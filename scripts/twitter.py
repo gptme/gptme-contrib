@@ -33,7 +33,7 @@ Authentication Methods:
 
 Usage:
     ./twitter.py post "Hello world!"      # Post a tweet
-    ./twitter.py me @TimeToBuildBob       # Read your tweets
+    ./twitter.py me                       # Read your tweets
     ./twitter.py user @username           # Read another user's tweets
     ./twitter.py replies --since 24h      # Check replies
 
@@ -58,8 +58,6 @@ import click
 import tweepy
 from dotenv import load_dotenv
 from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 
 # Initialize rich console
 console = Console()
@@ -271,39 +269,53 @@ def parse_time(timestr: str) -> datetime:
             sys.exit(1)
 
 
+def format_tweet_stats(tweet: tweepy.Tweet) -> str:
+    """Format engagement stats for a tweet"""
+    if not hasattr(tweet, "public_metrics"):
+        return ""
+
+    stats = []
+    m = tweet.public_metrics
+    stats.extend(
+        [
+            f"💟 {m['like_count']}" if m["like_count"] > 0 else "",
+            f"💬 {m['reply_count']}" if m["reply_count"] > 0 else "",
+            f"🔁 {m['retweet_count']}" if m["retweet_count"] > 0 else "",
+        ]
+    )
+    return " ".join(s for s in stats if s)
+
+
+def format_tweet_time(tweet: tweepy.Tweet) -> str:
+    """Format tweet timestamp"""
+    if not hasattr(tweet, "created_at"):
+        return "N/A"
+    return tweet.created_at.strftime("%Y-%m-%d %H:%M")  # type: ignore
+
+
+def display_tweet(tweet: tweepy.Tweet, author_info: Optional[str] = None) -> None:
+    """Display a single tweet with consistent formatting"""
+    console.print(f"[cyan]{format_tweet_time(tweet)}[/cyan]")
+    if author_info:
+        console.print(f"[green]From: {author_info}[/green]")
+    console.print(f"[magenta]Tweet ID: {tweet.id}[/magenta]")
+    console.print(f"[white]Tweet: {tweet.text}[/white]")
+
+    stats = format_tweet_stats(tweet)
+    if stats:
+        console.print(f"[blue]Stats: {stats}[/blue]")
+    console.print("─" * 50)
+
+
 def display_tweets(tweets: tweepy.Response, username: str) -> None:
-    """Display tweets in a formatted table"""
+    """Display tweets in a consistent format"""
     if not tweets.data:
         console.print(f"[yellow]No tweets found for @{username}")
         return
 
-    # Display tweets
-    table = Table(show_header=True)
-    table.add_column("Time", style="cyan")
-    table.add_column("Tweet", style="white")
-    table.add_column("Stats", style="green")
-
+    console.print(f"\n[bold]Recent tweets from @{username}:[/bold]\n")
     for tweet in tweets.data:
-        # Format engagement stats if available
-        stats = []
-        if hasattr(tweet, "public_metrics"):
-            m = tweet.public_metrics
-            stats.extend(
-                [
-                    f"💟 {m['like_count']}" if m["like_count"] > 0 else "    ",
-                    f"💬 {m['reply_count']}" if m["reply_count"] > 0 else "    ",
-                    f"🔁 {m['retweet_count']}" if m["retweet_count"] > 0 else "    ",
-                ]
-            )
-        stats_str = " ".join(s for s in stats if s)
-
-        table.add_row(
-            (tweet.created_at.strftime("%Y-%m-%d %H:%M") if hasattr(tweet, "created_at") else "N/A"),
-            tweet.text,
-            stats_str,
-        )
-
-    console.print(Panel(table, title=f"Recent tweets from @{username}"))
+        display_tweet(tweet)
 
 
 @click.group()
@@ -491,38 +503,13 @@ def mentions(username: str, since: str, limit: int) -> None:
     users = {user.id: user for user in mentions.includes["users"]} if mentions.includes else {}
 
     # Display mentions
-    table = Table(show_header=True)
-    table.add_column("Time", style="cyan")
-    table.add_column("From", style="green")
-    table.add_column("Tweet", style="white")
-    table.add_column("Stats", style="blue")
+    console.print(f"\n[bold]Recent mentions of @{username}:[/bold]\n")
 
     for tweet in mentions.data:
         # Get author username
         author = users.get(tweet.author_id, None)
         author_name = f"@{author.username}" if author else str(tweet.author_id)
-
-        # Format engagement stats
-        stats = []
-        if hasattr(tweet, "public_metrics"):
-            m = tweet.public_metrics
-            stats.extend(
-                [
-                    f"💟 {m['like_count']}" if m["like_count"] > 0 else "",
-                    f"💬 {m['reply_count']}" if m["reply_count"] > 0 else "",
-                    f"🔁 {m['retweet_count']}" if m["retweet_count"] > 0 else "",
-                ]
-            )
-        stats_str = " ".join(s for s in stats if s)
-
-        table.add_row(
-            tweet.created_at.strftime("%Y-%m-%d %H:%M"),
-            author_name,
-            tweet.text,
-            stats_str,
-        )
-
-    console.print(Panel(table, title=f"Recent mentions of @{username}"))
+        display_tweet(tweet, author_name)
 
 
 @cli.command()
@@ -553,20 +540,19 @@ def replies(since: str, limit: int) -> None:
         console.print("[yellow]No replies found")
         return
 
-    # Display mentions
-    table = Table(show_header=True)
-    table.add_column("Time", style="cyan")
-    table.add_column("From", style="green")
-    table.add_column("Reply", style="white")
+    # Display replies
+    console.print("\n[bold]Recent Replies:[/bold]\n")
 
     for mention in mentions.data:
-        table.add_row(
-            mention.created_at.strftime("%Y-%m-%d %H:%M") if mention.created_at else "N/A",
-            f"@{mention.author_id}",
-            mention.text,
-        )
+        # Get author info from expansions if available
+        author_info = f"@{mention.author_id}"  # Default to ID
+        if mentions.includes and "users" in mentions.includes:
+            for user in mentions.includes["users"]:
+                if user.id == mention.author_id:
+                    author_info = f"@{user.username}"
+                    break
 
-    console.print(Panel(table, title="Recent Replies"))
+        display_tweet(mention, author_info)
 
 
 @cli.command()
