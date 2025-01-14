@@ -6,6 +6,7 @@
 #   "rich>=13.0.0",
 #   "python-dotenv>=1.0.0",
 #   "click>=8.0.0",
+#   "flask>=3.0.0",
 # ]
 # [tool.uv]
 # exclude-newer = "2024-01-01T00:00:00Z"
@@ -51,13 +52,67 @@ For OAuth 2.0 setup:
 
 import os
 import sys
+import threading
+import webbrowser
 from datetime import datetime, timedelta
+from queue import Queue
 from typing import Optional
 
 import click
 import tweepy
 from dotenv import load_dotenv
+from flask import Flask, request
 from rich.console import Console
+from werkzeug.serving import make_server
+
+# Initialize Flask app
+app = Flask(__name__)
+auth_code_queue: Queue = Queue()
+server = None
+
+
+@app.route("/")
+def callback() -> str | tuple[str, int]:
+    """Handle OAuth callback"""
+    code = request.args.get("code")
+    if code:
+        # Reconstruct full URL with https for OAuth validation
+        full_url = request.url.replace("http://", "https://")
+        auth_code_queue.put(full_url)
+        return """
+        <h1>Authorization Successful!</h1>
+        <p>You can close this window and return to the terminal.</p>
+        <script>setTimeout(function() { window.close(); }, 1000);</script>
+        """
+    return "No authorization code received", 400
+
+
+@app.route("/shutdown")
+def shutdown() -> str:
+    """Shutdown the server"""
+    func = request.environ.get("werkzeug.server.shutdown")
+    if func is None:
+        raise RuntimeError("Not running with the Werkzeug Server")
+    func()
+    return "Server shutting down..."
+
+
+def start_auth_server() -> threading.Thread:
+    """Start Flask server in a separate thread"""
+    global server
+    server = make_server("localhost", 9876, app)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    return server_thread
+
+
+def stop_auth_server() -> None:
+    """Stop the Flask server"""
+    global server
+    if server:
+        server.shutdown()
+        server = None
+
 
 # Initialize rich console
 console = Console()
@@ -118,15 +173,30 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     scope=["tweet.read", "tweet.write", "users.read"],
                 )
 
-                # Get authorization URL
-                auth_url = oauth2_user_handler.get_authorization_url()
-                console.print(f"[yellow]Please authorize at: {auth_url}")
+                try:
+                    # Start the auth server
+                    console.print("[yellow]Starting authentication server...")
+                    start_auth_server()
 
-                # Get the response code from user
-                console.print("[yellow]After authorizing, you'll be redirected to localhost:9876")
-                console.print("[yellow]The response code will be in the URL as 'code' parameter")
-                console.print("[yellow]Example: http://localhost:9876?code=abcd1234...")
-                response_code = input("Enter the response code from URL: ")
+                    # Get authorization URL and open in browser
+                    auth_url = oauth2_user_handler.get_authorization_url()
+                    console.print(f"[yellow]Opening browser for authorization at: {auth_url}")
+                    webbrowser.open(auth_url)
+
+                    # Wait for the callback
+                    console.print("[yellow]Waiting for authorization (timeout: 5 minutes)...")
+                    try:
+                        response_code = auth_code_queue.get(timeout=300)  # 5 minute timeout
+                        console.print("[green]Authorization received!")
+                    except Exception as e:
+                        console.print("[red]Error: Authorization timeout or failed")
+                        console.print(f"[red]Details: {str(e)}")
+                        raise
+
+                finally:
+                    # Cleanup: Stop the server
+                    console.print("[yellow]Cleaning up authentication server...")
+                    stop_auth_server()
 
                 # Get access token
                 access_token = oauth2_user_handler.fetch_token(response_code)
@@ -515,7 +585,8 @@ def mentions(username: str, since: str, limit: int) -> None:
 @cli.command()
 @click.option("--since", default="24h", help="Time window (e.g. 24h, 7d)")
 @click.option("--limit", default=50, help="Maximum number of replies to fetch")
-def replies(since: str, limit: int) -> None:
+@click.option("--unreplied", is_flag=True, help="Show only unreplied tweets")
+def replies(since: str, limit: int, unreplied: bool) -> None:
     """Check replies to our tweets"""
     client = load_twitter_client(require_auth=True)
 
@@ -544,6 +615,10 @@ def replies(since: str, limit: int) -> None:
     console.print("\n[bold]Recent Replies:[/bold]\n")
 
     for mention in mentions.data:
+        # Skip if we only want unreplied tweets and this one has replies
+        if unreplied and mention.public_metrics and mention.public_metrics["reply_count"] > 0:
+            continue
+
         # Get author info from expansions if available
         author_info = f"@{mention.author_id}"  # Default to ID
         if mentions.includes and "users" in mentions.includes:
