@@ -86,9 +86,7 @@ class PerplexitySearch:
             },
         ]
         with Live(Spinner("runner", "Researching query..."), refresh_per_second=10):
-            response = self.client.chat.completions.create(
-                model="llama-3.1-sonar-large-128k-online", messages=messages
-            )
+            response = self.client.chat.completions.create(model="llama-3.1-sonar-large-128k-online", messages=messages)
         msg = response.choices[0].message
 
         return SearchResult(
