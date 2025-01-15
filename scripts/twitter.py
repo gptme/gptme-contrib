@@ -36,8 +36,7 @@ Usage:
     ./twitter.py post "Hello world!"      # Post a tweet
     ./twitter.py me                       # Read your tweets
     ./twitter.py user @username           # Read another user's tweets
-    ./twitter.py replies --since 24h      # Check replies
-    ./twitter.py replies --unanswered      # Check unanswered replies
+    ./twitter.py replies --unanswered     # Check unanswered replies
 
 Authentication Flow:
 1. Tries OAuth 2.0 if client credentials are available
@@ -70,6 +69,9 @@ from werkzeug.serving import make_server
 app = Flask(__name__)
 auth_code_queue: Queue = Queue()
 server = None
+
+DEFAULT_SINCE = "7d"
+DEFAULT_LIMIT = 10
 
 
 @app.route("/")
@@ -159,7 +161,9 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     # Test the token
                     test = client.get_me(user_auth=False)
                     if test.data:
-                        console.print(f"[green]Successfully authenticated as @{test.data.username}")
+                        console.print(
+                            f"[green]Successfully authenticated as @{test.data.username}"
+                        )
                         return client
                 except Exception as e:
                     console.print(f"[yellow]Saved token failed: {e}")
@@ -181,13 +185,19 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
 
                     # Get authorization URL and open in browser
                     auth_url = oauth2_user_handler.get_authorization_url()
-                    console.print(f"[yellow]Opening browser for authorization at: {auth_url}")
+                    console.print(
+                        f"[yellow]Opening browser for authorization at: {auth_url}"
+                    )
                     webbrowser.open(auth_url)
 
                     # Wait for the callback
-                    console.print("[yellow]Waiting for authorization (timeout: 5 minutes)...")
+                    console.print(
+                        "[yellow]Waiting for authorization (timeout: 5 minutes)..."
+                    )
                     try:
-                        response_code = auth_code_queue.get(timeout=300)  # 5 minute timeout
+                        response_code = auth_code_queue.get(
+                            timeout=300
+                        )  # 5 minute timeout
                         console.print("[green]Authorization received!")
                     except Exception as e:
                         console.print("[red]Error: Authorization timeout or failed")
@@ -215,7 +225,9 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                         token_line_idx = i
                         break
 
-                new_token_line = f"TWITTER_OAUTH2_ACCESS_TOKEN={access_token['access_token']}\n"
+                new_token_line = (
+                    f"TWITTER_OAUTH2_ACCESS_TOKEN={access_token['access_token']}\n"
+                )
 
                 if token_line_idx is not None:
                     # Replace existing token
@@ -223,7 +235,9 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     console.print("[yellow]Updated OAuth 2.0 access token in .env")
                 else:
                     # Append new token
-                    env_lines.extend(["\n# OAuth 2.0 User Context access token\n", new_token_line])
+                    env_lines.extend(
+                        ["\n# OAuth 2.0 User Context access token\n", new_token_line]
+                    )
                     console.print("[yellow]Saved new OAuth 2.0 access token to .env")
 
                 # Write back to file
@@ -232,17 +246,23 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
 
                 # Create client with OAuth 2.0 User Context authentication
                 client = tweepy.Client(
-                    access_token["access_token"],  # Pass access token directly as first argument
+                    access_token[
+                        "access_token"
+                    ],  # Pass access token directly as first argument
                     wait_on_rate_limit=True,
                 )
 
                 # Test the credentials with OAuth 2.0
                 test = client.get_me(user_auth=False)
                 if test.data:
-                    console.print(f"[green]Successfully authenticated as @{test.data.username}")
+                    console.print(
+                        f"[green]Successfully authenticated as @{test.data.username}"
+                    )
                     return client
                 else:
-                    console.print("[red]Could not get user info after OAuth 2.0 authentication")
+                    console.print(
+                        "[red]Could not get user info after OAuth 2.0 authentication"
+                    )
                     sys.exit(1)
 
             except tweepy.TweepyException as e:
@@ -265,10 +285,22 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
 
         # Debug info for OAuth 1.0a credentials
         console.print("[yellow]Debug: Using OAuth 1.0a authentication")
-        console.print(f"  API Key: {api_key[:8]}..." if api_key else "  API Key: Missing")
-        console.print(f"  API Secret: {'*' * 8}..." if api_secret else "  API Secret: Missing")
-        console.print(f"  Access Token: {access_token[:8]}..." if access_token else "  Access Token: Missing")
-        console.print(f"  Access Secret: {'*' * 8}..." if access_secret else "  Access Secret: Missing")
+        console.print(
+            f"  API Key: {api_key[:8]}..." if api_key else "  API Key: Missing"
+        )
+        console.print(
+            f"  API Secret: {'*' * 8}..." if api_secret else "  API Secret: Missing"
+        )
+        console.print(
+            f"  Access Token: {access_token[:8]}..."
+            if access_token
+            else "  Access Token: Missing"
+        )
+        console.print(
+            f"  Access Secret: {'*' * 8}..."
+            if access_secret
+            else "  Access Secret: Missing"
+        )
 
         # Verify all OAuth credentials are present
         if not all([api_key, api_secret, access_token, access_secret]):
@@ -398,7 +430,7 @@ def cli() -> None:
 @cli.command()
 @click.option(
     "--limit",
-    default=10,
+    default=DEFAULT_LIMIT,
     type=click.IntRange(5, 100),
     help="Number of tweets (5-100)",
 )
@@ -475,7 +507,9 @@ def post(text: str, reply_to: Optional[str], thread: bool) -> None:
             console.print(f"[green]Posted tweet: {tweet_text.strip()}")
     else:
         # Single tweet
-        response = client.create_tweet(text=text, in_reply_to_tweet_id=reply_to, user_auth=False)
+        response = client.create_tweet(
+            text=text, in_reply_to_tweet_id=reply_to, user_auth=False
+        )
         if not response.data:
             console.print("[red]Error: No response data from tweet creation")
             sys.exit(1)
@@ -498,7 +532,7 @@ def post(text: str, reply_to: Optional[str], thread: bool) -> None:
 @click.argument("username")
 @click.option(
     "--limit",
-    default=10,
+    default=DEFAULT_LIMIT,
     type=click.IntRange(5, 100),
     help="Number of tweets (5-100)",
 )
@@ -535,8 +569,10 @@ def user(username: str, limit: int) -> None:
 
 @cli.command()
 @click.argument("username")
-@click.option("--since", default="24h", help="Time window (e.g. 24h, 7d)")
-@click.option("--limit", default=50, help="Maximum number of mentions to fetch")
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of mentions to fetch"
+)
 def mentions(username: str, since: str, limit: int) -> None:
     """Check mentions of a specific user"""
     client = load_twitter_client(require_auth=False)
@@ -567,7 +603,11 @@ def mentions(username: str, since: str, limit: int) -> None:
         return
 
     # Create lookup for user info
-    users = {user.id: user for user in mentions.includes["users"]} if mentions.includes else {}
+    users = (
+        {user.id: user for user in mentions.includes["users"]}
+        if mentions.includes
+        else {}
+    )
 
     # Display mentions
     console.print(f"\n[bold]Recent mentions of @{username}:[/bold]\n")
@@ -580,8 +620,10 @@ def mentions(username: str, since: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--since", default="24h", help="Time window (e.g. 24h, 7d)")
-@click.option("--limit", default=50, help="Maximum number of replies to fetch")
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of replies to fetch"
+)
 @click.option("--unanswered", is_flag=True, help="Show only unanswered tweets")
 def replies(since: str, limit: int, unanswered: bool) -> None:
     """Check replies to our tweets"""
@@ -604,12 +646,9 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
         tweet_fields=["created_at", "author_id", "public_metrics"],
     )
 
-    # Skip if we only want unanswered tweets and this one has replies
-    tweets = [
-        tweet
-        for tweet in mentions.data or []
-        if (unanswered and tweet.public_metrics and tweet.public_metrics["reply_count"] > 0)
-    ]
+    tweets = [tweet for tweet in mentions.data or []]
+    if unanswered:
+        tweets = [tweet for tweet in tweets if tweet.public_metrics["reply_count"] == 0]
 
     if not tweets:
         console.print("[yellow]No replies found")
@@ -618,21 +657,23 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
     # Display replies
     console.print("\n[bold]Recent Replies:[/bold]\n")
 
-    for mention in mentions.data:
+    for tweet in tweets:
         # Get author info from expansions if available
-        author_info = f"@{mention.author_id}"  # Default to ID
+        author_info = f"@{tweet.author_id}"  # Default to ID
         if mentions.includes and "users" in mentions.includes:
             for user in mentions.includes["users"]:
-                if user.id == mention.author_id:
+                if user.id == tweet.author_id:
                     author_info = f"@{user.username}"
                     break
 
-        display_tweet(mention, author_info)
+        display_tweet(tweet, author_info)
 
 
 @cli.command()
-@click.option("--since", default="24h", help="Time window (e.g. 24h, 7d)")
-@click.option("--limit", default=50, help="Maximum number of replies to fetch")
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of replies to fetch"
+)
 @click.option("--unanswered", is_flag=True, help="Show only unanswered tweets")
 def quotes(since: str, limit: int, unanswered: bool) -> None:
     """Check quotes of our tweets"""
@@ -646,7 +687,9 @@ def quotes(since: str, limit: int, unanswered: bool) -> None:
 
     # Get quotes since the specified time
     start_time = parse_time(since)
-    query = f"url:{me.data.username}"  # Search for tweets containing links to our tweets
+    query = (
+        f"url:{me.data.username}"  # Search for tweets containing links to our tweets
+    )
     quotes = client.search_recent_tweets(
         query=query,
         max_results=limit,
@@ -656,24 +699,23 @@ def quotes(since: str, limit: int, unanswered: bool) -> None:
         user_fields=["username"],
     )
 
-    # Skip if we only want unanswered tweets and this one has replies
-    tweets = [
-        tweet
-        for tweet in (quotes.data or [])
-        if not (unanswered and tweet.public_metrics and tweet.public_metrics["reply_count"] > 0)
-    ]
+    tweets = [tweet for tweet in quotes.data or []]
+    if unanswered:
+        tweets = [tweet for tweet in tweets if tweet.public_metrics["reply_count"] == 0]
 
     if not tweets:
         console.print("[yellow]No quotes found")
         return
 
     # Create lookup for user info
-    users = {user.id: user for user in quotes.includes["users"]} if quotes.includes else {}
+    users = (
+        {user.id: user for user in quotes.includes["users"]} if quotes.includes else {}
+    )
 
     # Display quotes in a simpler format
     console.print("\n[bold]Recent Quotes:[/bold]")
 
-    for tweet in quotes.data:
+    for tweet in tweets:
         # Get author username
         author = users.get(tweet.author_id, None)
         author_name = f"@{author.username}" if author else str(tweet.author_id)
@@ -698,6 +740,66 @@ def quotes(since: str, limit: int, unanswered: bool) -> None:
         console.print(f"[blue]Stats: {stats_str}[/blue]")
         console.print(f"[magenta]ID: {tweet.id}[/magenta]")
         console.print("─" * 50)
+
+
+@cli.command()
+@click.argument("tweet_id")
+@click.option(
+    "--limit", default=2 * DEFAULT_LIMIT, help="Maximum number of tweets to fetch"
+)
+def thread(tweet_id: str, limit: int) -> None:
+    """Read a conversation thread given a tweet ID"""
+    client = load_twitter_client(require_auth=False)
+
+    # Get the original tweet
+    tweet = client.get_tweet(
+        tweet_id,
+        tweet_fields=["created_at", "author_id", "public_metrics", "conversation_id"],
+        expansions=["author_id", "referenced_tweets.id"],
+        user_fields=["username"],
+    )
+
+    if not tweet.data:
+        console.print("[yellow]Tweet not found")
+        return
+
+    # Get conversation thread including the original tweet
+    conversation_id = tweet.data.conversation_id or tweet_id
+    conversation = client.search_recent_tweets(
+        query=f"conversation_id:{conversation_id}",
+        max_results=limit,
+        tweet_fields=[
+            "created_at",
+            "author_id",
+            "public_metrics",
+            "in_reply_to_user_id",
+        ],
+        expansions=["author_id", "referenced_tweets.id"],
+        user_fields=["username"],
+    )
+
+    # Create lookup for user info from both tweet and conversation
+    users = {}
+    if tweet.includes and "users" in tweet.includes:
+        users.update({user.id: user for user in tweet.includes["users"]})
+    if conversation.includes and "users" in conversation.includes:
+        users.update({user.id: user for user in conversation.includes["users"]})
+
+    # Display thread
+    console.print("\n[bold]Conversation Thread:[/bold]\n")
+
+    # Combine all tweets and remove duplicates
+    all_tweets = {tweet.data.id: tweet.data}  # Start with original tweet
+    if conversation.data:
+        for reply in conversation.data:
+            all_tweets[reply.id] = reply
+
+    # Sort and display tweets
+    sorted_tweets = sorted(all_tweets.values(), key=lambda t: t.created_at)
+    for tweet_obj in sorted_tweets:
+        author = users.get(tweet_obj.author_id, None)
+        author_name = f"@{author.username}" if author else str(tweet_obj.author_id)
+        display_tweet(tweet_obj, author_name)
 
 
 if __name__ == "__main__":
