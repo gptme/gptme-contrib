@@ -37,6 +37,7 @@ Usage:
     ./twitter.py me                       # Read your tweets
     ./twitter.py user @username           # Read another user's tweets
     ./twitter.py replies --since 24h      # Check replies
+    ./twitter.py replies --unanswered      # Check unanswered replies
 
 Authentication Flow:
 1. Tries OAuth 2.0 if client credentials are available
@@ -140,9 +141,9 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
 
         if client_id and client_secret:
             # Use OAuth 2.0 if client credentials are available
-            console.print("[yellow]Debug: Using OAuth 2.0 authentication")
-            console.print(f"  Client ID: {client_id[:8]}...")
-            console.print(f"  Client Secret: {'*' * 8}...")
+            # console.print("[yellow]Debug: Using OAuth 2.0 authentication")
+            # console.print(f"  Client ID: {client_id[:8]}...")
+            # console.print(f"  Client Secret: {'*' * 8}...")
 
             # Check for saved OAuth 2.0 access token
             saved_token = os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN")
@@ -395,25 +396,21 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--username", help="Your Twitter username")
 @click.option(
     "--limit",
     default=10,
     type=click.IntRange(5, 100),
     help="Number of tweets (5-100)",
 )
-def me(username: Optional[str], limit: int) -> None:
+def me(limit: int) -> None:
     """Read your own recent tweets"""
     client = load_twitter_client(require_auth=True)
 
-    if not username:
-        # needs user_auth=False to use OAuth 2.0 and not get the "Consumer key must be string or bytes, not NoneType" error
-        me = client.get_me(user_auth=False)
-        username = me.data.username
+    # needs user_auth=False to use OAuth 2.0 and not get the "Consumer key must be string or bytes, not NoneType" error
+    me = client.get_me(user_auth=False)
+    username = me.data.username
 
     # Remove @ if present
-    assert username is not None
-    username = username.lstrip("@")
     console.print(f"[yellow]Fetching tweets for @{username}")
 
     # Get user ID
@@ -585,8 +582,8 @@ def mentions(username: str, since: str, limit: int) -> None:
 @cli.command()
 @click.option("--since", default="24h", help="Time window (e.g. 24h, 7d)")
 @click.option("--limit", default=50, help="Maximum number of replies to fetch")
-@click.option("--unreplied", is_flag=True, help="Show only unreplied tweets")
-def replies(since: str, limit: int, unreplied: bool) -> None:
+@click.option("--unanswered", is_flag=True, help="Show only unanswered tweets")
+def replies(since: str, limit: int, unanswered: bool) -> None:
     """Check replies to our tweets"""
     client = load_twitter_client(require_auth=True)
 
@@ -607,7 +604,14 @@ def replies(since: str, limit: int, unreplied: bool) -> None:
         tweet_fields=["created_at", "author_id", "public_metrics"],
     )
 
-    if not mentions.data:
+    # Skip if we only want unanswered tweets and this one has replies
+    tweets = [
+        tweet
+        for tweet in mentions.data or []
+        if (unanswered and tweet.public_metrics and tweet.public_metrics["reply_count"] > 0)
+    ]
+
+    if not tweets:
         console.print("[yellow]No replies found")
         return
 
@@ -615,10 +619,6 @@ def replies(since: str, limit: int, unreplied: bool) -> None:
     console.print("\n[bold]Recent Replies:[/bold]\n")
 
     for mention in mentions.data:
-        # Skip if we only want unreplied tweets and this one has replies
-        if unreplied and mention.public_metrics and mention.public_metrics["reply_count"] > 0:
-            continue
-
         # Get author info from expansions if available
         author_info = f"@{mention.author_id}"  # Default to ID
         if mentions.includes and "users" in mentions.includes:
@@ -633,7 +633,8 @@ def replies(since: str, limit: int, unreplied: bool) -> None:
 @cli.command()
 @click.option("--since", default="24h", help="Time window (e.g. 24h, 7d)")
 @click.option("--limit", default=50, help="Maximum number of replies to fetch")
-def quotes(since: str, limit: int) -> None:
+@click.option("--unanswered", is_flag=True, help="Show only unanswered tweets")
+def quotes(since: str, limit: int, unanswered: bool) -> None:
     """Check quotes of our tweets"""
     client = load_twitter_client(require_auth=True)
 
@@ -655,7 +656,14 @@ def quotes(since: str, limit: int) -> None:
         user_fields=["username"],
     )
 
-    if not quotes.data:
+    # Skip if we only want unanswered tweets and this one has replies
+    tweets = [
+        tweet
+        for tweet in (quotes.data or [])
+        if not (unanswered and tweet.public_metrics and tweet.public_metrics["reply_count"] > 0)
+    ]
+
+    if not tweets:
         console.print("[yellow]No quotes found")
         return
 
