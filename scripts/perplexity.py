@@ -7,8 +7,10 @@
 #     "rich",
 #     "openai>=1.57.0",
 #     "tabulate",
+#     "python-dotenv",
 # ]
 # ///
+
 import json
 import logging
 import os
@@ -22,6 +24,9 @@ from openai import OpenAI
 from rich.console import Console
 from rich.live import Live
 from rich.spinner import Spinner
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Get logger but don't configure it (will be configured by CLI)
 logger = logging.getLogger("perplexity")
