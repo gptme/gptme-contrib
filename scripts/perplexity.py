@@ -10,7 +10,6 @@
 #     "python-dotenv",
 # ]
 # ///
-
 import json
 import logging
 import os
@@ -20,11 +19,11 @@ from pathlib import Path
 from typing import Optional
 
 import click
+from dotenv import load_dotenv
 from openai import OpenAI
 from rich.console import Console
 from rich.live import Live
 from rich.spinner import Spinner
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -80,19 +79,22 @@ class PerplexitySearch:
             query: Search query
             mode: Search mode ('concise' or 'copilot')
         """
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an artificial intelligence assistant and you need to engage in a helpful, detailed, polite conversation with a user.",
-            },
-            {
-                "role": "user",
-                "content": query,
-            },
-        ]
         with Live(Spinner("runner", "Researching query..."), refresh_per_second=10):
-            response = self.client.chat.completions.create(model="llama-3.1-sonar-large-128k-online", messages=messages)
+            response = self.client.chat.completions.create(
+                model="llama-3.1-sonar-large-128k-online",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an artificial intelligence assistant and you need to engage in a helpful, detailed, polite conversation with a user.",
+                    },
+                    {
+                        "role": "user",
+                        "content": query,
+                    },
+                ],
+            )
         msg = response.choices[0].message
+        assert msg.content
 
         return SearchResult(
             answer=msg.content,

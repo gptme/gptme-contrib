@@ -15,5 +15,17 @@ repos:
   rev: v1.12.0
   hooks:
   - id: mypy
-    additional_dependencies: [types-tabulate, types-docutils, types-PyYAML]
-    args: [--ignore-missing-imports, --check-untyped-defs]
+    additional_dependencies: [
+      tweepy,
+      flask,
+      discord.py,
+      openai,
+      types-tabulate,
+      types-docutils,
+      types-PyYAML,
+      types-requests,
+      types-click,
+    ]
+    args: [--config-file=mypy.ini]
+    types: [python]
+    pass_filenames: true

@@ -4,21 +4,23 @@ from gptme.tools import ToolSpec, Parameter, ToolUse
 from gptme.message import Message
 
 
-PUSHOVER_USER_KEY = os.getenv('PUSHOVER_USER_KEY')
-PUSHOVER_API_TOKEN = os.getenv('PUSHOVER_API_TOKEN')
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+
 
 def has_pushover_conf():
     return PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN
 
-def execute(content: str | None, args: list[str] | None, kwargs: dict[str, str] | None, confirm = None) -> Message:
+
+def execute(content: str | None, args: list[str] | None, kwargs: dict[str, str] | None, confirm=None) -> Message:
     if content is not None and args is not None:
         title = args[0]
         message = content
     elif kwargs is not None:
-        title = kwargs.get('title', 'No title')
-        message = kwargs.get('message', 'No message')
+        title = kwargs.get("title", "No title")
+        message = kwargs.get("message", "No message")
     else:
-        return Message('system', "Tool call failed. Missing parameters!")
+        return Message("system", "Tool call failed. Missing parameters!")
 
     url = "https://api.pushover.net/1/messages.json"
     payload = {
@@ -31,12 +33,13 @@ def execute(content: str | None, args: list[str] | None, kwargs: dict[str, str] 
         response = requests.post(url, data=payload, timeout=30)
 
         if response.status_code == 200:
-            return Message('system', "Notification sent successfully")
+            return Message("system", "Notification sent successfully")
         else:
-            return Message('system', "The notification couldn't be sent")
+            return Message("system", "The notification couldn't be sent")
     except Exception as e:
-        return Message('system', f"Something went wrong while sending the notification: {e}")
-    
+        return Message("system", f"Something went wrong while sending the notification: {e}")
+
+
 def examples(tool_format):
     return f"""
 > User: Send me a notification.
@@ -45,6 +48,7 @@ def examples(tool_format):
 > System: Notification sent successfully.
 > Assistant: The notification has been sent.
 """.strip()
+
 
 tool = ToolSpec(
     name="notification",
