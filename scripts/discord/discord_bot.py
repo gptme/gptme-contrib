@@ -15,26 +15,28 @@ import logging
 import os
 import re
 from copy import copy
-from pathlib import Path
-from typing import (
-    AsyncGenerator,
-    Callable,
-    Dict,
-    Optional,
-    TypeAlias,
-    Union,
-)
-
-from dotenv import load_dotenv
-from gptme.chat import Message, _init_workspace, step
-from gptme.init import init
-from gptme.logmanager import Log, LogManager
-from gptme.prompts import get_prompt
-from gptme.tools import ToolUse, get_tools, init_tools
-from rich.logging import RichHandler
+from typing import AsyncGenerator
+from typing import Callable
+from typing import Dict
+from typing import Optional
+from typing import TypeAlias
+from typing import Union
 
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
+from gptme.chat import Message
+from gptme.chat import step
+from gptme.dirs import get_project_gptme_dir
+from gptme.init import init
+from gptme.logmanager import Log
+from gptme.logmanager import LogManager
+from gptme.prompts import get_prompt
+from gptme.tools import get_tools
+from gptme.tools import init_tools
+from gptme.tools import ToolUse
+from rich.logging import RichHandler
+
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -60,27 +62,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger("discord_bot")
 
+# Get workspace folder (location of `gptme.toml`):
+workspace_root = get_project_gptme_dir()
+logsdir = workspace_root / "logs_discord"
+
 # Load environment variables
 env_files = [".env", ".env.discord"]
 for env_file in env_files:
-    if Path(env_file).exists():
+    if (workspace_root / env_file).exists():
         load_dotenv(env_file, override=True)
         logger.info(f"Loaded environment from {env_file}")
 
-# Constants and configuration
+MODEL = os.getenv("MODEL", "anthropic")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+RATE_LIMIT = float(os.getenv("RATE_LIMIT", "1.0"))  # seconds between messages
 ENABLE_PRIVILEGED_INTENTS = os.getenv("ENABLE_PRIVILEGED_INTENTS", "").lower() in [
     "1",
     "true",
 ]
-RATE_LIMIT = float(os.getenv("RATE_LIMIT", "1.0"))  # seconds between messages
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic")
-logdir = Path("logs/discord")
+
 
 # Log configuration
 logger.info("Configuration:")
 logger.info(f"  Rate limit: {RATE_LIMIT}s")
-logger.info(f"  Default model: {DEFAULT_MODEL}")
-logger.info(f"  Log directory: {logdir}")
+logger.info(f"  Default model: {MODEL}")
+logger.info(f"  Logs directory: {logsdir}")
 
 # Bot configuration
 intents = discord.Intents.default()
@@ -102,7 +108,6 @@ COMMAND_PREFIX: str = "!"
 class BobBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.workspace: Path | None = None
 
 
 bot = BobBot(
@@ -166,7 +171,9 @@ async def fetch_discord_history(channel: discord.abc.Messageable) -> str:
 
 
 async def async_step(
-    log: Log, channel_id: int, channel: discord.abc.Messageable, max_retries: int = 2
+    log: Log,
+    channel_id: int,
+    channel: discord.abc.Messageable,
 ) -> AsyncGenerator[Message, None]:
     """Async wrapper around gptme.chat.step that supports multiple tool executions."""
 
@@ -180,8 +187,9 @@ async def async_step(
     # Basic tools only for testing
     tool_allowlist = frozenset(["read", "save", "append", "patch", "shell", "ipython", "browser"])
 
-    # Initialize gptme with channel-specific model and tools
-    init(model=settings.model, interactive=False, tool_allowlist=tool_allowlist)
+    # Restrict tools
+    # TODO: do this in a non-global way
+    init_tools(tool_allowlist)
     logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)}) for channel {channel_id}")
 
     async def add_discord_context(log: Log) -> Log:
@@ -205,7 +213,7 @@ async def async_step(
         try:
             # has ephemeral discord context message
             request_log = await add_discord_context(current_log)
-            logger.info(f"Starting step with log: {request_log}")
+            # logger.debug(f"Starting step with log: {request_log}")
             messages = await loop.run_in_executor(
                 None,
                 lambda: list(
@@ -214,7 +222,8 @@ async def async_step(
                         stream=True,
                         confirm=confirm_func,
                         tool_format="markdown",
-                        workspace=bot.workspace,
+                        workspace=workspace_root,
+                        model=settings.model,
                     )
                 ),
             )
@@ -240,7 +249,7 @@ async def async_step(
 def validate_config() -> tuple[bool, str]:
     """Validate configuration and return (is_valid, error_message)."""
     # Check for token
-    token = os.getenv("DISCORD_TOKEN")
+    token = DISCORD_TOKEN
     if not token:
         return False, "DISCORD_TOKEN not set in .env or .env.discord"
     if token == "your_token_here":
@@ -248,23 +257,14 @@ def validate_config() -> tuple[bool, str]:
 
     # Validate rate limit
     try:
-        rate_limit = float(os.getenv("RATE_LIMIT", "1.0"))
+        rate_limit = float(RATE_LIMIT)
         if rate_limit <= 0:
             return False, "RATE_LIMIT must be positive"
     except ValueError:
         return False, "RATE_LIMIT must be a valid number"
 
-    # Validate model
-    model = os.getenv("DEFAULT_MODEL", "openai/gpt-4")
-    if not any(model.startswith(prefix) for prefix in ["openai/", "anthropic/", "local/"]):
-        return (
-            False,
-            f"Invalid model format: {model} (should start with openai/, anthropic/, or local/)",
-        )
-
     # Log validation success with settings
     logger.info("Configuration validated:")
-    logger.info(f"  Model: {model}")
     logger.info(f"  Rate limit: {rate_limit}s")
     logger.info(f"  Privileged intents: {ENABLE_PRIVILEGED_INTENTS}")
 
@@ -277,12 +277,12 @@ class ChannelSettings:
 
     def __init__(self, channel_id: int):
         self.channel_id = channel_id
-        self.model = DEFAULT_MODEL
+        self.model = MODEL
         self.load()
 
     def load(self) -> None:
         """Load settings from disk."""
-        settings_file = logdir / str(self.channel_id) / "settings.txt"
+        settings_file = logsdir / str(self.channel_id) / "settings.txt"
         if settings_file.exists():
             settings = settings_file.read_text().splitlines()
             for line in settings:
@@ -291,7 +291,7 @@ class ChannelSettings:
 
     def save(self) -> None:
         """Save settings to disk."""
-        settings_file = logdir / str(self.channel_id) / "settings.txt"
+        settings_file = logsdir / str(self.channel_id) / "settings.txt"
         settings_file.parent.mkdir(parents=True, exist_ok=True)
         settings_file.write_text(f"model={self.model}\n")
 
@@ -311,7 +311,7 @@ def get_conversation(channel_id: ChannelID) -> Log:
 
     # Initialize a new conversation
     if channel_id not in conversations:
-        logpath = logdir / str(channel_id)
+        logpath = logsdir / str(channel_id)
         logpath.mkdir(parents=True, exist_ok=True)
         logger.info(f"Loading conversation log for channel {channel_id} ({logpath})")
         # TODO: actually save conversations so there is something to load/resume, persisting tooluse responses across messages
@@ -538,7 +538,7 @@ async def on_ready() -> None:
         logger.error("Bot user not initialized")
         return
 
-    logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    logger.info(f"[on_ready] Logged in as {bot.user} (ID: {bot.user.id})")
 
     # Generate invite URL
     invite_url = discord.utils.oauth_url(
@@ -612,7 +612,7 @@ async def dm(ctx: commands.Context) -> None:
 @bot.event
 async def on_guild_join(guild: discord.Guild) -> None:
     """Called when the bot joins a new server."""
-    logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
+    logger.info(f"[on_guild_join] Joined new guild: {guild.name} (ID: {guild.id})")
 
     # Only log permission issues, don't send messages
     missing_permissions = []
@@ -777,9 +777,7 @@ async def handle_gptme_error(message: discord.Message, error: Exception) -> None
     error_msg = str(error)
     await update_reaction(message, "🤔", "❌")
     await message.channel.send(
-        f"```diff\n- Error: Something went wrong.\n"
-        f"- Details: {error_msg}\n"
-        f"- Try !clear to reset the conversation.\n```"
+        f"```diff\n- Error: Something went wrong.\n- Details: {error_msg}\n- Try !clear to reset the conversation.\n```"
     )
 
 
@@ -842,7 +840,7 @@ async def on_message(message: discord.Message) -> None:
     if message.author == bot.user:
         return
 
-    logger.info(f"on_message: {message}")
+    logger.info(f"[on_message] @{message.author.name}: {message.content}")
 
     # Early returns for commands and rate limits
     if is_command(message.content):
@@ -897,7 +895,6 @@ async def on_message(message: discord.Message) -> None:
         # Setup message processing
         await message.add_reaction("⌛")
         await update_reaction(message, "⌛", "🤔")
-        logger.info(f"Processing input message: {message.content}")
 
         # Process message
         current_response = None
@@ -939,18 +936,12 @@ def main() -> None:
         tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
 
         # Initialize gptme and tools
-        init(model=DEFAULT_MODEL, interactive=False, tool_allowlist=tool_allowlist)
-        init_tools(tool_allowlist)
+        init(model=MODEL, interactive=False, tool_allowlist=tool_allowlist)
         tools = get_tools()
         if not tools:
             logger.error("No tools loaded in gptme")
             return
         logger.info(f"Loaded {len(tools)} gptme tools: {', '.join(t.name for t in tools)}")
-
-        # Initialize workspace
-        workspace = _init_workspace(Path.cwd(), logdir)
-        logger.info(f"Using workspace at {workspace}")
-        bot.workspace = workspace
     except Exception as e:
         logger.error(f"Failed to initialize gptme tools: {e}")
         return
