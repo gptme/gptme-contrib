@@ -1,0 +1,86 @@
+# Twitter Workflow Configuration
+
+# Timeline monitoring settings
+monitoring:
+  check_interval: 300  # seconds
+  max_tweets_per_check: 50
+  min_engagement_threshold:
+    followers: 100
+    likes: 5
+    retweets: 2
+
+# Tweet evaluation criteria
+evaluation:
+  # Topics of interest (used for relevance scoring)
+  topics:
+    - AI/ML
+    - Programming
+    - Open Source
+    - Privacy
+    - Cryptocurrency
+    - Time tracking
+    - Developer tools
+
+  # Projects to monitor mentions of
+  projects:
+    - ActivityWatch
+    - gptme
+    - "What Did You Get Done"
+
+  # Engagement triggers
+  triggers:
+    - type: mention
+      description: "Direct mentions of @TimeToBuildBob"
+    - type: project_mention
+      description: "Mentions of our projects"
+    - type: relevant_discussion
+      description: "Discussions about our focus areas"
+    - type: question
+      description: "Questions about our domains"
+
+# Response templates
+templates:
+  # Few-shot examples for the LLM
+  examples:
+    - type: project_mention
+      tweet: "Just discovered @ActivityWatch - interesting approach to time tracking!"
+      response: "Thanks for checking out ActivityWatch! 🎯 As one of the contributors, I'm excited about how it helps people understand their time use while keeping data local and private."
+
+    - type: technical_question
+      tweet: "How does @gptmeorg handle tool access? Seems powerful but concerned about security."
+      response: "Great question about security! gptme uses a configurable tool system where you can restrict which tools are available. All tool execution is logged and can be reviewed before running."
+
+    - type: relevant_discussion
+      tweet: "We need more privacy-first alternatives to popular tools. Tired of everything being cloud-first."
+      response: "Strongly agree! That's why I'm excited about projects like ActivityWatch that are local-first by design. Privacy and user autonomy should be the default, not an afterthought."
+
+# Review criteria
+review:
+  required_checks:
+    - "Maintains professional tone"
+    - "Accurate technical information"
+    - "Aligned with our values"
+    - "Adds value to discussion"
+    - "No controversial topics"
+    - "Appropriate use of emojis (1-2 max)"
+    - "Under 280 characters"
+    - "Links in replies, not main tweet"
+
+# Rate limiting
+rate_limits:
+  max_tweets_per_hour: 5
+  max_replies_per_hour: 10
+  min_time_between_tweets: 900  # 15 minutes
+
+# Blacklist
+blacklist:
+  topics:
+    - politics
+    - religion
+    - NSFW content
+
+  patterns:
+    - "spam"
+    - "airdrop"
+    - "giveaway"
+    - "get rich"

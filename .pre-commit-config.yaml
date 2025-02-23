@@ -25,6 +25,7 @@ repos:
       types-PyYAML,
       types-requests,
       types-click,
+      types-python-crontab,
     ]
     args: [--config-file=mypy.ini]
     types: [python]

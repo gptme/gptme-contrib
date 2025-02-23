@@ -12,7 +12,7 @@
 # exclude-newer = "2024-01-01T00:00:00Z"
 # ///
 """
-Twitter Tool - Simple CLI for Twitter operations
+Twitter Tool - Simple CLI to Twitter operations, for humans and AI agents.
 
 This tool supports both OAuth 1.0a and OAuth 2.0 authentication for Twitter API access.
 
@@ -60,7 +60,7 @@ from typing import Optional
 
 import click
 import tweepy
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from flask import Flask, request
 from rich.console import Console
 from werkzeug.serving import make_server
@@ -205,8 +205,14 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                 access_token = oauth2_user_handler.fetch_token(response_code)
                 print(f"{access_token=}")
 
+                # Get path to .env file
+                # traverse up to the root directory
+                env_path = find_dotenv()
+                if not env_path:
+                    console.print("[red]Error: .env file not found")
+                    sys.exit(1)
+
                 # Update or save access token to .env
-                env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
                 with open(env_path, "r") as f:
                     env_lines = f.readlines()
 
@@ -694,6 +700,64 @@ def quotes(since: str, limit: int, unanswered: bool) -> None:
         console.print(f"[blue]Stats: {stats_str}[/blue]")
         console.print(f"[magenta]ID: {tweet.id}[/magenta]")
         console.print("─" * 50)
+
+
+@cli.command()
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option("--limit", default=DEFAULT_LIMIT, help="Maximum number of tweets to fetch")
+@click.option("--list-id", help="Twitter list ID to fetch from")
+def timeline(since: str, limit: int, list_id: Optional[str]) -> None:
+    """Read home timeline or list timeline"""
+    client = load_twitter_client(require_auth=True)
+
+    start_time = parse_time(since)
+
+    if list_id:
+        # Get tweets from list
+        try:
+            tweets = client.get_list_tweets(
+                list_id,
+                max_results=limit,
+                start_time=start_time,
+                tweet_fields=["created_at", "author_id", "public_metrics"],
+                expansions=["author_id"],
+                user_fields=["username"],
+                user_auth=False,
+            )
+            source = f"list {list_id}"
+        except tweepy.TweepyException as e:
+            console.print(f"[red]Error getting list tweets: {e}")
+            sys.exit(1)
+    else:
+        # Get tweets from home timeline
+        try:
+            tweets = client.get_home_timeline(
+                max_results=limit,
+                start_time=start_time,
+                tweet_fields=["created_at", "author_id", "public_metrics"],
+                expansions=["author_id"],
+                user_fields=["username"],
+                user_auth=False,
+            )
+            source = "home timeline"
+        except tweepy.TweepyException as e:
+            console.print(f"[red]Error getting timeline: {e}")
+            sys.exit(1)
+
+    if not tweets.data:
+        console.print(f"[yellow]No tweets found in {source}")
+        return
+
+    # Create lookup for user info
+    users = {user.id: user for user in tweets.includes["users"]} if tweets.includes else {}
+
+    # Display tweets
+    console.print(f"\n[bold]Recent tweets from {source}:[/bold]\n")
+    for tweet in tweets.data:
+        # Get author info
+        author = users.get(tweet.author_id, None)
+        author_name = f"@{author.username}" if author else str(tweet.author_id)
+        display_tweet(tweet, author_name)
 
 
 @cli.command()
