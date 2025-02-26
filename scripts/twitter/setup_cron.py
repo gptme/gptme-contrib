@@ -25,7 +25,7 @@ Usage:
 from pathlib import Path
 
 import click
-from crontab import CronTab, CronItem
+from crontab import CronItem, CronTab
 
 # Job identifiers
 MONITOR_COMMENT = "gptme_twitter_monitor"
@@ -35,7 +35,7 @@ POST_COMMENT = "gptme_twitter_post"
 
 def get_script_path(script_name: str) -> str:
     """Get absolute path to a script"""
-    return str(Path(__file__).parent / "workflow.py")
+    return str(Path(__file__).parent / script_name)
 
 
 @click.group()
@@ -46,7 +46,11 @@ def cli():
 
 @cli.command()
 @click.option("--monitor-interval", default=15, help="Monitor interval in minutes (5-60)")
-@click.option("--review-time", default="9,13,17", help="Daily review notification times (24h format)")
+@click.option(
+    "--review-time",
+    default="9,13,17",
+    help="Daily review notification times (24h format)",
+)
 @click.option("--post-interval", default=30, help="Post check interval in minutes (15-60)")
 def install(monitor_interval: int, review_time: str, post_interval: int) -> None:
     """Install cron jobs for Twitter workflow"""
@@ -63,21 +67,20 @@ def install(monitor_interval: int, review_time: str, post_interval: int) -> None
     cron.remove_all(comment=POST_COMMENT)
 
     # Add monitor job
-    monitor_job: CronItem = cron.new(
-        command=f"{get_script_path('twitter_workflow.py')} monitor", comment=MONITOR_COMMENT
-    )
+    monitor_job: CronItem = cron.new(command=f"{get_script_path('workflow.py')} monitor", comment=MONITOR_COMMENT)
     monitor_job.minute.every(monitor_interval)  # type: ignore
 
     # Add review notification job
     for hour in review_time.split(","):
         review_job: CronItem = cron.new(
-            command="notify-send 'Twitter Review' 'Time to review tweet drafts!'", comment=REVIEW_COMMENT
+            command="notify-send 'Twitter Review' 'Time to review tweet drafts!'",
+            comment=REVIEW_COMMENT,
         )
         review_job.hour.on(int(hour))  # type: ignore
         review_job.minute.on(0)  # type: ignore
 
     # Add post job
-    post_job: CronItem = cron.new(command=f"{get_script_path('twitter_workflow.py')} post", comment=POST_COMMENT)
+    post_job: CronItem = cron.new(command=f"{get_script_path('workflow.py')} post", comment=POST_COMMENT)
     post_job.minute.every(post_interval)  # type: ignore
 
     # Write to crontab
