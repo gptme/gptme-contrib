@@ -26,6 +26,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Literal,
     Optional,
     Tuple,
     Type,
@@ -60,15 +61,25 @@ class EvaluationResponse:
     relevance: float
     engagement_type: str
     priority: int
-    action: str
+    # Valid actions: "respond" (generate reply), "ignore" (skip)
+    action: Literal["respond", "ignore"]
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EvaluationResponse":
+        action_str = str(data["action"])
+
+        # Validate that action is valid
+        if action_str not in ["respond", "ignore"]:
+            raise ValueError(f"Invalid action value: {action_str}")
+
+        # Use typing.cast to explicitly tell mypy about the type
+        action_literal = cast(Literal["respond", "ignore"], action_str)
+
         return cls(
             relevance=float(data["relevance"]),
             engagement_type=str(data["engagement_type"]),
             priority=int(data["priority"]),
-            action=str(data["action"]),
+            action=action_literal,
             reasoning=str(data["reasoning"]),
         )
 
@@ -142,13 +153,19 @@ class TweetResponse:
 class ReviewResult:
     """Review criteria result"""
 
-    pass_: bool
+    passed: bool
     notes: str
+
+    def __init__(self, passed: bool, notes: str):
+        self.passed = passed
+        self.notes = notes
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ReviewResult":
+        # Handle all possible field names for backward compatibility
+        pass_value = data.get("passed", data.get("pass_", data.get("pass", False)))
         return cls(
-            pass_=bool(data["pass"]),
+            passed=bool(pass_value),
             notes=str(data["notes"]),
         )
 
@@ -156,7 +173,7 @@ class ReviewResult:
     def example(cls) -> "ReviewResult":
         """Example for LLM format documentation"""
         return cls(
-            pass_=True,
+            passed=True,
             notes="Clear and helpful",
         )
 
@@ -231,7 +248,11 @@ Evaluation criteria:
 
 Blacklist check:
 - Forbidden topics: {", ".join(config["blacklist"]["topics"])}
-- Spam patterns: {", ".join(config["blacklist"]["patterns"])}"""
+- Spam patterns: {", ".join(config["blacklist"]["patterns"])}
+
+IMPORTANT: For the "action" field, use ONLY one of these values:
+- "respond" - Generate a response to this tweet
+- "ignore" - Skip this tweet, no response needed"""
 
 
 def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
