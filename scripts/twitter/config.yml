@@ -65,6 +65,7 @@ review:
     - "Appropriate use of emojis (1-2 max)"
     - "Under 280 characters"
     - "Links in replies, not main tweet"
+    - "No hashtags"
 
 # Rate limiting
 rate_limits:

@@ -38,6 +38,7 @@ Usage:
 
 import logging
 import time
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -150,9 +151,28 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
 
 def move_draft(path: Path, new_status: str) -> Path:
     """Move a draft to a new status directory"""
+    # Get the appropriate status directory
+    status_dirs = {
+        "new": NEW_DIR,
+        "review": REVIEW_DIR,
+        "approved": APPROVED_DIR,
+        "posted": POSTED_DIR,
+        "rejected": REJECTED_DIR,
+    }
+
+    if new_status not in status_dirs:
+        raise ValueError(f"Invalid status: {new_status}")
+
+    # Simply move the file to the new directory, preserving the filename
+    new_path = status_dirs[new_status] / path.name
+
+    # Load and save to ensure any updates are persisted
     draft = TweetDraft.load(path)
-    new_path = save_draft(draft, new_status)
+    draft.save(new_path)
+
+    # Remove the original file
     path.unlink()
+
     return new_path
 
 
@@ -205,7 +225,8 @@ def draft(text: str, type: str, reply_to: Optional[str], schedule: Optional[str]
     help="Automatically approve drafts that pass all checks",
 )
 @click.option("--show-context", is_flag=True, help="Show full context for each draft")
-def review(auto_approve: bool, show_context: bool) -> None:
+@click.option("--dry-run", is_flag=True, help="Don't prompt for actions, just show review results")
+def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
     drafts = list_drafts("new")
@@ -245,7 +266,7 @@ def review(auto_approve: bool, show_context: bool) -> None:
         # Display review results
         console.print("\n[bold]Review Results:[/bold]")
         for criterion, result in review_result.criteria_results.items():
-            status = "✅" if result.pass_ else "❌"
+            status = "✅" if result.passed else "❌"
             console.print(f"{status} {criterion}: {result.notes}")
 
         if review_result.improvements:
@@ -257,6 +278,11 @@ def review(auto_approve: bool, show_context: bool) -> None:
         if auto_approve and approved:
             move_draft(path, "approved")
             console.print("[green]Draft automatically approved")
+        elif dry_run:
+            # Just show review results, don't prompt for action
+            console.print("[yellow]Dry run - no action taken")
+            console.print(f"[blue]Draft ID: {path.stem}[/blue]")
+            console.print("[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]")
         else:
             action = Prompt.ask("Action", choices=["approve", "reject", "skip", "edit"], default="skip")
 
@@ -278,11 +304,76 @@ def review(auto_approve: bool, show_context: bool) -> None:
 
 
 @cli.command()
+@click.argument("draft_id")
+def approve(draft_id: str) -> None:
+    """Approve a draft tweet by ID"""
+    # Find the draft by ID
+    draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
+
+    if not draft_files:
+        console.print(f"[red]No draft found with ID: {draft_id}")
+        return
+
+    draft_path = draft_files[0]
+    new_path = move_draft(draft_path, "approved")
+    console.print(f"[green]Draft approved: {draft_path.name} → {new_path.name}")
+
+
+@cli.command()
+@click.argument("draft_id")
+def reject(draft_id: str) -> None:
+    """Reject a draft tweet by ID"""
+    # Find the draft by ID
+    draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
+
+    if not draft_files:
+        console.print(f"[red]No draft found with ID: {draft_id}")
+        return
+
+    draft_path = draft_files[0]
+    new_path = move_draft(draft_path, "rejected")
+    console.print(f"[red]Draft rejected: {draft_path.name} → {new_path.name}")
+
+
+@cli.command()
+@click.argument("draft_id")
+@click.argument("new_text")
+def edit(draft_id: str, new_text: str) -> None:
+    """Edit a draft tweet by ID"""
+    # Find the draft by ID
+    draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
+
+    if not draft_files:
+        console.print(f"[red]No draft found with ID: {draft_id}")
+        return
+
+    draft_path = draft_files[0]
+    draft = TweetDraft.load(draft_path)
+
+    console.print(f"[cyan]Original text: {draft.text}")
+    draft.text = new_text
+    draft.save(draft_path)
+    console.print(f"[green]Draft updated: {draft_path.name}")
+    console.print(f"[cyan]New text: {draft.text}")
+
+
+@cli.command()
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
-def post(dry_run: bool) -> None:
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.option("--draft-id", help="Post a specific draft by ID")
+def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
     """Post approved tweets"""
 
-    drafts = list_drafts("approved")
+    # If a specific draft ID is provided, find only that draft
+    if draft_id:
+        draft_files = list(APPROVED_DIR.glob(f"*{draft_id}*.yml"))
+        if not draft_files:
+            console.print(f"[red]No approved draft found with ID: {draft_id}")
+            return
+        drafts = draft_files
+    else:
+        drafts = list_drafts("approved")
+
     if not drafts:
         console.print("[yellow]No approved tweets to post")
         return
@@ -302,7 +393,17 @@ def post(dry_run: bool) -> None:
             console.print(f"[cyan]Reply to: {draft.in_reply_to}")
         console.print(f"[white]{draft.text}")
 
-        if not dry_run and Confirm.ask("Post this tweet?", default=True):
+        # Three possible actions:
+        # 1. --dry-run: Just show what would happen
+        # 2. --yes: Post without confirmation
+        # 3. Neither: Ask for confirmation
+
+        if dry_run:
+            console.print("[yellow]Dry run - tweet would be posted")
+            console.print(f"[blue]Draft ID: {path.stem}[/blue]")
+            continue
+
+        if yes or Confirm.ask("Post this tweet?", default=True):
             try:
                 response = client.create_tweet(
                     text=draft.text,
@@ -390,8 +491,8 @@ def process_timeline_tweets(
                     in_reply_to=tweet.id if response.type == "reply" else None,
                     context={
                         "original_tweet": tweet_data,
-                        "evaluation": eval_result,
-                        "response_metadata": response,
+                        "evaluation": asdict(eval_result),  # Convert to dict
+                        "response_metadata": asdict(response),  # Convert to dict
                     },
                 )
 
@@ -412,7 +513,7 @@ def process_timeline_tweets(
                             context={
                                 "thread_position": i,
                                 "original_tweet": tweet_data,
-                                "evaluation": eval_result,
+                                "evaluation": asdict(eval_result),  # Convert to dict
                             },
                         )
                         if not dry_run:
@@ -510,6 +611,155 @@ def monitor(list_id: Optional[str], interval: int, dry_run: bool, times: Optiona
                 check_timeline()
         except KeyboardInterrupt:
             console.print("\n[yellow]Stopping timeline monitor...")
+
+
+@cli.command()
+@click.option("--list-id", help="Twitter list ID to monitor")
+@click.option("--auto-approve", is_flag=True, help="Automatically approve drafts that pass all checks")
+@click.option("--post-approved", is_flag=True, help="Post approved tweets after reviewing")
+@click.option("--dry-run", is_flag=True, help="Don't actually save drafts or post tweets")
+@click.option("--max-tweets", type=int, default=10, help="Maximum number of tweets to process")
+@click.option("--max-drafts", type=int, default=5, help="Maximum number of drafts to generate")
+def auto(
+    list_id: Optional[str], auto_approve: bool, post_approved: bool, dry_run: bool, max_tweets: int, max_drafts: int
+) -> None:
+    """Run complete automation cycle (monitor, draft, review, approve)"""
+    console.print("[bold green]Starting automation cycle...[/bold green]")
+
+    # Step 1: Monitor timeline and generate drafts
+    console.print("\n[bold]Step 1: Monitoring timeline and generating drafts[/bold]")
+    client = load_twitter_client(require_auth=True)
+
+    # Get timeline tweets
+    if list_id:
+        tweets = client.get_list_tweets(
+            list_id,
+            tweet_fields=["created_at", "author_id", "public_metrics"],
+            expansions=["author_id"],
+            user_fields=["username", "public_metrics"],
+            user_auth=False,
+        )
+        source = f"list {list_id}"
+    else:
+        tweets = client.get_home_timeline(
+            tweet_fields=["created_at", "author_id", "public_metrics"],
+            expansions=["author_id"],
+            user_fields=["username", "public_metrics"],
+            user_auth=False,
+        )
+        source = "home timeline"
+
+    if not tweets.data:
+        console.print("[yellow]No new tweets found")
+        return
+
+    # Process tweets to generate drafts
+    console.print(f"Processing {min(len(tweets.data), max_tweets)} tweets from {source}")
+    if dry_run:
+        console.print("[yellow]DRY RUN: Processing tweets but not saving drafts")
+
+    process_timeline_tweets(
+        tweets.data[:max_tweets],
+        tweets.includes["users"] if tweets.includes else None,
+        source,
+        client,
+        times=max_drafts,
+        dry_run=dry_run,
+        max_drafts=max_drafts,
+    )
+
+    # Step 2: Review drafts
+    console.print("\n[bold]Step 2: Reviewing drafts[/bold]")
+    drafts = list_drafts("new")
+
+    if not drafts:
+        console.print("[yellow]No drafts to review")
+        return
+
+    approved_count = 0
+    needs_review_count = 0
+
+    for path in drafts:
+        draft = TweetDraft.load(path)
+
+        console.print(f"\n[bold]Reviewing draft:[/bold] {path.name}")
+        console.print(f"[cyan]Type: {draft.type}")
+        if draft.in_reply_to:
+            console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+        console.print(f"[white]{draft.text}")
+
+        # Get LLM review
+        approved_by_llm, review_result = verify_draft(draft.to_dict())
+
+        # Display review results
+        console.print("\n[bold]Review Results:[/bold]")
+        for criterion, result in review_result.criteria_results.items():
+            status = "✅" if result.passed else "❌"
+            console.print(f"{status} {criterion}: {result.notes}")
+
+        if review_result.improvements:
+            console.print("\n[yellow]Suggested improvements:[/yellow]")
+            for improvement in review_result.improvements:
+                console.print(f"• {improvement}")
+
+        # Handle auto-approve or mark for human review
+        if auto_approve and approved_by_llm:
+            if not dry_run:
+                move_draft(path, "approved")
+                console.print("[green]Draft automatically approved")
+            else:
+                console.print("[yellow]Would approve draft (dry run)")
+            approved_count += 1
+        else:
+            if approved_by_llm:
+                console.print("[blue]Draft passes checks but requires human review (--auto-approve to skip)")
+            else:
+                console.print("[yellow]Draft needs improvements and human review")
+            needs_review_count += 1
+
+    # Step 3: Post approved tweets if requested
+    if post_approved and approved_count > 0 and not dry_run:
+        console.print("\n[bold]Step 3: Posting approved tweets[/bold]")
+
+        approved_drafts = list_drafts("approved")
+        if not approved_drafts:
+            console.print("[yellow]No approved tweets to post")
+        else:
+            for path in approved_drafts:
+                draft = TweetDraft.load(path)
+
+                console.print("\n[bold]Posting tweet:[/bold]")
+                console.print(f"[cyan]Type: {draft.type}")
+                if draft.in_reply_to:
+                    console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+                console.print(f"[white]{draft.text}")
+
+                try:
+                    response = client.create_tweet(
+                        text=draft.text,
+                        in_reply_to_tweet_id=draft.in_reply_to,
+                        user_auth=False,
+                    )
+
+                    if response.data:
+                        tweet_id = response.data["id"]
+                        console.print(f"[green]Posted tweet: {tweet_id}")
+                        move_draft(path, "posted")
+                    else:
+                        console.print("[red]Error: No response data from tweet creation")
+                except Exception as e:
+                    console.print(f"[red]Error posting tweet: {e}")
+
+    # Summary
+    console.print("\n[bold]Automation Cycle Summary:[/bold]")
+    console.print(f"Tweets processed: {min(len(tweets.data), max_tweets)}")
+    console.print(f"Drafts reviewed: {len(drafts)}")
+    console.print(f"Auto-approved: {approved_count}")
+    console.print(f"Needs human review: {needs_review_count}")
+
+    if needs_review_count > 0:
+        console.print("\n[yellow]Run the following command to review pending drafts:[/yellow]")
+        console.print("[blue]./twitter-cli.py workflow review[/blue]")
 
 
 if __name__ == "__main__":
