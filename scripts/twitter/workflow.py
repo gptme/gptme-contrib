@@ -49,7 +49,7 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
 from .llm import process_tweet, verify_draft
-from .twitter import load_twitter_client
+from .twitter import load_twitter_client, cached_get_me
 
 # Initialize rich console
 console = Console()
@@ -446,8 +446,8 @@ def process_timeline_tweets(
     for tweet in tweets:
         tweets_processed += 1
         try:
-            # Skip our own tweets
-            if tweet.author_id == client.get_me(user_auth=False).data.id:
+            # Skip our own tweets (using cached function to reduce API calls)
+            if tweet.author_id == cached_get_me(client, user_auth=False).data.id:
                 continue
 
             # Get author info
