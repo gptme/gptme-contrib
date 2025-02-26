@@ -55,6 +55,7 @@ import sys
 import threading
 import webbrowser
 from datetime import datetime, timedelta
+from functools import lru_cache
 from queue import Queue
 from typing import Optional
 
@@ -121,6 +122,28 @@ def stop_auth_server() -> None:
 console = Console()
 
 
+@lru_cache(maxsize=1)
+def cached_get_me(client, user_auth: bool = False):
+    """
+    Cached wrapper for client.get_me() to reduce API calls.
+
+    This function caches the result of client.get_me() to avoid
+    hitting Twitter's rate limits with repeated calls. The result
+    won't change during execution, so caching is safe.
+
+    Returns:
+        The user information returned by client.get_me()
+
+    Usage:
+        # Instead of:
+        # user_id = client.get_me(user_auth=False).data.id
+
+        # Use:
+        # user_id = cached_get_me(client, user_auth=False).data.id
+    """
+    return client.get_me(user_auth=user_auth)
+
+
 def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
     """Initialize Twitter client with credentials from .env"""
     load_dotenv()
@@ -159,7 +182,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     )
 
                     # Test the token
-                    test = client.get_me(user_auth=False)
+                    test = cached_get_me(client, user_auth=False)
                     if test.data:
                         console.print(f"[green]Successfully authenticated as @{test.data.username}")
                         return client
@@ -245,7 +268,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                 )
 
                 # Test the credentials with OAuth 2.0
-                test = client.get_me(user_auth=False)
+                test = cached_get_me(client, user_auth=False)
                 if test.data:
                     console.print(f"[green]Successfully authenticated as @{test.data.username}")
                     return client
@@ -305,7 +328,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
 
         # Test the credentials with a simple API call
         console.print("[yellow]Debug: Testing OAuth credentials...")
-        test = client.get_me()
+        test = cached_get_me(client, user_auth=True)
         if test.data:
             console.print(f"[green]Successfully authenticated as @{test.data.username}")
         else:
@@ -415,7 +438,7 @@ def me(limit: int) -> None:
     client = load_twitter_client(require_auth=True)
 
     # needs user_auth=False to use OAuth 2.0 and not get the "Consumer key must be string or bytes, not NoneType" error
-    me = client.get_me(user_auth=False)
+    me = cached_get_me(client, user_auth=False)
     username = me.data.username
 
     # Remove @ if present
@@ -596,7 +619,7 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
     client = load_twitter_client(require_auth=True)
 
     # Get our user ID with OAuth 2.0
-    me = client.get_me(user_auth=False)
+    me = cached_get_me(client, user_auth=False)
     if not me.data:
         console.print("[red]Could not get user information")
         sys.exit(1)
