@@ -153,28 +153,24 @@ class TweetResponse:
 class ReviewResult:
     """Review criteria result"""
 
-    passed: bool
     notes: str
-
-    def __init__(self, passed: bool, notes: str):
-        self.passed = passed
-        self.notes = notes
+    passed: bool
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ReviewResult":
         # Handle all possible field names for backward compatibility
         pass_value = data.get("passed", data.get("pass_", data.get("pass", False)))
         return cls(
-            passed=bool(pass_value),
             notes=str(data["notes"]),
+            passed=bool(pass_value),
         )
 
     @classmethod
     def example(cls) -> "ReviewResult":
         """Example for LLM format documentation"""
         return cls(
-            passed=True,
             notes="Clear and helpful",
+            passed=True,
         )
 
 
@@ -234,17 +230,26 @@ def load_config() -> Dict[Any, Any]:
 
 def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     """Create prompt for tweet evaluation"""
+    # Include thread context if available
+    thread_context = ""
+    if tweet.get("thread_context"):
+        thread_context = "\nConversation Thread:\n"
+        for i, t in enumerate(tweet["thread_context"]):
+            thread_context += f"Tweet {i+1} - @{t['author']}: {t['text']}\n"
+
     return f"""Evaluate this tweet for response suitability.
 
 Tweet: "{tweet["text"]}"
 Author: @{tweet["author"]}
 Context: {json.dumps(tweet.get("context", {}), indent=2)}
+{thread_context}
 
 Evaluation criteria:
 1. Relevance to our topics: {", ".join(config["evaluation"]["topics"])}
 2. Mentions of our projects: {", ".join(config["evaluation"]["projects"])}
 3. Type of engagement needed (if any):
    {json.dumps(config["evaluation"]["triggers"], indent=2)}
+4. Sufficient context to provide a meaningful response
 
 Blacklist check:
 - Forbidden topics: {", ".join(config["blacklist"]["topics"])}
@@ -257,11 +262,19 @@ IMPORTANT: For the "action" field, use ONLY one of these values:
 
 def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
     """Create prompt for response generation"""
+    # Include thread context if available
+    thread_context = ""
+    if tweet.get("thread_context"):
+        thread_context = "\nConversation Thread:\n"
+        for i, t in enumerate(tweet["thread_context"]):
+            thread_context += f"Tweet {i+1} - @{t['author']}: {t['text']}\n"
+
     return f"""Draft a response tweet.
 
 Original Tweet: "{tweet["text"]}"
 Author: @{tweet["author"]}
 Context: {json.dumps(tweet.get("context", {}), indent=2)}
+{thread_context}
 
 Evaluation:
 {json.dumps(eval_result, indent=2)}
@@ -274,6 +287,8 @@ Response Guidelines:
 5. Put links in follow-up tweets
 6. Avoid controversial topics
 7. Add value to the discussion
+8. Demonstrate understanding of specific context from the thread
+9. Reference relevant details to show you've understood the conversation
 
 Few-shot examples:
 {yaml.dump(config["templates"]["examples"])}"""
@@ -281,14 +296,34 @@ Few-shot examples:
 
 def create_review_prompt(draft: Dict, config: Dict) -> str:
     """Create prompt for draft review"""
+    # Build detailed criteria section
+    detailed_criteria = ""
+    if "criteria_descriptions" in config["review"]:
+        detailed_criteria = "\nDetailed Criteria:\n"
+        for criterion in config["review"]["criteria_descriptions"]:
+            detailed_criteria += f"- {criterion['name']}: {criterion['description']}\n"
+            if "examples" in criterion:
+                for example in criterion["examples"]:
+                    for status, text in example.items():
+                        detailed_criteria += f"  • {status.upper()}: {text}\n"
+
+    # Include thread context if available
+    thread_context = ""
+    if draft.get("context", {}).get("original_tweet", {}).get("thread_context"):
+        thread_context = "\nThread Context:\n"
+        for i, tweet in enumerate(draft["context"]["original_tweet"]["thread_context"]):
+            thread_context += f"Tweet {i+1} - @{tweet['author']}: {tweet['text']}\n"
+
     return f"""Review this draft tweet.
 
 Draft Tweet: "{draft["text"]}"
 Type: {draft["type"]}
 Context: {json.dumps(draft.get("context", {}), indent=2)}
+{thread_context}
 
 Review Criteria:
-{yaml.dump(config["review"]["required_checks"])}"""
+{yaml.dump(config["review"]["required_checks"])}
+{detailed_criteria}"""
 
 
 def get_system_prompt() -> Message:

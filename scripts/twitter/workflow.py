@@ -36,20 +36,31 @@ Usage:
     ./twitter_workflow.py post                 # Post approved tweets
 """
 
+import json
 import logging
 import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 
 import click
 import yaml
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from .llm import process_tweet, verify_draft
-from .twitter import load_twitter_client, cached_get_me
+from .llm import (
+    EvaluationResponse,
+    TweetResponse,
+    process_tweet,
+    verify_draft,
+)
+from .twitter import cached_get_me, load_twitter_client
 
 # Initialize rich console
 console = Console()
@@ -61,10 +72,51 @@ REVIEW_DIR = TWEETS_DIR / "review"
 APPROVED_DIR = TWEETS_DIR / "approved"
 POSTED_DIR = TWEETS_DIR / "posted"
 REJECTED_DIR = TWEETS_DIR / "rejected"
+CACHE_DIR = TWEETS_DIR / "cache"
 
 # Ensure directories exist
-for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR]:
+for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR, CACHE_DIR]:
     dir.mkdir(parents=True, exist_ok=True)
+
+
+def get_cache_path(tweet_id: str) -> Path:
+    """Get the cache file path for a tweet ID"""
+    return CACHE_DIR / f"{tweet_id}.json"
+
+
+def is_tweet_cached(tweet_id: str) -> bool:
+    """Check if a tweet has been processed and cached"""
+    cache_path = get_cache_path(tweet_id)
+    return cache_path.exists()
+
+
+def save_to_cache(tweet_id: str, eval_result, response=None) -> None:
+    """Save tweet processing results to cache"""
+    cache_path = get_cache_path(tweet_id)
+    cache_data = {
+        "tweet_id": tweet_id,
+        "processed_at": datetime.now().isoformat(),
+        "evaluation": asdict(eval_result) if eval_result else None,
+        "response": asdict(response) if response else None,
+    }
+
+    with open(cache_path, "w") as f:
+        json.dump(cache_data, f, indent=2)
+
+    console.print(f"[blue]Cached results for tweet {tweet_id}")
+
+
+def load_from_cache(tweet_id: str) -> Tuple[Optional[dict], Optional[dict]]:
+    """Load tweet processing results from cache"""
+    cache_path = get_cache_path(tweet_id)
+
+    if not cache_path.exists():
+        return None, None
+
+    with open(cache_path, "r") as f:
+        cache_data = json.load(f)
+
+    return cache_data.get("evaluation"), cache_data.get("response")
 
 
 class TweetDraft:
@@ -147,6 +199,202 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
     path = status_dirs[status] / generate_draft_name(draft)
     draft.save(path)
     return path
+
+
+def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, max_tweets_per_page=100):
+    """
+    Retrieve the complete conversation thread for a given tweet ID or conversation ID.
+
+    Args:
+        client: The Twitter API client
+        tweet_id_or_conversation_id: Either a tweet ID or a conversation ID
+        max_pages: Maximum number of pagination pages to fetch (default: 3)
+        max_tweets_per_page: Maximum number of tweets per page (default: 100)
+
+    Returns:
+        List of tweet data dictionaries in chronological order with thread structure information
+    """
+    try:
+        # Step 1: Determine if we have a tweet ID or conversation ID
+        conversation_id = tweet_id_or_conversation_id
+
+        # Ensure tweet_id_or_conversation_id is a string before checking
+        tweet_id_str = str(tweet_id_or_conversation_id)
+
+        # If this looks like a tweet ID, get the conversation ID first
+        if not tweet_id_str.startswith("conversation_"):
+            # Get the original tweet with comprehensive metadata
+            try:
+                tweet_response = client.get_tweet(
+                    tweet_id_or_conversation_id,
+                    tweet_fields=[
+                        "created_at",
+                        "author_id",
+                        "public_metrics",
+                        "conversation_id",
+                        "in_reply_to_user_id",
+                        "referenced_tweets",
+                    ],
+                    expansions=[
+                        "author_id",
+                        "referenced_tweets.id",
+                        "in_reply_to_user_id",
+                    ],
+                    user_fields=["username", "name"],
+                )
+
+                if tweet_response.data and tweet_response.data.conversation_id:
+                    conversation_id = tweet_response.data.conversation_id
+
+                    # Initialize collections with the original tweet
+                    all_tweets = {tweet_response.data.id: tweet_response.data}
+                    all_users = {}
+
+                    # Add users from the original tweet response
+                    if tweet_response.includes and "users" in tweet_response.includes:
+                        all_users.update({user.id: user for user in tweet_response.includes["users"]})
+                else:
+                    # If we couldn't get the tweet, just use the ID as conversation ID
+                    all_tweets = {}
+                    all_users = {}
+            except Exception as e:
+                console.print(f"[yellow]Error fetching original tweet: {e}")
+                all_tweets = {}
+                all_users = {}
+        else:
+            # Initialize empty collections if starting with conversation ID
+            all_tweets = {}
+            all_users = {}
+
+        # Step 2: Get all tweets in the conversation with pagination
+        next_token = None
+        page_count = 0
+
+        while page_count < max_pages:
+            # Prepare pagination parameters
+            kwargs = {
+                "query": f"conversation_id:{conversation_id}",
+                "max_results": max_tweets_per_page,
+                "tweet_fields": [
+                    "created_at",
+                    "author_id",
+                    "public_metrics",
+                    "in_reply_to_user_id",
+                    "referenced_tweets",
+                ],
+                "expansions": [
+                    "author_id",
+                    "referenced_tweets.id",
+                    "in_reply_to_user_id",
+                ],
+                "user_fields": ["username", "name"],
+                "user_auth": False,
+            }
+
+            # Add pagination token if available
+            if next_token:
+                kwargs["next_token"] = next_token
+
+            # Execute the search
+            conversation = client.search_recent_tweets(**kwargs)
+            page_count += 1
+
+            # Process results
+            if conversation.data:
+                # Add tweets to our collection, avoiding duplicates
+                for reply in conversation.data:
+                    all_tweets[reply.id] = reply
+
+                # Add users to our collection
+                if conversation.includes and "users" in conversation.includes:
+                    all_users.update({user.id: user for user in conversation.includes["users"]})
+            else:
+                # No data in this page
+                break
+
+            # Check if there are more pages
+            if not hasattr(conversation, "meta") or "next_token" not in conversation.meta:
+                break
+
+            next_token = conversation.meta["next_token"]
+
+        # Step 3: No tweets found
+        if not all_tweets:
+            return []
+
+        # Step 4: Build the thread structure
+        # Create a mapping of tweets by ID for easy lookup
+        sorted_tweets = sorted(all_tweets.values(), key=lambda t: t.created_at)
+
+        # Create a reply structure mapping
+        reply_structure = {}
+        for t in sorted_tweets:
+            if hasattr(t, "referenced_tweets") and t.referenced_tweets:
+                for ref in t.referenced_tweets:
+                    if ref.type == "replied_to":
+                        reply_structure[t.id] = ref.id
+                        break
+
+        # Step 5: Build the final thread context
+        thread_context = []
+        for t in sorted_tweets:
+            # Get author username
+            author = all_users.get(t.author_id)
+            author_username = author.username if author else str(t.author_id)
+
+            # Calculate depth in thread
+            depth = 0
+            current_id = t.id
+            while current_id in reply_structure:
+                depth += 1
+                current_id = reply_structure[current_id]
+
+            # Create thread context entry
+            thread_entry = {
+                "id": t.id,
+                "text": t.text,
+                "author": author_username,
+                "created_at": t.created_at.isoformat(),
+                "depth": depth,  # Add depth information for UI indentation
+                "replied_to_id": reply_structure.get(t.id),  # Which tweet this is replying to
+                "public_metrics": t.public_metrics if hasattr(t, "public_metrics") else {},
+                # Include referenced tweets if available
+                "referenced_tweets": [],
+            }
+
+            # Add referenced tweets information
+            if hasattr(t, "referenced_tweets") and t.referenced_tweets:
+                for ref in t.referenced_tweets:
+                    ref_tweet = None
+                    for tweet in sorted_tweets:
+                        if tweet.id == ref.id:
+                            ref_tweet = tweet
+                            break
+                    else:
+                        # Tweet not found in the conversation
+                        raise ValueError(f"Referenced tweet {ref.id} not found in conversation")
+
+                    author = all_users.get(ref_tweet.author_id)
+                    assert author, f"Author not found for referenced tweet {ref.id}"
+                    thread_entry["referenced_tweets"].append(
+                        {
+                            "type": ref.type,
+                            "id": ref.id,
+                            "text": ref_tweet.text if ref_tweet else "Unavailable",
+                            "author": author.username if ref_tweet and ref_tweet.author_id in all_users else "Unknown",
+                        }
+                    )
+
+            thread_context.append(thread_entry)
+
+        # Log success
+        console.print(f"[blue]Retrieved {len(thread_context)} tweets from conversation {conversation_id}")
+
+        return thread_context
+
+    except Exception as e:
+        console.print(f"[yellow]Error retrieving conversation thread: {e}")
+        return []
 
 
 def move_draft(path: Path, new_status: str) -> Path:
@@ -322,12 +570,17 @@ def approve(draft_id: str) -> None:
 @cli.command()
 @click.argument("draft_id")
 def reject(draft_id: str) -> None:
-    """Reject a draft tweet by ID"""
-    # Find the draft by ID
+    """Reject a draft tweet by ID (works on both new and approved drafts)"""
+    # First try to find the draft in the NEW_DIR
     draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
 
+    # If not found, try APPROVED_DIR
     if not draft_files:
-        console.print(f"[red]No draft found with ID: {draft_id}")
+        draft_files = list(APPROVED_DIR.glob(f"{draft_id}*.yml"))
+
+    # Still not found
+    if not draft_files:
+        console.print(f"[red]No draft found with ID: {draft_id} in new or approved directories")
         return
 
     draft_path = draft_files[0]
@@ -339,12 +592,17 @@ def reject(draft_id: str) -> None:
 @click.argument("draft_id")
 @click.argument("new_text")
 def edit(draft_id: str, new_text: str) -> None:
-    """Edit a draft tweet by ID"""
-    # Find the draft by ID
+    """Edit a draft tweet by ID (works on both new and approved drafts)"""
+    # First try to find the draft in the NEW_DIR
     draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
 
+    # If not found, try APPROVED_DIR
     if not draft_files:
-        console.print(f"[red]No draft found with ID: {draft_id}")
+        draft_files = list(APPROVED_DIR.glob(f"{draft_id}*.yml"))
+
+    # Still not found
+    if not draft_files:
+        console.print(f"[red]No draft found with ID: {draft_id} in new or approved directories")
         return
 
     draft_path = draft_files[0]
@@ -450,6 +708,18 @@ def process_timeline_tweets(
             if tweet.author_id == cached_get_me(client, user_auth=False).data.id:
                 continue
 
+            # Check if tweet already has a reply in posted directory
+            tweet_id_str = str(tweet.id)
+            has_posted_reply = False
+            for posted_file in POSTED_DIR.glob("*.yml"):
+                if tweet_id_str in posted_file.name:
+                    console.print(f"[yellow]Skip: Already replied to tweet {tweet_id_str}")
+                    has_posted_reply = True
+                    break
+
+            if has_posted_reply:
+                continue
+
             # Get author info
             author = user_lookup.get(tweet.author_id)
             author_username = author.username if author else str(tweet.author_id)
@@ -472,16 +742,47 @@ def process_timeline_tweets(
                 },
             }
 
+            # Try to get conversation thread context if this is a reply
+            if hasattr(tweet, "conversation_id") and tweet.conversation_id:
+                try:
+                    thread_tweets = get_conversation_thread(client, tweet.conversation_id)
+                    if thread_tweets:
+                        # Add thread context at both the root level (for eval/response) and in context (for storage)
+                        tweet_data["thread_context"] = thread_tweets
+                        tweet_data["context"]["thread_context"] = thread_tweets
+                        console.print(f"[blue]Added thread context with {len(thread_tweets)} tweets")
+                except Exception as e:
+                    console.print(f"[yellow]Could not retrieve thread context: {e}")
+
             # Process tweet
             console.print(f"\n[cyan]Processing tweet from @{author_username}:[/cyan]")
             console.print(f"[white]{tweet.text}[/white]")
 
-            eval_result, response = process_tweet(tweet_data)
+            # Check if tweet is already cached
+            if is_tweet_cached(tweet_id_str):
+                console.print(f"[blue]Using cached results for tweet {tweet_id_str}")
+                cached_eval, cached_response = load_from_cache(tweet_id_str)
 
-            # Show evaluation result
-            console.print(f"[blue]Evaluation: {eval_result.action.upper()}[/blue]")
-            console.print(f"[blue]Relevance: {eval_result.relevance}/100[/blue]")
-            console.print(f"[blue]Priority: {eval_result.priority}/100[/blue]")
+                # Reconstruct objects from cached dictionaries
+
+                if cached_eval:
+                    eval_result = EvaluationResponse.from_dict(cached_eval)
+                    console.print(f"[blue]Cached Evaluation: {eval_result.action.upper()}")
+                    console.print(f"[blue]Cached Relevance: {eval_result.relevance}/100")
+                    console.print(f"[blue]Cached Priority: {eval_result.priority}/100")
+                else:
+                    eval_result = None
+
+                response = TweetResponse.from_dict(cached_response) if cached_response else None
+            else:
+                # Process tweet and cache results
+                eval_result, response = process_tweet(tweet_data)
+                save_to_cache(tweet_id_str, eval_result, response)
+
+                # Show evaluation result
+                console.print(f"[blue]Evaluation: {eval_result.action.upper()}")
+                console.print(f"[blue]Relevance: {eval_result.relevance}/100")
+                console.print(f"[blue]Priority: {eval_result.priority}/100")
 
             if response:
                 # Create draft from response
@@ -491,8 +792,8 @@ def process_timeline_tweets(
                     in_reply_to=tweet.id if response.type == "reply" else None,
                     context={
                         "original_tweet": tweet_data,
-                        "evaluation": asdict(eval_result),  # Convert to dict
-                        "response_metadata": asdict(response),  # Convert to dict
+                        "evaluation": asdict(eval_result) if eval_result is not None else None,  # Convert to dict
+                        "response_metadata": asdict(response) if response is not None else None,  # Convert to dict
                     },
                 )
 
@@ -507,6 +808,9 @@ def process_timeline_tweets(
                 # If thread needed, create follow-up drafts
                 if response.thread_needed and response.follow_up:
                     for i, follow_up in enumerate([response.follow_up], 1):
+                        # Assert that eval_result is not None before using asdict()
+                        assert eval_result is not None, "eval_result should not be None in thread context"
+
                         thread_draft = TweetDraft(
                             text=follow_up,
                             type="thread",
@@ -615,58 +919,143 @@ def monitor(list_id: Optional[str], interval: int, dry_run: bool, times: Optiona
 
 @cli.command()
 @click.option("--list-id", help="Twitter list ID to monitor")
-@click.option("--auto-approve", is_flag=True, help="Automatically approve drafts that pass all checks")
+@click.option(
+    "--auto-approve",
+    is_flag=True,
+    help="Automatically approve drafts that pass all checks",
+)
 @click.option("--post-approved", is_flag=True, help="Post approved tweets after reviewing")
 @click.option("--dry-run", is_flag=True, help="Don't actually save drafts or post tweets")
 @click.option("--max-tweets", type=int, default=10, help="Maximum number of tweets to process")
 @click.option("--max-drafts", type=int, default=5, help="Maximum number of drafts to generate")
+@click.option("--skip-mentions", is_flag=True, help="Skip processing of mentions")
+@click.option("--skip-timeline", is_flag=True, help="Skip processing of timeline")
 def auto(
-    list_id: Optional[str], auto_approve: bool, post_approved: bool, dry_run: bool, max_tweets: int, max_drafts: int
+    list_id: Optional[str],
+    auto_approve: bool,
+    post_approved: bool,
+    dry_run: bool,
+    max_tweets: int,
+    max_drafts: int,
+    skip_mentions: bool,
+    skip_timeline: bool,
 ) -> None:
     """Run complete automation cycle (monitor, draft, review, approve)"""
     console.print("[bold green]Starting automation cycle...[/bold green]")
 
-    # Step 1: Monitor timeline and generate drafts
-    console.print("\n[bold]Step 1: Monitoring timeline and generating drafts[/bold]")
-    client = load_twitter_client(require_auth=True)
-
-    # Get timeline tweets
-    if list_id:
-        tweets = client.get_list_tweets(
-            list_id,
-            tweet_fields=["created_at", "author_id", "public_metrics"],
-            expansions=["author_id"],
-            user_fields=["username", "public_metrics"],
-            user_auth=False,
-        )
-        source = f"list {list_id}"
-    else:
-        tweets = client.get_home_timeline(
-            tweet_fields=["created_at", "author_id", "public_metrics"],
-            expansions=["author_id"],
-            user_fields=["username", "public_metrics"],
-            user_auth=False,
-        )
-        source = "home timeline"
-
-    if not tweets.data:
-        console.print("[yellow]No new tweets found")
+    if skip_mentions and skip_timeline:
+        console.print("[yellow]Warning: Both mentions and timeline processing are skipped. Nothing to process.")
         return
 
-    # Process tweets to generate drafts
-    console.print(f"Processing {min(len(tweets.data), max_tweets)} tweets from {source}")
-    if dry_run:
-        console.print("[yellow]DRY RUN: Processing tweets but not saving drafts")
+    # Initialize variables to track overall counts
+    total_drafts_generated = 0
+    total_tweets_processed = 0
 
-    process_timeline_tweets(
-        tweets.data[:max_tweets],
-        tweets.includes["users"] if tweets.includes else None,
-        source,
-        client,
-        times=max_drafts,
-        dry_run=dry_run,
-        max_drafts=max_drafts,
-    )
+    # Step 1: Monitor sources and generate drafts
+    console.print("\n[bold]Step 1: Monitoring for new content[/bold]")
+    client = load_twitter_client(require_auth=True)
+
+    # Get our user ID for mentions
+    me = cached_get_me(client, user_auth=False)
+    my_username = me.data.username if me and me.data else None
+
+    # Process mentions first (if not skipped)
+    if not skip_mentions:
+        console.print("\n[bold]Processing mentions[/bold]")
+        try:
+            # Get recent mentions
+            mentions = client.get_users_mentions(
+                me.data.id,
+                max_results=max_tweets,
+                tweet_fields=[
+                    "created_at",
+                    "author_id",
+                    "public_metrics",
+                    "conversation_id",
+                ],
+                expansions=["author_id", "referenced_tweets.id"],
+                user_fields=["username", "public_metrics"],
+                user_auth=False,
+            )
+
+            if mentions.data:
+                console.print(f"Found {len(mentions.data)} mentions to process")
+                source = f"mentions of @{my_username}"
+
+                # Process mentions to generate drafts
+                process_timeline_tweets(
+                    mentions.data[: max_tweets - total_tweets_processed],
+                    mentions.includes["users"] if mentions.includes else None,
+                    source,
+                    client,
+                    times=max_drafts - total_drafts_generated,
+                    dry_run=dry_run,
+                    max_drafts=max_drafts - total_drafts_generated,
+                )
+
+                # Update counters
+                total_tweets_processed += min(len(mentions.data), max_tweets - total_tweets_processed)
+            else:
+                console.print("[yellow]No mentions found")
+        except Exception as e:
+            console.print(f"[red]Error processing mentions: {e}")
+
+    # Process timeline (if not skipped and still under limits)
+    if not skip_timeline and total_tweets_processed < max_tweets and total_drafts_generated < max_drafts:
+        console.print("\n[bold]Processing timeline[/bold]")
+        try:
+            # Get timeline tweets
+            if list_id:
+                tweets = client.get_list_tweets(
+                    list_id,
+                    tweet_fields=[
+                        "created_at",
+                        "author_id",
+                        "public_metrics",
+                        "conversation_id",
+                    ],
+                    expansions=["author_id"],
+                    user_fields=["username", "public_metrics"],
+                    user_auth=False,
+                )
+                source = f"list {list_id}"
+            else:
+                tweets = client.get_home_timeline(
+                    tweet_fields=[
+                        "created_at",
+                        "author_id",
+                        "public_metrics",
+                        "conversation_id",
+                    ],
+                    expansions=["author_id"],
+                    user_fields=["username", "public_metrics"],
+                    user_auth=False,
+                )
+                source = "home timeline"
+
+            if tweets.data:
+                remaining_tweets = max_tweets - total_tweets_processed
+                console.print(f"Processing {min(len(tweets.data), remaining_tweets)} tweets from {source}")
+
+                if dry_run:
+                    console.print("[yellow]DRY RUN: Processing tweets but not saving drafts")
+
+                process_timeline_tweets(
+                    tweets.data[:remaining_tweets],
+                    tweets.includes["users"] if tweets.includes else None,
+                    source,
+                    client,
+                    times=max_drafts - total_drafts_generated,
+                    dry_run=dry_run,
+                    max_drafts=max_drafts - total_drafts_generated,
+                )
+
+                # Update counters
+                total_tweets_processed += min(len(tweets.data), remaining_tweets)
+            else:
+                console.print("[yellow]No new tweets found in timeline")
+        except Exception as e:
+            console.print(f"[red]Error processing timeline: {e}")
 
     # Step 2: Review drafts
     console.print("\n[bold]Step 2: Reviewing drafts[/bold]")
@@ -752,7 +1141,7 @@ def auto(
 
     # Summary
     console.print("\n[bold]Automation Cycle Summary:[/bold]")
-    console.print(f"Tweets processed: {min(len(tweets.data), max_tweets)}")
+    console.print(f"Tweets processed: {total_tweets_processed}")
     console.print(f"Drafts reviewed: {len(drafts)}")
     console.print(f"Auto-approved: {approved_count}")
     console.print(f"Needs human review: {needs_review_count}")

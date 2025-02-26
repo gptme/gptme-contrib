@@ -61,11 +61,19 @@ review:
     - "Accurate technical information"
     - "Aligned with our values"
     - "Adds value to discussion"
+    - "Shows understanding of specific context"
     - "No controversial topics"
-    - "Appropriate use of emojis (1-2 max)"
+    - "Minimal emoji usage (0-1 max, never at the beginning of tweets, prefer no emojis)"
     - "Under 280 characters"
     - "Links in replies, not main tweet"
     - "No hashtags"
+
+  criteria_descriptions:
+    - name: "Shows understanding of specific context"
+      description: "Response must demonstrate understanding of the specific content being discussed, not just generic acknowledgment"
+      examples:
+        - fail: "Thanks for sharing! Interesting issue."
+        - pass: "The issue about improving RAG integration looks promising - especially the vector embedding approach you mentioned."
 
 # Rate limiting
 rate_limits:
