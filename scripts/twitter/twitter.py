@@ -785,60 +785,197 @@ def timeline(since: str, limit: int, list_id: Optional[str]) -> None:
 
 @cli.command()
 @click.argument("tweet_id")
-@click.option("--limit", default=2 * DEFAULT_LIMIT, help="Maximum number of tweets to fetch")
-def thread(tweet_id: str, limit: int) -> None:
-    """Read a conversation thread given a tweet ID"""
+@click.option("--limit", default=100, help="Maximum number of tweets to fetch per page")
+@click.option("--max-pages", default=5, help="Maximum number of pagination pages to fetch")
+@click.option("--verbose", is_flag=True, help="Show detailed debug information")
+@click.option("--structure", is_flag=True, help="Show thread structure with indentation")
+def thread(tweet_id: str, limit: int, max_pages: int, verbose: bool, structure: bool) -> None:
+    """Read a complete conversation thread given a tweet ID
+
+    This command will:
+    1. Fetch the specified tweet
+    2. Get its conversation ID
+    3. Retrieve all tweets in that conversation using pagination
+    4. Display the tweets in chronological order with reply structure
+    """
     client = load_twitter_client(require_auth=False)
 
-    # Get the original tweet
-    tweet = client.get_tweet(
-        tweet_id,
-        tweet_fields=["created_at", "author_id", "public_metrics", "conversation_id"],
-        expansions=["author_id", "referenced_tweets.id"],
-        user_fields=["username"],
-    )
+    if verbose:
+        console.print(f"[blue]Fetching tweet with ID: {tweet_id}")
+
+    # Get the original tweet with comprehensive metadata
+    try:
+        tweet = client.get_tweet(
+            tweet_id,
+            tweet_fields=[
+                "created_at",
+                "author_id",
+                "public_metrics",
+                "conversation_id",
+                "in_reply_to_user_id",
+                "referenced_tweets",
+            ],
+            expansions=["author_id", "referenced_tweets.id", "in_reply_to_user_id"],
+            user_fields=["username", "name", "profile_image_url"],
+        )
+    except Exception as e:
+        console.print(f"[red]Error fetching original tweet: {e}")
+        return
 
     if not tweet.data:
         console.print("[yellow]Tweet not found")
         return
 
-    # Get conversation thread including the original tweet
+    # Get the conversation ID
     conversation_id = tweet.data.conversation_id or tweet_id
-    conversation = client.search_recent_tweets(
-        query=f"conversation_id:{conversation_id}",
-        max_results=limit,
-        tweet_fields=[
-            "created_at",
-            "author_id",
-            "public_metrics",
-            "in_reply_to_user_id",
-        ],
-        expansions=["author_id", "referenced_tweets.id"],
-        user_fields=["username"],
-    )
+    if verbose:
+        console.print(f"[blue]Found conversation ID: {conversation_id}")
+        console.print(f"[blue]Retrieving conversation thread with pagination (max {max_pages} pages)")
 
-    # Create lookup for user info from both tweet and conversation
-    users = {}
-    if tweet.includes and "users" in tweet.includes:
-        users.update({user.id: user for user in tweet.includes["users"]})
-    if conversation.includes and "users" in conversation.includes:
-        users.update({user.id: user for user in conversation.includes["users"]})
-
-    # Display thread
-    console.print("\n[bold]Conversation Thread:[/bold]\n")
-
-    # Combine all tweets and remove duplicates
+    # Initialize variables for pagination
     all_tweets = {tweet.data.id: tweet.data}  # Start with original tweet
-    if conversation.data:
-        for reply in conversation.data:
-            all_tweets[reply.id] = reply
+    all_users = {}
+    next_token = None
+    page_count = 0
 
-    # Sort and display tweets
+    # If tweet includes have users, add them to all_users
+    if tweet.includes and "users" in tweet.includes:
+        all_users.update({user.id: user for user in tweet.includes["users"]})
+
+    # Paginated retrieval of conversation tweets
+    while page_count < max_pages:
+        try:
+            # Prepare pagination parameters
+            kwargs = {
+                "query": f"conversation_id:{conversation_id}",
+                "max_results": limit,
+                "tweet_fields": [
+                    "created_at",
+                    "author_id",
+                    "public_metrics",
+                    "in_reply_to_user_id",
+                    "referenced_tweets",
+                ],
+                "expansions": ["author_id", "referenced_tweets.id", "in_reply_to_user_id"],
+                "user_fields": ["username", "name", "profile_image_url"],
+            }
+
+            # Add pagination token if available
+            if next_token:
+                kwargs["next_token"] = next_token
+
+            # Execute the search
+            conversation = client.search_recent_tweets(**kwargs)
+            page_count += 1
+
+            if verbose:
+                console.print(f"[blue]Retrieved page {page_count} of conversation thread")
+
+            # Process results
+            if conversation.data:
+                if verbose:
+                    console.print(f"[blue]Found {len(conversation.data)} tweets on this page")
+
+                # Add tweets to our collection, avoiding duplicates
+                for reply in conversation.data:
+                    all_tweets[reply.id] = reply
+
+                # Add users to our collection
+                if conversation.includes and "users" in conversation.includes:
+                    all_users.update({user.id: user for user in conversation.includes["users"]})
+
+            # Check if there are more pages
+            if not hasattr(conversation, "meta") or "next_token" not in conversation.meta:
+                if verbose:
+                    console.print("[blue]No more pages available")
+                break
+
+            next_token = conversation.meta["next_token"]
+
+        except Exception as e:
+            console.print(f"[red]Error retrieving conversation page {page_count + 1}: {e}")
+            break
+
+    # No tweets found
+    if not all_tweets:
+        console.print("[yellow]No tweets found in conversation")
+        return
+
+    # Display thread statistics
+    console.print(f"\n[bold]Conversation Thread[/bold] (ID: {conversation_id})")
+    console.print(f"[blue]Retrieved {len(all_tweets)} tweets from {page_count} page(s)")
+
+    # Sort tweets chronologically
     sorted_tweets = sorted(all_tweets.values(), key=lambda t: t.created_at)
-    for tweet_obj in sorted_tweets:
-        author = users.get(tweet_obj.author_id, None)
-        author_name = f"@{author.username}" if author else str(tweet_obj.author_id)
-        display_tweet(tweet_obj, author_name)
+
+    # Build the thread structure if requested
+    if structure:
+        # Create a mapping of tweets by ID for easy lookup
+        tweets_by_id = {t.id: t for t in sorted_tweets}
+
+        # Create a reply structure mapping
+        reply_to = {}
+        for t in sorted_tweets:
+            if hasattr(t, "referenced_tweets") and t.referenced_tweets:
+                for ref in t.referenced_tweets:
+                    if ref.type == "replied_to":
+                        reply_to[t.id] = ref.id
+                        break
+
+        # Determine indentation levels
+        root_id = sorted_tweets[0].id  # Assume first tweet is root
+        for t in sorted_tweets:
+            if not hasattr(t, "referenced_tweets") or not t.referenced_tweets:
+                root_id = t.id
+                break
+
+        # Display the thread with indentation
+        console.print("\n[bold]Thread Structure:[/bold]\n")
+        displayed = set()
+
+        def display_thread(tweet_id, level=0):
+            """Recursively display a tweet and its replies with indentation"""
+            if tweet_id in displayed or tweet_id not in tweets_by_id:
+                return
+
+            tweet_obj = tweets_by_id[tweet_id]
+            displayed.add(tweet_id)
+
+            # Get author info
+            author = all_users.get(tweet_obj.author_id, None)
+            author_name = f"@{author.username}" if author else str(tweet_obj.author_id)
+
+            # Display with indentation
+            indent = "  " * level
+            console.print(f"\n{indent}[cyan]{format_tweet_time(tweet_obj)}[/cyan]")
+            console.print(f"{indent}[green]From: {author_name}[/green]")
+            console.print(f"{indent}[white]{tweet_obj.text}[/white]")
+
+            stats = format_tweet_stats(tweet_obj)
+            if stats:
+                console.print(f"{indent}[blue]Stats: {stats}[/blue]")
+
+            # Find and display replies
+            replies = [t_id for t_id, reply_to_id in reply_to.items() if reply_to_id == tweet_id]
+            for reply_id in replies:
+                display_thread(reply_id, level + 1)
+
+        # Start with the root tweet
+        display_thread(root_id)
+
+        # Display any remaining tweets that weren't caught in the tree structure
+        remaining = set(tweets_by_id.keys()) - displayed
+        if remaining:
+            console.print("\n[yellow]Additional tweets in conversation (structure unclear):[/yellow]")
+            for tweet_id in sorted([tid for tid in remaining], key=lambda tid: tweets_by_id[tid].created_at):
+                display_thread(tweet_id, 0)
+    else:
+        # Simple chronological display
+        console.print("\n[bold]Chronological Order:[/bold]\n")
+        for tweet_obj in sorted_tweets:
+            author = all_users.get(tweet_obj.author_id, None)
+            author_name = f"@{author.username}" if author else str(tweet_obj.author_id)
+            display_tweet(tweet_obj, author_name)
 
 
 if __name__ == "__main__":
