@@ -2,15 +2,14 @@
 # /// script
 # requires-python = ">=3.10,<3.12"
 # dependencies = [
+#   "gptme @ git+https://github.com/ErikBjare/gptme.git",
 #   "tweepy>=4.14.0",
 #   "rich>=13.0.0",
 #   "python-dotenv>=1.0.0",
 #   "click>=8.0.0",
 #   "pyyaml>=6.0.0",
-#   "schedule>=1.2.0",
+#   "flask>=3.0.0",
 # ]
-# [tool.uv]
-# exclude-newer = "2024-01-01T00:00:00Z"
 # ///
 """
 Twitter Workflow Manager - Automated timeline monitoring and tweet drafting.
@@ -30,14 +29,15 @@ tweets/
   rejected/  - Rejected tweet drafts
 
 Usage:
-    ./twitter_workflow.py monitor              # Start timeline monitoring
-    ./twitter_workflow.py draft "tweet text"   # Create new tweet draft
-    ./twitter_workflow.py review               # Review pending tweets
-    ./twitter_workflow.py post                 # Post approved tweets
+    ./workflow.py monitor              # Start timeline monitoring
+    ./workflow.py draft "tweet text"   # Create new tweet draft
+    ./workflow.py review               # Review pending tweets
+    ./workflow.py post                 # Post approved tweets
 """
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -51,16 +51,17 @@ from typing import (
 
 import click
 import yaml
+from gptme.init import init as init_gptme
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from .llm import (
+from llm import (
     EvaluationResponse,
     TweetResponse,
     process_tweet,
     verify_draft,
 )
-from .twitter import cached_get_me, load_twitter_client
+from twitter import cached_get_me, load_twitter_client
 
 # Initialize rich console
 console = Console()
@@ -441,9 +442,14 @@ def list_drafts(status: str) -> List[Path]:
 
 
 @click.group()
-def cli():
+@click.option(
+    "--model",
+    default=os.getenv("MODEL", "anthropic/claude-3-5-sonnet-20241022"),
+    help="Model to use for LLM operations",
+)
+def cli(model: str):
     """Twitter Workflow Manager"""
-    pass
+    init_gptme(model=model, interactive=False, tool_allowlist=frozenset())
 
 
 @cli.command()

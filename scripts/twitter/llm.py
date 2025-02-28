@@ -412,6 +412,7 @@ def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
 
     # Get LLM response
     model = get_default_model()
+    assert model, "default model not set"
     messages = [get_system_prompt(), Message("user", prompt)]
     response = reply(messages, model.full, stream=False)
 
