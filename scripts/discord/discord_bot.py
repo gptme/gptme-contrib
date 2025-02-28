@@ -15,6 +15,7 @@ import logging
 import os
 import re
 from copy import copy
+from pathlib import Path
 from typing import AsyncGenerator
 from typing import Callable
 from typing import Dict
@@ -64,12 +65,12 @@ logger = logging.getLogger("discord_bot")
 
 # Get workspace folder (location of `gptme.toml`):
 workspace_root = get_project_gptme_dir()
-logsdir = workspace_root / "logs_discord"
+logsdir = workspace_root / "logs_discord" if workspace_root else Path("logs_discord")
 
 # Load environment variables
 env_files = [".env", ".env.discord"]
 for env_file in env_files:
-    if (workspace_root / env_file).exists():
+    if workspace_root and (workspace_root / env_file).exists():
         load_dotenv(env_file, override=True)
         logger.info(f"Loaded environment from {env_file}")
 
@@ -696,7 +697,7 @@ async def tools(ctx: commands.Context) -> None:
     tool_info = "Available tools:\n\n"
     for tool in tools:
         tool_info += f"**{tool.name}**\n"
-        tool_info += f"- Description: {tool.description}\n"
+        tool_info += f"- Description: {tool.desc}\n"
         if tool.block_types:
             tool_info += f"- Usage: ```{', '.join(tool.block_types)}```\n"
         tool_info += "\n"
@@ -936,7 +937,7 @@ def main() -> None:
         tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
 
         # Initialize gptme and tools
-        init(model=MODEL, interactive=False, tool_allowlist=tool_allowlist)
+        init(model=MODEL, interactive=False, tool_allowlist=list(tool_allowlist))
         tools = get_tools()
         if not tools:
             logger.error("No tools loaded in gptme")

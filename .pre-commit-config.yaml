@@ -16,6 +16,9 @@ repos:
   hooks:
   - id: mypy
     additional_dependencies: [
+      "gptme @ git+https://github.com/ErikBjare/gptme.git",
+      rich,
+      python-dotenv,
       tweepy,
       flask,
       discord.py,
