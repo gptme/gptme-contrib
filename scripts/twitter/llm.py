@@ -221,7 +221,7 @@ console = Console()
 
 def load_config() -> Dict[Any, Any]:
     """Load workflow configuration"""
-    config_path = Path(__file__).parent / "config.yml"
+    config_path = Path(__file__).parent / "config" / "config.yml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     with config_path.open() as f:
