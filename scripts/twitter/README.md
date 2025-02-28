@@ -76,41 +76,41 @@ TWITTER_ACCESS_SECRET=your_access_secret
 
 ```bash
 # Post a tweet
-python -m twitter.cli twitter post "Hello world!"
+./twitter.py post "Hello world!"
 
 # Read timeline
-python -m twitter.cli twitter timeline
+./twitter.py timeline
 
 # Monitor for content to respond to
-python -m twitter.cli workflow monitor
+./workflow.py monitor
 
 # Review drafts
-python -m twitter.cli workflow review
+./workflow.py review
 
 # Post approved tweets
-python -m twitter.cli workflow post
+./workflow.py post
 ```
 
 ### Common Workflows
 
 1. **Monitor and respond to tweets**:
    ```bash
-   python -m twitter.cli workflow monitor --interval 900
+   ./workflow.py monitor --interval 900
    ```
 
 2. **Review and approve drafts**:
    ```bash
-   python -m twitter.cli workflow review
+   ./workflow.py review
    ```
 
 3. **Post approved tweets**:
    ```bash
-   python -m twitter.cli workflow post
+   ./workflow.py post
    ```
 
 4. **Auto workflow (monitor, review, post)**:
    ```bash
-   python -m twitter.cli workflow auto --auto-approve --post-approved
+   ./workflow.py auto --auto-approve --post-approved
    ```
 
 ## Automation Options
@@ -123,13 +123,13 @@ Add entries to your crontab:
 
 ```bash
 # Monitor timeline every 15 minutes
-*/15 * * * * cd /path/to/project && python -m twitter.cli workflow monitor --dry-run
+*/15 * * * * cd /path/to/project && ./workflow.py monitor --dry-run
 
 # Review notification at 9am, 1pm, and 5pm
 0 9,13,17 * * * notify-send "Twitter Review" "Time to review tweet drafts!"
 
 # Post approved tweets every 30 minutes
-*/30 * * * * cd /path/to/project && python -m twitter.cli workflow post
+*/30 * * * * cd /path/to/project && ./workflow.py post
 ```
 
 Use `crontab -e` to edit your crontab.
@@ -144,7 +144,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/path/to/python -m twitter.cli workflow monitor
+ExecStart=/path/to/./workflow.py monitor
 WorkingDirectory=/path/to/project
 User=yourusername
 
@@ -189,7 +189,7 @@ COPY . .
 RUN pip install -e .
 
 # Run workflow monitor every 15 minutes
-CMD ["bash", "-c", "while true; do python -m twitter.cli workflow monitor; sleep 900; done"]
+CMD ["bash", "-c", "while true; do ./workflow.py monitor; sleep 900; done"]
 ```
 
 ## Best Practices
