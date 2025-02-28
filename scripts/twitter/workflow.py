@@ -373,7 +373,8 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
                             break
                     else:
                         # Tweet not found in the conversation
-                        raise ValueError(f"Referenced tweet {ref.id} not found in conversation")
+                        logging.warning(f"Referenced tweet {ref.id} not found in conversation")
+                        continue
 
                     author = all_users.get(ref_tweet.author_id)
                     assert author, f"Author not found for referenced tweet {ref.id}"
