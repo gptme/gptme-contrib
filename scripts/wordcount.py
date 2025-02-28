@@ -103,11 +103,11 @@ def main() -> None:
     # Add rows
     for result in results:
         table.add_row(
-            result["source"],
+            str(result["source"]),
             str(result["lines"]),
             str(result["words"]),
             str(result["chars"]),
-            result["top_words"],
+            str(result["top_words"]),
         )
 
     # Add total row for multiple files

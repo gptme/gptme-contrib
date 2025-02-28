@@ -1,8 +1,9 @@
 import os
-import requests
-from gptme.tools import ToolSpec, Parameter, ToolUse
-from gptme.message import Message
 
+import requests
+from gptme.message import Message
+from gptme.tools import Parameter, ToolSpec, ToolUse
+from gptme.tools.base import ConfirmFunc
 
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
@@ -12,10 +13,15 @@ def has_pushover_conf():
     return PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN
 
 
-def execute(content: str | None, args: list[str] | None, kwargs: dict[str, str] | None, confirm=None) -> Message:
-    if content is not None and args is not None:
+def execute(
+    code: str | None,
+    args: list[str] | None,
+    kwargs: dict[str, str] | None,
+    confirm: ConfirmFunc,
+) -> Message:
+    if code is not None and args is not None:
         title = args[0]
-        message = content
+        message = code
     elif kwargs is not None:
         title = kwargs.get("title", "No title")
         message = kwargs.get("message", "No message")

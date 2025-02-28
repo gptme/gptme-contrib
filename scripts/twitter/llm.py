@@ -329,7 +329,7 @@ Review Criteria:
 def get_system_prompt() -> Message:
     """Get system prompt for Twitter interactions."""
     workspace = get_project_git_dir()
-    context = get_workspace_prompt(workspace)
+    context = get_workspace_prompt(workspace) if workspace else ""
 
     def get_format_examples() -> Dict[str, Any]:
         """Generate format examples from dataclasses"""
@@ -431,6 +431,8 @@ def generate_response(tweet: Dict, eval_result: EvaluationResponse) -> Optional[
 
     # Get LLM response
     model = get_default_model()
+    if not model:
+        raise RuntimeError("default model not set")
     messages = [get_system_prompt(), Message("user", prompt)]
     response = reply(messages, model.full, stream=False)
 
@@ -444,6 +446,8 @@ def review_draft(draft: Dict) -> ReviewResponse:
 
     # Get LLM response
     model = get_default_model()
+    if not model:
+        raise RuntimeError("default model not set")
     messages = [get_system_prompt(), Message("user", prompt)]
     response = reply(messages, model.full, stream=False)
 
