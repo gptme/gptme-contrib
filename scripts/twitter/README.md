@@ -1,6 +1,6 @@
 # Twitter Automation System
 
-A complete system for automated Twitter interaction, built on gptme. This system enables AI agents to:
+A flexible system for Twitter interaction, built on gptme. This system enables AI agents to:
 - Monitor Twitter timeline and lists
 - Generate contextually appropriate responses
 - Maintain high-quality engagement through LLM-assisted review
@@ -8,39 +8,36 @@ A complete system for automated Twitter interaction, built on gptme. This system
 
 ## Components
 
-### 1. Twitter CLI (`twitter.py`)
+### 1. Twitter Client (`twitter.py`)
 Basic Twitter operations:
 - Post tweets and threads
 - Read timeline and lists
 - Monitor mentions and replies
 - Check engagement metrics
 
-### 2. Workflow Manager (`twitter_workflow.py`)
+### 2. Workflow Manager (`workflow.py`)
 Manages the tweet lifecycle:
 - Timeline monitoring
 - Draft creation and storage
 - Review process
 - Scheduled posting
 
-### 3. LLM Integration (`twitter_llm.py`)
+### 3. LLM Integration (`llm.py`)
 Handles AI-powered operations:
 - Tweet evaluation
 - Response generation
 - Draft review and verification
 - Quality control
 
-### 4. Configuration (`twitter_config.yml`)
+### 4. Configuration (`config/config.yml`)
 Defines interaction parameters:
 - Topics of interest
 - Evaluation criteria
 - Response templates
 - Rate limits and blacklists
 
-### 5. Cron Setup (`setup_twitter_cron.py`)
-Automates workflow:
-- Timeline monitoring schedule
-- Review notifications
-- Post scheduling
+### 5. Command Line Interface (`cli.py`)
+Unified interface for all Twitter operations.
 
 ## Directory Structure
 
@@ -53,9 +50,9 @@ tweets/
 └── rejected/  - Rejected tweet drafts
 ```
 
-## Usage
+## Setup
 
-### Initial Setup
+### Initial Configuration
 
 1. Configure Twitter credentials in `.env`:
 ```env
@@ -71,41 +68,129 @@ TWITTER_ACCESS_TOKEN=your_access_token
 TWITTER_ACCESS_SECRET=your_access_secret
 ```
 
-2. Configure interaction parameters in `twitter_config.yml`
+2. Configure interaction parameters in `config/config.yml`
 
-3. Set up cron jobs:
+## Usage
+
+### Command Line Usage
+
 ```bash
-./setup_twitter_cron.py install
+# Post a tweet
+python -m twitter.cli twitter post "Hello world!"
+
+# Read timeline
+python -m twitter.cli twitter timeline
+
+# Monitor for content to respond to
+python -m twitter.cli workflow monitor
+
+# Review drafts
+python -m twitter.cli workflow review
+
+# Post approved tweets
+python -m twitter.cli workflow post
 ```
 
-### Manual Operations
+### Common Workflows
 
-1. Monitor timeline:
+1. **Monitor and respond to tweets**:
+   ```bash
+   python -m twitter.cli workflow monitor --interval 900
+   ```
+
+2. **Review and approve drafts**:
+   ```bash
+   python -m twitter.cli workflow review
+   ```
+
+3. **Post approved tweets**:
+   ```bash
+   python -m twitter.cli workflow post
+   ```
+
+4. **Auto workflow (monitor, review, post)**:
+   ```bash
+   python -m twitter.cli workflow auto --auto-approve --post-approved
+   ```
+
+## Automation Options
+
+Instead of built-in cron setup, you can use various methods to automate the Twitter workflow:
+
+### 1. System Cron Job
+
+Add entries to your crontab:
+
 ```bash
-./twitter_workflow.py monitor
+# Monitor timeline every 15 minutes
+*/15 * * * * cd /path/to/project && python -m twitter.cli workflow monitor --dry-run
+
+# Review notification at 9am, 1pm, and 5pm
+0 9,13,17 * * * notify-send "Twitter Review" "Time to review tweet drafts!"
+
+# Post approved tweets every 30 minutes
+*/30 * * * * cd /path/to/project && python -m twitter.cli workflow post
 ```
 
-2. Create tweet draft:
-```bash
-./twitter_workflow.py draft "Tweet text"
+Use `crontab -e` to edit your crontab.
+
+### 2. Systemd Timers (Linux)
+
+Create a service file `/etc/systemd/system/twitter-monitor.service`:
+```ini
+[Unit]
+Description=Twitter Monitoring Service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/path/to/python -m twitter.cli workflow monitor
+WorkingDirectory=/path/to/project
+User=yourusername
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-3. Review drafts:
-```bash
-./twitter_workflow.py review
+Create a timer file `/etc/systemd/system/twitter-monitor.timer`:
+```ini
+[Unit]
+Description=Run Twitter Monitor every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
 ```
 
-4. Post approved tweets:
+Enable and start the timer:
 ```bash
-./twitter_workflow.py post
+sudo systemctl enable twitter-monitor.timer
+sudo systemctl start twitter-monitor.timer
 ```
 
-### Automated Operation
+### 3. Task Scheduler (Windows)
 
-The system runs automatically once cron jobs are installed:
-1. Monitors timeline at configured intervals
-2. Notifies for review at scheduled times
-3. Posts approved tweets according to schedule
+Use Windows Task Scheduler to create scheduled tasks for:
+- Monitoring (`workflow monitor`)
+- Reviewing (`workflow review`)
+- Posting (`workflow post`)
+
+### 4. Docker with Scheduling
+
+Run in a Docker container with scheduled execution:
+```dockerfile
+FROM python:3.10-slim
+
+WORKDIR /app
+COPY . .
+RUN pip install -e .
+
+# Run workflow monitor every 15 minutes
+CMD ["bash", "-c", "while true; do python -m twitter.cli workflow monitor; sleep 900; done"]
+```
 
 ## Best Practices
 
@@ -154,16 +239,3 @@ Logs are stored in:
 - `twitter.log` - Basic operations
 - `twitter_error.log` - Error details
 - `twitter_llm.log` - LLM interactions
-
-## Contributing
-
-1. Follow the code style
-2. Add tests for new features
-3. Update documentation
-4. Use conventional commits
-
-## Related
-
-- [Twitter Best Practices](../../lessons/tools/twitter-best-practices.md)
-- [Twitter Banner Design](../../tasks/twitter-banner.md)
-- [Establish Twitter Workflow](../../tasks/establish-twitter-workflow.md)
