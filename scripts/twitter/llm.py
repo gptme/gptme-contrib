@@ -382,13 +382,6 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         response_type: The type to parse into (must implement ResponseProtocol)
         task: Task type for error messages
     """
-    """Parse LLM response into a typed response object.
-
-    Args:
-        content: The LLM response content to parse
-        response_type: The type to parse into
-        task: Task type for error messages
-    """
     try:
         # Extract just the JSON part (between first { and last })
         start = content.find("{")
@@ -412,7 +405,8 @@ def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
 
     # Get LLM response
     model = get_default_model()
-    assert model, "default model not set"
+    if not model:
+        raise RuntimeError("default model not set")
     messages = [get_system_prompt(), Message("user", prompt)]
     response = reply(messages, model.full, stream=False)
 
