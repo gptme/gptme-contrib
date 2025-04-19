@@ -38,6 +38,7 @@ Usage:
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -358,7 +359,7 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
                 "created_at": t.created_at.isoformat(),
                 "depth": depth,  # Add depth information for UI indentation
                 "replied_to_id": reply_structure.get(t.id),  # Which tweet this is replying to
-                "public_metrics": t.public_metrics if hasattr(t, "public_metrics") else {},
+                "public_metrics": (t.public_metrics if hasattr(t, "public_metrics") else {}),
                 # Include referenced tweets if available
                 "referenced_tweets": [],
             }
@@ -383,7 +384,9 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
                             "type": ref.type,
                             "id": ref.id,
                             "text": ref_tweet.text if ref_tweet else "Unavailable",
-                            "author": author.username if ref_tweet and ref_tweet.author_id in all_users else "Unknown",
+                            "author": (
+                                author.username if ref_tweet and ref_tweet.author_id in all_users else "Unknown"
+                            ),
                         }
                     )
 
@@ -426,6 +429,51 @@ def move_draft(path: Path, new_status: str) -> Path:
     return new_path
 
 
+def find_draft(draft_id: str, status: Optional[str] = None, show_error: bool = True) -> Optional[Path]:
+    """Find a draft by ID or path.
+
+    Args:
+        draft_id: Either a simple ID, filename, or full path
+        status: Optional status to look in specific directory
+               If None, looks in all status directories
+        show_error: Whether to print error message if not found
+
+    Returns:
+        Path to draft if found, None otherwise
+    """
+    status_dirs = {
+        "new": NEW_DIR,
+        "review": REVIEW_DIR,
+        "approved": APPROVED_DIR,
+        "posted": POSTED_DIR,
+        "rejected": REJECTED_DIR,
+    }
+
+    # Handle full paths
+    if "/" in draft_id:
+        draft_path = Path(draft_id)
+        if not draft_path.exists() and not draft_path.suffix:
+            draft_path = draft_path.with_suffix(".yml")
+        if draft_path.exists():
+            return draft_path
+    else:
+        # Search in specified directories
+        search_dirs = [status_dirs[status]] if status else status_dirs.values()
+        for dir in search_dirs:
+            for path in [dir / draft_id, (dir / draft_id).with_suffix(".yml")] + list(dir.glob(f"*{draft_id}*.yml")):
+                if path.exists():
+                    return path
+
+    if show_error:
+        status_msg = f" in {status} directory" if status else ""
+        console.print(f"[red]No draft found{status_msg}: {draft_id}")
+        console.print(
+            "[yellow]ID can be: simple ID, filename, or full path (e.g., tweet_20250419, reply_*.yml, tweets/new/*.yml)"
+        )
+
+    return None
+
+
 def list_drafts(status: str) -> List[Path]:
     """List all drafts in a status directory"""
     status_dirs = {
@@ -448,7 +496,7 @@ def list_drafts(status: str) -> List[Path]:
     default=os.getenv("MODEL", "anthropic/claude-3-5-sonnet-20241022"),
     help="Model to use for LLM operations",
 )
-def cli(model: str):
+def cli(model: str | None = None) -> None:
     """Twitter Workflow Manager"""
     init_gptme(model=model, interactive=False, tool_allowlist=[])
 
@@ -561,15 +609,11 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
 @cli.command()
 @click.argument("draft_id")
 def approve(draft_id: str) -> None:
-    """Approve a draft tweet by ID"""
-    # Find the draft by ID
-    draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
-
-    if not draft_files:
-        console.print(f"[red]No draft found with ID: {draft_id}")
+    """Approve a draft tweet by ID or path"""
+    draft_path = find_draft(draft_id, "new")
+    if not draft_path:
         return
 
-    draft_path = draft_files[0]
     new_path = move_draft(draft_path, "approved")
     console.print(f"[green]Draft approved: {draft_path.name} → {new_path.name}")
 
@@ -578,19 +622,11 @@ def approve(draft_id: str) -> None:
 @click.argument("draft_id")
 def reject(draft_id: str) -> None:
     """Reject a draft tweet by ID (works on both new and approved drafts)"""
-    # First try to find the draft in the NEW_DIR
-    draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
-
-    # If not found, try APPROVED_DIR
-    if not draft_files:
-        draft_files = list(APPROVED_DIR.glob(f"{draft_id}*.yml"))
-
-    # Still not found
-    if not draft_files:
-        console.print(f"[red]No draft found with ID: {draft_id} in new or approved directories")
+    # Try to find draft in either new or approved directories
+    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(draft_id, "approved")
+    if not draft_path:
         return
 
-    draft_path = draft_files[0]
     new_path = move_draft(draft_path, "rejected")
     console.print(f"[red]Draft rejected: {draft_path.name} → {new_path.name}")
 
@@ -600,21 +636,12 @@ def reject(draft_id: str) -> None:
 @click.argument("new_text")
 def edit(draft_id: str, new_text: str) -> None:
     """Edit a draft tweet by ID (works on both new and approved drafts)"""
-    # First try to find the draft in the NEW_DIR
-    draft_files = list(NEW_DIR.glob(f"{draft_id}*.yml"))
-
-    # If not found, try APPROVED_DIR
-    if not draft_files:
-        draft_files = list(APPROVED_DIR.glob(f"{draft_id}*.yml"))
-
-    # Still not found
-    if not draft_files:
-        console.print(f"[red]No draft found with ID: {draft_id} in new or approved directories")
+    # Try to find draft in either new or approved directories
+    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(draft_id, "approved")
+    if not draft_path:
         return
 
-    draft_path = draft_files[0]
     draft = TweetDraft.load(draft_path)
-
     console.print(f"[cyan]Original text: {draft.text}")
     draft.text = new_text
     draft.save(draft_path)
@@ -625,17 +652,15 @@ def edit(draft_id: str, new_text: str) -> None:
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-@click.option("--draft-id", help="Post a specific draft by ID")
+@click.option("--draft-id", help="Post a specific draft by ID or path")
 def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
     """Post approved tweets"""
-
     # If a specific draft ID is provided, find only that draft
     if draft_id:
-        draft_files = list(APPROVED_DIR.glob(f"*{draft_id}*.yml"))
-        if not draft_files:
-            console.print(f"[red]No approved draft found with ID: {draft_id}")
+        draft_path = find_draft(draft_id, "approved")
+        if not draft_path:
             return
-        drafts = draft_files
+        drafts = [draft_path]
     else:
         drafts = list_drafts("approved")
 
@@ -799,8 +824,8 @@ def process_timeline_tweets(
                     in_reply_to=tweet.id if response.type == "reply" else None,
                     context={
                         "original_tweet": tweet_data,
-                        "evaluation": asdict(eval_result) if eval_result is not None else None,  # Convert to dict
-                        "response_metadata": asdict(response) if response is not None else None,  # Convert to dict
+                        "evaluation": (asdict(eval_result) if eval_result is not None else None),  # Convert to dict
+                        "response_metadata": (asdict(response) if response is not None else None),  # Convert to dict
                     },
                 )
 
@@ -1155,7 +1180,7 @@ def auto(
 
     if needs_review_count > 0:
         console.print("\n[yellow]Run the following command to review pending drafts:[/yellow]")
-        console.print("[blue]./twitter-cli.py workflow review[/blue]")
+        console.print(f"[blue]{sys.argv[0]} review[/blue]")
 
 
 if __name__ == "__main__":
