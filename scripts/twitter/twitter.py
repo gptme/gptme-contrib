@@ -856,7 +856,11 @@ def thread(tweet_id: str, limit: int, max_pages: int, verbose: bool, structure: 
                     "in_reply_to_user_id",
                     "referenced_tweets",
                 ],
-                "expansions": ["author_id", "referenced_tweets.id", "in_reply_to_user_id"],
+                "expansions": [
+                    "author_id",
+                    "referenced_tweets.id",
+                    "in_reply_to_user_id",
+                ],
                 "user_fields": ["username", "name", "profile_image_url"],
             }
 

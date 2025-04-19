@@ -235,7 +235,7 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     if tweet.get("thread_context"):
         thread_context = "\nConversation Thread:\n"
         for i, t in enumerate(tweet["thread_context"]):
-            thread_context += f"Tweet {i+1} - @{t['author']}: {t['text']}\n"
+            thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
     return f"""Evaluate this tweet for response suitability.
 
@@ -267,7 +267,7 @@ def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
     if tweet.get("thread_context"):
         thread_context = "\nConversation Thread:\n"
         for i, t in enumerate(tweet["thread_context"]):
-            thread_context += f"Tweet {i+1} - @{t['author']}: {t['text']}\n"
+            thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
     return f"""Draft a response tweet.
 
@@ -312,7 +312,7 @@ def create_review_prompt(draft: Dict, config: Dict) -> str:
     if draft.get("context", {}).get("original_tweet", {}).get("thread_context"):
         thread_context = "\nThread Context:\n"
         for i, tweet in enumerate(draft["context"]["original_tweet"]["thread_context"]):
-            thread_context += f"Tweet {i+1} - @{tweet['author']}: {tweet['text']}\n"
+            thread_context += f"Tweet {i + 1} - @{tweet['author']}: {tweet['text']}\n"
 
     return f"""Review this draft tweet.
 

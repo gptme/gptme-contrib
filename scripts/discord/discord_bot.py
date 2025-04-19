@@ -33,7 +33,7 @@ from gptme.init import init
 from gptme.logmanager import Log
 from gptme.logmanager import LogManager
 from gptme.prompts import get_prompt
-from gptme.tools import get_tools
+from gptme.tools import get_tools, ToolSpec
 from gptme.tools import init_tools
 from gptme.tools import ToolUse
 from rich.logging import RichHandler
@@ -66,6 +66,8 @@ logger = logging.getLogger("discord_bot")
 # Get workspace folder (location of `gptme.toml`):
 workspace_root = get_project_gptme_dir()
 logsdir = workspace_root / "logs_discord" if workspace_root else Path("logs_discord")
+
+tools: list[ToolSpec] = []
 
 # Load environment variables
 env_files = [".env", ".env.discord"]
@@ -186,11 +188,12 @@ async def async_step(
     settings = get_settings(channel_id)
 
     # Basic tools only for testing
-    tool_allowlist = frozenset(["read", "save", "append", "patch", "shell", "ipython", "browser"])
+    tool_allowlist = ["read", "save", "append", "patch", "shell", "ipython", "browser"]
 
     # Restrict tools
     # TODO: do this in a non-global way
-    init_tools(tool_allowlist)
+    global tools
+    tools = init_tools(tool_allowlist)
     logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)}) for channel {channel_id}")
 
     async def add_discord_context(log: Log) -> Log:
@@ -307,7 +310,7 @@ def get_settings(channel_id: ChannelID) -> ChannelSettings:
 
 def get_conversation(channel_id: ChannelID) -> Log:
     """Get or create a conversation for a channel."""
-    initial_msgs = [get_prompt()]
+    initial_msgs = [get_prompt(tools=tools)]
     assert initial_msgs
 
     # Initialize a new conversation
@@ -669,8 +672,7 @@ async def status(ctx: commands.Context) -> None:
         assistant_msgs = sum(1 for m in log if m.role == "assistant")
 
         # Get current tools
-
-        tools = get_tools()
+        global tools
         tools_str = ", ".join(t.name for t in tools) if tools else "No tools loaded"
 
         await ctx.send(
@@ -684,8 +686,8 @@ async def status(ctx: commands.Context) -> None:
         await ctx.send("No active conversation in this channel.")
 
 
-@bot.command()
-async def tools(ctx: commands.Context) -> None:
+@bot.command("tools")
+async def tools_(ctx: commands.Context) -> None:
     """Show available tools and their descriptions."""
 
     tools = get_tools()
