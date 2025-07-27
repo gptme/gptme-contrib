@@ -39,7 +39,7 @@ from gptme.dirs import get_project_git_dir
 from gptme.llm import reply
 from gptme.llm.models import get_default_model
 from gptme.message import Message
-from gptme.prompts import get_workspace_prompt
+from gptme.prompts import prompt_workspace
 from rich.console import Console
 
 
@@ -329,7 +329,7 @@ Review Criteria:
 def get_system_prompt() -> Message:
     """Get system prompt for Twitter interactions."""
     workspace = get_project_git_dir()
-    context = get_workspace_prompt(workspace) if workspace else ""
+    context = prompt_workspace(workspace) if workspace else ""
 
     def get_format_examples() -> Dict[str, Any]:
         """Generate format examples from dataclasses"""

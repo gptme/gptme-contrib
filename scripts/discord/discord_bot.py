@@ -5,39 +5,43 @@
 #   "discord.py>=2.3.0",
 #   "rich>=13.0.0",
 #   "python-dotenv",
-#   "gptme @ git+https://github.com/ErikBjare/gptme.git",
+#   "gptme @ git+https://github.com/gptme/gptme.git",
 # ]
 # [tool.uv]
-# exclude-newer = "2025-02-05T00:00Z"
+# exclude-newer = "2025-05-05T00:00Z"
 # ///
+
 import asyncio
 import logging
 import os
 import re
 from copy import copy
 from pathlib import Path
-from typing import AsyncGenerator
-from typing import Callable
-from typing import Dict
-from typing import Optional
-from typing import TypeAlias
-from typing import Union
+from typing import (
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Optional,
+    TypeAlias,
+    Union,
+)
+
+from dotenv import load_dotenv
+from gptme.chat import Message, step
+from gptme.dirs import get_project_gptme_dir
+from gptme.init import init
+from gptme.logmanager import Log, LogManager
+from gptme.prompts import get_prompt
+from gptme.tools import (
+    ToolSpec,
+    ToolUse,
+    get_tools,
+    init_tools,
+)
+from rich.logging import RichHandler
 
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-from gptme.chat import Message
-from gptme.chat import step
-from gptme.dirs import get_project_gptme_dir
-from gptme.init import init
-from gptme.logmanager import Log
-from gptme.logmanager import LogManager
-from gptme.prompts import get_prompt
-from gptme.tools import get_tools, ToolSpec
-from gptme.tools import init_tools
-from gptme.tools import ToolUse
-from rich.logging import RichHandler
-
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -310,7 +314,7 @@ def get_settings(channel_id: ChannelID) -> ChannelSettings:
 
 def get_conversation(channel_id: ChannelID) -> Log:
     """Get or create a conversation for a channel."""
-    initial_msgs = [get_prompt(tools=tools)]
+    initial_msgs = get_prompt(tools=tools)
     assert initial_msgs
 
     # Initialize a new conversation
@@ -463,7 +467,7 @@ async def send_discord_message(
 
 
 # Add regex pattern at top of file with other imports
-re_thinking = re.compile(r"<thinking>.*?(\n</thinking>|$)", flags=re.DOTALL)
+re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
 
 
 async def process_message(
