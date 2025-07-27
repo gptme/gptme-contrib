@@ -42,7 +42,7 @@ Requirements:
 
 ### 2. Custom Tools
 
-For cases where you need deeper gptme integration (e.g., for attaching files/images), you can create a custom tool in [`src/gptme_contrib/tools/`](./src/gptme_contrib/tools).
+For cases where you need deeper gptme integration (e.g., for attaching files/images), you can create a custom tool in [`tools/`](./tools).
 
 See the [custom tools documentation](https://gptme.org/docs/custom_tool.html) for details.
 
