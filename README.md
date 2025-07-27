@@ -13,22 +13,14 @@ This repo is meant as a place for the community to share tools and scripts that 
 
 If you have a tool you'd like to share, please consider contributing it here!
 
-<!--
-## Installation
+## Dependencies
 
-```bash
-# Install base package
-pip install gptme-contrib
+Some scripts in this repository require additional dependencies:
 
-# Install with specific extras
-pip install "gptme-contrib[social]"    # Social media tools
-pip install "gptme-contrib[dev]"       # Development tools
-pip install "gptme-contrib[ai]"        # AI/ML tools
-
-# Install all extras
-pip install "gptme-contrib[all]"
-```
--->
+- **uv**: Required for scripts with `#!/usr/bin/env -S uv run` shebangs
+  ```bash
+  pipx install uv
+  ```
 
 ## Usage
 
@@ -57,13 +49,7 @@ chmod +x scripts/twitter.py
 
 ## Structure
 
-<!--
-- `src/gptme_contrib/tools/` - Custom tools
-  - `social/` - Social media tools
-  - `dev/` - Development tools
-  - `ai/` - AI/ML tools
-  - `system/` - System utilities
--->
+- `tools/` - Custom tools for gptme
 - `scripts/` - Standalone script tools
 
 ## Contributing
