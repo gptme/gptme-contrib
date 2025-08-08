@@ -5,10 +5,9 @@ Community-contributed tools and scripts for [gptme](https://github.com/ErikBjare
 ## Overview
 
 This repository contains:
-- Shared lessons for prompts and workflows (see lessons/)
-- [Custom tools](https://gptme.org/docs/custom_tool.html) that extend gptme's functionality
-- Standalone scripts that can be used via the shell tool
-- Utilities and helpers for tool development
+- [Custom `tools/`](https://gptme.org/docs/custom_tool.html) that extend gptme's functionality
+- Standalone `scripts/` that can be used via the shell tool
+- Shared `lessons/` for agents
 
 This repo is meant as a place for the community to share tools and scripts that they have created for gptme, but are not general/mature/stable enough to be included in the core gptme repository.
 
@@ -44,17 +43,16 @@ Scripts can be used directly via the shell tool:
 # Make scripts executable
 chmod +x scripts/twitter.py
 
-# Use via shell tool
+# Use ./ to respect shebang
 ./scripts/twitter.py --help
 ```
 
 ## Structure
 
-- `lessons/` - Shared lessons for prompts and workflows
-  - `lessons/workflow/` - Workflow lessons (e.g., git-workflow.md)
-
 - `tools/` - Custom tools for gptme
 - `scripts/` - Standalone script tools
+- `lessons/` - Shared lessons for prompts and workflows
+  - `lessons/workflow/` - Workflow lessons (e.g., git-workflow.md)
 
 ## Contributing
 
