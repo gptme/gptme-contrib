@@ -5,6 +5,7 @@ Community-contributed tools and scripts for [gptme](https://github.com/ErikBjare
 ## Overview
 
 This repository contains:
+- Shared lessons for prompts and workflows (see lessons/)
 - [Custom tools](https://gptme.org/docs/custom_tool.html) that extend gptme's functionality
 - Standalone scripts that can be used via the shell tool
 - Utilities and helpers for tool development
