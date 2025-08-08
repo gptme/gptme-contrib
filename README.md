@@ -49,6 +49,9 @@ chmod +x scripts/twitter.py
 
 ## Structure
 
+- `lessons/` - Shared lessons for prompts and workflows
+  - `lessons/workflow/` - Workflow lessons (e.g., git-workflow.md)
+
 - `tools/` - Custom tools for gptme
 - `scripts/` - Standalone script tools
 
