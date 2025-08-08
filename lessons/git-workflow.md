@@ -1,12 +1,12 @@
-# Git Workflow Defaults (Shared Lesson)
+# Git Workflow
 
 ## Context
-When making changes via gptme (agents and non-agent sessions), especially for docs/journals and small edits.
+When committing changes via git.
 
 ## Problem
 Unnecessary branches/PRs for trivial changes, staging too much (git add .), leaking secrets, and submodule noise increase friction and review overhead.
 
-## Defaults (concise rules)
+## Defaults
 - Small docs/journal tweaks: commit directly on master (no PR).
 - Non-trivial/behavioral/code changes: ask first; if approved, branch + PR.
 - Stage only intended files; never use `git add .` or `git commit -a`.
