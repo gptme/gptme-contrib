@@ -45,6 +45,8 @@ from discord.ext import commands
 
 os.environ["GPTME_CHECK"] = "false"
 
+# Max chars in a Discord message
+DISCORD_MSG_LIMIT = 2000
 
 # Type aliases
 ChannelID: TypeAlias = int
@@ -387,7 +389,7 @@ async def handle_rate_limit(message: discord.Message) -> bool:
     return True
 
 
-def split_on_codeblocks(content: str, max_length: int = 2000) -> list[str]:
+def split_on_codeblocks(content: str, max_length: int = DISCORD_MSG_LIMIT) -> list[str]:
     """Split content into parts, trying to keep code blocks intact."""
     if len(content) <= max_length:
         return [content]
@@ -438,13 +440,14 @@ async def send_discord_message(
         logger.info(f"Sending message ({len(content)} chars):\n{content}")
 
         # Handle messages that exceed Discord's limit
-        if len(content) > 4000:
+        if len(content) > DISCORD_MSG_LIMIT:
             logger.warning(f"Message too long ({len(content)} chars), truncating")
-            await channel.send("```diff\n- Message too long, truncating to 4000 chars\n```")
-            content = content[:3997] + "..."
+            await channel.send(f"```diff\n- Message too long, truncating to {DISCORD_MSG_LIMIT} chars\n```")
+            content = content[:1997] + "..."
 
         # Split long messages
-        if len(content) > 2000:
+        if len(content) > DISCORD_MSG_LIMIT:
+            # TODO: split on codeblocks, and on \n\n outside codeblocks
             parts = split_on_codeblocks(content)
             for i, part in enumerate(parts):
                 logger.info(f"Sending part {i + 1}/{len(parts)} ({len(part)} chars)")
@@ -710,11 +713,11 @@ async def tools_(ctx: commands.Context) -> None:
         tool_info += "\n"
 
     # Split long messages if needed
-    if len(tool_info) > 2000:
+    if len(tool_info) > DISCORD_MSG_LIMIT:
         parts = tool_info.split("\n\n")
         current = ""
         for part in parts:
-            if len(current) + len(part) + 2 > 2000:
+            if len(current) + len(part) + 2 > DISCORD_MSG_LIMIT:
                 await ctx.send(current)
                 current = part + "\n\n"
             else:
