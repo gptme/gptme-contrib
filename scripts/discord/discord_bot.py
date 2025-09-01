@@ -71,6 +71,10 @@ logger = logging.getLogger("discord_bot")
 workspace_root = get_project_gptme_dir()
 logsdir = workspace_root / "logs_discord" if workspace_root else Path("logs_discord")
 
+# Basic tools only for testing
+tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
+# tool_allowlist = ["read", "save", "append", "patch", "shell", "ipython", "browser"]
+
 tools: list[ToolSpec] = []
 
 # Load environment variables
@@ -191,42 +195,38 @@ async def async_step(
     # Get channel settings
     settings = get_settings(channel_id)
 
-    # Basic tools only for testing
-    tool_allowlist = ["read", "save", "append", "patch", "shell", "ipython", "browser"]
-
-    # Restrict tools
-    # TODO: do this in a non-global way
-    global tools
-    tools = init_tools(tool_allowlist)
-    logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)}) for channel {channel_id}")
-
     async def add_discord_context(log: Log) -> Log:
         # Fetch Discord history and create temporary log with context
         discord_context = await fetch_discord_history(channel)
-        log = copy(log)
         if discord_context:
             context_msg = Message(
                 "system",
                 f"<chat-history>\n{discord_context}\n</chat-history>",
                 hide=True,
             )
-            log.messages.insert(-1, context_msg)  # Insert before last message
+            # Insert before last message
+            log = log.replace(messages=log.messages[:-1] + [context_msg] + log.messages[-1:])
         return log
 
     # Run step in thread pool to avoid blocking
     loop = asyncio.get_event_loop()
-    current_log = log
+
+    # add ephemeral discord context message
+    current_log = await add_discord_context(log)
 
     while True:
         try:
-            # has ephemeral discord context message
-            request_log = await add_discord_context(current_log)
-            # logger.debug(f"Starting step with log: {request_log}")
+            # init tools in async thread
+            await loop.run_in_executor(None, lambda: init_tools(tool_allowlist))
+
+            # debug
+            #print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
+
             messages = await loop.run_in_executor(
                 None,
                 lambda: list(
                     step(
-                        request_log,
+                        current_log,
                         stream=True,
                         confirm=confirm_func,
                         tool_format="markdown",
@@ -501,7 +501,9 @@ async def process_message(
             accumulated_content += cleaned_content
 
         # Send/update message
-        current_response, had_error = await send_discord_message(channel, accumulated_content, current_response)
+        had_error = False
+        if accumulated_content:
+            current_response, had_error = await send_discord_message(channel, accumulated_content, current_response)
 
         # Only append to log if this is the final message
         if not had_error and len(cleaned_content.strip()) > 0:
@@ -676,7 +678,6 @@ async def status(ctx: commands.Context) -> None:
         assistant_msgs = sum(1 for m in log if m.role == "assistant")
 
         # Get current tools
-        global tools
         tools_str = ", ".join(t.name for t in tools) if tools else "No tools loaded"
 
         await ctx.send(
@@ -939,16 +940,19 @@ def main() -> None:
 
     # Initialize gptme
     try:
-        # Basic tools only for testing
-        tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
+        # Restrict tools
+        # TODO: do this in a non-global way
+        global tools
 
         # Initialize gptme and tools
         init(model=MODEL, interactive=False, tool_allowlist=list(tool_allowlist))
+        tools = init_tools(tool_allowlist)
         tools = get_tools()
         if not tools:
             logger.error("No tools loaded in gptme")
             return
         logger.info(f"Loaded {len(tools)} gptme tools: {', '.join(t.name for t in tools)}")
+        logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)})")
     except Exception as e:
         logger.error(f"Failed to initialize gptme tools: {e}")
         return
