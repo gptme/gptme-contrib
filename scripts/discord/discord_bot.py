@@ -219,7 +219,7 @@ async def async_step(
     while True:
         try:
             # init tools in async thread
-            await loop.run_in_executor(None, lambda: init_tools(tool_allowlist))
+            await loop.run_in_executor(None, lambda: init_tools(list(tool_allowlist)))
 
             # debug
             # print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
@@ -949,7 +949,7 @@ def main() -> None:
 
         # Initialize gptme and tools
         init(model=MODEL, interactive=False, tool_allowlist=list(tool_allowlist))
-        tools = init_tools(tool_allowlist)
+        tools = init_tools(list(tool_allowlist))
         tools = get_tools()
         if not tools:
             logger.error("No tools loaded in gptme")
