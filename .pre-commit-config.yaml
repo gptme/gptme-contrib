@@ -30,6 +30,7 @@ repos:
       types-requests,
       types-click,
       types-python-crontab,
+      types-Markdown,
     ]
     args: [--config-file=mypy.ini]
     types: [python]

@@ -222,7 +222,7 @@ async def async_step(
             await loop.run_in_executor(None, lambda: init_tools(tool_allowlist))
 
             # debug
-            #print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
+            # print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
 
             messages = await loop.run_in_executor(
                 None,
