@@ -12,6 +12,8 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from datetime import timezone
+
 
 import click
 
@@ -96,12 +98,13 @@ def list(folder: str) -> None:
         return
 
     # Print table header
-    click.echo(f"{'Date':<25} | {'Subject':<40} | Message ID")
+    click.echo(f"{'Date':<20} | {'Subject':<40} | Message ID")
     click.echo("-" * 80)
 
     # Print messages
     for msg_id, subject, date in messages:
-        click.echo(f"{date:<25} | {subject[:40]:<40} | {msg_id}")
+        date_str = date.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        click.echo(f"{date_str:<20} | {subject[:40]:<40} | {msg_id}")
 
 
 @cli.command()

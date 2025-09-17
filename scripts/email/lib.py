@@ -226,6 +226,7 @@ class AgentEmail:
 
     def _is_allowlisted_sender(self, sender: str) -> bool:
         """Check if sender is allowlisted for auto-responses."""
+        # TODO: set in config or env variable
         allowlisted = [
             "erik@bjareho.lt",
             "erik.bjareholt@gmail.com",
@@ -530,7 +531,7 @@ class AgentEmail:
 
         raise ValueError(f"Message not found: {message_id}")
 
-    def list_messages(self, folder: str = "inbox") -> list[tuple[str, str, str]]:
+    def list_messages(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
         """List messages in specified folder.
 
         Args:
@@ -553,7 +554,9 @@ class AgentEmail:
             id_match = re.search(r"Message-ID: (<[^>]+>)", content)
 
             if subject_match and date_match and id_match:
-                messages.append((id_match.group(1), subject_match.group(1), date_match.group(1)))
+                # Parse date, looks like: Fri, 07 Feb 2025 16:14:03 -0800
+                date = self._parse_email_date(date_match.group(1))
+                messages.append((id_match.group(1), subject_match.group(1), date))
 
         return sorted(messages, key=lambda m: m[2])  # Sort by date
 

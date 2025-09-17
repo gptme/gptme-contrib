@@ -19,7 +19,9 @@ from pathlib import Path
 from lib import AgentEmail
 
 # Configuration
-WORKSPACE_DIR = Path(__file__).parent.parent
+SCRIPT_DIR = Path(__file__).parent
+GPTME_CONTRIB_DIR = SCRIPT_DIR.parent.parent
+WORKSPACE_DIR = GPTME_CONTRIB_DIR.parent
 EMAIL_DIR = WORKSPACE_DIR / "email"
 INBOX_DIR = EMAIL_DIR / "inbox"
 
@@ -56,8 +58,8 @@ def sync_emails():
     try:
         logging.info("Syncing emails...")
         result = subprocess.run(
-            [str(EMAIL_DIR / "cli.py"), "sync-maildir", "all"],
-            cwd=EMAIL_DIR,
+            [str(SCRIPT_DIR / "cli.py"), "sync-maildir", "all"],
+            cwd=SCRIPT_DIR,
             capture_output=True,
             text=True,
         )
