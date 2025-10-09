@@ -5,10 +5,8 @@
 #   "discord.py>=2.3.0",
 #   "rich>=13.0.0",
 #   "python-dotenv",
-#   "gptme @ git+https://github.com/gptme/gptme.git",
+#   "gptme[telemetry] @ git+https://github.com/gptme/gptme.git",
 # ]
-# [tool.uv]
-# exclude-newer = "2025-05-05T00:00Z"
 # ///
 
 import asyncio
