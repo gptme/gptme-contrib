@@ -32,6 +32,7 @@ from gptme.dirs import get_project_gptme_dir
 from gptme.init import init
 from gptme.logmanager import Log, LogManager
 from gptme.prompts import get_prompt
+from gptme.telemetry import init_telemetry, shutdown_telemetry
 from gptme.tools import (
     ToolSpec,
     ToolUse,
@@ -960,6 +961,14 @@ def main() -> None:
         logger.error(f"Failed to initialize gptme tools: {e}")
         return
 
+    # Initialize telemetry for Discord bot
+    init_telemetry(
+        service_name="gptme-discord",
+        agent_name=bot_name,
+        interactive=False,  # Discord bot runs non-interactively
+    )
+    logger.info("Telemetry initialized for gptme-discord")
+
     try:
         # Run the bot
         bot.run(token)
@@ -973,6 +982,10 @@ def main() -> None:
         )
     except Exception:
         logger.exception("Error running bot")
+    finally:
+        # Shutdown telemetry
+        shutdown_telemetry()
+        logger.info("Telemetry shutdown complete")
 
 
 if __name__ == "__main__":
