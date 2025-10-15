@@ -35,3 +35,12 @@ repos:
     args: [--config-file=mypy.ini]
     types: [python]
     pass_filenames: true
+- repo: local
+  hooks:
+  - id: shellcheck
+    name: ShellCheck
+    description: Shell script linter for bash/sh files
+    entry: shellcheck
+    language: system
+    types: [shell]
+    args: ["--severity=warning"]
