@@ -43,13 +43,18 @@ Check CI status across multiple repositories to catch failing builds before push
 ```
 
 **Configuration:**
-Edit the `REPOS` array in the script to add your repositories:
+Pass repositories as arguments (format: `owner/repo:Label` or just `owner/repo`):
 ```bash
-REPOS=(
-    "owner/repo:Friendly Name"
-    "owner/another:Another Name"
-)
+./scripts/github/repo-status.sh gptme/gptme:gptme gptme/gptme-rag:gptme-rag
 ```
+
+Or set `GH_USER` environment variable to customize user for PR checking:
+```bash
+export GH_USER=myusername
+./scripts/github/repo-status.sh
+```
+
+Default behavior (no arguments): Checks gptme ecosystem repos.
 
 **Requirements:**
 - `gh` (GitHub CLI) installed and authenticated
@@ -58,9 +63,15 @@ REPOS=(
 
 These scripts are designed to be integrated into gptme agent workflows:
 
-1. **Dynamic Context:** Use context-gh.sh in gptme.toml:
+1. **Dynamic Context:** Include context-gh.sh in your agent's main context.sh script:
+   ```bash
+   # In your agent's scripts/context.sh
+   ./gptme-contrib/scripts/github/context-gh.sh
+   ```
+
+   Or use directly in gptme.toml (less common):
    ```toml
-   context_cmd = "scripts/github/context-gh.sh"
+   context_cmd = "gptme-contrib/scripts/github/context-gh.sh"
    ```
 
 2. **Pre-Push Checks:** Run repo-status.sh before pushing to ensure CI health:

@@ -18,6 +18,7 @@ check_repo() {
     local label=${2:-$(basename "$repo")}
 
     # Get latest workflow run
+    local status
     status=$(gh run list --repo "$repo" --limit 1 --json conclusion -q '.[0].conclusion' 2>/dev/null || echo "unknown")
 
     case "$status" in
@@ -27,6 +28,7 @@ check_repo() {
         "failure")
             echo -e "${RED}✗${NC} $label: Failing"
             # Get the workflow URL for easy access to logs
+            local workflow_url
             workflow_url=$(gh run list --repo "$repo" --limit 1 --json url -q '.[0].url' 2>/dev/null || echo "")
             if [ -n "$workflow_url" ]; then
                 echo "  $workflow_url"
@@ -58,12 +60,22 @@ if [ $# -gt 0 ]; then
         fi
     done
 else
-    # Default repos (gptme ecosystem)
-    check_repo "gptme/gptme" "gptme"
-    check_repo "gptme/gptme-rag" "gptme-rag"
-    check_repo "gptme/gptme-webui" "gptme-webui"
-    check_repo "gptme/gptme-agent-template" "gptme-agent-template"
-    check_repo "gptme/gptme-landing" "gptme-landing"
+    # Try to use watched repos as fallback
+    watched_repos=$(gh api --paginate /user/subscriptions 2>/dev/null | jq -r '.[].full_name' 2>/dev/null || echo "")
+
+    if [ -n "$watched_repos" ]; then
+        # Use watched repos
+        echo "$watched_repos" | while read -r repo; do
+            [ -n "$repo" ] && check_repo "$repo"
+        done
+    else
+        # Final fallback: Default repos (gptme ecosystem)
+        check_repo "gptme/gptme" "gptme"
+        check_repo "gptme/gptme-rag" "gptme-rag"
+        check_repo "gptme/gptme-webui" "gptme-webui"
+        check_repo "gptme/gptme-agent-template" "gptme-agent-template"
+        check_repo "gptme/gptme-landing" "gptme-landing"
+    fi
 fi
 
 # Check for any open PRs (if user is available)

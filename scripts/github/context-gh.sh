@@ -25,9 +25,9 @@ fi
 # Add repository CI status using existing script
 echo "## Repository CI Status"
 echo
-echo "*Build health for active repositories. Run \`./scripts/repo-status.sh\` for details.*"
+echo "*Build health for active repositories. Run \`$SCRIPT_DIR/repo-status.sh\` for details.*"
 echo
-./scripts/github/repo-status.sh
+"$SCRIPT_DIR/repo-status.sh"
 
 # Show GitHub notifications
 echo
