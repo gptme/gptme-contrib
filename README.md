@@ -47,6 +47,38 @@ chmod +x scripts/twitter.py
 ./scripts/twitter.py --help
 ```
 
+## Available Scripts
+
+### GitHub Integration (scripts/github/)
+
+Scripts for GitHub context generation and repository management:
+
+- **context-gh.sh** - Generate comprehensive GitHub context (notifications, issues, PRs, CI status)
+- **repo-status.sh** - Check CI status across multiple repositories
+
+See [scripts/github/README.md](scripts/github/README.md) for detailed documentation.
+
+### Workspace Management
+
+- **state-status.py** - Multi-directory state viewer (tasks, tweets, email, etc.)
+- **search.py** - Enhanced workspace search with filtering
+
+### Social Media
+
+- **twitter/** - Twitter automation and monitoring
+- **bluesky/** - Bluesky integration
+- **discord/** - Discord bot
+
+### Communication
+
+- **email/** - Universal email system for AI agents
+
+### Other
+
+- **tasks.py** - Task management utilities
+- **wordcount.py** - Word counting utilities
+- **perplexity.py** - Perplexity API integration
+
 ## Structure
 
 - `tools/` - Custom tools for gptme
