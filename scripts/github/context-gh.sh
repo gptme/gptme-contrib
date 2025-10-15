@@ -62,7 +62,7 @@ else
     echo "$NOTIFICATIONS" | jq -r '.[] | "- [\(.subject.type)] \(.repository.full_name): \(.subject.title) (\(.reason))"' | head -10
 
     if [ "$NOTIF_COUNT" -gt 10 ]; then
-        echo "... and $((NOTIF_COUNT - 10)) more (use ./scripts/check-notifications.sh for details)"
+        echo "... and $((NOTIF_COUNT - 10)) more (use ./scripts/github/check-notifications.sh for details)"
     fi
 fi
 
