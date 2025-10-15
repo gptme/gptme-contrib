@@ -33,8 +33,10 @@ class AgentEmail:
         self.own_email = own_email if own_email is not None else os.getenv("AGENT_EMAIL", "bob@superuserlabs.org")
 
         # External maildir paths (from mbsync)
-        self.external_maildir_bob = Path.home() / ".local/share/mail/gmail/Bob"
-        self.external_maildir_sent = Path.home() / ".local/share/mail/gmail/Bob/Sent"
+        # Use environment variables if set, otherwise fall back to timetobuildbob paths
+        maildir_base = os.getenv("MAILDIR_BASE", str(Path.home() / ".local/share/mail/timetobuildbob"))
+        self.external_maildir_bob = Path(maildir_base) / "Inbox"
+        self.external_maildir_sent = Path(maildir_base) / "Sent"
 
         # State files for tracking
         self.replies_state_file = self.email_dir / "replies_state.json"
