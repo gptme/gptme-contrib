@@ -8,11 +8,12 @@ Searches across multiple sources and provides token-efficient summaries:
 - GitHub issues/PRs (if --github)
 
 Usage:
-  ./scripts/search.py <query> [--roam] [--github] [--verbose]
+  ./scripts/search.py <query> [--roam] [--github] [--github-owners owner1,owner2,...] [--verbose]
 """
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -28,71 +29,62 @@ def git_grep_files(query: str, path_pattern: str | None = None) -> List[Tuple[st
     if result.returncode != 0:
         return []
 
-    files = [f for f in result.stdout.strip().split("\n") if f]
-
-    # Count matches per file
-    file_counts = []
-    for file in files:
-        count_result = subprocess.run(
-            ["git", "grep", "-i", "-c", query, "--", file],
-            capture_output=True,
-            text=True,
-            cwd=Path.cwd(),
-        )
+    # Get match count for each file
+    files_with_counts = []
+    for file in result.stdout.strip().split("\n"):
+        if not file:
+            continue
+        count_cmd = ["git", "grep", "-c", "-i", query, "--", file]
+        count_result = subprocess.run(count_cmd, capture_output=True, text=True, cwd=Path.cwd())
         if count_result.returncode == 0:
             try:
                 count = int(count_result.stdout.strip().split(":")[-1])
-                file_counts.append((file, count))
+                files_with_counts.append((file, count))
             except (ValueError, IndexError):
-                pass
+                files_with_counts.append((file, 1))
 
-    # Sort by count descending
-    file_counts.sort(key=lambda x: (-x[1], x[0]))
-    return file_counts
+    # Sort by count (descending)
+    return sorted(files_with_counts, key=lambda x: (-x[1], x[0]))
 
 
-def get_match_snippet(file: str, query: str, max_lines: int = 3) -> str:
-    """Get brief snippet showing first match with context."""
-    cmd = ["git", "grep", "-i", "-n", "-A", "1", query, "--", file]
+def get_match_snippet(file: str, query: str, context: int = 1) -> str:
+    """Get a snippet showing the first match with context lines."""
+    cmd = ["git", "grep", "-i", "-n", "-C", str(context), query, "--", file]
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
     if result.returncode != 0:
         return ""
 
+    # Take first match group
     lines = result.stdout.strip().split("\n")
-    snippets = []
-    seen_lines = set()
-
-    for line in lines:
-        if not line.strip() or line == "--":
-            continue
-        # Only process matching lines (with :), skip context lines (with -)
-        if ":" not in line:
-            continue
-
-        parts = line.split(":", 2)
-        if len(parts) >= 3:
-            line_num, content = parts[1], parts[2].strip()
-            # Skip very short matches (likely just tags/metadata)
-            if len(content) > 10 and line_num not in seen_lines:
-                seen_lines.add(line_num)
-                snippets.append(f"L{line_num}: {content[:100]}")
-                if len(snippets) >= max_lines:
-                    break
-
-    return "\n    ".join(snippets)
+    snippet = "\n    ".join(lines[: min(5, len(lines))])
+    if len(lines) > 5:
+        snippet += "\n    ..."
+    return snippet
 
 
 def search_roam_tasks(query: str) -> List[str]:
-    """Search Roam tasks using roam-tasks.py."""
-    cmd = ["./scripts/roam-tasks.py", "--filter", query, "--limit", "5"]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+    """Search Roam backup for TODO items matching query."""
+    roam_backup = Path.home() / "Programming" / "roam-backup" / "json"
+    if not roam_backup.exists():
+        return []
+
+    results = []
+    cmd = ["git", "grep", "-i", "-l", query]
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=roam_backup)
+
     if result.returncode != 0:
         return []
-    return [line for line in result.stdout.strip().split("\n") if line]
+
+    # Get filenames with matches
+    for file in result.stdout.strip().split("\n")[:10]:  # Limit to top 10
+        if file:
+            results.append(file)
+
+    return results
 
 
 def search_git_log(query: str, max_results: int = 5) -> List[str]:
-    """Search git commit history."""
+    """Search git commit history for query."""
     cmd = [
         "git",
         "log",
@@ -110,21 +102,29 @@ def search_git_log(query: str, max_results: int = 5) -> List[str]:
     return [line for line in result.stdout.strip().split("\n") if line]
 
 
-def search_github(query: str) -> Dict[str, List[str]]:
-    """Search GitHub issues and PRs."""
+def search_github(query: str, owners: List[str] | None = None) -> Dict[str, List[str]]:
+    """Search GitHub issues and PRs.
+
+    Args:
+        query: Search query
+        owners: List of GitHub owners/orgs to search. If None, uses default (gptme)
+    """
+    if owners is None:
+        owners = ["gptme"]  # Default to gptme org only
+
     results: Dict[str, List[str]] = {"issues": [], "prs": []}
+
+    # Build owner flags for gh command
+    owner_flags = []
+    for owner in owners:
+        owner_flags.extend(["--owner", owner])
 
     # Search issues in relevant repos
     issues_cmd = [
         "gh",
         "search",
         "issues",
-        "--owner",
-        "ErikBjare",
-        "--owner",
-        "gptme",
-        "--owner",
-        "TimeToBuildBob",
+        *owner_flags,
         "--sort",
         "updated",
         query,
@@ -151,12 +151,7 @@ def search_github(query: str) -> Dict[str, List[str]]:
         "gh",
         "search",
         "prs",
-        "--owner",
-        "ErikBjare",
-        "--owner",
-        "gptme",
-        "--owner",
-        "TimeToBuildBob",
+        *owner_flags,
         "--sort",
         "updated",
         query,
@@ -212,6 +207,10 @@ def main():
     parser.add_argument("--roam", action="store_true", help="Include Roam notes search")
     parser.add_argument("--github", action="store_true", help="Include GitHub issues/PRs search")
     parser.add_argument(
+        "--github-owners",
+        help="Comma-separated list of GitHub owners/orgs to search (default: gptme). Can also set via GITHUB_SEARCH_OWNERS env var.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -219,6 +218,14 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Get GitHub owners from args or env var
+    github_owners = None
+    if args.github:
+        if args.github_owners:
+            github_owners = [o.strip() for o in args.github_owners.split(",")]
+        elif os.environ.get("GITHUB_SEARCH_OWNERS"):
+            github_owners = [o.strip() for o in os.environ["GITHUB_SEARCH_OWNERS"].split(",")]
 
     # Define sources to search
     sources = {
@@ -270,11 +277,12 @@ def main():
 
     # Optional: GitHub
     if args.github:
-        gh_results = search_github(args.query)
+        gh_results = search_github(args.query, github_owners)
         issue_count = len(gh_results["issues"])
         pr_count = len(gh_results["prs"])
 
-        print("## GitHub")
+        owners_str = ", ".join(github_owners) if github_owners else "gptme (default)"
+        print(f"## GitHub (owners: {owners_str})")
         if issue_count or pr_count:
             print(f"{issue_count} issues, {pr_count} PRs")
 

@@ -1,82 +1,84 @@
 #!/bin/bash
-# Check CI status across multiple repositories
-# Usage: ./scripts/repo-status.sh
+# Multi-repository CI status checker
+# Shows status of GitHub Actions workflows across multiple repositories
 
-set -e
+set -euo pipefail
+
+# Get GitHub user (from auth or env var)
+GH_USER="${GH_USER:-$(gh api user -q .login 2>/dev/null || echo "")}"
 
 # Colors for output
-GREEN='\033[0;32m'
 RED='\033[0;31m'
+GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Function to check repo status
 check_repo() {
     local repo=$1
-    local name=$2
-
-    echo -n "Checking $name... "
+    local label=${2:-$(basename "$repo")}
 
     # Get latest workflow run
-    local status
-    status=$(gh run list --repo "$repo" --limit 1 --json status,conclusion,createdAt --jq '.[0] | "\(.status):\(.conclusion)"' 2>/dev/null || echo "error:")
+    status=$(gh run list --repo "$repo" --limit 1 --json conclusion -q '.[0].conclusion' 2>/dev/null || echo "unknown")
 
-    if [ "$status" == "error:" ]; then
-        echo -e "${YELLOW}⚠ Unable to fetch status${NC}"
-        return
-    fi
-
-    local run_status
-    run_status=$(echo "$status" | cut -d: -f1)
-    local conclusion
-    conclusion=$(echo "$status" | cut -d: -f2)
-
-    if [ "$run_status" == "completed" ]; then
-        if [ "$conclusion" == "success" ]; then
-            echo -e "${GREEN}✓ Passing${NC}"
-        elif [ "$conclusion" == "failure" ]; then
-            echo -e "${RED}✗ Failing${NC}"
-            # Show the workflow URL for quick access
-            local url
-            url=$(gh run list --repo "$repo" --limit 1 --json url --jq '.[0].url')
-            echo "  └─ $url"
-        else
-            echo -e "${YELLOW}⚠ $conclusion${NC}"
-        fi
-    else
-        echo -e "${YELLOW}⟳ In progress${NC}"
-    fi
+    case "$status" in
+        "success")
+            echo -e "${GREEN}✓${NC} $label: Passing"
+            ;;
+        "failure")
+            echo -e "${RED}✗${NC} $label: Failing"
+            # Get the workflow URL for easy access to logs
+            workflow_url=$(gh run list --repo "$repo" --limit 1 --json url -q '.[0].url' 2>/dev/null || echo "")
+            if [ -n "$workflow_url" ]; then
+                echo "  $workflow_url"
+            fi
+            ;;
+        "cancelled"|"skipped")
+            echo -e "${YELLOW}⚠${NC} $label: $status"
+            ;;
+        *)
+            echo "? $label: Unknown status"
+            ;;
+    esac
 }
 
 echo "=== Repository CI Status ==="
 echo
 
-# Check repositories in priority order
-# Core gptme projects
-check_repo "ErikBjare/gptme" "gptme"
-check_repo "ErikBjare/gptme-rag" "gptme-rag"
-
-# gptme ecosystem
-check_repo "gptme/gptme-webui" "gptme-webui"
-check_repo "gptme/gptme-agent-template" "gptme-agent-template"
-check_repo "gptme/gptme-landing" "gptme-landing"
-
-# Personal projects
-check_repo "TimeToBuildBob/whatdidyougetdone" "whatdidyougetdone"
-check_repo "TimeToBuildBob/TimeToBuildBob.github.io" "Website"
-
-# Check for any open PRs Bob has
-echo
-echo "=== Open PRs ==="
-echo
-
-# Check TimeToBuildBob's open PRs across all repos
-prs=$(gh search prs --author=TimeToBuildBob --state=open --json repository,number,title,url 2>/dev/null || echo "[]")
-
-if [ "$prs" == "[]" ] || [ -z "$prs" ]; then
-    echo "No open PRs"
+# If arguments provided, use them as repos
+if [ $# -gt 0 ]; then
+    # Process repos from arguments
+    # Format: "owner/repo:label" or just "owner/repo" (label defaults to repo name)
+    for arg in "$@"; do
+        if [[ "$arg" == *":"* ]]; then
+            repo="${arg%:*}"
+            label="${arg#*:}"
+            check_repo "$repo" "$label"
+        else
+            check_repo "$arg"
+        fi
+    done
 else
-    echo "$prs" | jq -r '.[] | "\(.repository.nameWithOwner) #\(.number): \(.title)\n  \(.url)"'
+    # Default repos (gptme ecosystem)
+    check_repo "gptme/gptme" "gptme"
+    check_repo "gptme/gptme-rag" "gptme-rag"
+    check_repo "gptme/gptme-webui" "gptme-webui"
+    check_repo "gptme/gptme-agent-template" "gptme-agent-template"
+    check_repo "gptme/gptme-landing" "gptme-landing"
 fi
 
-echo
+# Check for any open PRs (if user is available)
+if [ -n "$GH_USER" ]; then
+    echo
+    echo "=== Open PRs ==="
+    echo
+
+    prs=$(gh search prs --author="$GH_USER" --state=open --json repository,number,title,url 2>/dev/null || echo "[]")
+
+    if [ "$prs" == "[]" ] || [ -z "$prs" ]; then
+        echo "No open PRs"
+    else
+        echo "$prs" | jq -r '.[] | "\(.repository.nameWithOwner) #\(.number): \(.title)\n  \(.url)"'
+    fi
+
+    echo
+fi
