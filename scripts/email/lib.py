@@ -1,5 +1,6 @@
 """Core library for the email-based message system."""
 
+import os
 import re
 import subprocess
 import uuid
@@ -356,6 +357,11 @@ class AgentEmail:
 
         # Use custom from_address or default
         sender = from_address or self.own_email
+
+        # Add display name if EMAIL_FROM_NAME is set and sender doesn't already have it
+        from_name = os.getenv("EMAIL_FROM_NAME")
+        if from_name and "<" not in sender:
+            sender = f"{from_name} <{sender}>"
 
         # Build headers
         headers = [
