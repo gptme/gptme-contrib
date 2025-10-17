@@ -431,15 +431,31 @@ class AgentEmail:
             if not recipient:
                 raise ValueError("No recipient found in email headers")
 
-            # Convert markdown body to HTML
+            # Create proper MIME multipart message
+            from email.mime.multipart import MIMEMultipart
+            from email.mime.text import MIMEText
+
+            # Create multipart message
+            msg = MIMEMultipart("alternative")
+
+            # Set headers from extracted metadata
+            msg["From"] = headers.get("From") or sender
+            msg["To"] = recipient
+            msg["Subject"] = headers.get("Subject", "")
+            msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
+            msg["Message-ID"] = headers.get("Message-ID", "")
+            if "In-Reply-To" in headers:
+                msg["In-Reply-To"] = headers["In-Reply-To"]
+            if "References" in headers:
+                msg["References"] = headers["References"]
+
+            # Add plain text version (markdown as fallback)
+            plain_text = body
+            msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+
+            # Add HTML version (converted markdown)
             html_body = markdown.markdown(body, extensions=["extra", "codehilite"])
-
-            # Reconstruct email with HTML body
-            html_headers = []
-            for key, value in headers.items():
-                html_headers.append(f"{key}: {value}")
-
-            html_content = "\n".join(html_headers) + "\n\n" + html_body
+            msg.attach(MIMEText(html_body, "html", "utf-8"))
 
             # Get appropriate msmtp account
             account = self._get_msmtp_account_for_address(sender)
@@ -450,10 +466,10 @@ class AgentEmail:
                 msmtp_cmd.extend(["-a", account])
             msmtp_cmd.append(recipient)
 
-            # Send HTML version via msmtp
+            # Send MIME message via msmtp
             subprocess.run(
                 msmtp_cmd,
-                input=html_content.encode("utf-8"),
+                input=msg.as_string().encode("utf-8"),
                 capture_output=True,
                 check=True,
                 timeout=30,
