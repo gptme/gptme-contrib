@@ -14,6 +14,44 @@ from typing import Optional
 import markdown
 
 
+def fix_list_spacing(markdown_text: str) -> str:
+    """
+    Add blank lines before lists if missing.
+
+    This ensures the markdown library recognizes lists properly.
+    Only adds blank line before the first item of each list.
+
+    Args:
+        markdown_text: The markdown text to process
+
+    Returns:
+        The markdown text with proper list spacing
+    """
+    lines = markdown_text.split("\n")
+    result = []
+    prev_was_list = False
+
+    for i, line in enumerate(lines):
+        # Check if this line is a list item
+        is_list_item = bool(
+            re.match(r"^\s*[-*+]\s+", line)  # Unordered list
+            or re.match(r"^\s*\d+\.\s+", line)
+        )  # Numbered list
+
+        # Check if previous line is blank
+        prev_is_blank = i == 0 or (i > 0 and lines[i - 1].strip() == "")
+
+        # If this is a list item, previous line is not blank,
+        # and we're not continuing a list, add blank line
+        if is_list_item and not prev_is_blank and not prev_was_list and i > 0:
+            result.append("")  # Add blank line before first list item
+
+        result.append(line)
+        prev_was_list = is_list_item
+
+    return "\n".join(result)
+
+
 class AgentEmail:
     """Handles email operations for agent communication."""
 
@@ -462,7 +500,7 @@ class AgentEmail:
             # by converting single newlines to <br> tags, which prevents proper
             # paragraph and list rendering in HTML
             html_body = markdown.markdown(
-                body,
+                fix_list_spacing(body),
                 extensions=["extra", "codehilite", "sane_lists"],
             )
             msg.attach(MIMEText(html_body, "html", "utf-8"))
