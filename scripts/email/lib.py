@@ -457,15 +457,13 @@ class AgentEmail:
             msg.attach(MIMEText(plain_text, "plain", "utf-8"))
 
             # Add HTML version (converted markdown)
-            # Use nl2br to respect single newlines (like GitHub-flavored markdown)
-            # Use sane_lists to handle nested lists better
+            # Use sane_lists extension for better nested list handling
+            # Note: Removed nl2br extension as it breaks proper list formatting
+            # by converting single newlines to <br> tags, which prevents proper
+            # paragraph and list rendering in HTML
             html_body = markdown.markdown(
                 body,
-                extensions=["extra", "codehilite", "nl2br", "sane_lists"],
-                extension_configs={
-                    "extra": {},
-                    "nl2br": {},
-                },
+                extensions=["extra", "codehilite", "sane_lists"],
             )
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
