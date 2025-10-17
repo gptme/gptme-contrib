@@ -1,3 +1,8 @@
+---
+match:
+  keywords: [git workflow, branch management, PR creation, git add, git restore, master branch, feature branch, Conventional Commits, submodule update, secret protection, git status]
+---
+
 # Git Workflow
 
 ## Context
