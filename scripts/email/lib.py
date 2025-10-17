@@ -454,7 +454,16 @@ class AgentEmail:
             msg.attach(MIMEText(plain_text, "plain", "utf-8"))
 
             # Add HTML version (converted markdown)
-            html_body = markdown.markdown(body, extensions=["extra", "codehilite"])
+            # Use nl2br to respect single newlines (like GitHub-flavored markdown)
+            # Use sane_lists to handle nested lists better
+            html_body = markdown.markdown(
+                body,
+                extensions=["extra", "codehilite", "nl2br", "sane_lists"],
+                extension_configs={
+                    "extra": {},
+                    "nl2br": {},
+                },
+            )
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
             # Get appropriate msmtp account
