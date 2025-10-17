@@ -43,6 +43,78 @@ from rich.table import Table
 from tabulate import tabulate
 
 
+# Trajectory integration code (inline to avoid import issues in uv scripts)
+def on_task_completed(task_id: str, task_name: str, repo_root: Path) -> None:
+    """
+    Hook called when a task is marked as complete.
+
+    Provides guidance on analyzing the task completion trajectory.
+    """
+    console = Console()
+    console.print("\n📊 Task Completion Analysis Available")
+    console.print("=" * 60)
+    console.print(f"Task '{task_name}' marked as complete!")
+    console.print()
+
+    # Check for recent trajectories
+    trajectories_dir = repo_root / "knowledge" / "meta" / "trajectories"
+
+    if not trajectories_dir.exists():
+        console.print("[yellow]⚠️  No trajectory directory found.[/]")
+        console.print("   Trajectories are created during autonomous runs.")
+        return
+
+    # Find recent trajectory files (last 7 days)
+    recent_date = datetime.now() - timedelta(days=7)
+
+    trajectory_files = []
+    for f in trajectories_dir.glob("*.json"):
+        if f.stem.startswith("2025-"):  # Date-based naming
+            try:
+                # Extract date from filename (YYYY-MM-DD prefix)
+                date_str = f.stem[:10]
+                file_date = datetime.fromisoformat(date_str)
+                if file_date >= recent_date:
+                    trajectory_files.append(f)
+            except (ValueError, IndexError):
+                continue
+
+    if not trajectory_files:
+        console.print("[dim]ℹ️  No recent trajectory files found (last 7 days).[/]")
+        console.print()
+        console.print("Recommendation:")
+        console.print("  - Trajectory analysis works best with autonomous run data")
+        console.print("  - Consider running autonomous sessions to capture trajectories")
+        return
+
+    console.print(f"Found {len(trajectory_files)} recent trajectory file(s):")
+    for f in sorted(trajectory_files, reverse=True)[:5]:  # Show last 5
+        console.print(f"  - {f.name}")
+
+    console.print()
+    console.print("📋 Recommended Actions:")
+    console.print()
+    console.print("1. Analyze task completion trajectory:")
+    console.print("   ./scripts/learn/trajectory_analyzer.py compare \\")
+    console.print("       --storage knowledge/meta/trajectories/ \\")
+    console.print(f"       --task-id {task_id}")
+    console.print()
+    console.print("2. Generate recommendations from patterns:")
+    console.print("   ./scripts/learn/trajectory_analyzer.py recommend \\")
+    console.print("       --storage knowledge/meta/trajectories/")
+    console.print()
+    console.print("3. Review lessons learned:")
+    console.print(f"   grep -r '{task_name}' knowledge/meta/trajectories/ | less")
+    console.print()
+    console.print("4. Update task management best practices if needed:")
+    console.print("   - Add insights to TASKS.md")
+    console.print("   - Create lesson if pattern is generalizable")
+    console.print("=" * 60)
+
+
+TRAJECTORY_INTEGRATION_AVAILABLE = True  # Always available since it's inline
+
+
 @dataclass
 class DirectoryConfig:
     """Configuration for a directory type."""
@@ -1308,6 +1380,19 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
         # Save changes
         with open(task.path, "w") as f:
             f.write(frontmatter.dumps(post))
+
+    # Check if any tasks were marked as done and trigger trajectory analysis
+    if TRAJECTORY_INTEGRATION_AVAILABLE:
+        state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
+        if any(value == "done" for _, _, value in state_changes):
+            for task in target_tasks:
+                # Re-load task to get updated metadata
+                post = frontmatter.load(task.path)
+                if post.metadata.get("state") == "done":
+                    try:
+                        on_task_completed(task.id, task.name, repo_root)
+                    except Exception as e:
+                        console.print(f"[yellow]Note: Trajectory analysis error: {e}[/]")
 
     # Show success message
     count = len(target_tasks)
