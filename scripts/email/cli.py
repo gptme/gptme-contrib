@@ -29,6 +29,31 @@ def get_workspace_dir() -> Path:
     return Path(__file__).parent.parent.parent.parent
 
 
+def load_env_file(workspace_dir: Path) -> None:
+    """Load environment variables from .env file.
+
+    Simple .env loader that doesn't require python-dotenv.
+    """
+    env_path = workspace_dir / ".env"
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        # Skip empty lines and comments
+        if not line or line.startswith("#"):
+            continue
+        # Parse KEY=VALUE
+        if "=" in line:
+            key, value = line.split("=", 1)
+            # Only set if not already in environment (don't override)
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+# Load .env file at module initialization
+load_env_file(get_workspace_dir())
+
+
 def get_editor() -> str:
     """Get the user's preferred editor."""
     return os.environ.get("EDITOR", "vim")
