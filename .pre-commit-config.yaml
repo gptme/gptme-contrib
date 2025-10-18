@@ -16,7 +16,7 @@ repos:
   hooks:
   - id: mypy
     additional_dependencies: [
-      "gptme @ git+https://github.com/ErikBjare/gptme.git",
+      "gptme @ git+https://github.com/gptme/gptme.git",
       rich,
       python-dotenv,
       tweepy,
@@ -30,6 +30,7 @@ repos:
       types-requests,
       types-click,
       types-python-crontab,
+      exa_py,
       types-Markdown,
     ]
     args: [--config-file=mypy.ini]
