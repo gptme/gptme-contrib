@@ -5,42 +5,47 @@
 #   "discord.py>=2.3.0",
 #   "rich>=13.0.0",
 #   "python-dotenv",
-#   "gptme @ git+https://github.com/ErikBjare/gptme.git",
+#   "gptme[telemetry] @ git+https://github.com/gptme/gptme.git",
 # ]
-# [tool.uv]
-# exclude-newer = "2025-02-05T00:00Z"
 # ///
+
 import asyncio
 import logging
 import os
 import re
 from copy import copy
 from pathlib import Path
-from typing import AsyncGenerator
-from typing import Callable
-from typing import Dict
-from typing import Optional
-from typing import TypeAlias
-from typing import Union
+from typing import (
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Optional,
+    TypeAlias,
+    Union,
+)
+
+from dotenv import load_dotenv
+from gptme.chat import Message, step
+from gptme.dirs import get_project_gptme_dir
+from gptme.init import init
+from gptme.logmanager import Log, LogManager
+from gptme.prompts import get_prompt
+from gptme.telemetry import init_telemetry, shutdown_telemetry
+from gptme.tools import (
+    ToolSpec,
+    ToolUse,
+    get_tools,
+    init_tools,
+)
+from rich.logging import RichHandler
 
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-from gptme.chat import Message
-from gptme.chat import step
-from gptme.dirs import get_project_gptme_dir
-from gptme.init import init
-from gptme.logmanager import Log
-from gptme.logmanager import LogManager
-from gptme.prompts import get_prompt
-from gptme.tools import get_tools
-from gptme.tools import init_tools
-from gptme.tools import ToolUse
-from rich.logging import RichHandler
-
 
 os.environ["GPTME_CHECK"] = "false"
 
+# Max chars in a Discord message
+DISCORD_MSG_LIMIT = 2000
 
 # Type aliases
 ChannelID: TypeAlias = int
@@ -66,6 +71,12 @@ logger = logging.getLogger("discord_bot")
 # Get workspace folder (location of `gptme.toml`):
 workspace_root = get_project_gptme_dir()
 logsdir = workspace_root / "logs_discord" if workspace_root else Path("logs_discord")
+
+# Basic tools only for testing
+tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
+# tool_allowlist = ["read", "save", "append", "patch", "shell", "ipython", "browser"]
+
+tools: list[ToolSpec] = []
 
 # Load environment variables
 env_files = [".env", ".env.discord"]
@@ -185,41 +196,38 @@ async def async_step(
     # Get channel settings
     settings = get_settings(channel_id)
 
-    # Basic tools only for testing
-    tool_allowlist = frozenset(["read", "save", "append", "patch", "shell", "ipython", "browser"])
-
-    # Restrict tools
-    # TODO: do this in a non-global way
-    init_tools(tool_allowlist)
-    logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)}) for channel {channel_id}")
-
     async def add_discord_context(log: Log) -> Log:
         # Fetch Discord history and create temporary log with context
         discord_context = await fetch_discord_history(channel)
-        log = copy(log)
         if discord_context:
             context_msg = Message(
                 "system",
                 f"<chat-history>\n{discord_context}\n</chat-history>",
                 hide=True,
             )
-            log.messages.insert(-1, context_msg)  # Insert before last message
+            # Insert before last message
+            log = log.replace(messages=log.messages[:-1] + [context_msg] + log.messages[-1:])
         return log
 
     # Run step in thread pool to avoid blocking
     loop = asyncio.get_event_loop()
-    current_log = log
+
+    # add ephemeral discord context message
+    current_log = await add_discord_context(log)
 
     while True:
         try:
-            # has ephemeral discord context message
-            request_log = await add_discord_context(current_log)
-            # logger.debug(f"Starting step with log: {request_log}")
+            # init tools in async thread
+            await loop.run_in_executor(None, lambda: init_tools(list(tool_allowlist)))
+
+            # debug
+            # print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
+
             messages = await loop.run_in_executor(
                 None,
                 lambda: list(
                     step(
-                        request_log,
+                        current_log,
                         stream=True,
                         confirm=confirm_func,
                         tool_format="markdown",
@@ -307,7 +315,7 @@ def get_settings(channel_id: ChannelID) -> ChannelSettings:
 
 def get_conversation(channel_id: ChannelID) -> Log:
     """Get or create a conversation for a channel."""
-    initial_msgs = [get_prompt()]
+    initial_msgs = get_prompt(tools=tools)
     assert initial_msgs
 
     # Initialize a new conversation
@@ -380,7 +388,7 @@ async def handle_rate_limit(message: discord.Message) -> bool:
     return True
 
 
-def split_on_codeblocks(content: str, max_length: int = 2000) -> list[str]:
+def split_on_codeblocks(content: str, max_length: int = DISCORD_MSG_LIMIT) -> list[str]:
     """Split content into parts, trying to keep code blocks intact."""
     if len(content) <= max_length:
         return [content]
@@ -431,13 +439,14 @@ async def send_discord_message(
         logger.info(f"Sending message ({len(content)} chars):\n{content}")
 
         # Handle messages that exceed Discord's limit
-        if len(content) > 4000:
+        if len(content) > DISCORD_MSG_LIMIT:
             logger.warning(f"Message too long ({len(content)} chars), truncating")
-            await channel.send("```diff\n- Message too long, truncating to 4000 chars\n```")
-            content = content[:3997] + "..."
+            await channel.send(f"```diff\n- Message too long, truncating to {DISCORD_MSG_LIMIT} chars\n```")
+            content = content[:1997] + "..."
 
         # Split long messages
-        if len(content) > 2000:
+        if len(content) > DISCORD_MSG_LIMIT:
+            # TODO: split on codeblocks, and on \n\n outside codeblocks
             parts = split_on_codeblocks(content)
             for i, part in enumerate(parts):
                 logger.info(f"Sending part {i + 1}/{len(parts)} ({len(part)} chars)")
@@ -460,7 +469,7 @@ async def send_discord_message(
 
 
 # Add regex pattern at top of file with other imports
-re_thinking = re.compile(r"<thinking>.*?(\n</thinking>|$)", flags=re.DOTALL)
+re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
 
 
 async def process_message(
@@ -494,7 +503,9 @@ async def process_message(
             accumulated_content += cleaned_content
 
         # Send/update message
-        current_response, had_error = await send_discord_message(channel, accumulated_content, current_response)
+        had_error = False
+        if accumulated_content:
+            current_response, had_error = await send_discord_message(channel, accumulated_content, current_response)
 
         # Only append to log if this is the final message
         if not had_error and len(cleaned_content.strip()) > 0:
@@ -669,8 +680,6 @@ async def status(ctx: commands.Context) -> None:
         assistant_msgs = sum(1 for m in log if m.role == "assistant")
 
         # Get current tools
-
-        tools = get_tools()
         tools_str = ", ".join(t.name for t in tools) if tools else "No tools loaded"
 
         await ctx.send(
@@ -684,8 +693,8 @@ async def status(ctx: commands.Context) -> None:
         await ctx.send("No active conversation in this channel.")
 
 
-@bot.command()
-async def tools(ctx: commands.Context) -> None:
+@bot.command("tools")
+async def tools_(ctx: commands.Context) -> None:
     """Show available tools and their descriptions."""
 
     tools = get_tools()
@@ -703,11 +712,11 @@ async def tools(ctx: commands.Context) -> None:
         tool_info += "\n"
 
     # Split long messages if needed
-    if len(tool_info) > 2000:
+    if len(tool_info) > DISCORD_MSG_LIMIT:
         parts = tool_info.split("\n\n")
         current = ""
         for part in parts:
-            if len(current) + len(part) + 2 > 2000:
+            if len(current) + len(part) + 2 > DISCORD_MSG_LIMIT:
                 await ctx.send(current)
                 current = part + "\n\n"
             else:
@@ -933,19 +942,30 @@ def main() -> None:
 
     # Initialize gptme
     try:
-        # Basic tools only for testing
-        tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
+        # Restrict tools
+        # TODO: do this in a non-global way
+        global tools
 
         # Initialize gptme and tools
         init(model=MODEL, interactive=False, tool_allowlist=list(tool_allowlist))
+        tools = init_tools(list(tool_allowlist))
         tools = get_tools()
         if not tools:
             logger.error("No tools loaded in gptme")
             return
         logger.info(f"Loaded {len(tools)} gptme tools: {', '.join(t.name for t in tools)}")
+        logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)})")
     except Exception as e:
         logger.error(f"Failed to initialize gptme tools: {e}")
         return
+
+    # Initialize telemetry for Discord bot
+    init_telemetry(
+        service_name="gptme-discord",
+        agent_name=bot_name,
+        interactive=False,  # Discord bot runs non-interactively
+    )
+    logger.info("Telemetry initialized for gptme-discord")
 
     try:
         # Run the bot
@@ -960,6 +980,10 @@ def main() -> None:
         )
     except Exception:
         logger.exception("Error running bot")
+    finally:
+        # Shutdown telemetry
+        shutdown_telemetry()
+        logger.info("Telemetry shutdown complete")
 
 
 if __name__ == "__main__":

@@ -53,7 +53,6 @@ For OAuth 2.0 setup:
 import os
 import sys
 import threading
-import webbrowser
 from datetime import datetime, timedelta
 from functools import lru_cache
 from queue import Queue
@@ -204,10 +203,10 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     console.print("[yellow]Starting authentication server...")
                     start_auth_server()
 
-                    # Get authorization URL and open in browser
+                    # Get authorization URL and provide it to the user
                     auth_url = oauth2_user_handler.get_authorization_url()
-                    console.print(f"[yellow]Opening browser for authorization at: {auth_url}")
-                    webbrowser.open(auth_url)
+                    console.print("[yellow]Please open this URL in your browser to authorize the application:")
+                    console.print(f"[blue]{auth_url}")
 
                     # Wait for the callback
                     console.print("[yellow]Waiting for authorization (timeout: 5 minutes)...")
@@ -856,7 +855,11 @@ def thread(tweet_id: str, limit: int, max_pages: int, verbose: bool, structure: 
                     "in_reply_to_user_id",
                     "referenced_tweets",
                 ],
-                "expansions": ["author_id", "referenced_tweets.id", "in_reply_to_user_id"],
+                "expansions": [
+                    "author_id",
+                    "referenced_tweets.id",
+                    "in_reply_to_user_id",
+                ],
                 "user_fields": ["username", "name", "profile_image_url"],
             }
 

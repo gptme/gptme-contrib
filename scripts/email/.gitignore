@@ -1,0 +1,14 @@
+# Ignore mutt cache
+cache/headers/*
+cache/bodies/*
+
+# Ignore notmuch database
+.notmuch/
+
+# Watcher state
+watcher_state.txt
+processed_state.txt
+watcher.log
+
+# Lock files
+locks/

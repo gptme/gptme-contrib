@@ -39,7 +39,7 @@ from gptme.dirs import get_project_git_dir
 from gptme.llm import reply
 from gptme.llm.models import get_default_model
 from gptme.message import Message
-from gptme.prompts import get_workspace_prompt
+from gptme.prompts import prompt_workspace
 from rich.console import Console
 
 
@@ -235,7 +235,7 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     if tweet.get("thread_context"):
         thread_context = "\nConversation Thread:\n"
         for i, t in enumerate(tweet["thread_context"]):
-            thread_context += f"Tweet {i+1} - @{t['author']}: {t['text']}\n"
+            thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
     return f"""Evaluate this tweet for response suitability.
 
@@ -267,7 +267,7 @@ def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
     if tweet.get("thread_context"):
         thread_context = "\nConversation Thread:\n"
         for i, t in enumerate(tweet["thread_context"]):
-            thread_context += f"Tweet {i+1} - @{t['author']}: {t['text']}\n"
+            thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
     return f"""Draft a response tweet.
 
@@ -312,7 +312,7 @@ def create_review_prompt(draft: Dict, config: Dict) -> str:
     if draft.get("context", {}).get("original_tweet", {}).get("thread_context"):
         thread_context = "\nThread Context:\n"
         for i, tweet in enumerate(draft["context"]["original_tweet"]["thread_context"]):
-            thread_context += f"Tweet {i+1} - @{tweet['author']}: {tweet['text']}\n"
+            thread_context += f"Tweet {i + 1} - @{tweet['author']}: {tweet['text']}\n"
 
     return f"""Review this draft tweet.
 
@@ -329,7 +329,7 @@ Review Criteria:
 def get_system_prompt() -> Message:
     """Get system prompt for Twitter interactions."""
     workspace = get_project_git_dir()
-    context = get_workspace_prompt(workspace) if workspace else ""
+    context = prompt_workspace(workspace) if workspace else ""
 
     def get_format_examples() -> Dict[str, Any]:
         """Generate format examples from dataclasses"""
