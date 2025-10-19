@@ -111,27 +111,23 @@ class ExaSearch:
         """Extract sources from search results"""
         sources: List[Dict[str, str]] = []
         for result in results:
-            source = {
-                "title": "No title",
-                "url": "No URL",
-                "content_snippet": "No content"
-            }
+            source = {"title": "No title", "url": "No URL", "content_snippet": "No content"}
 
             # Safe attribute access
-            if hasattr(result, 'title'):
-                title = getattr(result, 'title')
+            if hasattr(result, "title"):
+                title = getattr(result, "title")
                 if isinstance(title, str):
                     source["title"] = title
-            if hasattr(result, 'url'):
-                url = getattr(result, 'url')
+            if hasattr(result, "url"):
+                url = getattr(result, "url")
                 if isinstance(url, str):
                     source["url"] = url
-            if hasattr(result, 'text'):
-                text_content = getattr(result, 'text')
+            if hasattr(result, "text"):
+                text_content = getattr(result, "text")
                 if isinstance(text_content, str):
                     source["content_snippet"] = text_content
-            elif hasattr(result, 'content'):
-                content = getattr(result, 'content')
+            elif hasattr(result, "content"):
+                content = getattr(result, "content")
                 if isinstance(content, str):
                     source["content_snippet"] = content
 
@@ -141,12 +137,12 @@ class ExaSearch:
     def _extract_answer_text(self, response) -> str:
         """Extract answer text from response object"""
         # Handle different response types safely
-        if hasattr(response, 'answer'):
-            answer = getattr(response, 'answer')
+        if hasattr(response, "answer"):
+            answer = getattr(response, "answer")
             if isinstance(answer, str):
                 return answer
-        elif hasattr(response, 'text'):
-            text_content = getattr(response, 'text')
+        elif hasattr(response, "text"):
+            text_content = getattr(response, "text")
             if isinstance(text_content, str):
                 return text_content
         elif isinstance(response, str):
