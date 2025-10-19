@@ -203,7 +203,7 @@ def format_source_summary(source_name: str, files: List[Tuple[str, int]], query:
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-source workspace search with compact summaries")
-    parser.add_argument("query", help="Search query")
+    parser.add_argument("queries", nargs="+", help="Search queries (one or more)")
     parser.add_argument("--roam", action="store_true", help="Include Roam notes search")
     parser.add_argument("--github", action="store_true", help="Include GitHub issues/PRs search")
     parser.add_argument(
@@ -234,28 +234,53 @@ def main():
         "Lessons": ["lessons/**/*.md"],
     }
 
-    # Search each source
-    all_results = {}
-    for source_name, patterns in sources.items():
-        files = [file for pattern in patterns for file in git_grep_files(args.query, pattern)]
-        all_results[source_name] = files
+    # Search each source for all queries - aggregate counts
+    count_results: Dict[str, Dict[str, int]] = {source_name: {} for source_name, _ in sources.items()}
+
+    for query in args.queries:
+        for source_name, patterns in sources.items():
+            files = [file for pattern in patterns for file in git_grep_files(query, pattern)]
+            for file, count in files:
+                # Keep max count across all queries
+                count_results[source_name][file] = max(count_results[source_name].get(file, 0), count)
+
+    # Convert to list format, sorted by count
+    all_results: Dict[str, List[Tuple[str, int]]] = {}
+    for source_name in count_results:
+        if count_results[source_name]:
+            all_results[source_name] = sorted(count_results[source_name].items(), key=lambda x: (-x[1], x[0]))
+        else:
+            all_results[source_name] = []
 
     # Print summary header
     total_files = sum(len(files) for files in all_results.values())
     total_matches = sum(sum(count for _, count in files) for files in all_results.values())
 
-    print(f"# Search: '{args.query}'")
+    queries_str = ", ".join(repr(q) for q in args.queries)
+    print(f"# Search: {queries_str}")
     print(f"Total: {total_files} files, {total_matches} matches\n")
 
     # Print each source (skip if no matches)
     for source_name in ["Tasks", "Knowledge", "Lessons"]:
         files = all_results[source_name]
         if files:  # Only show sources with matches
-            print(format_source_summary(source_name, files, args.query, args.verbose))
+            # Use first query for snippet display
+            print(format_source_summary(source_name, files, args.queries[0], args.verbose))
             print()
 
-    # Git log search
-    git_log_results = search_git_log(args.query)
+    # Git log search - combine results from all queries
+    all_git_log = []
+    for query in args.queries:
+        all_git_log.extend(search_git_log(query))
+
+    # Deduplicate by commit hash
+    seen = set()
+    git_log_results = []
+    for line in all_git_log:
+        commit_hash = line.split()[0] if line else None
+        if commit_hash and commit_hash not in seen:
+            seen.add(commit_hash)
+            git_log_results.append(line)
     if git_log_results:
         print("## Git Log")
         print(f"{len(git_log_results)} commits")
@@ -263,9 +288,15 @@ def main():
             print(f"  {i}. {commit}")
         print()
 
-    # Optional: Roam tasks
+    # Optional: Roam tasks - combine results from all queries
     if args.roam:
-        roam_results = search_roam_tasks(args.query)
+        all_roam = []
+        for query in args.queries:
+            all_roam.extend(search_roam_tasks(query))
+
+        # Deduplicate roam results
+        roam_results = list(set(all_roam))
+
         print("## Roam Tasks")
         if roam_results:
             print(f"{len(roam_results)} results")
@@ -275,9 +306,21 @@ def main():
             print("No matches")
         print()
 
-    # Optional: GitHub
+    # Optional: GitHub - combine results from all queries
     if args.github:
-        gh_results = search_github(args.query, github_owners)
+        combined_issues: List[str] = []
+        combined_prs: List[str] = []
+
+        for query in args.queries:
+            gh_results = search_github(query, github_owners)
+            combined_issues.extend(gh_results["issues"])
+            combined_prs.extend(gh_results["prs"])
+
+        # Deduplicate results (preserves order)
+        gh_results = {
+            "issues": list(dict.fromkeys(combined_issues)),
+            "prs": list(dict.fromkeys(combined_prs)),
+        }
         issue_count = len(gh_results["issues"])
         pr_count = len(gh_results["prs"])
 
@@ -302,7 +345,10 @@ def main():
     # Suggestion for deeper exploration
     if total_files > 0:
         print("💡 Dig deeper:")
-        print(f"  git grep -i '{args.query}' -- <file>  # See full matches")
+        if len(args.queries) == 1:
+            print(f"  git grep -i '{args.queries[0]}' -- <file>  # See full matches")
+        else:
+            print("  git grep -i '<query>' -- <file>  # See full matches for any query")
         print("  cat <file>  # Read full content")
 
 
