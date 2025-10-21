@@ -19,6 +19,7 @@ show_usage() {
     echo
     echo "Options:"
     echo "  --with-ids        Show notification IDs for marking as read"
+    echo "  --only-open       Filter out closed/merged PRs and issues"
     echo "  --mark-read ID    Mark specific notification as read"
     echo "  --mark-all-read   Mark all notifications as read"
     echo "  -h, --help        Show this help"
@@ -26,17 +27,23 @@ show_usage() {
     echo "Examples:"
     echo "  $0                           # Show unread notifications (clean)"
     echo "  $0 --with-ids                # Show notifications with IDs"
+    echo "  $0 --only-open               # Show only open PRs/issues"
     echo "  $0 --mark-read 19518981563   # Mark specific notification as read"
     echo "  $0 --mark-all-read           # Mark all as read"
 }
 
 # Parse options
 WITH_IDS=false
+ONLY_OPEN=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --with-ids)
             WITH_IDS=true
+            shift
+            ;;
+        --only-open)
+            ONLY_OPEN=true
             shift
             ;;
         --mark-read)
@@ -99,6 +106,29 @@ AUTHOR_COUNT=$(echo "$AUTHOR" | jq '. | length')
 COMMENT_COUNT=$(echo "$COMMENTS" | jq '. | length')
 OTHER_COUNT=$(echo "$OTHERS" | jq '. | length')
 
+# Helper function to check if PR/Issue is open (only called when ONLY_OPEN=true)
+is_item_open() {
+    local repo=$1
+    local number=$2
+    local type=$3
+    local state
+
+    case "$type" in
+        PullRequest)
+            state=$(gh pr view "$number" --repo "$repo" --json state -q .state 2>/dev/null || echo "UNKNOWN")
+            [[ "$state" == "OPEN" ]]
+            ;;
+        Issue)
+            state=$(gh issue view "$number" --repo "$repo" --json state -q .state 2>/dev/null || echo "UNKNOWN")
+            [[ "$state" == "OPEN" ]]
+            ;;
+        *)
+            # For other types (discussions, releases), always show
+            return 0
+            ;;
+    esac
+}
+
 # Helper function to format compactly with smart timestamps (limit 10 per category)
 format_compact() {
     local category=$1
@@ -106,7 +136,16 @@ format_compact() {
     local today
     today=$(date +%Y-%m-%d)
 
-    echo "$category" | jq -r ".[] | \"\(.id)|\(.repository.full_name)|\(.subject.title)|\(.subject.type)|\(.updated_at)\"" | head -$limit | while IFS='|' read -r id repo title type timestamp; do
+    echo "$category" | jq -r ".[] | \"\(.id)|\(.repository.full_name)|\(.subject.title)|\(.subject.type)|\(.subject.url)|\(.updated_at)\"" | head -$limit | while IFS='|' read -r id repo title type url timestamp; do
+        # If --only-open flag set, filter out closed/merged items
+        if [ "$ONLY_OPEN" = true ] && [[ "$type" == "PullRequest" || "$type" == "Issue" ]]; then
+            local number
+            number=$(echo "$url" | grep -oP '\d+$')
+            if ! is_item_open "$repo" "$number" "$type"; then
+                continue  # Skip closed/merged items
+            fi
+        fi
+
         local date
         local time
         date=$(echo "$timestamp" | cut -d'T' -f1)

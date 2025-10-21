@@ -22,19 +22,29 @@ if [ -n "$REPO" ]; then
     echo
 fi
 
-# Add repository CI status using existing script
-echo "## Repository CI Status"
-echo
-echo "*Build health for active repositories. Run \`$SCRIPT_DIR/repo-status.sh\` for details.*"
-echo
-"$SCRIPT_DIR/repo-status.sh"
+# PRIMARY: What Bob is asked to help with
+# - gptme-bob issues (requests, assignments)
+# - Direct mentions asking for help
+# These should be checked FIRST in autonomous runs
 
-# Show GitHub notifications
-echo
+# Show GitHub notifications (includes gptme-bob issues via mentions/assignments)
 echo "## GitHub Notifications"
 echo
 echo "*Unread notifications requiring attention.*"
 echo
 
-# Run notification check script
-"$SCRIPT_DIR/check-notifications.sh"
+# Run notification check script with filtering for closed/merged items
+"$SCRIPT_DIR/check-notifications.sh" --only-open
+
+# SECONDARY: Bob's own work status
+# - Repository health checks
+# - Bob's open PRs
+# Check these only when PRIMARY sources are blocked
+
+# Add repository CI status using existing script
+echo
+echo "## Repository CI Status"
+echo
+echo "*Build health for active repositories. Run \`$SCRIPT_DIR/repo-status.sh\` for details.*"
+echo
+"$SCRIPT_DIR/repo-status.sh"
