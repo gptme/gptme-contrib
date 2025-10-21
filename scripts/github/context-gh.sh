@@ -48,3 +48,19 @@ echo
 echo "*Build health for active repositories. Run \`$SCRIPT_DIR/repo-status.sh\` for details.*"
 echo
 "$SCRIPT_DIR/repo-status.sh"
+
+# Show Bob's open PRs
+GH_USER="${GH_USER:-$(gh api user -q .login 2>/dev/null || echo "")}"
+if [ -n "$GH_USER" ]; then
+    echo
+    echo "## Open PRs"
+    echo
+
+    prs=$(gh search prs --author="$GH_USER" --state=open --json repository,number,title,url 2>/dev/null || echo "[]")
+
+    if [ "$prs" == "[]" ] || [ -z "$prs" ]; then
+        echo "No open PRs"
+    else
+        echo "$prs" | jq -r '.[] | "\(.repository.nameWithOwner) #\(.number): \(.title)\n  \(.url)"'
+    fi
+fi

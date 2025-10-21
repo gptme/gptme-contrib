@@ -77,20 +77,3 @@ else
         check_repo "gptme/gptme-landing" "gptme-landing"
     fi
 fi
-
-# Check for any open PRs (if user is available)
-if [ -n "$GH_USER" ]; then
-    echo
-    echo "=== Open PRs ==="
-    echo
-
-    prs=$(gh search prs --author="$GH_USER" --state=open --json repository,number,title,url 2>/dev/null || echo "[]")
-
-    if [ "$prs" == "[]" ] || [ -z "$prs" ]; then
-        echo "No open PRs"
-    else
-        echo "$prs" | jq -r '.[] | "\(.repository.nameWithOwner) #\(.number): \(.title)\n  \(.url)"'
-    fi
-
-    echo
-fi
