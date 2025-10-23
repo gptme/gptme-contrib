@@ -119,6 +119,8 @@ class TaskInfo:
     priority: Optional[str]
     tags: List[str]
     depends: List[str]
+    waiting_for: Optional[str]
+    waiting_since: Optional[datetime]
     subtasks: SubtaskCount
     issues: List[str]
     metadata: Dict
@@ -335,6 +337,21 @@ def load_tasks(tasks_dir: Path, recursive: bool = False, single_file: Optional[P
             if modified.tzinfo:
                 modified = modified.astimezone().replace(tzinfo=None)
 
+            # Parse waiting_since timestamp if present
+            waiting_since = None
+            if "waiting_since" in metadata:
+                try:
+                    waiting_since = (
+                        metadata["waiting_since"]
+                        if isinstance(metadata.get("waiting_since"), datetime)
+                        else datetime.fromisoformat(str(metadata["waiting_since"]))
+                    )
+                    # Convert to naive datetime if timezone-aware
+                    if waiting_since.tzinfo:
+                        waiting_since = waiting_since.astimezone().replace(tzinfo=None)
+                except (ValueError, TypeError):
+                    issues.append("Invalid waiting_since timestamp")
+
             # Create TaskInfo object
             task = TaskInfo(
                 path=file,
@@ -345,6 +362,8 @@ def load_tasks(tasks_dir: Path, recursive: bool = False, single_file: Optional[P
                 priority=metadata.get("priority"),
                 tags=metadata.get("tags", []),
                 depends=metadata.get("depends", []),
+                waiting_for=metadata.get("waiting_for"),
+                waiting_since=waiting_since,
                 subtasks=subtasks,
                 issues=issues,
                 metadata=metadata,
@@ -778,6 +797,15 @@ def print_status_section(console: Console, title: str, items: List[TaskInfo], sh
         subtask_str = f" {task.subtasks}" if task.subtasks.total > 0 else ""
         priority_str = f" [{task.priority}]" if task.priority else ""
 
+        # Add waiting indicator
+        waiting_str = ""
+        if task.waiting_for:
+            waiting_days = ""
+            if task.waiting_since:
+                days = (datetime.now() - task.waiting_since).days
+                waiting_days = f" ({days}d)" if days > 0 else ""
+            waiting_str = f" ⏸️{waiting_days}"
+
         # Get state info if needed
         state_info = ""
         if show_state:
@@ -787,7 +815,11 @@ def print_status_section(console: Console, title: str, items: List[TaskInfo], sh
             state_info = f", {state_text}"
 
         # Print task info
-        console.print(f"  {task.name}{subtask_str}{priority_str} ({task.created_ago}{state_info})")
+        console.print(f"  {task.name}{subtask_str}{priority_str}{waiting_str} ({task.created_ago}{state_info})")
+
+        # Show waiting details inline
+        if task.waiting_for:
+            console.print(f"    ⏸️  Waiting: {task.waiting_for}")
 
         # Show issues inline
         if task.issues:
@@ -1225,8 +1257,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
 
     # Validate set operations
     for field, value in set_fields:
-        if field not in ("state", "priority", "created"):
-            console.print(f"[red]Cannot set field: {field}. Use --set with state, priority, or created.[/]")
+        if field not in ("state", "priority", "created", "waiting_for", "waiting_since"):
+            console.print(
+                f"[red]Cannot set field: {field}. Use --set with state, priority, created, waiting_for, or waiting_since.[/]"
+            )
             return
 
         if field == "state":
@@ -1237,14 +1271,19 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
             if value not in ("high", "medium", "low", "none"):
                 console.print(f"[red]Invalid priority: {value}[/]")
                 return
-        elif field == "created":
-            try:
-                # Parse and validate the date format
-                created_dt = datetime.fromisoformat(value)
-                # Convert to string format for storage
-                value = created_dt.isoformat()
-            except ValueError:
-                console.print("[red]Invalid created date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]")
+        elif field in ("created", "waiting_since"):
+            if value != "none":
+                try:
+                    # Parse and validate the date format
+                    dt = datetime.fromisoformat(value)
+                    # Convert to string format for storage
+                    value = dt.isoformat()
+                except ValueError:
+                    console.print(f"[red]Invalid {field} date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]")
+                    return
+        elif field == "waiting_for":
+            if not value.strip() and value != "none":
+                console.print("[red]waiting_for cannot be empty (use 'none' to clear)[/]")
                 return
 
         changes.append(("set", field, value))
