@@ -533,7 +533,13 @@ def show(task_id):
     is_flag=True,
     help="Only show new and active tasks",
 )
-def list_(sort, active_only):
+@click.option(
+    "--context",
+    type=str,
+    default=None,
+    help="Filter by context tag (e.g., @coding, @research)",
+)
+def list_(sort, active_only, context):
     """List all tasks in a table format."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -559,6 +565,16 @@ def list_(sort, active_only):
             console.print("[yellow]No new or active tasks found[/]")
             return
         console.print("[blue]Showing only new and active tasks[/]\n")
+
+    # Filter by context if specified
+    if context:
+        # Normalize context tag (add @ if missing)
+        context_tag = context if context.startswith("@") else f"@{context}"
+        tasks = [task for task in tasks if context_tag in (task.tags or [])]
+        if not tasks:
+            console.print(f"[yellow]No tasks found with context tag '{context_tag}'[/]")
+            return
+        console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
 
     # Sort tasks for display based on option
     if sort == "state":
