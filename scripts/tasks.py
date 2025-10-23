@@ -117,6 +117,7 @@ class TaskInfo:
     created: datetime
     modified: datetime
     priority: Optional[str]
+    task_type: Optional[str]
     tags: List[str]
     depends: List[str]
     waiting_for: Optional[str]
@@ -360,6 +361,7 @@ def load_tasks(tasks_dir: Path, recursive: bool = False, single_file: Optional[P
                 created=created,
                 modified=modified,
                 priority=metadata.get("priority"),
+                task_type=metadata.get("task_type"),
                 tags=metadata.get("tags", []),
                 depends=metadata.get("depends", []),
                 waiting_for=metadata.get("waiting_for"),
@@ -1257,9 +1259,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
 
     # Validate set operations
     for field, value in set_fields:
-        if field not in ("state", "priority", "created", "waiting_for", "waiting_since"):
+        if field not in ("state", "priority", "task_type", "created", "waiting_for", "waiting_since"):
             console.print(
-                f"[red]Cannot set field: {field}. Use --set with state, priority, created, waiting_for, or waiting_since.[/]"
+                f"[red]Cannot set field: {field}. Use --set with state, priority, task_type, created, waiting_for, or waiting_since.[/]"
             )
             return
 
@@ -1270,6 +1272,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
         elif field == "priority":
             if value not in ("high", "medium", "low", "none"):
                 console.print(f"[red]Invalid priority: {value}[/]")
+                return
+        elif field == "task_type":
+            if value not in ("project", "action", "none"):
+                console.print(f"[red]Invalid task_type: {value}. Must be project, action, or none.[/]")
                 return
         elif field in ("created", "waiting_since"):
             if value != "none":
