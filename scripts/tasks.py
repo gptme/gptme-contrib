@@ -59,7 +59,7 @@ class DirectoryConfig:
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",
-        states=["new", "active", "paused", "done", "cancelled"],
+        states=["new", "active", "paused", "done", "cancelled", "someday"],
         special_files=["README.md", "templates", "video-scripts"],
         emoji="📋",
     ),
