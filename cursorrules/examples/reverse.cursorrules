@@ -1,0 +1,28 @@
+# Overview
+This rule was converted from a gptme lesson.
+
+## Rules
+
+## Context
+This project uses TypeScript with React best practices. All code should follow strict type safety and modern React patterns.
+
+## Always
+- Use TypeScript strict mode
+- Prefer functional components over class components
+- Use hooks for state management
+- Include proper error handling
+
+## Auto Attached: tsx!
+- Always define prop types with interfaces
+- Use React.FC for functional components
+- Destructure props at function signature
+
+## Auto Attached: test!
+- Write tests for all components
+- Use Jest and React Testing Library
+- Aim for 80%+ coverage
+
+## Deprecated Patterns
+- Class components (use functional components instead)
+- PropTypes (use TypeScript interfaces instead)
+- any types (use proper typing)
