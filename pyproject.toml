@@ -25,6 +25,7 @@ classifiers = [
 # Minimal core dependencies
 dependencies = [
     "gptme>=0.25.0",
+    "pyyaml>=6.0",
 ]
 
 [tool.ruff]
