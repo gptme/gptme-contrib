@@ -456,6 +456,9 @@ def check_unreplied() -> None:
     for message_id, subject, sender in unreplied:
         click.echo(f"{sender:<30} | {subject[:40]:<40} | {message_id}")
 
+    # Exit with code 1 to indicate emails were found
+    sys.exit(1)
+
 
 @cli.command()
 @click.option(
