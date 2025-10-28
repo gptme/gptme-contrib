@@ -269,14 +269,17 @@ def _write_lesson_file(lesson_data: dict[str, Any], output_path: Path | str) -> 
 
 def _format_as_cursorrules(lesson_content: str) -> str:
     """Format lesson content as Cursor rules."""
-    # Simple conversion - can be enhanced
+    # Demote all headings by one level (# → ##, ## → ###, etc.)
+    # This properly nests lesson sections under "## Rules"
+    demoted_content = re.sub(r"^(#{1,5}) ", r"#\1 ", lesson_content, flags=re.MULTILINE)
+
     lines = []
     lines.append("# Overview")
     lines.append("This rule was converted from a gptme lesson.")
     lines.append("")
     lines.append("## Rules")
     lines.append("")
-    lines.append(lesson_content)
+    lines.append(demoted_content)
 
     return "\n".join(lines)
 
