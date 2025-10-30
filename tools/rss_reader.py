@@ -236,6 +236,85 @@ def get_all_feeds(config: dict[str, Any]) -> dict[str, str]:
     return all_feeds
 
 
+def get_all_tags(config: dict[str, Any]) -> dict[str, list[str]]:
+    """
+    Extract all unique tags from config with their associated sources.
+
+    Returns: dict mapping tag -> list of source names
+    """
+    tag_map: dict[str, list[str]] = {}
+
+    for domain_name, domain_config in config.get("domains", {}).items():
+        for source in domain_config.get("sources", []):
+            source_name = source["name"]
+            keywords = source.get("keywords", [])
+
+            for keyword in keywords:
+                tag = keyword.lower()  # Normalize to lowercase
+                if tag not in tag_map:
+                    tag_map[tag] = []
+                if source_name not in tag_map[tag]:
+                    tag_map[tag].append(source_name)
+
+    return tag_map
+
+
+def get_feeds_by_tags(config: dict[str, Any], tags: list[str], match_mode: str = "any") -> dict[str, str]:
+    """
+    Filter feeds by tags (keywords).
+
+    Args:
+        config: RSS feed configuration
+        tags: List of tags to filter by
+        match_mode: 'any' (OR) or 'all' (AND) matching
+
+    Returns: dict mapping source name -> URL for matching feeds
+    """
+    feeds: dict[str, str] = {}
+    normalized_tags = [t.lower() for t in tags]
+
+    for domain_name, domain_config in config.get("domains", {}).items():
+        for source in domain_config.get("sources", []):
+            source_name = source["name"]
+            source_url = source["url"]
+            source_keywords = [k.lower() for k in source.get("keywords", [])]
+
+            # Check if source matches tags
+            if match_mode == "any":
+                # Match if ANY tag is present
+                if any(tag in source_keywords for tag in normalized_tags):
+                    feeds[source_name] = source_url
+            elif match_mode == "all":
+                # Match if ALL tags are present
+                if all(tag in source_keywords for tag in normalized_tags):
+                    feeds[source_name] = source_url
+
+    return feeds
+
+
+def list_tags_info(config: dict[str, Any]) -> str:
+    """
+    Generate formatted list of all available tags with source counts.
+
+    Returns: Formatted string showing tags and their usage
+    """
+    tag_map = get_all_tags(config)
+
+    if not tag_map:
+        return "No tags found in config"
+
+    # Sort tags by number of sources (descending), then alphabetically
+    sorted_tags = sorted(tag_map.items(), key=lambda x: (-len(x[1]), x[0]))
+
+    lines = ["Available Tags:\n"]
+    for tag, sources in sorted_tags:
+        source_count = len(sources)
+        lines.append(f"  {tag}: {source_count} source{'s' if source_count != 1 else ''}")
+        lines.append(f"    Sources: {', '.join(sources)}")
+
+    return "\n".join(lines)
+
+
 def validate_url(url: str) -> bool:
     """Validate if string is a valid URL."""
     try:
@@ -719,6 +798,92 @@ def format_multi_feed_output(
     return "\n".join(output)
 
 
+def format_by_tag_groups(
+    all_entries: list[tuple[str, feedparser.FeedParserDict]],
+    config: dict[str, Any],
+    max_entries: Optional[int] = None,
+    include_summary: bool = False,
+    format_template: Optional[str] = None,
+    date_format: str = "%Y-%m-%d",
+    filter_title: Optional[str] = None,
+    filter_source: Optional[str] = None,
+) -> str:
+    """
+    Group and format entries by tags instead of domains.
+
+    Args:
+        all_entries: List of (source_name, entry) tuples
+        config: RSS feed configuration
+        max_entries: Maximum entries per tag
+        include_summary: Include entry summaries
+        format_template: Custom format template
+        date_format: Date format string
+        filter_title: Filter by title regex
+        filter_source: Filter by source regex
+
+    Returns: Formatted output grouped by tags
+    """
+    # Build source -> tags mapping
+    source_tags: dict[str, list[str]] = {}
+    for domain_name, domain_config in config.get("domains", {}).items():
+        for source in domain_config.get("sources", []):
+            source_name = source["name"]
+            keywords = [k.lower() for k in source.get("keywords", [])]
+            source_tags[source_name] = keywords if keywords else ["untagged"]
+
+    # Group entries by tag
+    tag_entries: dict[str, list[tuple[datetime, str, feedparser.FeedParserDict]]] = {}
+    for source_name, entry in all_entries:
+        # Get datetime for entry
+        dt = entry.get("updated_parsed") or entry.get("published_parsed")
+        if dt:
+            dt = datetime(*dt[:6])
+        else:
+            dt = datetime.now()
+
+        # Add entry to all tags for this source
+        tags = source_tags.get(source_name, ["untagged"])
+        for tag in tags:
+            if tag not in tag_entries:
+                tag_entries[tag] = []
+            tag_entries[tag].append((dt, source_name, entry))
+
+    # Sort entries within each tag by date (newest first)
+    for tag in tag_entries:
+        tag_entries[tag].sort(key=lambda x: x[0], reverse=True)
+
+    # Format output
+    output = []
+    for tag in sorted(tag_entries.keys()):
+        entries = tag_entries[tag]
+
+        # Apply max_entries limit per tag
+        if max_entries:
+            entries = entries[:max_entries]
+
+        # Convert to format expected by apply_filters
+        entries_for_filter = [(dt, source, entry) for dt, source, entry in entries]
+        entries_for_filter = apply_filters(entries_for_filter, filter_title, filter_source)
+
+        if not entries_for_filter:
+            continue
+
+        output.append(f"\n=== Tag: {tag} ({len(entries_for_filter)} entries) ===\n")
+
+        for dt, source_name, entry in entries_for_filter:
+            formatted = format_entry(
+                entry, source_name, dt, format_template, date_format, include_summary=include_summary
+            )
+            output.append(formatted)
+
+            if include_summary:
+                summary = get_entry_summary(entry)
+                if summary:
+                    output.append(f"  Summary: {summary}")
+
+    return "\n".join(output)
+
+
 @click.command()
 @click.argument("url", required=False)
 @click.option("--exclude-url", "-e", multiple=True, help="URL patterns to exclude from output")
@@ -743,6 +908,17 @@ def format_multi_feed_output(
 @click.option("--date-format", type=str, default="%Y-%m-%d", help="Custom date format (strftime, default: %Y-%m-%d)")
 @click.option("--filter-title", type=str, help="Filter entries by title (regex pattern)")
 @click.option("--filter-source", type=str, help="Filter entries by source name (regex pattern)")
+@click.option("--tags", type=str, help="Filter feeds by tags (comma-separated, requires --config)")
+@click.option(
+    "--tag-match", type=click.Choice(["any", "all"]), default="any", help="Tag matching mode: any (OR) or all (AND)"
+)
+@click.option("--list-tags", is_flag=True, help="List all available tags from config (requires --config)")
+@click.option(
+    "--group-by",
+    type=click.Choice(["domain", "tag", "source"]),
+    default="domain",
+    help="Group output by domain, tag, or source",
+)
 def main(
     url: Optional[str],
     exclude_url: tuple[str, ...],
@@ -767,6 +943,10 @@ def main(
     date_format: str,
     filter_title: Optional[str],
     filter_source: Optional[str],
+    tags: Optional[str],
+    tag_match: str,
+    list_tags: bool,
+    group_by: str,
 ) -> None:
     """
     Read RSS feeds and display them in a compact format.
@@ -904,12 +1084,27 @@ def main(
     if config:
         cfg = load_config(config)
 
-        if all_domains:
+        # Handle --list-tags
+        if list_tags:
+            tags_info = list_tags_info(cfg)
+            console.print(tags_info)
+            return
+
+        # Handle --tags filtering
+        if tags:
+            tag_list = [t.strip() for t in tags.split(",")]
+            feeds = get_feeds_by_tags(cfg, tag_list, tag_match)
+            if not feeds:
+                console.print(
+                    f"[yellow]No feeds found matching tags: {', '.join(tag_list)} (match mode: {tag_match})[/yellow]"
+                )
+                return
+        elif all_domains:
             feeds = get_all_feeds(cfg)
         elif domain:
             feeds = get_feeds_for_domain(cfg, domain)
         else:
-            console.print("[red]Error: --config requires either --domain or --all-domains[/red]")
+            console.print("[red]Error: --config requires either --domain, --all-domains, or --tags[/red]")
             sys.exit(1)
 
         console.print(f"Fetching {len(feeds)} feeds...")
@@ -934,10 +1129,22 @@ def main(
                 }
             console.print(json_lib.dumps(output_data, indent=2))
         else:
-            # Text output with domain grouping
-            output = format_multi_feed_output(
-                fetched_feeds, cfg, max_entries, summary, format, date_format, filter_title, filter_source
-            )
+            # Text output with grouping
+            if group_by == "tag":
+                # Convert fetched_feeds to list of (source_name, entry) tuples
+                all_entries = []
+                for source_name, feed in fetched_feeds.items():
+                    for entry in feed.entries:
+                        all_entries.append((source_name, entry))
+
+                output = format_by_tag_groups(
+                    all_entries, cfg, max_entries, summary, format, date_format, filter_title, filter_source
+                )
+            else:
+                # Domain or source grouping (existing behavior)
+                output = format_multi_feed_output(
+                    fetched_feeds, cfg, max_entries, summary, format, date_format, filter_title, filter_source
+                )
             console.print(output)
 
         if show_cache_stats and cache:
