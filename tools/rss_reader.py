@@ -7,6 +7,8 @@
 #   "rich>=13.0.0",
 #   "python-dotenv>=1.0.0",
 #   "pyyaml>=6.0.0",
+#   "requests>=2.31.0",
+#   "beautifulsoup4>=4.12.0",
 # ]
 # [tool.uv]
 # exclude-newer = "2024-01-23T00:00:00Z"
@@ -34,7 +36,9 @@ from urllib.parse import urlparse
 
 import click
 import feedparser
+import requests
 import yaml
+from bs4 import BeautifulSoup  # type: ignore
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
@@ -485,6 +489,87 @@ def format_entries(
     return "\n".join(output)
 
 
+def discover_feeds(url: str, timeout: int = 10) -> list[str]:
+    """
+    Discover RSS/Atom feeds from a website URL.
+
+    Checks for feed links in HTML <link> tags and tries common feed locations.
+
+    Args:
+        url: Website URL to search for feeds
+        timeout: Request timeout in seconds
+
+    Returns:
+        List of discovered feed URLs (empty if none found)
+    """
+    discovered = []
+
+    # Ensure URL has scheme
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    try:
+        # Fetch HTML
+        response = requests.get(url, timeout=timeout, headers={"User-Agent": "gptme-rss-reader/1.0"})
+        response.raise_for_status()
+
+        # Parse HTML
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        # Find feed links in <link rel="alternate"> tags
+        for link in soup.find_all("link", rel="alternate"):
+            feed_type = link.get("type", "")
+            if "rss" in feed_type or "atom" in feed_type or "feed" in feed_type:
+                href = link.get("href")
+                if href:
+                    # Make absolute URL
+                    if href.startswith("//"):
+                        href = "https:" + href
+                    elif href.startswith("/"):
+                        parsed = urlparse(url)
+                        href = f"{parsed.scheme}://{parsed.netloc}{href}"
+                    elif not href.startswith("http"):
+                        # Relative URL
+                        href = url.rstrip("/") + "/" + href.lstrip("/")
+
+                    if href not in discovered:
+                        discovered.append(href)
+
+        # If no feeds found, try common feed locations
+        if not discovered:
+            common_paths = [
+                "/feed",
+                "/rss",
+                "/atom.xml",
+                "/feed.xml",
+                "/rss.xml",
+                "/index.xml",
+                "/feeds/posts/default",
+                "/blog/feed",
+            ]
+
+            parsed = urlparse(url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+            for path in common_paths:
+                feed_url = base_url + path
+                try:
+                    # Quick check if URL returns valid feed
+                    feed_response = requests.head(feed_url, timeout=5)
+                    if feed_response.status_code == 200:
+                        content_type = feed_response.headers.get("content-type", "")
+                        if "xml" in content_type or "rss" in content_type or "atom" in content_type:
+                            if feed_url not in discovered:
+                                discovered.append(feed_url)
+                except requests.RequestException:
+                    pass  # Skip failed attempts
+
+    except requests.RequestException as e:
+        console.print(f"[yellow]Warning: Failed to fetch {url}: {e}[/yellow]")
+
+    return discovered
+
+
 def format_multi_feed_output(
     feeds: dict[str, feedparser.FeedParserDict],
     config: dict[str, Any],
@@ -570,6 +655,7 @@ def format_multi_feed_output(
 @click.option("--validate", is_flag=True, help="Validate feed health and report issues")
 @click.option("--validate-all", is_flag=True, help="Validate all feeds in config (requires --config)")
 @click.option("--validate-verbose", "-v", is_flag=True, help="Show detailed validation info")
+@click.option("--discover", is_flag=True, help="Discover RSS/Atom feeds from a website URL")
 def main(
     url: Optional[str],
     exclude_url: tuple[str, ...],
@@ -589,6 +675,7 @@ def main(
     validate: bool,
     validate_all: bool,
     validate_verbose: bool,
+    discover: bool,
 ) -> None:
     """
     Read RSS feeds and display them in a compact format.
@@ -624,6 +711,33 @@ def main(
         console.print(f"Cleared {cleared} cached feed(s)")
         if not (url or config):  # If just clearing cache, exit
             return
+
+    # Discovery mode
+    if discover:
+        if not url:
+            console.print("[red]Error: --discover requires a website URL[/red]")
+            sys.exit(1)
+
+        console.print(f"[cyan]Discovering feeds from {url}...[/cyan]\n")
+        discovered_feeds = discover_feeds(url)
+
+        if discovered_feeds:
+            console.print(f"[green]Found {len(discovered_feeds)} feed(s):[/green]\n")
+            for i, feed_url in enumerate(discovered_feeds, 1):
+                console.print(f"  {i}. {feed_url}")
+
+            # Optionally validate discovered feeds
+            if validate or validate_verbose:
+                console.print("\n[cyan]Validating discovered feeds...[/cyan]\n")
+                for feed_url in discovered_feeds:
+                    result = validate_feed(feed_url, cache=None)
+                    formatted = format_validation_result(result, verbose=validate_verbose)
+                    console.print(formatted)
+                    console.print("")
+        else:
+            console.print("[yellow]No feeds discovered[/yellow]")
+
+        return
 
     # Validation mode
     if validate or validate_all:
