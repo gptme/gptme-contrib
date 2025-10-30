@@ -17,13 +17,17 @@ RSS reader tool for gptme-bob.
 Reads RSS feeds and displays them in a compact format.
 """
 
+import hashlib
 import html
 import json as json_lib
 import os
+import pickle
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -33,11 +37,94 @@ import feedparser
 import yaml
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.table import Table
 
 # Load environment variables from .env file
 load_dotenv()
 
 console = Console()
+
+
+@dataclass
+class FeedValidationResult:
+    """Results from feed validation."""
+
+    url: str
+    is_valid: bool = True
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    info: dict[str, Any] = field(default_factory=dict)
+
+    def add_error(self, message: str) -> None:
+        """Add an error and mark feed as invalid."""
+        self.is_valid = False
+        self.errors.append(message)
+
+    def add_warning(self, message: str) -> None:
+        """Add a warning (doesn't invalidate feed)."""
+        self.warnings.append(message)
+
+
+class FeedCache:
+    """Simple file-based cache for RSS feeds with TTL support."""
+
+    def __init__(self, cache_dir: Path | str = "~/.cache/rss_reader", ttl_minutes: int = 60):
+        self.cache_dir = Path(cache_dir).expanduser()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.ttl = timedelta(minutes=ttl_minutes)
+        self.stats = {"hits": 0, "misses": 0}
+
+    def _get_cache_path(self, url: str) -> Path:
+        """Get cache file path for a URL."""
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        return self.cache_dir / f"{url_hash}.pkl"
+
+    def get(self, url: str) -> feedparser.FeedParserDict | None:
+        """Get cached feed if valid, None otherwise."""
+        cache_path = self._get_cache_path(url)
+
+        if not cache_path.exists():
+            self.stats["misses"] += 1
+            return None
+
+        try:
+            with open(cache_path, "rb") as f:
+                cached = pickle.load(f)
+
+            # Check TTL
+            cached_time = datetime.fromisoformat(cached["timestamp"])
+            if datetime.now() - cached_time > self.ttl:
+                self.stats["misses"] += 1
+                return None
+
+            self.stats["hits"] += 1
+            return cached["feed"]
+        except Exception:
+            self.stats["misses"] += 1
+            return None
+
+    def set(self, url: str, feed: feedparser.FeedParserDict) -> None:
+        """Cache a feed."""
+        cache_path = self._get_cache_path(url)
+
+        try:
+            cached = {"timestamp": datetime.now().isoformat(), "url": url, "feed": feed}
+            with open(cache_path, "wb") as f:
+                pickle.dump(cached, f)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to cache feed: {e}[/yellow]")
+
+    def clear(self) -> int:
+        """Clear all cached feeds. Returns number of files removed."""
+        count = 0
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            cache_file.unlink()
+            count += 1
+        return count
+
+    def get_stats(self) -> dict[str, int]:
+        """Get cache statistics."""
+        return self.stats.copy()
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -76,8 +163,162 @@ def get_all_feeds(config: dict[str, Any]) -> dict[str, str]:
     return all_feeds
 
 
-def fetch_feed_safe(source_name: str, url: str) -> tuple[str, feedparser.FeedParserDict | None]:
-    """Fetch a single feed safely, returning (source_name, feed or None)."""
+def validate_url(url: str) -> bool:
+    """Validate if string is a valid URL."""
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
+
+
+def validate_feed(url: str, cache: FeedCache | None = None) -> FeedValidationResult:
+    """
+    Perform comprehensive feed validation.
+
+    Checks:
+    - URL format validity
+    - Feed fetchability and parse-ability
+    - Feed structure (title, entries)
+    - Entry freshness (age of latest entry)
+    - Performance (fetch time)
+
+    Returns:
+        FeedValidationResult with validation status and details
+    """
+    result = FeedValidationResult(url=url)
+
+    # 1. URL validation
+    if not validate_url(url):
+        result.add_error("Invalid URL format")
+        return result
+
+    # 2. Fetch and parse with timing
+    start_time = time.time()
+    try:
+        # Check cache first (if provided and --validate-cached not used)
+        feed = None
+        if cache:
+            feed = cache.get(url)
+            if feed:
+                result.info["cached"] = True
+
+        if not feed:
+            feed = feedparser.parse(url)
+            result.info["cached"] = False
+
+        fetch_time = time.time() - start_time
+        result.info["fetch_time_ms"] = int(fetch_time * 1000)
+    except Exception as e:
+        result.add_error(f"Failed to fetch feed: {e}")
+        return result
+
+    # 3. Parse error check
+    if feed.bozo:
+        # Some feeds work despite bozo flag, so this is a warning
+        result.add_warning(f"Feed has parsing issues: {feed.bozo_exception}")
+
+    # 4. Feed structure validation
+    if not hasattr(feed, "feed"):
+        result.add_error("Feed missing required 'feed' attribute")
+        return result
+
+    # 5. Feed metadata validation
+    feed_title = feed.feed.get("title", "")
+    if not feed_title:
+        result.add_warning("Feed missing title")
+    else:
+        result.info["title"] = feed_title
+
+    result.info["link"] = feed.feed.get("link", "")
+
+    # 6. Entries validation
+    if not feed.entries:
+        result.add_warning("Feed has no entries (empty feed)")
+        result.info["entry_count"] = 0
+    else:
+        result.info["entry_count"] = len(feed.entries)
+
+        # Check entry freshness
+        latest_entry = feed.entries[0]
+        dt = latest_entry.get("updated_parsed") or latest_entry.get("published_parsed")
+        if dt:
+            dt_obj = datetime(*dt[:6])
+            age_days = (datetime.now() - dt_obj).days
+            result.info["latest_entry_age_days"] = age_days
+            result.info["latest_entry_date"] = dt_obj.isoformat()
+
+            if age_days > 90:
+                result.add_warning(f"Latest entry is {age_days} days old (stale feed)")
+            elif age_days > 30:
+                result.add_warning(f"Latest entry is {age_days} days old (may be stale)")
+
+        # Check for required entry fields
+        missing_fields = []
+        if not latest_entry.get("title"):
+            missing_fields.append("title")
+        if not latest_entry.get("link"):
+            missing_fields.append("link")
+
+        if missing_fields:
+            result.add_warning(f"Entries missing fields: {', '.join(missing_fields)}")
+
+    # 7. Performance check
+    fetch_time_ms = result.info.get("fetch_time_ms", 0)
+    if fetch_time_ms > 10000:
+        result.add_warning(f"Very slow feed response ({fetch_time_ms}ms > 10s)")
+    elif fetch_time_ms > 5000:
+        result.add_warning(f"Slow feed response ({fetch_time_ms}ms > 5s)")
+
+    return result
+
+
+def format_validation_result(result: FeedValidationResult, verbose: bool = False) -> str:
+    """Format validation result as human-readable text."""
+    lines = []
+
+    # Status line
+    if result.is_valid:
+        if result.warnings:
+            status = "[yellow]⚠ VALID WITH WARNINGS[/yellow]"
+        else:
+            status = "[green]✓ VALID[/green]"
+    else:
+        status = "[red]✗ INVALID[/red]"
+
+    lines.append(f"{status}: {result.url}")
+
+    # Info
+    if verbose and result.info:
+        lines.append("\nInfo:")
+        for key, value in result.info.items():
+            lines.append(f"  {key}: {value}")
+
+    # Errors
+    if result.errors:
+        lines.append("\nErrors:")
+        for error in result.errors:
+            lines.append(f"  • {error}")
+
+    # Warnings
+    if result.warnings:
+        lines.append("\nWarnings:")
+        for warning in result.warnings:
+            lines.append(f"  • {warning}")
+
+    return "\n".join(lines)
+
+
+def fetch_feed_safe(
+    source_name: str, url: str, cache: FeedCache | None = None
+) -> tuple[str, feedparser.FeedParserDict | None]:
+    """Fetch a single feed safely, returning (source_name, feed or None). Uses cache if provided."""
+    # Check cache first
+    if cache:
+        cached_feed = cache.get(url)
+        if cached_feed:
+            return source_name, cached_feed
+
     try:
         if not validate_url(url):
             console.print(f"[yellow]Warning: Invalid URL for {source_name}: {url}[/yellow]")
@@ -88,18 +329,27 @@ def fetch_feed_safe(source_name: str, url: str) -> tuple[str, feedparser.FeedPar
             console.print(f"[yellow]Warning: Failed to parse {source_name}: {feed.bozo_exception}[/yellow]")
             return source_name, None
 
+        # Cache successful fetch
+        if cache:
+            cache.set(url, feed)
+
         return source_name, feed
     except Exception as e:
         console.print(f"[yellow]Warning: Error fetching {source_name}: {e}[/yellow]")
         return source_name, None
 
 
-def fetch_feeds_parallel(feeds: dict[str, str], max_workers: int = 5) -> dict[str, feedparser.FeedParserDict]:
-    """Fetch multiple feeds in parallel using ThreadPoolExecutor."""
+def fetch_feeds_parallel(
+    feeds: dict[str, str], cache: FeedCache | None = None, max_workers: int = 5
+) -> dict[str, feedparser.FeedParserDict]:
+    """Fetch multiple feeds in parallel using ThreadPoolExecutor. Uses cache if provided."""
     results = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_source = {executor.submit(fetch_feed_safe, name, url): name for name, url in feeds.items()}
+        # Submit all fetch tasks
+        future_to_source = {
+            executor.submit(fetch_feed_safe, source_name, url, cache): source_name for source_name, url in feeds.items()
+        }
 
         for future in as_completed(future_to_source):
             source_name, feed = future.result()
@@ -125,17 +375,14 @@ def deduplicate_entries(
     return unique_entries
 
 
-def validate_url(url: str) -> bool:
-    """Validate if string is a valid URL."""
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
+def fetch_feed(url: str, cache: FeedCache | None = None) -> feedparser.FeedParserDict:
+    """Fetch and parse RSS feed. Uses cache if provided."""
+    # Check cache first
+    if cache:
+        cached_feed = cache.get(url)
+        if cached_feed:
+            return cached_feed
 
-
-def fetch_feed(url: str) -> feedparser.FeedParserDict:
-    """Fetch and parse RSS feed."""
     if not validate_url(url):
         console.print(f"[red]Error: Invalid URL: {url}[/red]")
         sys.exit(1)
@@ -144,6 +391,11 @@ def fetch_feed(url: str) -> feedparser.FeedParserDict:
     if feed.bozo:  # feedparser sets this flag for malformed feeds
         console.print(f"[red]Error: Failed to parse feed: {feed.bozo_exception}[/red]")
         sys.exit(1)
+
+    # Cache successful fetch
+    if cache:
+        cache.set(url, feed)
+
     return feed
 
 
@@ -162,7 +414,6 @@ def get_entry_summary(entry: feedparser.FeedParserDict) -> str | None:
         summary = entry.get("summary", "") or entry.get("description", "") or ""
 
     # Remove HTML tags more thoroughly
-
     # Remove any HTML tag
     summary = re.sub(r"<[^>]+>", " ", summary)
     # Decode all HTML entities
@@ -206,205 +457,331 @@ def format_entries(
 
     if max_entries:
         if order == "asc":
-            dt_entries = dt_entries[-max_entries:]
+            dt_entries = dt_entries[:max_entries]
         else:
+            # descending: take first N
             dt_entries = dt_entries[:max_entries]
 
-    lines: list[str] = []
+    if exclude_urls:
+        dt_entries = [(dt, entry) for dt, entry in dt_entries if entry.link not in exclude_urls]
+
+    output = []
     for dt, entry in dt_entries:
-        # Skip if URL contains any excluded patterns
-        if exclude_urls and any(pattern in entry.link for pattern in exclude_urls):
-            continue
+        title = entry.title
+        link = entry.link
 
-        # Get date, fallback to current date if not available
-        date_str = dt.strftime("%Y-%m-%d")
-        if time:  # Add time if requested
-            date_str += " " + dt.strftime("%H:%M")
+        if time:
+            # Format with time
+            output.append(f"{dt.strftime('%Y-%m-%d %H:%M')} {title} <{link}>")
+        else:
+            # Format without time (default)
+            output.append(f"{dt.strftime('%Y-%m-%d')} {title} <{link}>")
 
-        # Prepare entry lines
-        entry_lines = []
-        entry_lines.append(f"{date_str} {entry.title.strip()} <{entry.link}>")
-
-        # Add summary if available and requested
         if include_summary:
             summary = get_entry_summary(entry)
             if summary:
-                entry_lines.append(f"  Summary: {summary}")
+                output.append(f"  Summary: {summary}")
 
-        # Only add blank line if we have previous content and current entry has content
-        if lines and entry_lines:
-            lines.append("")
-
-        # Add entry lines
-        lines.extend(entry_lines)
-
-    return "\n".join(lines)
+    return "\n".join(output)
 
 
 def format_multi_feed_output(
-    feeds_by_domain: dict[str, dict[str, feedparser.FeedParserDict]],
-    exclude_urls: Optional[list[str]] = None,
+    feeds: dict[str, feedparser.FeedParserDict],
+    config: dict[str, Any],
     max_entries: Optional[int] = None,
     include_summary: bool = False,
-    time: bool = False,
 ) -> str:
-    """Format aggregated entries from multiple feeds with domain grouping."""
-    all_entries = []
+    """Format output for multiple feeds, grouped by domain."""
+    output = []
 
-    # Collect all entries with their source
-    for domain, feeds in feeds_by_domain.items():
-        for source_name, feed in feeds.items():
+    # Group feeds by domain
+    domain_feeds: dict[str, list[tuple[str, feedparser.FeedParserDict]]] = {}
+    for source_name, feed in feeds.items():
+        # Find which domain this source belongs to
+        domain_name = None
+        for d_name, d_config in config.get("domains", {}).items():
+            for source in d_config.get("sources", []):
+                if source["name"] == source_name:
+                    domain_name = d_name
+                    break
+            if domain_name:
+                break
+
+        if domain_name:
+            if domain_name not in domain_feeds:
+                domain_feeds[domain_name] = []
+            domain_feeds[domain_name].append((source_name, feed))
+
+    # Collect all entries with source info
+    all_entries: list[tuple[str, feedparser.FeedParserDict]] = []
+    for domain_name, sources in domain_feeds.items():
+        for source_name, feed in sources:
             for entry in feed.entries:
-                # Skip excluded URLs
-                if exclude_urls and any(pattern in entry.link for pattern in exclude_urls):
-                    continue
+                all_entries.append((source_name, entry))
 
-                all_entries.append((domain, source_name, entry))
+    # Deduplicate
+    all_entries = deduplicate_entries(all_entries)
 
-    # Deduplicate by URL
-    seen_urls = set()
-    unique_entries = []
-    for domain, source, entry in all_entries:
-        if entry.link not in seen_urls:
-            seen_urls.add(entry.link)
-            unique_entries.append((domain, source, entry))
-
-    # Sort by date
-    def get_entry_date(item):
-        _, _, entry = item
-        return entry.get("published_parsed") or entry.get("updated_parsed") or datetime.now().timetuple()
-
-    unique_entries.sort(key=get_entry_date, reverse=True)
+    # Sort by date (newest first)
+    dt_entries = []
+    for source, entry in all_entries:
+        dt = entry.get("updated_parsed") or entry.get("published_parsed")
+        if dt:
+            dt = datetime(*dt[:6])
+        else:
+            dt = datetime.now()
+        dt_entries.append((dt, source, entry))
+    dt_entries.sort(key=lambda x: x[0], reverse=True)
 
     # Apply max_entries limit
     if max_entries:
-        unique_entries = unique_entries[:max_entries]
-
-    # Group by domain for output
-    domain_entries: dict[str, list[tuple[str, feedparser.FeedParserDict]]] = {}
-    for domain, source, entry in unique_entries:
-        if domain not in domain_entries:
-            domain_entries[domain] = []
-        domain_entries[domain].append((source, entry))
+        dt_entries = dt_entries[:max_entries]
 
     # Format output
-    lines = []
-    for domain, entries in domain_entries.items():
-        lines.append(f"\n=== {domain.replace('_', ' ').title()} ({len(entries)} entries) ===\n")
+    for dt, source, entry in dt_entries:
+        title = entry.title
+        link = entry.link
+        output.append(f"{dt.strftime('%Y-%m-%d')} [{source}] {title} <{link}>")
 
-        for source, entry in entries:
-            # Get date
-            pub_time = entry.get("published_parsed") or entry.get("updated_parsed")
-            dt = datetime(*pub_time[:6]) if pub_time else datetime.now()
-            date_str = dt.strftime("%Y-%m-%d")
-            if time:
-                date_str += " " + dt.strftime("%H:%M")
+        if include_summary:
+            summary = get_entry_summary(entry)
+            if summary:
+                output.append(f"  Summary: {summary}")
 
-            # Format entry
-            lines.append(f"{date_str} {entry.title.strip()} <{entry.link}>")
-
-            if include_summary:
-                summary = get_entry_summary(entry)
-                if summary:
-                    lines.append(f"  Summary: {summary}")
-
-    # Add statistics
-    lines.append(f"\nTotal: {len(unique_entries)} unique entries across {len(domain_entries)} domains")
-
-    return "\n".join(lines)
+    return "\n".join(output)
 
 
 @click.command()
 @click.argument("url", required=False)
-@click.option("--config", type=click.Path(exists=True), help="Path to RSS feeds YAML configuration")
-@click.option("--domain", type=str, help="Scan specific domain from config")
-@click.option("--all-domains", is_flag=True, help="Scan all domains from config")
-@click.option("--exclude-url", "-e", multiple=True, help="URLs patterns to exclude")
-@click.option("--max-entries", "-n", type=int, help="Maximum number of entries to show")
-@click.option("--json-output", is_flag=True, help="Output in JSON format")
-@click.option("--summary/--no-summary", default=False, help="Include entry summaries/content")
-@click.option("--time", is_flag=True, help="Include time in text output")
+@click.option("--exclude-url", "-e", multiple=True, help="URL patterns to exclude from output")
+@click.option("--max-entries", "-n", type=int, help="Maximum number of entries to display")
+@click.option("--summary", "-s", is_flag=True, help="Include entry summaries")
+@click.option("--time", "-t", is_flag=True, help="Include time in date format")
+@click.option("--order", type=click.Choice(["asc", "desc"]), default="asc", help="Entry order (asc=oldest first)")
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output in JSON format")
+@click.option("--config", "-c", type=str, help="Path to RSS feeds config file (YAML)")
+@click.option("--domain", "-d", type=str, help="Domain to fetch feeds for (requires --config)")
+@click.option("--all-domains", "-a", is_flag=True, help="Fetch feeds from all domains in config (requires --config)")
+@click.option("--no-cache", is_flag=True, help="Bypass cache and fetch fresh feeds")
+@click.option("--clear-cache", is_flag=True, help="Clear all cached feeds before running")
+@click.option("--cache-ttl", type=int, default=60, help="Cache TTL in minutes (default: 60)")
+@click.option("--cache-dir", type=str, default="~/.cache/rss_reader", help="Cache directory path")
+@click.option("--show-cache-stats", is_flag=True, help="Show cache hit/miss statistics")
+@click.option("--validate", is_flag=True, help="Validate feed health and report issues")
+@click.option("--validate-all", is_flag=True, help="Validate all feeds in config (requires --config)")
+@click.option("--validate-verbose", "-v", is_flag=True, help="Show detailed validation info")
 def main(
     url: Optional[str],
+    exclude_url: tuple[str, ...],
+    max_entries: Optional[int],
+    summary: bool,
+    time: bool,
+    order: str,
+    json_output: bool,
     config: Optional[str],
     domain: Optional[str],
     all_domains: bool,
-    exclude_url: tuple[str],
-    max_entries: Optional[int],
-    json_output: bool,
-    summary: bool,
-    time: bool,
+    no_cache: bool,
+    clear_cache: bool,
+    cache_ttl: int,
+    cache_dir: str,
+    show_cache_stats: bool,
+    validate: bool,
+    validate_all: bool,
+    validate_verbose: bool,
 ) -> None:
-    """Read RSS feed(s) and display in compact format.
-
-    URL: Single feed URL. If not provided, uses RSS_URL environment variable.
-
-    Multi-feed mode: Use --config with --domain or --all-domains to scan multiple feeds.
     """
-    # Multi-feed mode: config with domain or all-domains
-    if config and (domain or all_domains):
+    Read RSS feeds and display them in a compact format.
+
+    If URL is not provided, uses RSS_URL from environment or config file.
+
+    Examples:
+
+        # Read single feed
+        rss_reader.py https://news.ycombinator.com/rss
+
+        # Read with summaries and limit entries
+        rss_reader.py https://news.ycombinator.com/rss --summary --max-entries 5
+
+        # Read from config (specific domain)
+        rss_reader.py --config feeds.yaml --domain ai
+
+        # Read all domains from config
+        rss_reader.py --config feeds.yaml --all-domains
+
+        # Validate a feed
+        rss_reader.py https://example.com/feed.xml --validate
+
+        # Validate all feeds in config
+        rss_reader.py --config feeds.yaml --validate-all
+    """
+    # Setup cache (even if --no-cache, we need it for stats)
+    cache = FeedCache(cache_dir=cache_dir, ttl_minutes=cache_ttl) if not no_cache else None
+
+    # Clear cache if requested
+    if clear_cache and cache:
+        cleared = cache.clear()
+        console.print(f"Cleared {cleared} cached feed(s)")
+        if not (url or config):  # If just clearing cache, exit
+            return
+
+    # Validation mode
+    if validate or validate_all:
+        if validate_all:
+            if not config:
+                console.print("[red]Error: --validate-all requires --config[/red]")
+                sys.exit(1)
+
+            cfg = load_config(config)
+            feeds = get_all_feeds(cfg)
+
+            console.print(f"\n[bold]Validating {len(feeds)} feeds...[/bold]\n")
+
+            results = []
+            for source_name, feed_url in feeds.items():
+                result = validate_feed(feed_url, cache=None)  # Don't use cache for validation
+                results.append((source_name, result))
+
+            # Create summary table
+            table = Table(title="Feed Validation Summary")
+            table.add_column("Feed", style="cyan")
+            table.add_column("Status", style="bold")
+            table.add_column("Entries", justify="right")
+            table.add_column("Age (days)", justify="right")
+            table.add_column("Fetch (ms)", justify="right")
+            table.add_column("Issues", justify="right")
+
+            for source_name, result in results:
+                if result.is_valid:
+                    if result.warnings:
+                        status = "[yellow]⚠ WARN[/yellow]"
+                    else:
+                        status = "[green]✓ OK[/green]"
+                else:
+                    status = "[red]✗ FAIL[/red]"
+
+                entries = str(result.info.get("entry_count", "-"))
+                age = str(result.info.get("latest_entry_age_days", "-"))
+                fetch_time = str(result.info.get("fetch_time_ms", "-"))
+                issues = len(result.errors) + len(result.warnings)
+
+                table.add_row(source_name, status, entries, age, fetch_time, str(issues) if issues > 0 else "-")
+
+            console.print(table)
+
+            # Show detailed results if verbose
+            if validate_verbose:
+                console.print("\n[bold]Detailed Results:[/bold]\n")
+                for source_name, result in results:
+                    console.print(f"\n[bold]{source_name}[/bold]")
+                    formatted = format_validation_result(result, verbose=True)
+                    console.print(formatted)
+                    console.print("")
+
+        else:
+            # Validate single feed
+            if not url:
+                url = os.getenv("RSS_URL")
+                if not url:
+                    console.print("[red]Error: No URL provided and RSS_URL not set[/red]")
+                    sys.exit(1)
+
+            result = validate_feed(url, cache=None)
+            formatted = format_validation_result(result, verbose=validate_verbose)
+            console.print(formatted)
+
+            if not result.is_valid:
+                sys.exit(1)
+
+        return
+
+    # Multi-feed mode (config-based)
+    if config:
         cfg = load_config(config)
 
-        # Get feeds based on mode
         if all_domains:
-            feeds_by_domain = {}
-            for domain_name in cfg.get("domains", {}).keys():
-                feeds_by_domain[domain_name] = get_feeds_for_domain(cfg, domain_name)
+            feeds = get_all_feeds(cfg)
+        elif domain:
+            feeds = get_feeds_for_domain(cfg, domain)
         else:
-            # domain is guaranteed to be not None here (checked in condition)
-            assert domain is not None
-            feeds_by_domain = {domain: get_feeds_for_domain(cfg, domain)}
+            console.print("[red]Error: --config requires either --domain or --all-domains[/red]")
+            sys.exit(1)
 
-        # Fetch all feeds in parallel
-        console.print(f"[cyan]Fetching {sum(len(feeds) for feeds in feeds_by_domain.values())} feeds...[/cyan]")
-        all_feeds = {}
-        for domain_name, feeds in feeds_by_domain.items():
-            all_feeds.update(feeds)
+        console.print(f"Fetching {len(feeds)} feeds...")
+        fetched_feeds = fetch_feeds_parallel(feeds, cache=cache)
+        console.print(f"Successfully fetched {len(fetched_feeds)}/{len(feeds)} feeds")
 
-        fetched_feeds = fetch_feeds_parallel(all_feeds)
-        console.print(f"[green]Successfully fetched {len(fetched_feeds)} feeds[/green]")
+        if json_output:
+            # JSON output for multi-feed
+            output_data = {}
+            for source_name, feed in fetched_feeds.items():
+                output_data[source_name] = {
+                    "title": feed.feed.get("title", ""),
+                    "link": feed.feed.get("link", ""),
+                    "entries": [
+                        {
+                            "title": entry.title,
+                            "link": entry.link,
+                            "published": entry.get("published", ""),
+                        }
+                        for entry in (feed.entries[:max_entries] if max_entries else feed.entries)
+                    ],
+                }
+            console.print(json_lib.dumps(output_data, indent=2))
+        else:
+            # Text output with domain grouping
+            output = format_multi_feed_output(fetched_feeds, cfg, max_entries, summary)
+            console.print(output)
 
-        # Organize by domain
-        feeds_by_domain_fetched = {}
-        for domain_name, feeds in feeds_by_domain.items():
-            feeds_by_domain_fetched[domain_name] = {
-                name: fetched_feeds[name] for name in feeds.keys() if name in fetched_feeds
-            }
+        if show_cache_stats and cache:
+            stats = cache.get_stats()
+            total = stats["hits"] + stats["misses"]
+            hit_rate = (stats["hits"] / total * 100) if total > 0 else 0
+            console.print(f"\nCache: {stats['hits']} hits, {stats['misses']} misses ({hit_rate:.1f}% hit rate)")
 
-        # Format and output
-        output = format_multi_feed_output(feeds_by_domain_fetched, list(exclude_url), max_entries, summary, time=time)
-        print(output)
         return
 
-    # Single-feed mode (backward compatible)
-    feed_url = url or os.getenv("RSS_URL")
-    if not feed_url:
-        console.print("[red]Error: No URL provided and RSS_URL environment variable not set[/red]")
-        sys.exit(1)
+    # Single-feed mode
+    if not url:
+        url = os.getenv("RSS_URL")
+        if not url:
+            console.print("[red]Error: No URL provided and RSS_URL not set[/red]")
+            sys.exit(1)
 
-    feed = fetch_feed(feed_url)
+    feed = fetch_feed(url, cache=cache)
 
     if json_output:
-        entries = []
-        for entry in feed.entries[:max_entries]:
-            if exclude_url and any(pattern in entry.link for pattern in exclude_url):
-                continue
-            entry_data = {
-                "title": entry.title,
-                "link": entry.link,
-                "date": entry.get("published", datetime.now().isoformat()),
-            }
-            if summary:
-                clean_summary = get_entry_summary(entry)
-                if clean_summary:
-                    entry_data["summary"] = clean_summary
-            entries.append(entry_data)
-        print(json_lib.dumps(entries, indent=2))
-        return
+        # JSON output
+        output = json_lib.dumps(
+            {
+                "title": feed.feed.get("title", ""),
+                "link": feed.feed.get("link", ""),
+                "entries": [
+                    {
+                        "title": entry.title,
+                        "link": entry.link,
+                        "published": entry.get("published", ""),
+                    }
+                    for entry in (feed.entries[:max_entries] if max_entries else feed.entries)
+                ],
+            },
+            indent=2,
+        )
+        console.print(output)
+    else:
+        # Text output
+        from typing import cast
 
-    # Print formatted entries
-    output = format_entries(feed, list(exclude_url), max_entries, summary, time=time)
-    print(output)
+        output = format_entries(
+            feed, list(exclude_url), max_entries, summary, time, cast(Literal["asc", "desc"], order)
+        )
+        console.print(output)
+
+    if show_cache_stats and cache:
+        stats = cache.get_stats()
+        total = stats["hits"] + stats["misses"]
+        hit_rate = (stats["hits"] / total * 100) if total > 0 else 0
+        console.print(f"\nCache: {stats['hits']} hits, {stats['misses']} misses ({hit_rate:.1f}% hit rate)")
 
 
 if __name__ == "__main__":
