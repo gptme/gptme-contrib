@@ -131,6 +131,75 @@ class FeedCache:
         return self.stats.copy()
 
 
+def format_entry(
+    entry: feedparser.FeedParserDict,
+    source: str,
+    dt: datetime,
+    template: Optional[str],
+    date_format: str,
+    include_summary: bool = False,
+) -> str:
+    """Format an RSS entry using a template string.
+
+    Available placeholders:
+    - {date}: Entry date
+    - {source}: Source name
+    - {title}: Entry title
+    - {link}: Entry URL
+    - {summary}: Entry summary (if available)
+    """
+    # Default template if none provided
+    if template is None:
+        template = "{date} [{source}] {title} <{link}>"
+
+    # Prepare values for template
+    values = {
+        "date": dt.strftime(date_format),
+        "source": source,
+        "title": entry.title,
+        "link": entry.link,
+        "summary": entry.get("summary", "") if include_summary else "",
+    }
+
+    # Apply template
+    try:
+        return template.format(**values)
+    except KeyError as e:
+        console.print(f"[red]Error: Invalid placeholder in format template: {e}[/red]")
+        sys.exit(1)
+
+
+def apply_filters(
+    entries: list[tuple[datetime, str, feedparser.FeedParserDict]],
+    filter_title: Optional[str],
+    filter_source: Optional[str],
+) -> list[tuple[datetime, str, feedparser.FeedParserDict]]:
+    """Apply filtering to entries based on title and source patterns."""
+    import re
+
+    filtered = entries
+
+    # Filter by title
+    if filter_title:
+        try:
+            pattern = re.compile(filter_title, re.IGNORECASE)
+            filtered = [(dt, src, entry) for dt, src, entry in filtered if pattern.search(entry.title)]
+        except re.error as e:
+            console.print(f"[red]Error: Invalid title filter regex: {e}[/red]")
+            sys.exit(1)
+
+    # Filter by source
+    if filter_source:
+        try:
+            pattern = re.compile(filter_source, re.IGNORECASE)
+            filtered = [(dt, src, entry) for dt, src, entry in filtered if pattern.search(src)]
+        except re.error as e:
+            console.print(f"[red]Error: Invalid source filter regex: {e}[/red]")
+            sys.exit(1)
+
+    return filtered
+
+
 def load_config(config_path: str | Path) -> dict[str, Any]:
     """Load RSS feeds configuration from YAML file."""
     path = Path(config_path)
@@ -444,8 +513,16 @@ def format_entries(
     include_summary: bool = False,
     time: bool = False,
     order: Literal["asc", "desc"] = "asc",
+    format_template: Optional[str] = None,
+    date_format: str = "%Y-%m-%d",
+    filter_title: Optional[str] = None,
+    filter_source: Optional[str] = None,
 ) -> str:
     """Format feed entries in a clean, LLM-friendly format."""
+    # Get feed title for source name
+    source = feed.feed.get("title", "Unknown")
+
+    # Convert entries to (datetime, source, entry) tuples
     dt_entries = []
     for entry in feed.entries:
         # Use feedparser's built-in date parsing
@@ -454,11 +531,14 @@ def format_entries(
             dt = datetime(*dt[:6])  # Convert time tuple to datetime
         else:
             dt = datetime.now()  # Fallback to current time
-        dt_entries.append((dt, entry))
+        dt_entries.append((dt, source, entry))
+
+    # Sort by date
     dt_entries.sort(key=lambda x: x[0], reverse=True)
     if order == "asc":
         dt_entries = list(reversed(dt_entries))
 
+    # Apply max_entries limit
     if max_entries:
         if order == "asc":
             dt_entries = dt_entries[:max_entries]
@@ -466,25 +546,22 @@ def format_entries(
             # descending: take first N
             dt_entries = dt_entries[:max_entries]
 
+    # Apply exclude_urls filter
     if exclude_urls:
-        dt_entries = [(dt, entry) for dt, entry in dt_entries if entry.link not in exclude_urls]
+        dt_entries = [(dt, src, entry) for dt, src, entry in dt_entries if entry.link not in exclude_urls]
 
+    # Apply custom filters
+    dt_entries = apply_filters(dt_entries, filter_title, filter_source)
+
+    # Handle time parameter (overrides date_format)
+    if time and not format_template:
+        date_format = "%Y-%m-%d %H:%M"
+
+    # Format output
     output = []
-    for dt, entry in dt_entries:
-        title = entry.title
-        link = entry.link
-
-        if time:
-            # Format with time
-            output.append(f"{dt.strftime('%Y-%m-%d %H:%M')} {title} <{link}>")
-        else:
-            # Format without time (default)
-            output.append(f"{dt.strftime('%Y-%m-%d')} {title} <{link}>")
-
-        if include_summary:
-            summary = get_entry_summary(entry)
-            if summary:
-                output.append(f"  Summary: {summary}")
+    for dt, src, entry in dt_entries:
+        formatted = format_entry(entry, src, dt, format_template, date_format, include_summary)
+        output.append(formatted)
 
     return "\n".join(output)
 
@@ -575,6 +652,10 @@ def format_multi_feed_output(
     config: dict[str, Any],
     max_entries: Optional[int] = None,
     include_summary: bool = False,
+    format_template: Optional[str] = None,
+    date_format: str = "%Y-%m-%d",
+    filter_title: Optional[str] = None,
+    filter_source: Optional[str] = None,
 ) -> str:
     """Format output for multiple feeds, grouped by domain."""
     output = []
@@ -622,11 +703,13 @@ def format_multi_feed_output(
     if max_entries:
         dt_entries = dt_entries[:max_entries]
 
+    # Apply filters
+    dt_entries = apply_filters(dt_entries, filter_title, filter_source)
+
     # Format output
     for dt, source, entry in dt_entries:
-        title = entry.title
-        link = entry.link
-        output.append(f"{dt.strftime('%Y-%m-%d')} [{source}] {title} <{link}>")
+        formatted = format_entry(entry, source, dt, format_template, date_format, include_summary=include_summary)
+        output.append(formatted)
 
         if include_summary:
             summary = get_entry_summary(entry)
@@ -656,6 +739,10 @@ def format_multi_feed_output(
 @click.option("--validate-all", is_flag=True, help="Validate all feeds in config (requires --config)")
 @click.option("--validate-verbose", "-v", is_flag=True, help="Show detailed validation info")
 @click.option("--discover", is_flag=True, help="Discover RSS/Atom feeds from a website URL")
+@click.option("--format", "-f", type=str, help="Custom output format template (e.g., '{date} {title} <{link}>')")
+@click.option("--date-format", type=str, default="%Y-%m-%d", help="Custom date format (strftime, default: %Y-%m-%d)")
+@click.option("--filter-title", type=str, help="Filter entries by title (regex pattern)")
+@click.option("--filter-source", type=str, help="Filter entries by source name (regex pattern)")
 def main(
     url: Optional[str],
     exclude_url: tuple[str, ...],
@@ -676,6 +763,10 @@ def main(
     validate_all: bool,
     validate_verbose: bool,
     discover: bool,
+    format: Optional[str],
+    date_format: str,
+    filter_title: Optional[str],
+    filter_source: Optional[str],
 ) -> None:
     """
     Read RSS feeds and display them in a compact format.
@@ -844,7 +935,9 @@ def main(
             console.print(json_lib.dumps(output_data, indent=2))
         else:
             # Text output with domain grouping
-            output = format_multi_feed_output(fetched_feeds, cfg, max_entries, summary)
+            output = format_multi_feed_output(
+                fetched_feeds, cfg, max_entries, summary, format, date_format, filter_title, filter_source
+            )
             console.print(output)
 
         if show_cache_stats and cache:
@@ -887,7 +980,16 @@ def main(
         from typing import cast
 
         output = format_entries(
-            feed, list(exclude_url), max_entries, summary, time, cast(Literal["asc", "desc"], order)
+            feed,
+            list(exclude_url),
+            max_entries,
+            summary,
+            time,
+            cast(Literal["asc", "desc"], order),
+            format,
+            date_format,
+            filter_title,
+            filter_source,
         )
         console.print(output)
 
