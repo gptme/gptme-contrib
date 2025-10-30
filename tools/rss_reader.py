@@ -69,6 +69,144 @@ class FeedValidationResult:
         self.warnings.append(message)
 
 
+@dataclass
+class SearchHistoryEntry:
+    """Entry in search history."""
+
+    timestamp: str
+    query: str
+    field: str
+    results_count: int
+
+
+def load_search_history(cache_dir: Path | str = "~/.cache/rss_reader") -> list[SearchHistoryEntry]:
+    """Load search history from file."""
+    cache_path = Path(cache_dir).expanduser() / "search_history.json"
+    if not cache_path.exists():
+        return []
+
+    try:
+        with open(cache_path, "r") as f:
+            data = json_lib.load(f)
+        return [SearchHistoryEntry(**entry) for entry in data]
+    except (json_lib.JSONDecodeError, TypeError):
+        return []
+
+
+def save_to_search_history(
+    query: str,
+    field: str,
+    results_count: int,
+    cache_dir: Path | str = "~/.cache/rss_reader",
+    max_entries: int = 50,
+) -> None:
+    """Save search to history file."""
+    cache_path = Path(cache_dir).expanduser()
+    cache_path.mkdir(parents=True, exist_ok=True)
+    history_path = cache_path / "search_history.json"
+
+    # Load existing history
+    history = load_search_history(cache_dir)
+
+    # Add new entry
+    new_entry = SearchHistoryEntry(
+        timestamp=datetime.now().isoformat(), query=query, field=field, results_count=results_count
+    )
+
+    history.append(new_entry)
+
+    # Keep only last max_entries
+    history = history[-max_entries:]
+
+    # Save to file
+    with open(history_path, "w") as f:
+        json_lib.dump(
+            [
+                {"timestamp": e.timestamp, "query": e.query, "field": e.field, "results_count": e.results_count}
+                for e in history
+            ],
+            f,
+            indent=2,
+        )
+
+
+def format_search_history(history: list[SearchHistoryEntry]) -> str:
+    """Format search history for display."""
+    if not history:
+        return "No search history found."
+
+    output = ["Search History (most recent first):\n"]
+    for entry in reversed(history[-20:]):  # Show last 20
+        dt = datetime.fromisoformat(entry.timestamp)
+        output.append(
+            f"  {dt.strftime('%Y-%m-%d %H:%M')} - '{entry.query}' in {entry.field} ({entry.results_count} results)"
+        )
+
+    return "\n".join(output)
+
+
+def search_entries(
+    entries: list[tuple[datetime, str, Any]],
+    query: str,
+    field: str = "all",
+) -> list[tuple[datetime, str, Any]]:
+    """Search entries for query in specified field.
+
+    Args:
+        entries: List of (datetime, source, entry) tuples
+        query: Search query (regex pattern)
+        field: Field to search in ('title', 'summary', 'link', 'all')
+
+    Returns:
+        Filtered list of entries matching the search query
+    """
+    if not query:
+        return entries
+
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+    except re.error as e:
+        console.print(f"[red]Invalid regex pattern: {e}[/red]")
+        return entries
+
+    filtered = []
+    for dt, source, entry in entries:
+        match = False
+
+        if field in ("title", "all"):
+            if pattern.search(entry.title):
+                match = True
+
+        if field in ("summary", "all"):
+            summary = getattr(entry, "summary", "") or getattr(entry, "description", "")
+            if summary and pattern.search(summary):
+                match = True
+
+        if field in ("link", "all"):
+            if pattern.search(entry.link):
+                match = True
+
+        if match:
+            filtered.append((dt, source, entry))
+
+    return filtered
+
+
+def parse_date(entry: Any) -> datetime:
+    """Parse date from feed entry.
+
+    Args:
+        entry: Feed entry with published_parsed or updated_parsed
+
+    Returns:
+        Datetime object or current time if no date found
+    """
+    dt = entry.get("updated_parsed") or entry.get("published_parsed")
+    if dt:
+        return datetime(*dt[:6])  # Convert time tuple to datetime
+    return datetime.now()  # Fallback to current time
+
+
 class FeedCache:
     """Simple file-based cache for RSS feeds with TTL support."""
 
@@ -919,6 +1057,15 @@ def format_by_tag_groups(
     default="domain",
     help="Group output by domain, tag, or source",
 )
+@click.option("--search", "-S", type=str, help="Search entries by query (regex pattern)")
+@click.option(
+    "--search-in",
+    type=click.Choice(["title", "summary", "link", "all"]),
+    default="all",
+    help="Field to search in (default: all)",
+)
+@click.option("--search-history", "search_history_flag", is_flag=True, help="Show recent search queries")
+@click.option("--save-search/--no-save-search", default=True, help="Save search to history (default: true)")
 def main(
     url: Optional[str],
     exclude_url: tuple[str, ...],
@@ -947,6 +1094,10 @@ def main(
     tag_match: str,
     list_tags: bool,
     group_by: str,
+    search: Optional[str],
+    search_in: str,
+    search_history_flag: bool,
+    save_search: bool,
 ) -> None:
     """
     Read RSS feeds and display them in a compact format.
@@ -1080,6 +1231,12 @@ def main(
 
         return
 
+    # Show search history if requested
+    if search_history_flag:
+        history = load_search_history(cache_dir)
+        console.print(format_search_history(history))
+        return
+
     # Multi-feed mode (config-based)
     if config:
         cfg = load_config(config)
@@ -1135,13 +1292,60 @@ def main(
                 all_entries = []
                 for source_name, feed in fetched_feeds.items():
                     for entry in feed.entries:
-                        all_entries.append((source_name, entry))
+                        # Convert to (datetime, source, entry) tuple format
+                        pub_time = parse_date(entry)
+                        all_entries.append((pub_time, source_name, entry))
 
+                # Apply search if specified
+                if search:
+                    original_count = len(all_entries)
+                    all_entries = search_entries(all_entries, search, search_in)
+                    if save_search:
+                        save_to_search_history(search, search_in, len(all_entries), cache_dir)
+                    console.print(
+                        f"[dim]Found {len(all_entries)}/{original_count} entries matching '{search}' in {search_in}[/dim]\n"
+                    )
+
+                # Convert back to (source, entry) format for format_by_tag_groups
+                entries_for_format = [(source, entry) for dt, source, entry in all_entries]
                 output = format_by_tag_groups(
-                    all_entries, cfg, max_entries, summary, format, date_format, filter_title, filter_source
+                    entries_for_format, cfg, max_entries, summary, format, date_format, filter_title, filter_source
                 )
             else:
                 # Domain or source grouping (existing behavior)
+                # Apply search to fetched feeds if specified
+                if search:
+                    # Convert to entry list, apply search, convert back
+                    all_entries = []
+                    for source_name, feed in fetched_feeds.items():
+                        for entry in feed.entries:
+                            pub_time = parse_date(entry)
+                            all_entries.append((pub_time, source_name, entry))
+
+                    original_count = len(all_entries)
+                    all_entries = search_entries(all_entries, search, search_in)
+
+                    if save_search:
+                        save_to_search_history(search, search_in, len(all_entries), cache_dir)
+
+                    console.print(
+                        f"[dim]Found {len(all_entries)}/{original_count} entries matching '{search}' in {search_in}[/dim]\n"
+                    )
+
+                    # Convert back to fetched_feeds structure
+                    filtered_feeds = {}
+                    for dt, source_name, entry in all_entries:
+                        if source_name not in filtered_feeds:
+                            # Create a new feed object with filtered entries
+                            original_feed = fetched_feeds[source_name]
+                            filtered_feed = feedparser.FeedParserDict()
+                            filtered_feed.feed = original_feed.feed
+                            filtered_feed.entries = []
+                            filtered_feeds[source_name] = filtered_feed
+                        filtered_feeds[source_name].entries.append(entry)
+
+                    fetched_feeds = filtered_feeds
+
                 output = format_multi_feed_output(
                     fetched_feeds, cfg, max_entries, summary, format, date_format, filter_title, filter_source
                 )
@@ -1185,6 +1389,27 @@ def main(
     else:
         # Text output
         from typing import cast
+
+        # Apply search if specified
+        if search:
+            # Convert entries to searchable format
+            searchable_entries: list[tuple[datetime, str, Any]] = []
+            for entry in feed.entries:
+                pub_time = parse_date(entry)
+                searchable_entries.append((pub_time, "feed", entry))
+
+            original_count = len(searchable_entries)
+            searchable_entries = search_entries(searchable_entries, search, search_in)
+
+            if save_search:
+                save_to_search_history(search, search_in, len(searchable_entries), cache_dir)
+
+            console.print(
+                f"[dim]Found {len(searchable_entries)}/{original_count} entries matching '{search}' in {search_in}[/dim]\n"
+            )
+
+            # Convert back to feed structure
+            feed.entries = [entry for _, _, entry in searchable_entries]
 
         output = format_entries(
             feed,
