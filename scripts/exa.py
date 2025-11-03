@@ -85,7 +85,7 @@ class ExaSearch:
                 response = self.client.search(
                     query,
                     num_results=num_results,
-                    use_autoprompt=True,
+                    # use_autoprompt=True,
                 )
 
                 # Process search results for sources
