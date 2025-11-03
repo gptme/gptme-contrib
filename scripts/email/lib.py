@@ -13,6 +13,7 @@ from typing import Optional
 
 from communication_utils.state.locks import FileLock, LockError
 from communication_utils.state.tracking import ConversationTracker, MessageState
+from communication_utils.rate_limiting.limiters import RateLimiter
 
 import markdown
 
@@ -89,6 +90,9 @@ class AgentEmail:
         # State files for tracking
         self.processed_state_file = self.email_dir / "processed_state.txt"
         self.locks_dir = self.email_dir / "locks"
+
+        # Rate limiting for email sending (1 request per second)
+        self.rate_limiter = RateLimiter.for_platform("email")
 
         # Initialize conversation tracker for reply state management
         self.tracker = ConversationTracker(self.locks_dir)
@@ -459,6 +463,13 @@ class AgentEmail:
             if account:
                 msmtp_cmd.extend(["-a", account])
             msmtp_cmd.append(recipient)
+
+            # Check rate limit before sending
+            if not self.rate_limiter.can_proceed():
+                wait_time = self.rate_limiter.time_until_ready()
+                print(f"Rate limit reached. Waiting {wait_time:.1f}s...")
+                if not self.rate_limiter.wait_if_needed(max_wait=60):
+                    raise RuntimeError("Rate limit timeout - could not send within 60s")
 
             # Send MIME message via msmtp
             subprocess.run(
