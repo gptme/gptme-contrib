@@ -529,6 +529,12 @@ def show(task_id):
     help="Sort by state, creation date, name, or completion percentage",
 )
 @click.option(
+    "--state",
+    type=str,
+    default=None,
+    help="Filter by state (e.g. new, active, done)",
+)
+@click.option(
     "--active-only",
     is_flag=True,
     help="Only show new and active tasks",
@@ -539,11 +545,18 @@ def show(task_id):
     default=None,
     help="Filter by context tag (e.g., @coding, @research)",
 )
-def list_(sort, active_only, context):
+def list_(sort, state, active_only, context):
     """List all tasks in a table format."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
+
+    # TODO: validate state
+    filter_states = None
+    if state:
+        filter_states = [state]
+    if active_only:
+        filter_states = ["new", "active"]
 
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
@@ -559,8 +572,8 @@ def list_(sort, active_only, context):
 
     # Filter tasks if active-only flag is set
     tasks = all_tasks
-    if active_only:
-        tasks = [task for task in all_tasks if task.state in ["new", "active"]]
+    if filter_states:
+        tasks = [task for task in all_tasks if task.state in filter_states]
         if not tasks:
             console.print("[yellow]No new or active tasks found[/]")
             return
