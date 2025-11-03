@@ -188,9 +188,7 @@ def read(message_id: str, thread: bool = False, thread_only: bool = False) -> No
     "from_address",
     help="Custom sender address (defaults to bob@superuserlabs.org)",
 )
-def reply(
-    message_id: str, content: str | None = None, from_address: str | None = None
-) -> None:
+def reply(message_id: str, content: str | None = None, from_address: str | None = None) -> None:
     """Reply to message.
 
     If CONTENT is not provided, opens an editor to compose the reply.
@@ -346,9 +344,7 @@ def thread(message_id: str, structure: bool = False, stats: bool = False) -> Non
             subject = headers.get("Subject", "No Subject")
             folder = msg["folder"]
 
-            click.echo(
-                f"{i + 1:2d}. [{folder:7s}] {date} | {sender:25s} | {subject[:35]}{marker}"
-            )
+            click.echo(f"{i + 1:2d}. [{folder:7s}] {date} | {sender:25s} | {subject[:35]}{marker}")
 
     else:
         # Show full thread (same as read --thread)
@@ -420,9 +416,7 @@ def list_completed(status: str) -> None:
         else:
             details = "Unknown"
 
-        click.echo(
-            f"{status_val:<15} | {completed_at:<20} | {details[:40]:<40} | {msg_id}"
-        )
+        click.echo(f"{status_val:<15} | {completed_at:<20} | {details[:40]:<40} | {msg_id}")
 
 
 @cli.command()
@@ -526,9 +520,7 @@ def process_unreplied(dry_run: bool) -> None:
             if result.returncode == 0:
                 click.echo(f"Successfully processed email from {sender}")
             else:
-                click.echo(
-                    f"Failed to process email from {sender}: {result.stderr}", err=True
-                )
+                click.echo(f"Failed to process email from {sender}: {result.stderr}", err=True)
 
         except subprocess.TimeoutExpired:
             click.echo(f"Timeout processing email from {sender}", err=True)
@@ -570,11 +562,7 @@ def check_completion_status(message_id: str) -> None:
         click.echo("\nEntries in replies_state.json:")
         matching_entries = []
         for stored_id, data in replies_data.items():
-            if (
-                stored_id == message_id
-                or stored_id == normalized_id
-                or stored_id == with_brackets
-            ):
+            if stored_id == message_id or stored_id == normalized_id or stored_id == with_brackets:
                 matching_entries.append((stored_id, data))
 
         if matching_entries:

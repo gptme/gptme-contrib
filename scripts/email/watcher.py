@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+from communication_utils.state.locks import FileLock, LockError
 from lib import AgentEmail
 
 # Configuration
@@ -40,9 +41,7 @@ def run_mbsync():
     for label in ["gmail-Bob", "gmail-Bob-sent"]:
         try:
             logging.info(f"Running mbsync for {label}...")
-            result = subprocess.run(
-                ["mbsync", label], capture_output=True, text=True, timeout=60
-            )
+            result = subprocess.run(["mbsync", label], capture_output=True, text=True, timeout=60)
             if result.returncode == 0:
                 logging.info(f"mbsync {label} completed successfully")
             else:
@@ -84,9 +83,7 @@ def find_email_file(message_id: str) -> Path | None:
     return None
 
 
-def run_gptme_for_email(
-    message_id: str, subject: str, sender: str, email_file: Path
-) -> bool:
+def run_gptme_for_email(message_id: str, subject: str, sender: str, email_file: Path) -> bool:
     """Run gptme to process an email. Returns True if successful."""
     gptme_cmd = [
         "gptme",
@@ -112,12 +109,8 @@ def run_gptme_for_email(
             print(f"✅ SUCCESS: Email from {sender} processed successfully")
             logging.info(f"Successfully processed email from {sender}")
         else:
-            print(
-                f"❌ FAILED: Email from {sender} failed (exit code {result.returncode})"
-            )
-            logging.error(
-                f"Failed to process email from {sender} (exit code {result.returncode})"
-            )
+            print(f"❌ FAILED: Email from {sender} failed (exit code {result.returncode})")
+            logging.error(f"Failed to process email from {sender} (exit code {result.returncode})")
         print(f"{'=' * 60}\n")
 
         return success
@@ -164,14 +157,13 @@ def process_unreplied_emails(limit: int | None = None):
             message_id, subject, sender = unreplied[0]
             logging.info(f"Processing single email from {sender}: {subject}")
 
-            if email._acquire_lock(message_id):
-                try:
+            lock_file = email.locks_dir / f"{email._format_filename(message_id)}.lock"
+            try:
+                with FileLock(lock_file, timeout=0):
                     process_single_email(message_id, subject, sender)
                     logging.info("Processed 1 unreplied email")
                     return True
-                finally:
-                    email._release_lock(message_id)
-            else:
+            except LockError:
                 logging.info(f"Email {message_id} is already being processed")
                 return False
         else:
