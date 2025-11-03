@@ -23,7 +23,7 @@ repos:
       flask,
       discord.py,
       openai,
-      frontmatter,
+      python-frontmatter,
       types-tabulate,
       types-docutils,
       types-PyYAML,
