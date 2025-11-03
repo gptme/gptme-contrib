@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from communication_utils.state.locks import FileLock, LockError
+from communication_utils.state.tracking import ConversationTracker, MessageState
 
 import markdown
 
@@ -86,12 +87,14 @@ class AgentEmail:
         )
 
         # State files for tracking
-        self.replies_state_file = self.email_dir / "replies_state.json"
         self.processed_state_file = self.email_dir / "processed_state.txt"
         self.locks_dir = self.email_dir / "locks"
 
+        # Initialize conversation tracker for reply state management
+        self.tracker = ConversationTracker(self.locks_dir)
+
         self._validate_structure()
-        self._ensure_state_files()
+        self._ensure_processed_state()
 
     def _validate_structure(self) -> None:
         """Ensure email directory structure exists."""
@@ -102,16 +105,10 @@ class AgentEmail:
             if not dir_path.exists():
                 raise RuntimeError(f"Required directory missing: {dir_path}")
 
-    def _ensure_state_files(self) -> None:
-        """Ensure state tracking files and directories exist."""
-        import json
-
-        # Create locks directory
+    def _ensure_processed_state(self) -> None:
+        """Ensure processed state file exists (tracker handles reply state)."""
+        # Create locks directory (also used by ConversationTracker)
         self.locks_dir.mkdir(exist_ok=True)
-
-        # Initialize replies state file if it doesn't exist
-        if not self.replies_state_file.exists():
-            self.replies_state_file.write_text(json.dumps({}))
 
         # Initialize processed state file if it doesn't exist
         if not self.processed_state_file.exists():
@@ -119,73 +116,48 @@ class AgentEmail:
 
     def _is_replied(self, message_id: str) -> bool:
         """Check if we've already replied to this message."""
-        import json
+        # Normalize message ID format
+        normalized_id = message_id.strip("<>")
+        conversation_id = "email"  # Single conversation for all emails
 
-        try:
-            replies_data = json.loads(self.replies_state_file.read_text())
-            return message_id in replies_data
-        except (json.JSONDecodeError, FileNotFoundError):
-            return False
+        msg_info = self.tracker.get_message_state(conversation_id, normalized_id)
+        return msg_info is not None and msg_info.state == MessageState.COMPLETED
 
     def _mark_replied(self, original_message_id: str, reply_message_id: str) -> None:
         """Mark a message as replied to."""
-        import json
-
-        try:
-            replies_data = json.loads(self.replies_state_file.read_text())
-        except (json.JSONDecodeError, FileNotFoundError):
-            replies_data = {}
-
-        # Normalize message ID format - always store with angle brackets for consistency
+        # Normalize message ID format
         normalized_id = original_message_id.strip("<>")
-        with_brackets = f"<{normalized_id}>"
+        conversation_id = "email"  # Single conversation for all emails
 
-        replies_data[with_brackets] = {
-            "status": "replied",
-            "reply_id": reply_message_id,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        self.replies_state_file.write_text(json.dumps(replies_data, indent=2))
+        # Set state to COMPLETED with reply info
+        self.tracker.set_message_state(
+            conversation_id=conversation_id, message_id=normalized_id, state=MessageState.COMPLETED
+        )
 
     def _mark_no_reply_needed(self, message_id: str, reason: str = "no reply needed") -> None:
         """Mark a message as processed but no reply needed."""
-        import json
-
-        try:
-            replies_data = json.loads(self.replies_state_file.read_text())
-        except (json.JSONDecodeError, FileNotFoundError):
-            replies_data = {}
-
-        # Normalize message ID format - always store with angle brackets for consistency
+        # Normalize message ID format
         normalized_id = message_id.strip("<>")
-        with_brackets = f"<{normalized_id}>"
+        conversation_id = "email"  # Single conversation for all emails
 
-        replies_data[with_brackets] = {
-            "status": "no_reply_needed",
-            "reason": reason,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        self.replies_state_file.write_text(json.dumps(replies_data, indent=2))
+        # Set state to NO_REPLY_NEEDED
+        self.tracker.set_message_state(
+            conversation_id=conversation_id,
+            message_id=normalized_id,
+            state=MessageState.NO_REPLY_NEEDED,
+        )
 
     def _is_completed(self, message_id: str) -> bool:
         """Check if message has been completed (replied or marked as no reply needed)."""
-        import json
+        # Normalize message ID format
+        normalized_id = message_id.strip("<>")
+        conversation_id = "email"  # Single conversation for all emails
 
-        try:
-            replies_data = json.loads(self.replies_state_file.read_text())
-            # Normalize message ID format - try both with and without angle brackets
-            normalized_id = message_id.strip("<>")
-            with_brackets = f"<{normalized_id}>"
-
-            return (
-                message_id in replies_data
-                or normalized_id in replies_data
-                or with_brackets in replies_data
-            )
-        except (json.JSONDecodeError, FileNotFoundError):
-            return False
+        msg_info = self.tracker.get_message_state(conversation_id, normalized_id)
+        return msg_info is not None and msg_info.state in (
+            MessageState.COMPLETED,
+            MessageState.NO_REPLY_NEEDED,
+        )
 
     def get_unreplied_emails(self) -> list[tuple[str, str, str]]:
         """Get list of emails that haven't been replied to.
