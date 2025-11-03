@@ -11,6 +11,8 @@ from email.utils import format_datetime
 from pathlib import Path
 from typing import Optional
 
+from communication_utils.state.locks import FileLock, LockError
+
 import markdown
 
 
@@ -80,9 +82,7 @@ class AgentEmail:
             os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/Bob"))
         )
         self.external_maildir_sent = Path(
-            os.getenv(
-                "MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Bob/Sent")
-            )
+            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Bob/Sent"))
         )
 
         # State files for tracking
@@ -117,42 +117,6 @@ class AgentEmail:
         if not self.processed_state_file.exists():
             self.processed_state_file.write_text("")
 
-    def _acquire_lock(self, message_id: str, timeout: int = 300) -> bool:
-        """Acquire lock for processing an email.
-
-        Args:
-            message_id: ID of message to lock
-            timeout: Lock timeout in seconds
-
-        Returns:
-            True if lock acquired, False if already locked
-        """
-        import time
-
-        lock_file = self.locks_dir / f"{self._format_filename(message_id)}.lock"
-
-        # Check for existing lock
-        if lock_file.exists():
-            try:
-                lock_time = float(lock_file.read_text().strip())
-                if time.time() - lock_time < timeout:
-                    return False  # Still locked
-                else:
-                    # Stale lock, remove it
-                    lock_file.unlink()
-            except (ValueError, FileNotFoundError):
-                # Invalid lock file, remove it
-                lock_file.unlink(missing_ok=True)
-
-        # Create lock
-        lock_file.write_text(str(time.time()))
-        return True
-
-    def _release_lock(self, message_id: str) -> None:
-        """Release lock for an email."""
-        lock_file = self.locks_dir / f"{self._format_filename(message_id)}.lock"
-        lock_file.unlink(missing_ok=True)
-
     def _is_replied(self, message_id: str) -> bool:
         """Check if we've already replied to this message."""
         import json
@@ -184,9 +148,7 @@ class AgentEmail:
 
         self.replies_state_file.write_text(json.dumps(replies_data, indent=2))
 
-    def _mark_no_reply_needed(
-        self, message_id: str, reason: str = "no reply needed"
-    ) -> None:
+    def _mark_no_reply_needed(self, message_id: str, reason: str = "no reply needed") -> None:
         """Mark a message as processed but no reply needed."""
         import json
 
@@ -349,19 +311,17 @@ class AgentEmail:
         processed_count = 0
 
         for message_id, subject, sender in unreplied:
-            # Try to acquire lock
-            if not self._acquire_lock(message_id):
-                print(f"Skipping {message_id} (already being processed)")
-                continue
-
+            # Try to acquire lock (non-blocking with timeout=0)
+            lock_file = self.locks_dir / f"{self._format_filename(message_id)}.lock"
             try:
-                print(f"Processing unreplied email from {sender}: {subject}")
-                callback_func(message_id, subject, sender)
-                processed_count += 1
+                with FileLock(lock_file, timeout=0):
+                    print(f"Processing unreplied email from {sender}: {subject}")
+                    callback_func(message_id, subject, sender)
+                    processed_count += 1
+            except LockError:
+                print(f"Skipping {message_id} (already being processed)")
             except Exception as e:
                 print(f"Error processing {message_id}: {e}")
-            finally:
-                self._release_lock(message_id)
 
         return processed_count
 
@@ -424,9 +384,7 @@ class AgentEmail:
         # Add threading headers if needed
         if reply_to:
             # Ensure reply_to has angle brackets
-            reply_to_formatted = (
-                reply_to if reply_to.startswith("<") else f"<{reply_to}>"
-            )
+            reply_to_formatted = reply_to if reply_to.startswith("<") else f"<{reply_to}>"
             headers.append(f"In-Reply-To: {reply_to_formatted}")
         if references:
             # Ensure each reference has angle brackets
@@ -499,9 +457,7 @@ class AgentEmail:
             msg["From"] = headers.get("From") or sender
             msg["To"] = recipient
             msg["Subject"] = headers.get("Subject", "")
-            msg["Date"] = headers.get(
-                "Date", format_datetime(datetime.now(timezone.utc))
-            )
+            msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
             msg["Message-ID"] = headers.get("Message-ID", "")
             if "In-Reply-To" in headers:
                 msg["In-Reply-To"] = headers["In-Reply-To"]
@@ -561,9 +517,7 @@ class AgentEmail:
         if in_reply_to:
             try:
                 self._mark_replied(in_reply_to, message_id)
-                print(
-                    f"Marked original message {in_reply_to} as replied to by {message_id}"
-                )
+                print(f"Marked original message {in_reply_to} as replied to by {message_id}")
             except Exception as e:
                 print(f"Warning: Failed to mark original message as replied: {e}")
 
@@ -880,9 +834,7 @@ class AgentEmail:
         # Split headers and body
         parts = content.split("\n\n", 1)
         if len(parts) != 2:
-            print(
-                f"Warning: Message missing body separator, content: {content[:100]}..."
-            )
+            print(f"Warning: Message missing body separator, content: {content[:100]}...")
             # Try to handle messages with just headers
             if "\n" in content:
                 return self._parse_headers(content), ""
@@ -940,9 +892,7 @@ class AgentEmail:
         """
         try:
             # Check if msmtp is installed
-            subprocess.run(
-                ["msmtp", "--version"], capture_output=True, check=True, timeout=10
-            )
+            subprocess.run(["msmtp", "--version"], capture_output=True, check=True, timeout=10)
             return True
         except (
             subprocess.CalledProcessError,
