@@ -145,7 +145,9 @@ class TweetDraft:
             "text": self.text,
             "type": self.type,
             "in_reply_to": self.in_reply_to,
-            "scheduled_time": (self.scheduled_time.isoformat() if self.scheduled_time else None),
+            "scheduled_time": (
+                self.scheduled_time.isoformat() if self.scheduled_time else None
+            ),
             "context": self.context,
             "created_at": self.created_at.isoformat(),
         }
@@ -157,7 +159,11 @@ class TweetDraft:
             text=data["text"],
             type=data["type"],
             in_reply_to=data["in_reply_to"],
-            scheduled_time=(datetime.fromisoformat(data["scheduled_time"]) if data["scheduled_time"] else None),
+            scheduled_time=(
+                datetime.fromisoformat(data["scheduled_time"])
+                if data["scheduled_time"]
+                else None
+            ),
             context=data["context"],
         )
         draft.created_at = datetime.fromisoformat(data["created_at"])
@@ -203,7 +209,9 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
     return path
 
 
-def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, max_tweets_per_page=100):
+def get_conversation_thread(
+    client, tweet_id_or_conversation_id, max_pages=3, max_tweets_per_page=100
+):
     """
     Retrieve the complete conversation thread for a given tweet ID or conversation ID.
 
@@ -254,7 +262,9 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
 
                     # Add users from the original tweet response
                     if tweet_response.includes and "users" in tweet_response.includes:
-                        all_users.update({user.id: user for user in tweet_response.includes["users"]})
+                        all_users.update(
+                            {user.id: user for user in tweet_response.includes["users"]}
+                        )
                 else:
                     # If we couldn't get the tweet, just use the ID as conversation ID
                     all_tweets = {}
@@ -309,13 +319,18 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
 
                 # Add users to our collection
                 if conversation.includes and "users" in conversation.includes:
-                    all_users.update({user.id: user for user in conversation.includes["users"]})
+                    all_users.update(
+                        {user.id: user for user in conversation.includes["users"]}
+                    )
             else:
                 # No data in this page
                 break
 
             # Check if there are more pages
-            if not hasattr(conversation, "meta") or "next_token" not in conversation.meta:
+            if (
+                not hasattr(conversation, "meta")
+                or "next_token" not in conversation.meta
+            ):
                 break
 
             next_token = conversation.meta["next_token"]
@@ -358,8 +373,12 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
                 "author": author_username,
                 "created_at": t.created_at.isoformat(),
                 "depth": depth,  # Add depth information for UI indentation
-                "replied_to_id": reply_structure.get(t.id),  # Which tweet this is replying to
-                "public_metrics": (t.public_metrics if hasattr(t, "public_metrics") else {}),
+                "replied_to_id": reply_structure.get(
+                    t.id
+                ),  # Which tweet this is replying to
+                "public_metrics": (
+                    t.public_metrics if hasattr(t, "public_metrics") else {}
+                ),
                 # Include referenced tweets if available
                 "referenced_tweets": [],
             }
@@ -374,7 +393,9 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
                             break
                     else:
                         # Tweet not found in the conversation
-                        logging.warning(f"Referenced tweet {ref.id} not found in conversation")
+                        logging.warning(
+                            f"Referenced tweet {ref.id} not found in conversation"
+                        )
                         continue
 
                     author = all_users.get(ref_tweet.author_id)
@@ -385,7 +406,9 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
                             "id": ref.id,
                             "text": ref_tweet.text if ref_tweet else "Unavailable",
                             "author": (
-                                author.username if ref_tweet and ref_tweet.author_id in all_users else "Unknown"
+                                author.username
+                                if ref_tweet and ref_tweet.author_id in all_users
+                                else "Unknown"
                             ),
                         }
                     )
@@ -393,7 +416,9 @@ def get_conversation_thread(client, tweet_id_or_conversation_id, max_pages=3, ma
             thread_context.append(thread_entry)
 
         # Log success
-        console.print(f"[blue]Retrieved {len(thread_context)} tweets from conversation {conversation_id}")
+        console.print(
+            f"[blue]Retrieved {len(thread_context)} tweets from conversation {conversation_id}"
+        )
 
         return thread_context
 
@@ -429,7 +454,9 @@ def move_draft(path: Path, new_status: str) -> Path:
     return new_path
 
 
-def find_draft(draft_id: str, status: Optional[str] = None, show_error: bool = True) -> Optional[Path]:
+def find_draft(
+    draft_id: str, status: Optional[str] = None, show_error: bool = True
+) -> Optional[Path]:
     """Find a draft by ID or path.
 
     Args:
@@ -460,7 +487,9 @@ def find_draft(draft_id: str, status: Optional[str] = None, show_error: bool = T
         # Search in specified directories
         search_dirs = [status_dirs[status]] if status else status_dirs.values()
         for dir in search_dirs:
-            for path in [dir / draft_id, (dir / draft_id).with_suffix(".yml")] + list(dir.glob(f"*{draft_id}*.yml")):
+            for path in [dir / draft_id, (dir / draft_id).with_suffix(".yml")] + list(
+                dir.glob(f"*{draft_id}*.yml")
+            ):
                 if path.exists():
                     return path
 
@@ -503,10 +532,14 @@ def cli(model: str | None = None) -> None:
 
 @cli.command()
 @click.argument("text")
-@click.option("--type", default="tweet", type=click.Choice(["tweet", "reply", "thread"]))
+@click.option(
+    "--type", default="tweet", type=click.Choice(["tweet", "reply", "thread"])
+)
 @click.option("--reply-to", help="Tweet ID to reply to")
 @click.option("--schedule", help="Schedule time (ISO format)")
-def draft(text: str, type: str, reply_to: Optional[str], schedule: Optional[str]) -> None:
+def draft(
+    text: str, type: str, reply_to: Optional[str], schedule: Optional[str]
+) -> None:
     """Create a new tweet draft"""
     scheduled_time = datetime.fromisoformat(schedule) if schedule else None
 
@@ -528,7 +561,9 @@ def draft(text: str, type: str, reply_to: Optional[str], schedule: Optional[str]
     help="Automatically approve drafts that pass all checks",
 )
 @click.option("--show-context", is_flag=True, help="Show full context for each draft")
-@click.option("--dry-run", is_flag=True, help="Don't prompt for actions, just show review results")
+@click.option(
+    "--dry-run", is_flag=True, help="Don't prompt for actions, just show review results"
+)
 def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
@@ -585,9 +620,13 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
             # Just show review results, don't prompt for action
             console.print("[yellow]Dry run - no action taken")
             console.print(f"[blue]Draft ID: {path.stem}[/blue]")
-            console.print("[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]")
+            console.print(
+                "[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]"
+            )
         else:
-            action = Prompt.ask("Action", choices=["approve", "reject", "skip", "edit"], default="skip")
+            action = Prompt.ask(
+                "Action", choices=["approve", "reject", "skip", "edit"], default="skip"
+            )
 
             if action == "approve":
                 move_draft(path, "approved")
@@ -623,7 +662,9 @@ def approve(draft_id: str) -> None:
 def reject(draft_id: str) -> None:
     """Reject a draft tweet by ID (works on both new and approved drafts)"""
     # Try to find draft in either new or approved directories
-    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(draft_id, "approved")
+    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
+        draft_id, "approved"
+    )
     if not draft_path:
         return
 
@@ -637,7 +678,9 @@ def reject(draft_id: str) -> None:
 def edit(draft_id: str, new_text: str) -> None:
     """Edit a draft tweet by ID (works on both new and approved drafts)"""
     # Try to find draft in either new or approved directories
-    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(draft_id, "approved")
+    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
+        draft_id, "approved"
+    )
     if not draft_path:
         return
 
@@ -745,7 +788,9 @@ def process_timeline_tweets(
             has_posted_reply = False
             for posted_file in POSTED_DIR.glob("*.yml"):
                 if tweet_id_str in posted_file.name:
-                    console.print(f"[yellow]Skip: Already replied to tweet {tweet_id_str}")
+                    console.print(
+                        f"[yellow]Skip: Already replied to tweet {tweet_id_str}"
+                    )
                     has_posted_reply = True
                     break
 
@@ -766,7 +811,11 @@ def process_timeline_tweets(
                     "public_metrics": tweet.public_metrics,
                     "author_metrics": (
                         {
-                            "followers": (author.public_metrics["followers_count"] if author else 0),
+                            "followers": (
+                                author.public_metrics["followers_count"]
+                                if author
+                                else 0
+                            ),
                         }
                         if author
                         else {}
@@ -777,12 +826,16 @@ def process_timeline_tweets(
             # Try to get conversation thread context if this is a reply
             if hasattr(tweet, "conversation_id") and tweet.conversation_id:
                 try:
-                    thread_tweets = get_conversation_thread(client, tweet.conversation_id)
+                    thread_tweets = get_conversation_thread(
+                        client, tweet.conversation_id
+                    )
                     if thread_tweets:
                         # Add thread context at both the root level (for eval/response) and in context (for storage)
                         tweet_data["thread_context"] = thread_tweets
                         tweet_data["context"]["thread_context"] = thread_tweets
-                        console.print(f"[blue]Added thread context with {len(thread_tweets)} tweets")
+                        console.print(
+                            f"[blue]Added thread context with {len(thread_tweets)} tweets"
+                        )
                 except Exception as e:
                     console.print(f"[yellow]Could not retrieve thread context: {e}")
 
@@ -799,13 +852,21 @@ def process_timeline_tweets(
 
                 if cached_eval:
                     eval_result = EvaluationResponse.from_dict(cached_eval)
-                    console.print(f"[blue]Cached Evaluation: {eval_result.action.upper()}")
-                    console.print(f"[blue]Cached Relevance: {eval_result.relevance}/100")
+                    console.print(
+                        f"[blue]Cached Evaluation: {eval_result.action.upper()}"
+                    )
+                    console.print(
+                        f"[blue]Cached Relevance: {eval_result.relevance}/100"
+                    )
                     console.print(f"[blue]Cached Priority: {eval_result.priority}/100")
                 else:
                     eval_result = None
 
-                response = TweetResponse.from_dict(cached_response) if cached_response else None
+                response = (
+                    TweetResponse.from_dict(cached_response)
+                    if cached_response
+                    else None
+                )
             else:
                 # Process tweet and cache results
                 eval_result, response = process_tweet(tweet_data)
@@ -824,8 +885,12 @@ def process_timeline_tweets(
                     in_reply_to=tweet.id if response.type == "reply" else None,
                     context={
                         "original_tweet": tweet_data,
-                        "evaluation": (asdict(eval_result) if eval_result is not None else None),  # Convert to dict
-                        "response_metadata": (asdict(response) if response is not None else None),  # Convert to dict
+                        "evaluation": (
+                            asdict(eval_result) if eval_result is not None else None
+                        ),  # Convert to dict
+                        "response_metadata": (
+                            asdict(response) if response is not None else None
+                        ),  # Convert to dict
                     },
                 )
 
@@ -841,7 +906,9 @@ def process_timeline_tweets(
                 if response.thread_needed and response.follow_up:
                     for i, follow_up in enumerate([response.follow_up], 1):
                         # Assert that eval_result is not None before using asdict()
-                        assert eval_result is not None, "eval_result should not be None in thread context"
+                        assert (
+                            eval_result is not None
+                        ), "eval_result should not be None in thread context"
 
                         thread_draft = TweetDraft(
                             text=follow_up,
@@ -854,14 +921,22 @@ def process_timeline_tweets(
                         )
                         if not dry_run:
                             thread_path = save_draft(thread_draft, "new")
-                            console.print(f"[green]Created thread draft {i}: {thread_path}")
+                            console.print(
+                                f"[green]Created thread draft {i}: {thread_path}"
+                            )
                             drafts_generated += 1
                         else:
                             console.print(f"[yellow]Would create thread draft {i}:")
                             console.print(f"[white]{thread_draft.text}")
 
-                        if not dry_run and max_drafts and drafts_generated >= max_drafts:
-                            console.print("[yellow]Reached maximum number of drafts, stopping...")
+                        if (
+                            not dry_run
+                            and max_drafts
+                            and drafts_generated >= max_drafts
+                        ):
+                            console.print(
+                                "[yellow]Reached maximum number of drafts, stopping..."
+                            )
                             return
 
             if times and tweets_processed >= times:
@@ -884,7 +959,9 @@ def process_timeline_tweets(
     type=int,
     help="Number of tweets to process before exiting",
 )
-def monitor(list_id: Optional[str], interval: int, dry_run: bool, times: Optional[int]) -> None:
+def monitor(
+    list_id: Optional[str], interval: int, dry_run: bool, times: Optional[int]
+) -> None:
     """Monitor timeline and generate draft replies"""
 
     console.print("[green]Starting timeline monitor...")
@@ -921,7 +998,9 @@ def monitor(list_id: Optional[str], interval: int, dry_run: bool, times: Optiona
 
             # Process tweets
             if dry_run:
-                console.print("[yellow]DRY RUN: Processing tweets but not saving drafts")
+                console.print(
+                    "[yellow]DRY RUN: Processing tweets but not saving drafts"
+                )
 
             process_timeline_tweets(
                 tweets.data,
@@ -956,10 +1035,18 @@ def monitor(list_id: Optional[str], interval: int, dry_run: bool, times: Optiona
     is_flag=True,
     help="Automatically approve drafts that pass all checks",
 )
-@click.option("--post-approved", is_flag=True, help="Post approved tweets after reviewing")
-@click.option("--dry-run", is_flag=True, help="Don't actually save drafts or post tweets")
-@click.option("--max-tweets", type=int, default=10, help="Maximum number of tweets to process")
-@click.option("--max-drafts", type=int, default=5, help="Maximum number of drafts to generate")
+@click.option(
+    "--post-approved", is_flag=True, help="Post approved tweets after reviewing"
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Don't actually save drafts or post tweets"
+)
+@click.option(
+    "--max-tweets", type=int, default=10, help="Maximum number of tweets to process"
+)
+@click.option(
+    "--max-drafts", type=int, default=5, help="Maximum number of drafts to generate"
+)
 @click.option("--skip-mentions", is_flag=True, help="Skip processing of mentions")
 @click.option("--skip-timeline", is_flag=True, help="Skip processing of timeline")
 def auto(
@@ -976,7 +1063,9 @@ def auto(
     console.print("[bold green]Starting automation cycle...[/bold green]")
 
     if skip_mentions and skip_timeline:
-        console.print("[yellow]Warning: Both mentions and timeline processing are skipped. Nothing to process.")
+        console.print(
+            "[yellow]Warning: Both mentions and timeline processing are skipped. Nothing to process."
+        )
         return
 
     # Initialize variables to track overall counts
@@ -1026,14 +1115,20 @@ def auto(
                 )
 
                 # Update counters
-                total_tweets_processed += min(len(mentions.data), max_tweets - total_tweets_processed)
+                total_tweets_processed += min(
+                    len(mentions.data), max_tweets - total_tweets_processed
+                )
             else:
                 console.print("[yellow]No mentions found")
         except Exception as e:
             console.print(f"[red]Error processing mentions: {e}")
 
     # Process timeline (if not skipped and still under limits)
-    if not skip_timeline and total_tweets_processed < max_tweets and total_drafts_generated < max_drafts:
+    if (
+        not skip_timeline
+        and total_tweets_processed < max_tweets
+        and total_drafts_generated < max_drafts
+    ):
         console.print("\n[bold]Processing timeline[/bold]")
         try:
             # Get timeline tweets
@@ -1067,10 +1162,14 @@ def auto(
 
             if tweets.data:
                 remaining_tweets = max_tweets - total_tweets_processed
-                console.print(f"Processing {min(len(tweets.data), remaining_tweets)} tweets from {source}")
+                console.print(
+                    f"Processing {min(len(tweets.data), remaining_tweets)} tweets from {source}"
+                )
 
                 if dry_run:
-                    console.print("[yellow]DRY RUN: Processing tweets but not saving drafts")
+                    console.print(
+                        "[yellow]DRY RUN: Processing tweets but not saving drafts"
+                    )
 
                 process_timeline_tweets(
                     tweets.data[:remaining_tweets],
@@ -1133,7 +1232,9 @@ def auto(
             approved_count += 1
         else:
             if approved_by_llm:
-                console.print("[blue]Draft passes checks but requires human review (--auto-approve to skip)")
+                console.print(
+                    "[blue]Draft passes checks but requires human review (--auto-approve to skip)"
+                )
             else:
                 console.print("[yellow]Draft needs improvements and human review")
             needs_review_count += 1
@@ -1167,7 +1268,9 @@ def auto(
                         console.print(f"[green]Posted tweet: {tweet_id}")
                         move_draft(path, "posted")
                     else:
-                        console.print("[red]Error: No response data from tweet creation")
+                        console.print(
+                            "[red]Error: No response data from tweet creation"
+                        )
                 except Exception as e:
                     console.print(f"[red]Error posting tweet: {e}")
 
@@ -1179,7 +1282,9 @@ def auto(
     console.print(f"Needs human review: {needs_review_count}")
 
     if needs_review_count > 0:
-        console.print("\n[yellow]Run the following command to review pending drafts:[/yellow]")
+        console.print(
+            "\n[yellow]Run the following command to review pending drafts:[/yellow]"
+        )
         console.print(f"[blue]{sys.argv[0]} review[/blue]")
 
 

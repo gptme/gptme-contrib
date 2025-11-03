@@ -154,7 +154,9 @@ async def check_permissions(bot_user: Optional[discord.ClientUser]) -> list[str]
 
             for perm, name in required_permissions:
                 if not getattr(permissions, perm):
-                    missing_permissions.append(f"Missing '{name}' permission in #{channel.name} ({guild.name})")
+                    missing_permissions.append(
+                        f"Missing '{name}' permission in #{channel.name} ({guild.name})"
+                    )
 
     return missing_permissions
 
@@ -165,7 +167,9 @@ async def fetch_discord_history(channel: discord.abc.Messageable) -> str:
     try:
         async for msg in channel.history(limit=100):
             author = bot_name if msg.author == bot.user else msg.author.name
-            messages.append(f'<message from="{author}" time="{msg.created_at}">{msg.content}</message>')
+            messages.append(
+                f'<message from="{author}" time="{msg.created_at}">{msg.content}</message>'
+            )
     except discord.Forbidden:
         logger.warning("Cannot read message history")
         return ""
@@ -206,7 +210,9 @@ async def async_step(
                 hide=True,
             )
             # Insert before last message
-            log = log.replace(messages=log.messages[:-1] + [context_msg] + log.messages[-1:])
+            log = log.replace(
+                messages=log.messages[:-1] + [context_msg] + log.messages[-1:]
+            )
         return log
 
     # Run step in thread pool to avoid blocking
@@ -246,7 +252,10 @@ async def async_step(
                 (m.content for m in reversed(current_log) if m.role == "assistant"),
                 "",
             )
-            has_runnable = any(tooluse.is_runnable for tooluse in ToolUse.iter_from_content(last_content))
+            has_runnable = any(
+                tooluse.is_runnable
+                for tooluse in ToolUse.iter_from_content(last_content)
+            )
             if not has_runnable:
                 break
 
@@ -339,7 +348,9 @@ def get_conversation(channel_id: ChannelID) -> Log:
     return Log(msgs)
 
 
-def check_rate_limit(user_id: int, channel: discord.abc.Messageable) -> tuple[bool, float]:
+def check_rate_limit(
+    user_id: int, channel: discord.abc.Messageable
+) -> tuple[bool, float]:
     """Check if user is rate limited.
 
     Returns:
@@ -348,7 +359,9 @@ def check_rate_limit(user_id: int, channel: discord.abc.Messageable) -> tuple[bo
     now = asyncio.get_event_loop().time()
 
     # Use lower rate limit for DMs during testing
-    effective_rate_limit = RATE_LIMIT * 0.5 if isinstance(channel, discord.DMChannel) else RATE_LIMIT
+    effective_rate_limit = (
+        RATE_LIMIT * 0.5 if isinstance(channel, discord.DMChannel) else RATE_LIMIT
+    )
 
     if user_id in rate_limits:
         time_since_last = now - rate_limits[user_id]
@@ -441,7 +454,9 @@ async def send_discord_message(
         # Handle messages that exceed Discord's limit
         if len(content) > DISCORD_MSG_LIMIT:
             logger.warning(f"Message too long ({len(content)} chars), truncating")
-            await channel.send(f"```diff\n- Message too long, truncating to {DISCORD_MSG_LIMIT} chars\n```")
+            await channel.send(
+                f"```diff\n- Message too long, truncating to {DISCORD_MSG_LIMIT} chars\n```"
+            )
             content = content[:1997] + "..."
 
         # Split long messages
@@ -464,7 +479,9 @@ async def send_discord_message(
 
     except discord.HTTPException as e:
         logger.error(f"Failed to send message: {e}")
-        await channel.send("```diff\n- Error: Message too complex. Try a shorter response.\n```")
+        await channel.send(
+            "```diff\n- Error: Message too complex. Try a shorter response.\n```"
+        )
         return current_response, True
 
 
@@ -505,7 +522,9 @@ async def process_message(
         # Send/update message
         had_error = False
         if accumulated_content:
-            current_response, had_error = await send_discord_message(channel, accumulated_content, current_response)
+            current_response, had_error = await send_discord_message(
+                channel, accumulated_content, current_response
+            )
 
         # Only append to log if this is the final message
         if not had_error and len(cleaned_content.strip()) > 0:
@@ -516,7 +535,9 @@ async def process_message(
     elif msg.role == "system":
         # Only show important system messages
         firstline = msg.content.split("\n", 1)[0].lower()
-        if "pre-commit" not in firstline and any(word in firstline for word in ["error", "warning", "failed"]):
+        if "pre-commit" not in firstline and any(
+            word in firstline for word in ["error", "warning", "failed"]
+        ):
             content = f"System: {msg.content[:1000]}..."
             await channel.send(content)
             had_error = True
@@ -618,7 +639,9 @@ async def dm(ctx: commands.Context) -> None:
         if ctx.guild:  # If command was used in a server
             await ctx.send("✅ Check your DMs!")
     except discord.Forbidden:
-        await ctx.send("❌ I couldn't DM you. Please check if you have DMs enabled for server members.")
+        await ctx.send(
+            "❌ I couldn't DM you. Please check if you have DMs enabled for server members."
+        )
 
 
 @bot.event
@@ -639,7 +662,9 @@ async def on_guild_join(guild: discord.Guild) -> None:
 
         for perm, name in required_permissions:
             if not getattr(permissions, perm):
-                missing_permissions.append(f"Missing '{name}' permission in #{channel.name}")
+                missing_permissions.append(
+                    f"Missing '{name}' permission in #{channel.name}"
+                )
 
     if missing_permissions:
         logger.warning("Missing permissions in new guild:")
@@ -653,7 +678,10 @@ async def checkperms(ctx: commands.Context) -> None:
     """Check bot permissions in all channels."""
     missing_permissions = await check_permissions(bot.user)
     if missing_permissions:
-        await ctx.send("⚠️ Missing permissions:\n" + "\n".join(f"- {p}" for p in missing_permissions))
+        await ctx.send(
+            "⚠️ Missing permissions:\n"
+            + "\n".join(f"- {p}" for p in missing_permissions)
+        )
     else:
         await ctx.send("✅ All required permissions are properly set!")
 
@@ -909,7 +937,9 @@ async def on_message(message: discord.Message) -> None:
         # Process message
         current_response = None
         async with message.channel.typing():
-            current_response, had_error = await process_conversation_step(message, channel_id, current_response)
+            current_response, had_error = await process_conversation_step(
+                message, channel_id, current_response
+            )
 
         # Update reaction based on result
         if had_error:
@@ -953,8 +983,12 @@ def main() -> None:
         if not tools:
             logger.error("No tools loaded in gptme")
             return
-        logger.info(f"Loaded {len(tools)} gptme tools: {', '.join(t.name for t in tools)}")
-        logger.info(f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)})")
+        logger.info(
+            f"Loaded {len(tools)} gptme tools: {', '.join(t.name for t in tools)}"
+        )
+        logger.info(
+            f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)})"
+        )
     except Exception as e:
         logger.error(f"Failed to initialize gptme tools: {e}")
         return

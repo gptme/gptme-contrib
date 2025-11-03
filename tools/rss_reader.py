@@ -79,7 +79,9 @@ class SearchHistoryEntry:
     results_count: int
 
 
-def load_search_history(cache_dir: Path | str = "~/.cache/rss_reader") -> list[SearchHistoryEntry]:
+def load_search_history(
+    cache_dir: Path | str = "~/.cache/rss_reader",
+) -> list[SearchHistoryEntry]:
     """Load search history from file."""
     cache_path = Path(cache_dir).expanduser() / "search_history.json"
     if not cache_path.exists():
@@ -110,7 +112,10 @@ def save_to_search_history(
 
     # Add new entry
     new_entry = SearchHistoryEntry(
-        timestamp=datetime.now().isoformat(), query=query, field=field, results_count=results_count
+        timestamp=datetime.now().isoformat(),
+        query=query,
+        field=field,
+        results_count=results_count,
     )
 
     history.append(new_entry)
@@ -122,7 +127,12 @@ def save_to_search_history(
     with open(history_path, "w") as f:
         json_lib.dump(
             [
-                {"timestamp": e.timestamp, "query": e.query, "field": e.field, "results_count": e.results_count}
+                {
+                    "timestamp": e.timestamp,
+                    "query": e.query,
+                    "field": e.field,
+                    "results_count": e.results_count,
+                }
                 for e in history
             ],
             f,
@@ -210,7 +220,9 @@ def parse_date(entry: Any) -> datetime:
 class FeedCache:
     """Simple file-based cache for RSS feeds with TTL support."""
 
-    def __init__(self, cache_dir: Path | str = "~/.cache/rss_reader", ttl_minutes: int = 60):
+    def __init__(
+        self, cache_dir: Path | str = "~/.cache/rss_reader", ttl_minutes: int = 60
+    ):
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.ttl = timedelta(minutes=ttl_minutes)
@@ -321,7 +333,11 @@ def apply_filters(
     if filter_title:
         try:
             pattern = re.compile(filter_title, re.IGNORECASE)
-            filtered = [(dt, src, entry) for dt, src, entry in filtered if pattern.search(entry.title)]
+            filtered = [
+                (dt, src, entry)
+                for dt, src, entry in filtered
+                if pattern.search(entry.title)
+            ]
         except re.error as e:
             console.print(f"[red]Error: Invalid title filter regex: {e}[/red]")
             sys.exit(1)
@@ -330,7 +346,9 @@ def apply_filters(
     if filter_source:
         try:
             pattern = re.compile(filter_source, re.IGNORECASE)
-            filtered = [(dt, src, entry) for dt, src, entry in filtered if pattern.search(src)]
+            filtered = [
+                (dt, src, entry) for dt, src, entry in filtered if pattern.search(src)
+            ]
         except re.error as e:
             console.print(f"[red]Error: Invalid source filter regex: {e}[/red]")
             sys.exit(1)
@@ -397,7 +415,9 @@ def get_all_tags(config: dict[str, Any]) -> dict[str, list[str]]:
     return tag_map
 
 
-def get_feeds_by_tags(config: dict[str, Any], tags: list[str], match_mode: str = "any") -> dict[str, str]:
+def get_feeds_by_tags(
+    config: dict[str, Any], tags: list[str], match_mode: str = "any"
+) -> dict[str, str]:
     """
     Filter feeds by tags (keywords).
 
@@ -447,7 +467,9 @@ def list_tags_info(config: dict[str, Any]) -> str:
     lines = ["Available Tags:\n"]
     for tag, sources in sorted_tags:
         source_count = len(sources)
-        lines.append(f"  {tag}: {source_count} source{'s' if source_count != 1 else ''}")
+        lines.append(
+            f"  {tag}: {source_count} source{'s' if source_count != 1 else ''}"
+        )
         lines.append(f"    Sources: {', '.join(sources)}")
 
     return "\n".join(lines)
@@ -541,7 +563,9 @@ def validate_feed(url: str, cache: FeedCache | None = None) -> FeedValidationRes
             if age_days > 90:
                 result.add_warning(f"Latest entry is {age_days} days old (stale feed)")
             elif age_days > 30:
-                result.add_warning(f"Latest entry is {age_days} days old (may be stale)")
+                result.add_warning(
+                    f"Latest entry is {age_days} days old (may be stale)"
+                )
 
         # Check for required entry fields
         missing_fields = []
@@ -563,7 +587,9 @@ def validate_feed(url: str, cache: FeedCache | None = None) -> FeedValidationRes
     return result
 
 
-def format_validation_result(result: FeedValidationResult, verbose: bool = False) -> str:
+def format_validation_result(
+    result: FeedValidationResult, verbose: bool = False
+) -> str:
     """Format validation result as human-readable text."""
     lines = []
 
@@ -611,12 +637,16 @@ def fetch_feed_safe(
 
     try:
         if not validate_url(url):
-            console.print(f"[yellow]Warning: Invalid URL for {source_name}: {url}[/yellow]")
+            console.print(
+                f"[yellow]Warning: Invalid URL for {source_name}: {url}[/yellow]"
+            )
             return source_name, None
 
         feed = feedparser.parse(url)
         if feed.bozo:
-            console.print(f"[yellow]Warning: Failed to parse {source_name}: {feed.bozo_exception}[/yellow]")
+            console.print(
+                f"[yellow]Warning: Failed to parse {source_name}: {feed.bozo_exception}[/yellow]"
+            )
             return source_name, None
 
         # Cache successful fetch
@@ -638,7 +668,8 @@ def fetch_feeds_parallel(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all fetch tasks
         future_to_source = {
-            executor.submit(fetch_feed_safe, source_name, url, cache): source_name for source_name, url in feeds.items()
+            executor.submit(fetch_feed_safe, source_name, url, cache): source_name
+            for source_name, url in feeds.items()
         }
 
         for future in as_completed(future_to_source):
@@ -713,7 +744,12 @@ def get_entry_summary(entry: feedparser.FeedParserDict) -> str | None:
     summary = " ".join(summary.split())
 
     # Skip if summary doesn't meet quality criteria
-    if not summary or len(summary) < 20 or "comments" in summary.lower() or summary.startswith("http"):
+    if (
+        not summary
+        or len(summary) < 20
+        or "comments" in summary.lower()
+        or summary.startswith("http")
+    ):
         return None
 
     # Truncate if too long
@@ -765,7 +801,11 @@ def format_entries(
 
     # Apply exclude_urls filter
     if exclude_urls:
-        dt_entries = [(dt, src, entry) for dt, src, entry in dt_entries if entry.link not in exclude_urls]
+        dt_entries = [
+            (dt, src, entry)
+            for dt, src, entry in dt_entries
+            if entry.link not in exclude_urls
+        ]
 
     # Apply custom filters
     dt_entries = apply_filters(dt_entries, filter_title, filter_source)
@@ -777,7 +817,9 @@ def format_entries(
     # Format output
     output = []
     for dt, src, entry in dt_entries:
-        formatted = format_entry(entry, src, dt, format_template, date_format, include_summary)
+        formatted = format_entry(
+            entry, src, dt, format_template, date_format, include_summary
+        )
         output.append(formatted)
 
     return "\n".join(output)
@@ -804,7 +846,9 @@ def discover_feeds(url: str, timeout: int = 10) -> list[str]:
 
     try:
         # Fetch HTML
-        response = requests.get(url, timeout=timeout, headers={"User-Agent": "gptme-rss-reader/1.0"})
+        response = requests.get(
+            url, timeout=timeout, headers={"User-Agent": "gptme-rss-reader/1.0"}
+        )
         response.raise_for_status()
 
         # Parse HTML
@@ -852,7 +896,11 @@ def discover_feeds(url: str, timeout: int = 10) -> list[str]:
                     feed_response = requests.head(feed_url, timeout=5)
                     if feed_response.status_code == 200:
                         content_type = feed_response.headers.get("content-type", "")
-                        if "xml" in content_type or "rss" in content_type or "atom" in content_type:
+                        if (
+                            "xml" in content_type
+                            or "rss" in content_type
+                            or "atom" in content_type
+                        ):
                             if feed_url not in discovered:
                                 discovered.append(feed_url)
                 except requests.RequestException:
@@ -925,7 +973,14 @@ def format_multi_feed_output(
 
     # Format output
     for dt, source, entry in dt_entries:
-        formatted = format_entry(entry, source, dt, format_template, date_format, include_summary=include_summary)
+        formatted = format_entry(
+            entry,
+            source,
+            dt,
+            format_template,
+            date_format,
+            include_summary=include_summary,
+        )
         output.append(formatted)
 
         if include_summary:
@@ -1001,7 +1056,9 @@ def format_by_tag_groups(
 
         # Convert to format expected by apply_filters
         entries_for_filter = [(dt, source, entry) for dt, source, entry in entries]
-        entries_for_filter = apply_filters(entries_for_filter, filter_title, filter_source)
+        entries_for_filter = apply_filters(
+            entries_for_filter, filter_title, filter_source
+        )
 
         if not entries_for_filter:
             continue
@@ -1010,7 +1067,12 @@ def format_by_tag_groups(
 
         for dt, source_name, entry in entries_for_filter:
             formatted = format_entry(
-                entry, source_name, dt, format_template, date_format, include_summary=include_summary
+                entry,
+                source_name,
+                dt,
+                format_template,
+                date_format,
+                include_summary=include_summary,
             )
             output.append(formatted)
 
@@ -1024,48 +1086,112 @@ def format_by_tag_groups(
 
 @click.command()
 @click.argument("url", required=False)
-@click.option("--exclude-url", "-e", multiple=True, help="URL patterns to exclude from output")
-@click.option("--max-entries", "-n", type=int, help="Maximum number of entries to display")
+@click.option(
+    "--exclude-url", "-e", multiple=True, help="URL patterns to exclude from output"
+)
+@click.option(
+    "--max-entries", "-n", type=int, help="Maximum number of entries to display"
+)
 @click.option("--summary", "-s", is_flag=True, help="Include entry summaries")
 @click.option("--time", "-t", is_flag=True, help="Include time in date format")
-@click.option("--order", type=click.Choice(["asc", "desc"]), default="asc", help="Entry order (asc=oldest first)")
+@click.option(
+    "--order",
+    type=click.Choice(["asc", "desc"]),
+    default="asc",
+    help="Entry order (asc=oldest first)",
+)
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output in JSON format")
 @click.option("--config", "-c", type=str, help="Path to RSS feeds config file (YAML)")
-@click.option("--domain", "-d", type=str, help="Domain to fetch feeds for (requires --config)")
-@click.option("--all-domains", "-a", is_flag=True, help="Fetch feeds from all domains in config (requires --config)")
+@click.option(
+    "--domain", "-d", type=str, help="Domain to fetch feeds for (requires --config)"
+)
+@click.option(
+    "--all-domains",
+    "-a",
+    is_flag=True,
+    help="Fetch feeds from all domains in config (requires --config)",
+)
 @click.option("--no-cache", is_flag=True, help="Bypass cache and fetch fresh feeds")
-@click.option("--clear-cache", is_flag=True, help="Clear all cached feeds before running")
-@click.option("--cache-ttl", type=int, default=60, help="Cache TTL in minutes (default: 60)")
-@click.option("--cache-dir", type=str, default="~/.cache/rss_reader", help="Cache directory path")
+@click.option(
+    "--clear-cache", is_flag=True, help="Clear all cached feeds before running"
+)
+@click.option(
+    "--cache-ttl", type=int, default=60, help="Cache TTL in minutes (default: 60)"
+)
+@click.option(
+    "--cache-dir", type=str, default="~/.cache/rss_reader", help="Cache directory path"
+)
 @click.option("--show-cache-stats", is_flag=True, help="Show cache hit/miss statistics")
 @click.option("--validate", is_flag=True, help="Validate feed health and report issues")
-@click.option("--validate-all", is_flag=True, help="Validate all feeds in config (requires --config)")
-@click.option("--validate-verbose", "-v", is_flag=True, help="Show detailed validation info")
-@click.option("--discover", is_flag=True, help="Discover RSS/Atom feeds from a website URL")
-@click.option("--format", "-f", type=str, help="Custom output format template (e.g., '{date} {title} <{link}>')")
-@click.option("--date-format", type=str, default="%Y-%m-%d", help="Custom date format (strftime, default: %Y-%m-%d)")
-@click.option("--filter-title", type=str, help="Filter entries by title (regex pattern)")
-@click.option("--filter-source", type=str, help="Filter entries by source name (regex pattern)")
-@click.option("--tags", type=str, help="Filter feeds by tags (comma-separated, requires --config)")
 @click.option(
-    "--tag-match", type=click.Choice(["any", "all"]), default="any", help="Tag matching mode: any (OR) or all (AND)"
+    "--validate-all",
+    is_flag=True,
+    help="Validate all feeds in config (requires --config)",
 )
-@click.option("--list-tags", is_flag=True, help="List all available tags from config (requires --config)")
+@click.option(
+    "--validate-verbose", "-v", is_flag=True, help="Show detailed validation info"
+)
+@click.option(
+    "--discover", is_flag=True, help="Discover RSS/Atom feeds from a website URL"
+)
+@click.option(
+    "--format",
+    "-f",
+    type=str,
+    help="Custom output format template (e.g., '{date} {title} <{link}>')",
+)
+@click.option(
+    "--date-format",
+    type=str,
+    default="%Y-%m-%d",
+    help="Custom date format (strftime, default: %Y-%m-%d)",
+)
+@click.option(
+    "--filter-title", type=str, help="Filter entries by title (regex pattern)"
+)
+@click.option(
+    "--filter-source", type=str, help="Filter entries by source name (regex pattern)"
+)
+@click.option(
+    "--tags", type=str, help="Filter feeds by tags (comma-separated, requires --config)"
+)
+@click.option(
+    "--tag-match",
+    type=click.Choice(["any", "all"]),
+    default="any",
+    help="Tag matching mode: any (OR) or all (AND)",
+)
+@click.option(
+    "--list-tags",
+    is_flag=True,
+    help="List all available tags from config (requires --config)",
+)
 @click.option(
     "--group-by",
     type=click.Choice(["domain", "tag", "source"]),
     default="domain",
     help="Group output by domain, tag, or source",
 )
-@click.option("--search", "-S", type=str, help="Search entries by query (regex pattern)")
+@click.option(
+    "--search", "-S", type=str, help="Search entries by query (regex pattern)"
+)
 @click.option(
     "--search-in",
     type=click.Choice(["title", "summary", "link", "all"]),
     default="all",
     help="Field to search in (default: all)",
 )
-@click.option("--search-history", "search_history_flag", is_flag=True, help="Show recent search queries")
-@click.option("--save-search/--no-save-search", default=True, help="Save search to history (default: true)")
+@click.option(
+    "--search-history",
+    "search_history_flag",
+    is_flag=True,
+    help="Show recent search queries",
+)
+@click.option(
+    "--save-search/--no-save-search",
+    default=True,
+    help="Save search to history (default: true)",
+)
 def main(
     url: Optional[str],
     exclude_url: tuple[str, ...],
@@ -1125,7 +1251,9 @@ def main(
         rss_reader.py --config feeds.yaml --validate-all
     """
     # Setup cache (even if --no-cache, we need it for stats)
-    cache = FeedCache(cache_dir=cache_dir, ttl_minutes=cache_ttl) if not no_cache else None
+    cache = (
+        FeedCache(cache_dir=cache_dir, ttl_minutes=cache_ttl) if not no_cache else None
+    )
 
     # Clear cache if requested
     if clear_cache and cache:
@@ -1153,7 +1281,9 @@ def main(
                 console.print("\n[cyan]Validating discovered feeds...[/cyan]\n")
                 for feed_url in discovered_feeds:
                     result = validate_feed(feed_url, cache=None)
-                    formatted = format_validation_result(result, verbose=validate_verbose)
+                    formatted = format_validation_result(
+                        result, verbose=validate_verbose
+                    )
                     console.print(formatted)
                     console.print("")
         else:
@@ -1175,7 +1305,9 @@ def main(
 
             results = []
             for source_name, feed_url in feeds.items():
-                result = validate_feed(feed_url, cache=None)  # Don't use cache for validation
+                result = validate_feed(
+                    feed_url, cache=None
+                )  # Don't use cache for validation
                 results.append((source_name, result))
 
             # Create summary table
@@ -1201,7 +1333,14 @@ def main(
                 fetch_time = str(result.info.get("fetch_time_ms", "-"))
                 issues = len(result.errors) + len(result.warnings)
 
-                table.add_row(source_name, status, entries, age, fetch_time, str(issues) if issues > 0 else "-")
+                table.add_row(
+                    source_name,
+                    status,
+                    entries,
+                    age,
+                    fetch_time,
+                    str(issues) if issues > 0 else "-",
+                )
 
             console.print(table)
 
@@ -1219,7 +1358,9 @@ def main(
             if not url:
                 url = os.getenv("RSS_URL")
                 if not url:
-                    console.print("[red]Error: No URL provided and RSS_URL not set[/red]")
+                    console.print(
+                        "[red]Error: No URL provided and RSS_URL not set[/red]"
+                    )
                     sys.exit(1)
 
             result = validate_feed(url, cache=None)
@@ -1261,7 +1402,9 @@ def main(
         elif domain:
             feeds = get_feeds_for_domain(cfg, domain)
         else:
-            console.print("[red]Error: --config requires either --domain, --all-domains, or --tags[/red]")
+            console.print(
+                "[red]Error: --config requires either --domain, --all-domains, or --tags[/red]"
+            )
             sys.exit(1)
 
         console.print(f"Fetching {len(feeds)} feeds...")
@@ -1281,7 +1424,9 @@ def main(
                             "link": entry.link,
                             "published": entry.get("published", ""),
                         }
-                        for entry in (feed.entries[:max_entries] if max_entries else feed.entries)
+                        for entry in (
+                            feed.entries[:max_entries] if max_entries else feed.entries
+                        )
                     ],
                 }
             console.print(json_lib.dumps(output_data, indent=2))
@@ -1301,15 +1446,26 @@ def main(
                     original_count = len(all_entries)
                     all_entries = search_entries(all_entries, search, search_in)
                     if save_search:
-                        save_to_search_history(search, search_in, len(all_entries), cache_dir)
+                        save_to_search_history(
+                            search, search_in, len(all_entries), cache_dir
+                        )
                     console.print(
                         f"[dim]Found {len(all_entries)}/{original_count} entries matching '{search}' in {search_in}[/dim]\n"
                     )
 
                 # Convert back to (source, entry) format for format_by_tag_groups
-                entries_for_format = [(source, entry) for dt, source, entry in all_entries]
+                entries_for_format = [
+                    (source, entry) for dt, source, entry in all_entries
+                ]
                 output = format_by_tag_groups(
-                    entries_for_format, cfg, max_entries, summary, format, date_format, filter_title, filter_source
+                    entries_for_format,
+                    cfg,
+                    max_entries,
+                    summary,
+                    format,
+                    date_format,
+                    filter_title,
+                    filter_source,
                 )
             else:
                 # Domain or source grouping (existing behavior)
@@ -1326,7 +1482,9 @@ def main(
                     all_entries = search_entries(all_entries, search, search_in)
 
                     if save_search:
-                        save_to_search_history(search, search_in, len(all_entries), cache_dir)
+                        save_to_search_history(
+                            search, search_in, len(all_entries), cache_dir
+                        )
 
                     console.print(
                         f"[dim]Found {len(all_entries)}/{original_count} entries matching '{search}' in {search_in}[/dim]\n"
@@ -1347,7 +1505,14 @@ def main(
                     fetched_feeds = filtered_feeds
 
                 output = format_multi_feed_output(
-                    fetched_feeds, cfg, max_entries, summary, format, date_format, filter_title, filter_source
+                    fetched_feeds,
+                    cfg,
+                    max_entries,
+                    summary,
+                    format,
+                    date_format,
+                    filter_title,
+                    filter_source,
                 )
             console.print(output)
 
@@ -1355,7 +1520,9 @@ def main(
             stats = cache.get_stats()
             total = stats["hits"] + stats["misses"]
             hit_rate = (stats["hits"] / total * 100) if total > 0 else 0
-            console.print(f"\nCache: {stats['hits']} hits, {stats['misses']} misses ({hit_rate:.1f}% hit rate)")
+            console.print(
+                f"\nCache: {stats['hits']} hits, {stats['misses']} misses ({hit_rate:.1f}% hit rate)"
+            )
 
         return
 
@@ -1380,7 +1547,9 @@ def main(
                         "link": entry.link,
                         "published": entry.get("published", ""),
                     }
-                    for entry in (feed.entries[:max_entries] if max_entries else feed.entries)
+                    for entry in (
+                        feed.entries[:max_entries] if max_entries else feed.entries
+                    )
                 ],
             },
             indent=2,
@@ -1402,7 +1571,9 @@ def main(
             searchable_entries = search_entries(searchable_entries, search, search_in)
 
             if save_search:
-                save_to_search_history(search, search_in, len(searchable_entries), cache_dir)
+                save_to_search_history(
+                    search, search_in, len(searchable_entries), cache_dir
+                )
 
             console.print(
                 f"[dim]Found {len(searchable_entries)}/{original_count} entries matching '{search}' in {search_in}[/dim]\n"
@@ -1429,7 +1600,9 @@ def main(
         stats = cache.get_stats()
         total = stats["hits"] + stats["misses"]
         hit_rate = (stats["hits"] / total * 100) if total > 0 else 0
-        console.print(f"\nCache: {stats['hits']} hits, {stats['misses']} misses ({hit_rate:.1f}% hit rate)")
+        console.print(
+            f"\nCache: {stats['hits']} hits, {stats['misses']} misses ({hit_rate:.1f}% hit rate)"
+        )
 
 
 if __name__ == "__main__":

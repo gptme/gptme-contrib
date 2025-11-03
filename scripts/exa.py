@@ -68,7 +68,9 @@ class ExaSearch:
             f"Exa API key not found. Set EXA_API_KEY environment variable or add 'EXA_API_KEY' to the env section in {config_path}"
         )
 
-    def search(self, query: str, text: bool = True, num_results: int = 10) -> SearchResult:
+    def search(
+        self, query: str, text: bool = True, num_results: int = 10
+    ) -> SearchResult:
         """
         Search using Exa API
 
@@ -111,7 +113,11 @@ class ExaSearch:
         """Extract sources from search results"""
         sources: List[Dict[str, str]] = []
         for result in results:
-            source = {"title": "No title", "url": "No URL", "content_snippet": "No content"}
+            source = {
+                "title": "No title",
+                "url": "No URL",
+                "content_snippet": "No content",
+            }
 
             # Safe attribute access
             if hasattr(result, "title"):

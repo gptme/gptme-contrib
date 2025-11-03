@@ -56,14 +56,19 @@ class CursorRule:
     def to_lesson_format(self) -> dict[str, Any]:
         """Convert Cursor rule to gptme lesson format."""
         # Extract keywords from file patterns and content
-        keywords = _generate_keywords_from_patterns(self.file_patterns, self.overview, list(self.rules.values()))
+        keywords = _generate_keywords_from_patterns(
+            self.file_patterns, self.overview, list(self.rules.values())
+        )
 
         # Convert rules sections to lesson content
         lesson_content = self._format_as_lesson()
 
         return {
             "frontmatter": {
-                "match": {"keywords": keywords, "file_patterns": self.file_patterns if self.file_patterns else None}
+                "match": {
+                    "keywords": keywords,
+                    "file_patterns": self.file_patterns if self.file_patterns else None,
+                }
             },
             "content": lesson_content,
             "source": "cursorrules",
@@ -125,7 +130,11 @@ def _extract_rules_sections(content: str) -> dict[str, str]:
 
     # Find next top-level heading
     next_section = re.search(r"^##?\s+\w", content[start:], re.MULTILINE)
-    rules_content = content[start : start + next_section.start()] if next_section else content[start:]
+    rules_content = (
+        content[start : start + next_section.start()]
+        if next_section
+        else content[start:]
+    )
 
     # Extract subsections within Rules
     # Match: ### Subsection or #### Subsection
@@ -168,7 +177,9 @@ def _extract_file_patterns(content: str) -> list[str]:
     return list(set(matches))
 
 
-def _generate_keywords_from_patterns(file_patterns: list[str], overview: str, rules_sections: list[str]) -> list[str]:
+def _generate_keywords_from_patterns(
+    file_patterns: list[str], overview: str, rules_sections: list[str]
+) -> list[str]:
     """Generate keywords from file patterns and content."""
     keywords = set()
 
@@ -207,7 +218,9 @@ def _generate_keywords_from_patterns(file_patterns: list[str], overview: str, ru
     return sorted(list(keywords))[:10]
 
 
-def cursor_to_lesson(cursor_path: Path | str, output_path: Path | str | None = None) -> dict[str, Any]:
+def cursor_to_lesson(
+    cursor_path: Path | str, output_path: Path | str | None = None
+) -> dict[str, Any]:
     """Convert Cursor rules file to gptme lesson format.
 
     Args:
@@ -226,7 +239,9 @@ def cursor_to_lesson(cursor_path: Path | str, output_path: Path | str | None = N
     return lesson_data
 
 
-def lesson_to_cursor(lesson_path: Path | str, output_path: Path | str | None = None) -> str:
+def lesson_to_cursor(
+    lesson_path: Path | str, output_path: Path | str | None = None
+) -> str:
     """Convert gptme lesson to Cursor rules format.
 
     Args:
@@ -329,7 +344,9 @@ def main() -> None:
 
     elif command == "from-lesson":
         if len(sys.argv) < 3:
-            print("Usage: cursorrules_parser.py from-lesson <lesson-file> [output-file]")
+            print(
+                "Usage: cursorrules_parser.py from-lesson <lesson-file> [output-file]"
+            )
             sys.exit(1)
 
         lesson_file = sys.argv[2]

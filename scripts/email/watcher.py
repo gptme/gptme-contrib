@@ -40,7 +40,9 @@ def run_mbsync():
     for label in ["gmail-Bob", "gmail-Bob-sent"]:
         try:
             logging.info(f"Running mbsync for {label}...")
-            result = subprocess.run(["mbsync", label], capture_output=True, text=True, timeout=60)
+            result = subprocess.run(
+                ["mbsync", label], capture_output=True, text=True, timeout=60
+            )
             if result.returncode == 0:
                 logging.info(f"mbsync {label} completed successfully")
             else:
@@ -82,7 +84,9 @@ def find_email_file(message_id: str) -> Path | None:
     return None
 
 
-def run_gptme_for_email(message_id: str, subject: str, sender: str, email_file: Path) -> bool:
+def run_gptme_for_email(
+    message_id: str, subject: str, sender: str, email_file: Path
+) -> bool:
     """Run gptme to process an email. Returns True if successful."""
     gptme_cmd = [
         "gptme",
@@ -108,8 +112,12 @@ def run_gptme_for_email(message_id: str, subject: str, sender: str, email_file: 
             print(f"✅ SUCCESS: Email from {sender} processed successfully")
             logging.info(f"Successfully processed email from {sender}")
         else:
-            print(f"❌ FAILED: Email from {sender} failed (exit code {result.returncode})")
-            logging.error(f"Failed to process email from {sender} (exit code {result.returncode})")
+            print(
+                f"❌ FAILED: Email from {sender} failed (exit code {result.returncode})"
+            )
+            logging.error(
+                f"Failed to process email from {sender} (exit code {result.returncode})"
+            )
         print(f"{'=' * 60}\n")
 
         return success

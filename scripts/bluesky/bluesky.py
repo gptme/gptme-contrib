@@ -229,7 +229,9 @@ def feed(limit: int, cursor: Optional[str]) -> None:
         # Show cursor for next page if available
         if hasattr(feed, "cursor"):
             console.print("\n[blue]For older posts, use:[/blue]")
-            console.print(f"[green]./scripts/bluesky.py feed --cursor {feed.cursor}[/green]")
+            console.print(
+                f"[green]./scripts/bluesky.py feed --cursor {feed.cursor}[/green]"
+            )
     except Exception as e:
         console.print(f"[red]Error getting feed: {e}")
         sys.exit(1)
@@ -269,7 +271,9 @@ def me(limit: int, cursor: Optional[str]) -> None:
         console.print(f"[yellow]Fetching posts for {handle}")
 
         # Get author feed using app.bsky.feed namespace
-        feed = client.app.bsky.feed.get_author_feed({"actor": client.me.did, "limit": limit, "cursor": cursor})
+        feed = client.app.bsky.feed.get_author_feed(
+            {"actor": client.me.did, "limit": limit, "cursor": cursor}
+        )
 
         if not feed or not feed.feed:
             console.print("[yellow]No posts found in timeline")
@@ -283,7 +287,9 @@ def me(limit: int, cursor: Optional[str]) -> None:
         # Show cursor for next page if available
         if hasattr(feed, "cursor"):
             console.print("\n[blue]For older posts, use:[/blue]")
-            console.print(f"[green]./scripts/bluesky.py me --cursor {feed.cursor}[/green]")
+            console.print(
+                f"[green]./scripts/bluesky.py me --cursor {feed.cursor}[/green]"
+            )
     except Exception as e:
         console.print(f"[red]Error getting posts: {e}")
         sys.exit(1)
@@ -307,7 +313,9 @@ def process_post_text(client: Client, text: str) -> client_utils.TextBuilder:
                 resolved = client.resolve_handle(handle)
                 text_builder.mention(word, resolved.did)
             except Exception as e:
-                console.print(f"[yellow]Warning: Could not resolve handle {handle}: {str(e)}")
+                console.print(
+                    f"[yellow]Warning: Could not resolve handle {handle}: {str(e)}"
+                )
                 text_builder.text(word)
         else:
             text_builder.text(word)
@@ -329,7 +337,9 @@ def get_post_refs(client: Client, post_uri: str) -> dict:
         rkey = parts[4]  # post ID
 
         # Get the post record using repo.getRecord
-        record = client.com.atproto.repo.get_record({"repo": repo, "collection": collection, "rkey": rkey})
+        record = client.com.atproto.repo.get_record(
+            {"repo": repo, "collection": collection, "rkey": rkey}
+        )
 
         return {"uri": post_uri, "cid": record.cid}
     except Exception as e:
@@ -356,11 +366,16 @@ def get_reply_refs(client: Client, parent_uri: str) -> dict:
             if isinstance(parent_record, dict) and "reply" in parent_record:
                 try:
                     # Use parent's root reference
-                    root = {"uri": parent_record["reply"]["root"]["uri"], "cid": parent_record["reply"]["root"]["cid"]}
+                    root = {
+                        "uri": parent_record["reply"]["root"]["uri"],
+                        "cid": parent_record["reply"]["root"]["cid"],
+                    }
                     # Validate the root URI format
                     validate_post_uri(root["uri"])
                 except (KeyError, ValueError):
-                    console.print("[yellow]Warning: Invalid root reference in parent post, using parent as root")
+                    console.print(
+                        "[yellow]Warning: Invalid root reference in parent post, using parent as root"
+                    )
                     root = parent
             else:
                 # Parent is the root
@@ -428,7 +443,9 @@ def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
                 # Create post record
                 thread_post_record: Dict[str, Any] = {
                     "text": post_text.strip(),
-                    "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "createdAt": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                 }
 
                 # Add reply refs if this is a reply
@@ -438,7 +455,11 @@ def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
 
                 # Create post
                 response = client.com.atproto.repo.create_record(
-                    {"repo": client.me.did, "collection": "app.bsky.feed.post", "record": thread_post_record}
+                    {
+                        "repo": client.me.did,
+                        "collection": "app.bsky.feed.post",
+                        "record": thread_post_record,
+                    }
                 )
 
                 reply_to_uri = response.uri
@@ -454,7 +475,9 @@ def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
             post_record: Dict[str, Any] = {
                 "$type": "app.bsky.feed.post",
                 "text": text,
-                "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "createdAt": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
             }
 
             # Add reply refs if this is a reply
@@ -471,7 +494,11 @@ def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
             try:
                 # Create post
                 response = client.com.atproto.repo.create_record(
-                    {"repo": client.me.did, "collection": "app.bsky.feed.post", "record": post_record}
+                    {
+                        "repo": client.me.did,
+                        "collection": "app.bsky.feed.post",
+                        "record": post_record,
+                    }
                 )
 
                 console.print("[green]Successfully posted:[/green]")
@@ -548,7 +575,9 @@ def user(handle: str, limit: int, cursor: Optional[str]) -> None:
         # Show cursor for next page if available
         if hasattr(feed, "cursor"):
             console.print("\n[blue]For older posts, use:[/blue]")
-            console.print(f"[green]./scripts/bluesky.py user {handle} --cursor {feed.cursor}[/green]")
+            console.print(
+                f"[green]./scripts/bluesky.py user {handle} --cursor {feed.cursor}[/green]"
+            )
     except Exception as e:
         console.print(f"[red]Error getting posts: {e}")
         sys.exit(1)
@@ -557,9 +586,14 @@ def user(handle: str, limit: int, cursor: Optional[str]) -> None:
 @cli.command()
 @click.option("--since", help="Time window (e.g. 24h, 7d, 30d)", default=None)
 @click.option(
-    "--limit", default=DEFAULT_LIMIT, type=click.IntRange(5, 100), help="Number of replies to fetch (min: 5, max: 100)"
+    "--limit",
+    default=DEFAULT_LIMIT,
+    type=click.IntRange(5, 100),
+    help="Number of replies to fetch (min: 5, max: 100)",
 )
-@click.option("--unanswered", is_flag=True, help="Show only replies that you haven't responded to")
+@click.option(
+    "--unanswered", is_flag=True, help="Show only replies that you haven't responded to"
+)
 def replies(since: str, limit: int, unanswered: bool) -> None:
     """Show replies to your posts
 
@@ -591,29 +625,39 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
 
                 since_time = datetime.now(timezone.utc) - delta
             except (ValueError, IndexError):
-                console.print(f"[red]Error: Invalid time format '{since}'. Use format: 24h, 7d, etc.")
+                console.print(
+                    f"[red]Error: Invalid time format '{since}'. Use format: 24h, 7d, etc."
+                )
                 return
         else:
             since_time = None
 
         # Get notifications using proper namespace
-        notifications = client.app.bsky.notification.list_notifications({"limit": limit})
+        notifications = client.app.bsky.notification.list_notifications(
+            {"limit": limit}
+        )
 
         # Filter notifications by time if needed
         if since_time:
             notifications.notifications = [
                 notif
                 for notif in notifications.notifications
-                if datetime.fromisoformat(notif.indexed_at.replace("Z", "+00:00")) > since_time
+                if datetime.fromisoformat(notif.indexed_at.replace("Z", "+00:00"))
+                > since_time
             ]
 
         # Filter for replies
-        replies = [notif for notif in notifications.notifications if notif.reason == "reply"]
+        replies = [
+            notif for notif in notifications.notifications if notif.reason == "reply"
+        ]
 
         if unanswered:
             # Filter for posts without replies
             replies = [
-                reply for reply in replies if not hasattr(reply.record, "replyCount") or reply.record.replyCount == 0
+                reply
+                for reply in replies
+                if not hasattr(reply.record, "replyCount")
+                or reply.record.replyCount == 0
             ]
 
         # Show filter summary
@@ -634,16 +678,22 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
         for reply in replies:
             try:
                 # Show the reply with all information
-                author_name = getattr(reply.author, "displayName", None) or reply.author.handle
+                author_name = (
+                    getattr(reply.author, "displayName", None) or reply.author.handle
+                )
                 author_info = f"{author_name} (@{reply.author.handle})"
 
                 # Format timestamp and URL
                 timestamp = format_post_time(reply.indexed_at)
                 post_id = reply.uri.split("/")[-1]
-                post_url = f"https://bsky.app/profile/{reply.author.handle}/post/{post_id}"
+                post_url = (
+                    f"https://bsky.app/profile/{reply.author.handle}/post/{post_id}"
+                )
 
                 # Display reply with all information
-                console.print(f"[green]{author_info}[/green] • [blue]{timestamp}[/blue]")
+                console.print(
+                    f"[green]{author_info}[/green] • [blue]{timestamp}[/blue]"
+                )
                 console.print(f"[white]{reply.record.text}[/white]")
                 console.print(f"[dim]{post_url}[/dim]")
 
@@ -662,7 +712,9 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
                 console.print("─" * 50)
             except AttributeError as e:
                 # If there's an error processing a reply, skip it
-                console.print(f"[yellow]Warning: Could not process reply: {str(e)}[/yellow]")
+                console.print(
+                    f"[yellow]Warning: Could not process reply: {str(e)}[/yellow]"
+                )
 
     except Exception as e:
         console.print(f"[red]Error getting replies: {e}")

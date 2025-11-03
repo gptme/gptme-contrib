@@ -227,7 +227,9 @@ def validate_task_file(file: Path, post: frontmatter.Post) -> List[str]:
         try:
             datetime.fromisoformat(metadata["created"])
         except ValueError:
-            issues.append("Created date must be ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])")
+            issues.append(
+                "Created date must be ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])"
+            )
 
     # Optional field validation
     if "priority" in metadata:
@@ -244,7 +246,9 @@ def validate_task_file(file: Path, post: frontmatter.Post) -> List[str]:
     return issues
 
 
-def load_tasks(tasks_dir: Path, recursive: bool = False, single_file: Optional[Path] = None) -> List[TaskInfo]:
+def load_tasks(
+    tasks_dir: Path, recursive: bool = False, single_file: Optional[Path] = None
+) -> List[TaskInfo]:
     """Load tasks from directory or single file with metadata.
 
     Args:
@@ -269,7 +273,11 @@ def load_tasks(tasks_dir: Path, recursive: bool = False, single_file: Optional[P
     else:
         # Determine glob pattern based on recursive flag
         pattern = "**/*.md" if recursive else "*.md"
-        files = [f for f in tasks_dir.glob(pattern) if not recursive or not any(d in f.parts for d in excluded_dirs)]
+        files = [
+            f
+            for f in tasks_dir.glob(pattern)
+            if not recursive or not any(d in f.parts for d in excluded_dirs)
+        ]
 
     for file in files:
         try:
@@ -507,7 +515,9 @@ def show(task_id):
     if task.depends:
         table.add_row("Dependencies", ", ".join(task.depends))
     if task.subtasks.total > 0:
-        table.add_row("Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed")
+        table.add_row(
+            "Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed"
+        )
     if task.issues:
         table.add_row("Issues", ", ".join(task.issues))
 
@@ -640,7 +650,9 @@ def list_(sort, state, active_only, context):
                         dep_ids.append(str(name_to_enum_id[dep]))
                     else:
                         # Show task name and state for filtered out dependencies
-                        state_emoji = STATE_EMOJIS.get(dep_task.state or "untracked", "•")
+                        state_emoji = STATE_EMOJIS.get(
+                            dep_task.state or "untracked", "•"
+                        )
                         dep_ids.append(f"{dep} ({state_emoji})")
                 else:
                     dep_ids.append(f"{dep} (missing)")
@@ -689,7 +701,9 @@ def list_(sort, state, active_only, context):
 
     # Print legend for tasks with dependencies
     if has_deps:
-        tasks_with_deps = [(task, name_to_enum_id[task.name]) for task in tasks if task.depends]
+        tasks_with_deps = [
+            (task, name_to_enum_id[task.name]) for task in tasks if task.depends
+        ]
         if tasks_with_deps:
             console.print("\nDependencies:")
             for task, enum_id in tasks_with_deps:
@@ -702,7 +716,9 @@ def list_(sort, state, active_only, context):
                             dep_strs.append(f"{dep} ({name_to_enum_id[dep]})")
                         else:
                             # Show task name and state for filtered out dependencies
-                            state_emoji = STATE_EMOJIS.get(dep_task.state or "untracked", "•")
+                            state_emoji = STATE_EMOJIS.get(
+                                dep_task.state or "untracked", "•"
+                            )
                             dep_strs.append(f"{dep} ({state_emoji})")
                     else:
                         dep_strs.append(f"{dep} (missing)")
@@ -757,7 +773,9 @@ class StateChecker:
         return results
 
 
-def print_status_section(console: Console, title: str, items: List[TaskInfo], show_state: bool = False):
+def print_status_section(
+    console: Console, title: str, items: List[TaskInfo], show_state: bool = False
+):
     """Print a section of the status output."""
     if not items:
         return
@@ -800,7 +818,9 @@ def print_status_section(console: Console, title: str, items: List[TaskInfo], sh
             state_info = f", {state_text}"
 
         # Print task info
-        console.print(f"  {task.name}{subtask_str}{priority_str} ({task.created_ago}{state_info})")
+        console.print(
+            f"  {task.name}{subtask_str}{priority_str} ({task.created_ago}{state_info})"
+        )
 
         # Show issues inline
         if task.issues:
@@ -811,7 +831,9 @@ def print_status_section(console: Console, title: str, items: List[TaskInfo], sh
         console.print(f"  ... and {remaining} more")
 
 
-def print_summary(console: Console, results: Dict[str, List[TaskInfo]], config: DirectoryConfig):
+def print_summary(
+    console: Console, results: Dict[str, List[TaskInfo]], config: DirectoryConfig
+):
     """Print summary statistics."""
     total = 0
     state_counts: Dict[str, int] = {}
@@ -841,7 +863,9 @@ def print_summary(console: Console, results: Dict[str, List[TaskInfo]], config: 
 
     # Print compact summary
     if summary_parts:
-        console.print(f"\n{config.emoji} Summary: {total} total ({', '.join(summary_parts)})")
+        console.print(
+            f"\n{config.emoji} Summary: {total} total ({', '.join(summary_parts)})"
+        )
 
 
 def check_directory(
@@ -854,7 +878,9 @@ def check_directory(
 
     # Print header with type-specific color
     style, _ = STATE_STYLES.get(config.states[0], ("white", "•"))
-    console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n")
+    console.print(
+        f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n"
+    )
 
     # Print sections in order
     if results["issues"]:
@@ -890,7 +916,9 @@ def check_directory(
     return results
 
 
-def print_total_summary(console: Console, all_results: Dict[str, Dict[str, List[TaskInfo]]]):
+def print_total_summary(
+    console: Console, all_results: Dict[str, Dict[str, List[TaskInfo]]]
+):
     """Print summary of all directory types."""
     table = Table(title="\n📊 Total Summary", show_header=False, title_style="bold")
     table.add_column("Category", style="bold")
@@ -1080,7 +1108,9 @@ def check(fix: bool, task_files: list[str]):
     # Check for circular dependencies
     for task in tasks_with_deps:
         if has_cycle(task.id, set(), set()):
-            cycle_issues.append(f"Circular dependency detected involving task {task.id}")
+            cycle_issues.append(
+                f"Circular dependency detected involving task {task.id}"
+            )
 
     # TODO: Implement link checking
     # for task in tasks:
@@ -1120,7 +1150,8 @@ def check(fix: bool, task_files: list[str]):
         total = len(tasks)
         with_subtasks = sum(1 for t in tasks if t.subtasks.total > 0)
         console.print(
-            f"\n[bold green]✓ All {total} tasks verified successfully! " f"({with_subtasks} with subtasks)[/]"
+            f"\n[bold green]✓ All {total} tasks verified successfully! "
+            f"({with_subtasks} with subtasks)[/]"
         )
 
 
@@ -1133,7 +1164,9 @@ PRIORITY_RANK: dict[str | None, int] = {
 }
 
 
-def resolve_tasks(task_ids: List[str], tasks: List[TaskInfo], tasks_dir: Path) -> List[TaskInfo]:
+def resolve_tasks(
+    task_ids: List[str], tasks: List[TaskInfo], tasks_dir: Path
+) -> List[TaskInfo]:
     """Resolve tasks by ID/path, supporting both task names and paths.
 
     Args:
@@ -1239,7 +1272,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
     # Validate set operations
     for field, value in set_fields:
         if field not in ("state", "priority", "created"):
-            console.print(f"[red]Cannot set field: {field}. Use --set with state, priority, or created.[/]")
+            console.print(
+                f"[red]Cannot set field: {field}. Use --set with state, priority, or created.[/]"
+            )
             return
 
         if field == "state":
@@ -1257,7 +1292,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
                 # Convert to string format for storage
                 value = created_dt.isoformat()
             except ValueError:
-                console.print("[red]Invalid created date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]")
+                console.print(
+                    "[red]Invalid created date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]"
+                )
                 return
 
         changes.append(("set", field, value))
@@ -1266,7 +1303,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
     for op, fields in [("add", add_fields), ("remove", remove_fields)]:
         for field, value in fields:
             if field not in ("deps", "tags", "tag", "dep"):
-                console.print(f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags.[/]")
+                console.print(
+                    f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags.[/]"
+                )
                 return
 
             # Normalize field names (tag -> tags, dep -> depends, deps -> depends)
@@ -1304,7 +1343,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
                         new = [x for x in new if x != value]
 
                 if new != current:
-                    task_changes.append(f"{field}: {', '.join(current)} -> {', '.join(new)}")
+                    task_changes.append(
+                        f"{field}: {', '.join(current)} -> {', '.join(new)}"
+                    )
             else:
                 # For set operations, only show the final value
                 set_ops = [v for op, v in field_ops if op == "set"]
@@ -1342,7 +1383,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
             f.write(frontmatter.dumps(post))
 
     # Check if any tasks were marked as done and run completion hook
-    state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
+    state_changes = [
+        (op, field, value) for op, field, value in changes if field == "state"
+    ]
     if any(value == "done" for _, _, value in state_changes):
         for task in target_tasks:
             # Re-load task to get updated metadata
@@ -1355,9 +1398,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields):
                 hook_cmd = os.environ.get("HOOK_TASK_DONE")
                 if hook_cmd:
                     try:
-                        subprocess.run([hook_cmd, task.id, task.name, str(repo_root)], check=False)
+                        subprocess.run(
+                            [hook_cmd, task.id, task.name, str(repo_root)], check=False
+                        )
                     except Exception as e:
-                        console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
+                        console.print(
+                            f"[yellow]Note: Task completion hook error: {e}[/]"
+                        )
 
     # Show success message
     count = len(target_tasks)
@@ -1448,14 +1495,19 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
             rows.append([tag, str(count)])
 
     # Print table using tabulate with simple format
-    headers = ["Tag", "Count", "Tasks"] if (show_tasks or filter_tags) else ["Tag", "Count"]
+    headers = (
+        ["Tag", "Count", "Tasks"] if (show_tasks or filter_tags) else ["Tag", "Count"]
+    )
     console.print(tabulate(rows, headers=headers, tablefmt="plain"))
 
     # Print summary
     total_tags = len(sorted_tags)
     total_tasks = len(tasks)
     tagged_tasks = len(set(task.name for tasks in tag_tasks.values() for task in tasks))
-    console.print(f"\nFound {total_tags} tags across {tagged_tasks} tasks " f"({total_tasks - tagged_tasks} untagged)")
+    console.print(
+        f"\nFound {total_tags} tags across {tagged_tasks} tasks "
+        f"({total_tasks - tagged_tasks} untagged)"
+    )
 
 
 @cli.command("next")
@@ -1489,7 +1541,9 @@ def next_():
     next_task = active_tasks[0]
 
     # Show task using same format as show command
-    console.print(f"\n[bold blue]🏃 Next Task:[/] (Priority: {next_task.priority or 'none'})")
+    console.print(
+        f"\n[bold blue]🏃 Next Task:[/] (Priority: {next_task.priority or 'none'})"
+    )
     # Call show command directly instead of using callback
     show(next_task.name)
 

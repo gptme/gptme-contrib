@@ -229,7 +229,9 @@ STATE_STYLES = {
 }
 
 
-def print_status_section(console: Console, title: str, items: List[FileStatus], show_state: bool = False):
+def print_status_section(
+    console: Console, title: str, items: List[FileStatus], show_state: bool = False
+):
     """Print a section of the status output."""
     if not items:
         return
@@ -279,7 +281,9 @@ def print_status_section(console: Console, title: str, items: List[FileStatus], 
         console.print(f"  ... and {remaining} more")
 
 
-def print_summary(console: Console, results: Dict[str, List[FileStatus]], config: DirectoryConfig):
+def print_summary(
+    console: Console, results: Dict[str, List[FileStatus]], config: DirectoryConfig
+):
     """Print summary statistics."""
     total = 0
     state_summary = []
@@ -304,7 +308,9 @@ def print_summary(console: Console, results: Dict[str, List[FileStatus]], config
 
     # Print compact summary
     if state_summary:
-        console.print(f"\n{config.emoji} Summary: {total} total ({', '.join(state_summary)})")
+        console.print(
+            f"\n{config.emoji} Summary: {total} total ({', '.join(state_summary)})"
+        )
 
 
 def check_directory(console: Console, dir_type: str, repo_root: Path) -> None:
@@ -315,7 +321,9 @@ def check_directory(console: Console, dir_type: str, repo_root: Path) -> None:
 
     # Print header with type-specific color
     style, _ = STATE_STYLES.get(config.states[0], ("white", "•"))
-    console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n")
+    console.print(
+        f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n"
+    )
 
     # Print sections
     if results["issues"]:
@@ -347,7 +355,9 @@ def check_directory(console: Console, dir_type: str, repo_root: Path) -> None:
     print_summary(console, results, config)
 
 
-def print_total_summary(console: Console, all_results: Dict[str, Dict[str, List[FileStatus]]]):
+def print_total_summary(
+    console: Console, all_results: Dict[str, Dict[str, List[FileStatus]]]
+):
     """Print summary of all directory types."""
     table = Table(title="\n📊 Total Summary", show_header=False, title_style="bold")
     table.add_column("Category", style="bold")
@@ -420,7 +430,9 @@ def print_total_summary(console: Console, all_results: Dict[str, Dict[str, List[
     default=False,
     help="Show verbose output",
 )
-def main(dir_type: str = "tasks", check_all: bool = False, verbose: bool = False) -> None:
+def main(
+    dir_type: str = "tasks", check_all: bool = False, verbose: bool = False
+) -> None:
     """Show git status-like view of state directories."""
     # Configure logging
     log_level = logging.DEBUG if verbose else logging.INFO

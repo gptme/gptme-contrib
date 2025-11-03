@@ -186,7 +186,10 @@ class ReviewResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ReviewResponse":
         return cls(
-            criteria_results={k: ReviewResult.from_dict(v) for k, v in data["criteria_results"].items()},
+            criteria_results={
+                k: ReviewResult.from_dict(v)
+                for k, v in data["criteria_results"].items()
+            },
             recommendation=str(data["recommendation"]),
             improvements=[str(i) for i in data["improvements"]],
             reasoning=str(data["reasoning"]),
@@ -413,7 +416,9 @@ def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
     return parse_llm_response(response.content, EvaluationResponse, TaskType.EVALUATE)
 
 
-def generate_response(tweet: Dict, eval_result: EvaluationResponse) -> Optional[TweetResponse]:
+def generate_response(
+    tweet: Dict, eval_result: EvaluationResponse
+) -> Optional[TweetResponse]:
     """Generate response using LLM"""
     if eval_result.action != "respond":
         return None

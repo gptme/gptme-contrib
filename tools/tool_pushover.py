@@ -43,7 +43,9 @@ def execute(
         else:
             return Message("system", "The notification couldn't be sent")
     except Exception as e:
-        return Message("system", f"Something went wrong while sending the notification: {e}")
+        return Message(
+            "system", f"Something went wrong while sending the notification: {e}"
+        )
 
 
 def examples(tool_format):

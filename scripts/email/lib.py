@@ -68,13 +68,21 @@ class AgentEmail:
         self.workspace = Path(workspace_dir)
         self.email_dir = self.workspace / "email"
         # Ensure own_email is always a string (never None due to fallback)
-        self.own_email = own_email if own_email is not None else os.getenv("AGENT_EMAIL", "bob@superuserlabs.org")
+        self.own_email = (
+            own_email
+            if own_email is not None
+            else os.getenv("AGENT_EMAIL", "bob@superuserlabs.org")
+        )
 
         # External maildir paths (from mbsync)
         # Use environment variables with fallback to defaults for backward compatibility
-        self.external_maildir_bob = Path(os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/Bob")))
+        self.external_maildir_bob = Path(
+            os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/Bob"))
+        )
         self.external_maildir_sent = Path(
-            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Bob/Sent"))
+            os.getenv(
+                "MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Bob/Sent")
+            )
         )
 
         # State files for tracking
@@ -176,7 +184,9 @@ class AgentEmail:
 
         self.replies_state_file.write_text(json.dumps(replies_data, indent=2))
 
-    def _mark_no_reply_needed(self, message_id: str, reason: str = "no reply needed") -> None:
+    def _mark_no_reply_needed(
+        self, message_id: str, reason: str = "no reply needed"
+    ) -> None:
         """Mark a message as processed but no reply needed."""
         import json
 
@@ -207,7 +217,11 @@ class AgentEmail:
             normalized_id = message_id.strip("<>")
             with_brackets = f"<{normalized_id}>"
 
-            return message_id in replies_data or normalized_id in replies_data or with_brackets in replies_data
+            return (
+                message_id in replies_data
+                or normalized_id in replies_data
+                or with_brackets in replies_data
+            )
         except (json.JSONDecodeError, FileNotFoundError):
             return False
 
@@ -410,7 +424,9 @@ class AgentEmail:
         # Add threading headers if needed
         if reply_to:
             # Ensure reply_to has angle brackets
-            reply_to_formatted = reply_to if reply_to.startswith("<") else f"<{reply_to}>"
+            reply_to_formatted = (
+                reply_to if reply_to.startswith("<") else f"<{reply_to}>"
+            )
             headers.append(f"In-Reply-To: {reply_to_formatted}")
         if references:
             # Ensure each reference has angle brackets
@@ -483,7 +499,9 @@ class AgentEmail:
             msg["From"] = headers.get("From") or sender
             msg["To"] = recipient
             msg["Subject"] = headers.get("Subject", "")
-            msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
+            msg["Date"] = headers.get(
+                "Date", format_datetime(datetime.now(timezone.utc))
+            )
             msg["Message-ID"] = headers.get("Message-ID", "")
             if "In-Reply-To" in headers:
                 msg["In-Reply-To"] = headers["In-Reply-To"]
@@ -543,7 +561,9 @@ class AgentEmail:
         if in_reply_to:
             try:
                 self._mark_replied(in_reply_to, message_id)
-                print(f"Marked original message {in_reply_to} as replied to by {message_id}")
+                print(
+                    f"Marked original message {in_reply_to} as replied to by {message_id}"
+                )
             except Exception as e:
                 print(f"Warning: Failed to mark original message as replied: {e}")
 
@@ -709,7 +729,9 @@ class AgentEmail:
 
         return last_valid_id
 
-    def _collect_thread_messages(self, message_id: str, collected: list[dict], seen: set[str]) -> None:
+    def _collect_thread_messages(
+        self, message_id: str, collected: list[dict], seen: set[str]
+    ) -> None:
         """Recursively collect all messages in a thread."""
         if message_id in seen:
             return
@@ -858,7 +880,9 @@ class AgentEmail:
         # Split headers and body
         parts = content.split("\n\n", 1)
         if len(parts) != 2:
-            print(f"Warning: Message missing body separator, content: {content[:100]}...")
+            print(
+                f"Warning: Message missing body separator, content: {content[:100]}..."
+            )
             # Try to handle messages with just headers
             if "\n" in content:
                 return self._parse_headers(content), ""
@@ -916,7 +940,9 @@ class AgentEmail:
         """
         try:
             # Check if msmtp is installed
-            subprocess.run(["msmtp", "--version"], capture_output=True, check=True, timeout=10)
+            subprocess.run(
+                ["msmtp", "--version"], capture_output=True, check=True, timeout=10
+            )
             return True
         except (
             subprocess.CalledProcessError,
@@ -956,7 +982,9 @@ class AgentEmail:
         elif folder == "sent":
             maildir_folder = self.external_maildir_sent
         else:
-            raise ValueError(f"sync_from_maildir supports 'inbox' and 'sent' folders, got: {folder}")
+            raise ValueError(
+                f"sync_from_maildir supports 'inbox' and 'sent' folders, got: {folder}"
+            )
 
         if not maildir_folder.exists():
             print(f"Warning: Maildir folder does not exist: {maildir_folder}")
@@ -1093,4 +1121,6 @@ class AgentEmail:
                     failed += 1
                     continue
 
-        print(f"Synced {folder}: {success} succeeded, {failed} failed, {skipped} skipped (already exist)")
+        print(
+            f"Synced {folder}: {success} succeeded, {failed} failed, {skipped} skipped (already exist)"
+        )
