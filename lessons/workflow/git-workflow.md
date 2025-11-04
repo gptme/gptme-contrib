@@ -31,14 +31,42 @@ Unnecessary branches/PRs for trivial changes, staging too much (git add .), leak
    - If sensitive files (e.g., gptme.toml) were touched, `git restore <file>`.
    - Avoid: carrying unrelated/untracked files into commits.
 
-3) Stage
-   - Stage only explicit paths: `git add <path1> <path2>`.
-   - Avoid: `git add .` and `git commit -a`.
+3) Verify branch (prevents accidental master commits)
+   - Check current branch: `git branch --show-current`
+   - If on master but should be on feature branch: switch now
+   - If accidentally on master: don't commit, create proper branch first
+   - Avoid: committing to master when feature branch intended
 
-4) Commit
-   - Use Conventional Commits (e.g., `docs: …`, `fix: …`).
-   - Keep commits focused; prefer one clear commit per small change.
-   - Avoid: vague messages or bundling unrelated changes.
+4) Commit with explicit paths (no staging)
+   - Commit files directly: `git commit path1 path2 -m "type(scope): message"`
+   - This prevents accidentally committing staged files you weren't aware of
+   - If you already staged files: review `git status` carefully before committing
+   - Avoid: `git add .` then `git commit` (can commit unintended staged changes)
+   - Avoid: `git commit -a` (commits all tracked changes)
+
+Example correct workflow:
+```bash
+# Check what changed
+git status
+
+# Verify on correct branch
+git branch --show-current  # Should show feature-branch, not master
+
+# Commit only intended files
+git commit journal/2025-11-04.md tasks/my-task.md -m "docs: update journal and task"
+
+# Co-authorship
+git commit --amend --no-edit --trailer "Co-authored-by: Bob <bob@superuserlabs.org>"
+```
+
+Recovery from accidental master commit:
+```bash
+# If you committed to master by accident:
+git branch feature-branch    # Create branch at current HEAD
+git reset --hard HEAD~1      # Move master back one commit
+git checkout feature-branch  # Switch to feature branch
+# Now you're on feature-branch with your commit, master is clean
+```
 
 5) Submodules (when applicable)
    - In the submodule: commit the actual file changes.
