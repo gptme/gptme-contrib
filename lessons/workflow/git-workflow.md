@@ -1,6 +1,29 @@
 ---
 match:
-  keywords: [git workflow, branch management, PR creation, git add, git restore, master branch, feature branch, Conventional Commits, submodule update, secret protection, git status, commit, stage, checkout, push]
+  keywords:
+  - git workflow
+  - branch management
+  - PR creation
+  - git add
+  - git restore
+  - master branch
+  - feature branch
+  - Conventional Commits
+  - submodule update
+  - secret protection
+  - git status
+  - commit
+  - stage
+  - checkout
+  - push
+lesson_id: workflow_git-workflow_49086c79
+version: 1.0.0
+usage_count: 0
+helpful_count: 0
+harmful_count: 0
+created: '2025-11-04T18:14:42.679244Z'
+updated: '2025-11-04T18:14:42.679244Z'
+last_used: null
 ---
 
 # Git Workflow
