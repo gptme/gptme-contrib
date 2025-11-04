@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: [git workflow, branch management, PR creation, git add, git restore, master branch, feature branch, Conventional Commits, submodule update, secret protection, git status]
+  keywords: [git workflow, branch management, PR creation, git add, git restore, master branch, feature branch, Conventional Commits, submodule update, secret protection, git status, commit, stage, checkout, push]
 ---
 
 # Git Workflow
@@ -77,6 +77,11 @@ git checkout feature-branch  # Switch to feature branch
    - Don’t push or open PRs unless requested.
    - If on a feature branch and review is desired: push and open PR with a clear title/body.
    - Avoid: pushing master without confirmation for non-trivial changes.
+
+## Related
+- [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs (read together!)
+- [Git Remote Branch Pushing](./git-remote-branch-pushing.md) - Pushing to upstream branches
+- [When to Rebase PRs](./when-to-rebase-prs.md) - When to rebase
 
 ## Origin
 Established 2025-08-08 from Erik/Bob session to reduce review overhead and PR noise.
