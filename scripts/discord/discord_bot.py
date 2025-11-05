@@ -42,8 +42,12 @@ from rich.logging import RichHandler
 import discord
 from discord.ext import commands
 
-# Import per-user rate limiting
+# Import per-user rate limiting and state management
 from .rate_limiting import PerUserRateLimiter  # type: ignore[import-untyped]
+from ..email.communication_utils.state import (  # type: ignore[import-untyped, misc]
+    ConversationTracker,
+    MessageState,
+)
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -73,6 +77,10 @@ logger = logging.getLogger("discord_bot")
 # Get workspace folder (location of `gptme.toml`):
 workspace_root = get_project_gptme_dir()
 logsdir = workspace_root / "logs_discord" if workspace_root else Path("logs_discord")
+
+# Initialize state management
+state_dir = logsdir / "state"
+conversation_tracker = ConversationTracker(state_dir)
 
 # Basic tools only for testing
 tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
@@ -928,6 +936,13 @@ async def on_message(message: discord.Message) -> None:
         await message.add_reaction("⌛")
         await update_reaction(message, "⌛", "🤔")
 
+        # Track message state
+        conversation_tracker.set_message_state(
+            conversation_id=str(channel_id),
+            message_id=str(message.id),
+            state=MessageState.IN_PROGRESS,
+        )
+
         # Process message
         current_response = None
         async with message.channel.typing():
@@ -938,10 +953,29 @@ async def on_message(message: discord.Message) -> None:
         # Update reaction based on result
         if had_error:
             await update_reaction(message, "🤔", "❌")
+            conversation_tracker.set_message_state(
+                conversation_id=str(channel_id),
+                message_id=str(message.id),
+                state=MessageState.FAILED,
+                error="Processing error occurred",
+            )
         else:
             await update_reaction(message, "🤔", None)
+            conversation_tracker.set_message_state(
+                conversation_id=str(channel_id),
+                message_id=str(message.id),
+                state=MessageState.COMPLETED,
+            )
 
     except Exception as e:
+        # Track failure state
+        conversation_tracker.set_message_state(
+            conversation_id=str(channel_id),
+            message_id=str(message.id),
+            state=MessageState.FAILED,
+            error=str(e),
+        )
+
         if isinstance(e, discord.HTTPException):
             logger.exception("Discord API error")
             await message.channel.send(
