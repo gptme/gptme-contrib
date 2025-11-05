@@ -68,10 +68,13 @@ _SCRIPTS_DIR = _SCRIPT_DIR.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-# Import shared OAuth utilities (type: ignore for mypy - paths are dynamic)
+# Import shared utilities (type: ignore for mypy - paths are dynamic)
 from email.communication_utils.auth import (  # type: ignore  # noqa: E402
     run_oauth_callback,
     save_token_to_env,
+)
+from email.communication_utils.messaging import (  # type: ignore  # noqa: E402
+    split_thread,
 )
 
 DEFAULT_SINCE = "7d"
@@ -434,13 +437,13 @@ def post(text: str, reply_to: Optional[str], thread: bool) -> None:
 
     # Handle thread posting
     if thread:
-        tweet_texts = text.split("\n---\n")
+        thread_messages = split_thread(text)
         reply_to_id: Optional[str] = None
 
-        for tweet_text in tweet_texts:
+        for message in thread_messages:
             # Create tweet and get the response data
             response = client.create_tweet(
-                text=tweet_text.strip(),
+                text=message.text,
                 in_reply_to_tweet_id=reply_to_id,
                 user_auth=False,
             )
@@ -459,7 +462,7 @@ def post(text: str, reply_to: Optional[str], thread: bool) -> None:
                 console.print("[red]Error: Could not get tweet ID from response")
                 sys.exit(1)
 
-            console.print(f"[green]Posted tweet: {tweet_text.strip()}")
+            console.print(f"[green]Posted tweet: {message.text}")
     else:
         # Single tweet
         response = client.create_tweet(
