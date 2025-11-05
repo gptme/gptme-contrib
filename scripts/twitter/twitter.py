@@ -52,70 +52,33 @@ For OAuth 2.0 setup:
 
 import os
 import sys
-import threading
 from datetime import datetime, timedelta
 from functools import lru_cache
-from queue import Queue
+from pathlib import Path
 from typing import Optional
 
 import click
 import tweepy
-from dotenv import find_dotenv, load_dotenv
-from flask import Flask, request
+from dotenv import load_dotenv
 from rich.console import Console
-from werkzeug.serving import make_server
 
-# Initialize Flask app
-app = Flask(__name__)
-auth_code_queue: Queue = Queue()
-server = None
+# Add parent directory to path for imports
+_SCRIPT_DIR = Path(__file__).parent
+_SCRIPTS_DIR = _SCRIPT_DIR.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+# Import shared utilities (type: ignore for mypy - paths are dynamic)
+from email.communication_utils.auth import (  # type: ignore  # noqa: E402
+    run_oauth_callback,
+    save_token_to_env,
+)
+from email.communication_utils.messaging import (  # type: ignore  # noqa: E402
+    split_thread,
+)
 
 DEFAULT_SINCE = "7d"
 DEFAULT_LIMIT = 10
-
-
-@app.route("/")
-def callback() -> str | tuple[str, int]:
-    """Handle OAuth callback"""
-    code = request.args.get("code")
-    if code:
-        # Reconstruct full URL with https for OAuth validation
-        full_url = request.url.replace("http://", "https://")
-        auth_code_queue.put(full_url)
-        return """
-        <h1>Authorization Successful!</h1>
-        <p>You can close this window and return to the terminal.</p>
-        <script>setTimeout(function() { window.close(); }, 1000);</script>
-        """
-    return "No authorization code received", 400
-
-
-@app.route("/shutdown")
-def shutdown() -> str:
-    """Shutdown the server"""
-    func = request.environ.get("werkzeug.server.shutdown")
-    if func is None:
-        raise RuntimeError("Not running with the Werkzeug Server")
-    func()
-    return "Server shutting down..."
-
-
-def start_auth_server() -> threading.Thread:
-    """Start Flask server in a separate thread"""
-    global server
-    server = make_server("localhost", 9876, app)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    return server_thread
-
-
-def stop_auth_server() -> None:
-    """Stop the Flask server"""
-    global server
-    if server:
-        server.shutdown()
-        server = None
-
 
 # Initialize rich console
 console = Console()
@@ -200,77 +163,44 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     scope=["tweet.read", "tweet.write", "users.read"],
                 )
 
+                # Get authorization URL and provide it to the user
+                auth_url = oauth2_user_handler.get_authorization_url()
+                console.print(
+                    "[yellow]Please open this URL in your browser to authorize the application:"
+                )
+                console.print(f"[blue]{auth_url}")
+
+                # Wait for OAuth callback using shared utility
+                console.print(
+                    "[yellow]Waiting for authorization (timeout: 5 minutes)..."
+                )
                 try:
-                    # Start the auth server
-                    console.print("[yellow]Starting authentication server...")
-                    start_auth_server()
-
-                    # Get authorization URL and provide it to the user
-                    auth_url = oauth2_user_handler.get_authorization_url()
-                    console.print(
-                        "[yellow]Please open this URL in your browser to authorize the application:"
-                    )
-                    console.print(f"[blue]{auth_url}")
-
-                    # Wait for the callback
-                    console.print(
-                        "[yellow]Waiting for authorization (timeout: 5 minutes)..."
-                    )
-                    try:
-                        response_code = auth_code_queue.get(
-                            timeout=300
-                        )  # 5 minute timeout
-                        console.print("[green]Authorization received!")
-                    except Exception as e:
-                        console.print("[red]Error: Authorization timeout or failed")
-                        console.print(f"[red]Details: {str(e)}")
-                        raise
-
-                finally:
-                    # Cleanup: Stop the server
-                    console.print("[yellow]Cleaning up authentication server...")
-                    stop_auth_server()
+                    response_code = run_oauth_callback(port=9876, timeout=300)
+                    console.print("[green]Authorization received!")
+                except TimeoutError as e:
+                    console.print("[red]Error: Authorization timeout")
+                    console.print(f"[red]Details: {str(e)}")
+                    raise
+                except Exception as e:
+                    console.print("[red]Error: Authorization failed")
+                    console.print(f"[red]Details: {str(e)}")
+                    raise
 
                 # Get access token
                 access_token = oauth2_user_handler.fetch_token(response_code)
                 print(f"{access_token=}")
 
-                # Get path to .env file
-                # traverse up to the root directory
-                env_path = find_dotenv()
-                if not env_path:
-                    console.print("[red]Error: .env file not found")
-                    sys.exit(1)
-
-                # Update or save access token to .env
-                with open(env_path, "r") as f:
-                    env_lines = f.readlines()
-
-                # Find existing token line
-                token_line_idx = None
-                for i, line in enumerate(env_lines):
-                    if line.startswith("TWITTER_OAUTH2_ACCESS_TOKEN="):
-                        token_line_idx = i
-                        break
-
-                new_token_line = (
-                    f"TWITTER_OAUTH2_ACCESS_TOKEN={access_token['access_token']}\n"
-                )
-
-                if token_line_idx is not None:
-                    # Replace existing token
-                    env_lines[token_line_idx] = new_token_line
-                    console.print("[yellow]Updated OAuth 2.0 access token in .env")
-                else:
-                    # Append new token
-                    env_lines.extend(
-                        ["\n# OAuth 2.0 User Context access token\n", new_token_line]
+                # Save access token to .env using shared utility
+                try:
+                    save_token_to_env(
+                        "TWITTER_OAUTH2_ACCESS_TOKEN",
+                        access_token["access_token"],
+                        comment="OAuth 2.0 User Context access token",
                     )
-                    console.print("[yellow]Saved new OAuth 2.0 access token to .env")
-
-                # Write back to file
-                with open(env_path, "w") as f:
-                    f.writelines(env_lines)
+                    console.print("[yellow]Saved OAuth 2.0 access token to .env")
+                except Exception as e:
+                    console.print(f"[red]Error saving token: {str(e)}")
+                    sys.exit(1)
 
                 # Create client with OAuth 2.0 User Context authentication
                 client = tweepy.Client(
@@ -507,13 +437,13 @@ def post(text: str, reply_to: Optional[str], thread: bool) -> None:
 
     # Handle thread posting
     if thread:
-        tweet_texts = text.split("\n---\n")
+        thread_messages = split_thread(text)
         reply_to_id: Optional[str] = None
 
-        for tweet_text in tweet_texts:
+        for message in thread_messages:
             # Create tweet and get the response data
             response = client.create_tweet(
-                text=tweet_text.strip(),
+                text=message.text,
                 in_reply_to_tweet_id=reply_to_id,
                 user_auth=False,
             )
@@ -532,7 +462,7 @@ def post(text: str, reply_to: Optional[str], thread: bool) -> None:
                 console.print("[red]Error: Could not get tweet ID from response")
                 sys.exit(1)
 
-            console.print(f"[green]Posted tweet: {tweet_text.strip()}")
+            console.print(f"[green]Posted tweet: {message.text}")
     else:
         # Single tweet
         response = client.create_tweet(
