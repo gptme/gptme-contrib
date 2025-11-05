@@ -42,6 +42,9 @@ from rich.logging import RichHandler
 import discord
 from discord.ext import commands
 
+# Import per-user rate limiting
+from .rate_limiting import PerUserRateLimiter  # type: ignore[import-untyped]
+
 os.environ["GPTME_CHECK"] = "false"
 
 # Max chars in a Discord message
@@ -52,12 +55,11 @@ ChannelID: TypeAlias = int
 CommandPrefix = Union[str, Callable[..., str]]  # Type for command prefix
 Settings: TypeAlias = Dict[ChannelID, "ChannelSettings"]
 Conversations: TypeAlias = Dict[ChannelID, Log]
-RateLimits: TypeAlias = Dict[int, float]
 
 # Global state with type hints
 conversations: Conversations = {}  # channel_id -> conversation log
 channel_settings: Settings = {}  # channel_id -> settings
-rate_limits: RateLimits = {}  # user_id -> last_message_time
+rate_limiter: PerUserRateLimiter  # Initialized after RATE_LIMIT
 
 # Configure logging
 logging.basicConfig(
@@ -93,6 +95,8 @@ ENABLE_PRIVILEGED_INTENTS = os.getenv("ENABLE_PRIVILEGED_INTENTS", "").lower() i
     "true",
 ]
 
+# Initialize per-user rate limiter
+rate_limiter = PerUserRateLimiter(base_rate=RATE_LIMIT, dm_multiplier=0.5)
 
 # Log configuration
 logger.info("Configuration:")
@@ -356,26 +360,16 @@ def check_rate_limit(
     Returns:
         tuple[bool, float]: (is_allowed, seconds_remaining)
     """
-    now = asyncio.get_event_loop().time()
+    is_allowed, seconds_remaining = rate_limiter.check_rate_limit(user_id, channel)
 
-    # Use lower rate limit for DMs during testing
-    effective_rate_limit = (
-        RATE_LIMIT * 0.5 if isinstance(channel, discord.DMChannel) else RATE_LIMIT
-    )
+    if not is_allowed:
+        logger.debug(
+            f"Rate limit hit: user={user_id} "
+            f"channel_type={'DM' if isinstance(channel, discord.DMChannel) else 'server'} "
+            f"seconds_remaining={seconds_remaining:.1f}"
+        )
 
-    if user_id in rate_limits:
-        time_since_last = now - rate_limits[user_id]
-        if time_since_last < effective_rate_limit:
-            seconds_remaining = effective_rate_limit - time_since_last
-            logger.debug(
-                f"Rate limit hit: user={user_id} "
-                f"channel_type={'DM' if isinstance(channel, discord.DMChannel) else 'server'} "
-                f"seconds_remaining={seconds_remaining:.1f}"
-            )
-            return False, seconds_remaining
-
-    rate_limits[user_id] = now
-    return True, 0.0
+    return is_allowed, seconds_remaining
 
 
 async def handle_rate_limit(message: discord.Message) -> bool:
