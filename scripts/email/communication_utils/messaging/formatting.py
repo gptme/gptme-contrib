@@ -136,7 +136,7 @@ def format_for_platform(
     # Truncate if needed
     if len(text) > limit:
         # Account for truncate suffix in limit
-        truncate_at = limit - len(truncate_suffix)
+        truncate_at = max(0, limit - len(truncate_suffix))
         return text[:truncate_at] + truncate_suffix
 
     return text
