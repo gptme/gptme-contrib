@@ -5,6 +5,7 @@ Provides a lightweight Flask server to handle OAuth callbacks
 during authorization flows. Supports configurable ports and paths.
 """
 
+import html
 import threading
 from queue import Queue, Empty
 from typing import Optional
@@ -68,26 +69,22 @@ class CallbackServer:
                 <script>setTimeout(function() { window.close(); }, 1000);</script>
                 """
 
-            error = request.args.get("error")
+            error = request.args.get("error", "Unknown error")
             error_description = request.args.get("error_description", "Unknown error")
+
+            # Escape HTML to prevent XSS attacks
+            error_safe = html.escape(error)
+            error_description_safe = html.escape(error_description)
 
             return (
                 f"""
                 <h1>Authorization Failed</h1>
-                <p>Error: {error}</p>
-                <p>Description: {error_description}</p>
+                <p>Error: {error_safe}</p>
+                <p>Description: {error_description_safe}</p>
                 <p>You can close this window and return to the terminal.</p>
                 """,
                 400,
             )
-
-        @self.app.route("/shutdown")
-        def shutdown():
-            """Shutdown the server"""
-            func = request.environ.get("werkzeug.server.shutdown")
-            if func:
-                func()
-            return "Server shutting down..."
 
     def start(self) -> None:
         """Start the callback server in a background thread."""
@@ -99,14 +96,20 @@ class CallbackServer:
         self.server_thread.start()
 
     def stop(self) -> None:
-        """Stop the callback server."""
+        """Stop the callback server and wait for cleanup."""
         if self.server:
             self.server.shutdown()
-            self.server = None
 
+        # Wait for server thread to finish before cleanup
         if self.server_thread:
             self.server_thread.join(timeout=5)
-            self.server_thread = None
+            if self.server_thread.is_alive():
+                # Thread didn't finish - log warning but continue
+                print("Warning: Server thread did not stop within timeout")
+
+        # Clean up after thread has finished
+        self.server = None
+        self.server_thread = None
 
     def wait_for_callback(
         self, timeout: Optional[int] = None
