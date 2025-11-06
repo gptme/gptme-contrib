@@ -78,8 +78,7 @@ git branch --show-current  # Should show feature-branch, not master
 # Commit only intended files
 git commit journal/2025-11-04.md tasks/my-task.md -m "docs: update journal and task"
 
-# Co-authorship
-git commit --amend --no-edit --trailer "Co-authored-by: Bob <bob@superuserlabs.org>"
+# If pre-commit fails, run the entire `git commit` command again (don't amend)
 ```
 
 Recovery from accidental master commit:
