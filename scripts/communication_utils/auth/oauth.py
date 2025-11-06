@@ -105,7 +105,9 @@ class OAuthManager:
         except requests.RequestException as e:
             return None, f"Token exchange failed: {e}"
 
-    def refresh_token(self, refresh_token: str) -> tuple[Optional[TokenInfo], Optional[str]]:
+    def refresh_token(
+        self, refresh_token: str
+    ) -> tuple[Optional[TokenInfo], Optional[str]]:
         """
         Refresh an expired access token.
 

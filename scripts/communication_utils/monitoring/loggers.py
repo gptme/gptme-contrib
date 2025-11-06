@@ -94,7 +94,9 @@ def configure_logging(
         root_logger.addHandler(file_handler)
 
 
-def get_logger(name: str, platform: str, log_dir: Optional[Path] = None) -> PlatformLogger:
+def get_logger(
+    name: str, platform: str, log_dir: Optional[Path] = None
+) -> PlatformLogger:
     """
     Get platform-specific logger.
 

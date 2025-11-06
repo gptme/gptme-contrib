@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from email import message_from_bytes
@@ -10,6 +11,9 @@ from email.policy import default
 from email.utils import format_datetime
 from pathlib import Path
 from typing import Optional
+
+# Add parent directory to path for shared communication_utils
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from communication_utils.state.locks import FileLock, LockError
 from communication_utils.state.tracking import ConversationTracker, MessageState

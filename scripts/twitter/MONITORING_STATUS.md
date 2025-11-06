@@ -1,130 +1,134 @@
 # Twitter Monitoring Integration Status
 
-**Status**: Imports added, implementation pending
-**Session**: 861 (2025-11-06)
+**Status**: 🔄 PARTIAL COMPLETE (2/3 functions)
+**Session**: 864 (2025-11-06)
+**Implementation Time**: ~45 min (imports + infrastructure + 2 functions)
 **Based on**: Email monitoring pattern (Session 860)
 
-## Current Progress
+## Implementation Progress (Session 864)
 
-### ✅ Complete (Session 861)
+### ✅ Phase 3.4.2: Twitter Function Monitoring (Partial)
 
-1. **Added monitoring imports** to workflow.py (line 67-70)
-   - Location: After twitter imports, before console init
-   - Imports: get_logger, MetricsCollector from communication_utils.monitoring
-   - Logger init: `get_logger(__name__, "twitter")`
+**1. draft() monitoring** ✅ COMPLETE
+- Operation: `draft_creation`
+- Logging: draft parameters, path, success/errors
+- Error handling: try/except with operation completion
+- Status: Fully implemented and tested
 
-2. **Verified imports work**
-   - Logger requires: name and platform ("twitter")
-   - MetricsCollector requires: no arguments (instantiate empty)
-   - Operation tracking: `op = metrics.start_operation(name, platform)`
+**2. post() monitoring** ✅ COMPLETE
+- Operations: `post_batch` (overall) and `post_tweet` (per tweet)
+- Tracking: posted_count, skipped_count, error_count
+- Logging: tweet_id, draft_id, type, outcomes
+- Comprehensive error handling for each tweet
+- Status: Fully implemented and tested
 
-3. **Identified functions needing monitoring**
-   - draft() - line 548: Create tweet drafts
-   - post() - line 707: Post approved tweets
-   - monitor() - line 976: Monitor timeline and generate drafts
+**3. monitor() monitoring** ⏸️ PENDING
+- Operations: `timeline_monitor` (overall) and `timeline_check` (per check)
+- Tracking: check_count, tweet_count, source
+- Status: Deferred to future session due to complexity
+- Estimated: 30-45 min to complete
 
-### ⏸️ Pending Implementation
+### ✅ Infrastructure Setup COMPLETE
 
-1. **draft() monitoring** (20 min)
-   - Track draft_creation operation
-   - Log draft parameters, path, success/errors
+**Shared Module Access** ✅
+- Moved communication_utils from email/ to scripts/ level
+- Added sys.path setup to email/lib.py and email/watcher.py  
+- Added sys.path setup to twitter/workflow.py
+- All imports now work correctly across platforms
 
-2. **post() monitoring** (30 min)
-   - Track post_tweet and post_batch operations
-   - Log posted/skipped/error counts per batch
-   - Track per-tweet success/failure with tweet_id
+**Monitoring Integration** ✅
+- Imports: get_logger, MetricsCollector
+- Logger initialization: `logger = get_logger(__name__, "twitter")`
+- Metrics initialization: `metrics = MetricsCollector()`
 
-3. **monitor() monitoring** (30 min)
-   - Track timeline_check and timeline_monitor operations
-   - Log check frequency, tweet counts, sources
-   - Track processing success rates
+## Metrics Collected
 
-4. **Integration testing** (20 min)
-   - Test each function with monitoring
-   - Verify metrics collection
-   - Validate log output
+**draft()** ✅:
+- Operation: draft_creation
+- Context: type, scheduled, text_length, path
+- Success/failure tracking
 
-5. **Phase 3.4.4: Monitoring CLI tool** (15-20 min)
-   - View metrics across platforms
-   - Generate performance reports
-   - Query operation history
+**post()** ✅:
+- Operations: post_batch, post_tweet
+- Counts: posted, skipped, errors  
+- Context: tweet_id, draft_id, type, reply_to
+- Per-tweet and batch-level tracking
 
-## Monitoring Pattern
+**monitor()** ⏸️:
+- Not yet implemented
+- Design ready (following email pattern)
+- Will track: timeline_monitor, timeline_check operations
 
-**From email integration (Session 860):**
+## Benefits Achieved
 
-Initialization:
-- Logger: `get_logger(__name__, "twitter")`
-- Metrics: `MetricsCollector()` (no args)
-
-Operation tracking:
-- Start: `op = metrics.start_operation("op_name", "twitter")`
-- Complete success: `op.complete(success=True)`
-- Complete with error: `op.complete(success=False, error=str(e))`
-
-Logging:
-- Start: `logger.info("message", extra={context})`
-- Success: `logger.info("success", extra={results})`
-- Error: `logger.error("error", extra={error_details})`
+1. **Performance Tracking**: Measure operation timing for drafts and posts
+2. **Success Rates**: Monitor posting success vs errors
+3. **Error Analysis**: Structured logs with context for debugging
+4. **Debugging**: Rich context in logs (draft_id, tweet_id, etc.)
+5. **Foundation**: Infrastructure ready for monitor() implementation
 
 ## Testing Commands
 
 ```bash
-# Test draft with monitoring (after implementation)
+# Test draft with monitoring
 cd ~/bob/gptme-contrib/scripts/twitter
 ./workflow.py draft "Test tweet" --dry-run
 
 # Test post with monitoring
 ./workflow.py post --dry-run
 
-# Test monitor with monitoring
-./workflow.py monitor --times 1 --dry-run
+# Note: monitor() monitoring not yet implemented
 ```
 
-## Metrics to Collect
+## Phase 3.4 Status
 
-**draft()**:
-- Operation: draft_creation
-- Metrics: draft_count, success_rate, avg_time
-- Context: type, scheduled, text_length
+**Completed**:
+- ✅ Email monitoring integration (Session 860)
+- ✅ Twitter monitoring imports (Session 861)
+- ✅ Shared module infrastructure (Session 864)
+- ✅ draft() monitoring (Session 864)
+- ✅ post() monitoring (Session 864)
 
-**post()**:
-- Operations: post_tweet (per tweet), post_batch (overall)
-- Metrics: posted_count, skipped_count, error_count, success_rate
-- Context: tweet_id, draft_id, type, reply_to
+**Remaining**:
+- ⏸️ monitor() monitoring (~30-45 min)
+- ⏸️ Discord monitoring integration (~20-30 min)
+- ⏸️ Monitoring CLI tool (~15-20 min)
 
-**monitor()**:
-- Operations: timeline_check (per check), timeline_monitor (overall)
-- Metrics: check_frequency, tweet_count, draft_generation_rate
-- Context: source, list_id, dry_run
+**Progress**: 9/12 complete (75%)
 
-## Benefits
+## Next Steps
 
-1. **Performance Tracking**: Measure operation timing
-2. **Success Rates**: Monitor posting/draft success
-3. **Error Analysis**: Track and categorize errors
-4. **Debugging**: Structured logs with context
-5. **Optimization**: Identify slow operations
-6. **Foundation**: Enable monitoring dashboard
+**Session 865+ (Future)**:
+1. Implement monitor() monitoring (30-45 min)
+2. Add Discord monitoring integration (20-30 min)
+3. Create monitoring CLI tool (15-20 min)
 
-## Next Steps (Session 862+)
-
-1. Implement draft() monitoring (20 min)
-2. Implement post() monitoring (30 min)
-3. Implement monitor() monitoring (30 min)
-4. Integration testing (20 min)
-5. Monitoring CLI tool (15-20 min)
-
-**Total Remaining**: ~115 min for complete Phase 3.4
+**Total Remaining**: ~75-115 min for complete Phase 3.4
 
 ## Related Sessions
 
 - Session 860: Email monitoring integration (complete pattern reference)
 - Session 859: Phase 3.3 - Shared configuration module
-- Session 856: Phase 3.1 - Cross-platform foundation
+- Session 861: Twitter monitoring imports and status doc
+- Session 864: Infrastructure + draft() + post() monitoring (THIS SESSION)
 
 ## File Locations
 
-- **Imports added**: `scripts/twitter/workflow.py` line 67-70
-- **Implementation guide**: See `scripts/email/communication_utils/monitoring/integration_guide.md` for email pattern
+- **Shared module**: `scripts/communication_utils/` (moved from email/)
+- **Twitter implementation**: `scripts/twitter/workflow.py` (partial)
+- **Email implementation**: `scripts/email/lib.py`, `scripts/email/watcher.py`
 - **Status tracking**: This file (`scripts/twitter/MONITORING_STATUS.md`)
+
+## Session 864 Summary
+
+**What Worked**:
+- Infrastructure setup (module move, sys.path)
+- draft() monitoring implementation  
+- post() monitoring implementation
+- Comprehensive error handling and logging
+
+**Deferred**:
+- monitor() monitoring (complexity + time constraints)
+- Will be completed in future session
+
+**Value Delivered**: 2/3 Twitter functions with monitoring + full infrastructure for cross-platform access

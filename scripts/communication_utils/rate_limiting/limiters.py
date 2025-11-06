@@ -39,7 +39,9 @@ class RateLimiter:
             now = time.time()
             # Remove expired requests
             cutoff = now - self.window
-            self._requests = [req_time for req_time in self._requests if req_time > cutoff]
+            self._requests = [
+                req_time for req_time in self._requests if req_time > cutoff
+            ]
 
             # Check if under limit
             if len(self._requests) < self.max_requests:
@@ -103,10 +105,14 @@ class RateLimiter:
         }
 
         if platform.lower() not in defaults:
-            raise ValueError(f"Unknown platform: {platform}. Use email, twitter, or discord.")
+            raise ValueError(
+                f"Unknown platform: {platform}. Use email, twitter, or discord."
+            )
 
         config = defaults[platform.lower()]
-        return cls(max_requests=config["max_requests"], window=config["window"], name=platform)
+        return cls(
+            max_requests=config["max_requests"], window=config["window"], name=platform
+        )
 
 
 @dataclass

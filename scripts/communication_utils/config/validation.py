@@ -85,7 +85,9 @@ class ConfigValidator:
         return True, ""
 
     @staticmethod
-    def validate_positive_number(value: float | int, name: str = "value") -> Tuple[bool, str]:
+    def validate_positive_number(
+        value: float | int, name: str = "value"
+    ) -> Tuple[bool, str]:
         """
         Validate that a number is positive.
 
@@ -126,7 +128,9 @@ class ConfigValidator:
         return True, ""
 
     @staticmethod
-    def validate_choice(value: Any, choices: List[Any], name: str = "value") -> Tuple[bool, str]:
+    def validate_choice(
+        value: Any, choices: List[Any], name: str = "value"
+    ) -> Tuple[bool, str]:
         """
         Validate that a value is in a list of allowed choices.
 
@@ -167,7 +171,9 @@ class ConfigValidator:
         return True, ""
 
     @staticmethod
-    def combine_validations(validations: List[Tuple[bool, str]]) -> Tuple[bool, List[str]]:
+    def combine_validations(
+        validations: List[Tuple[bool, str]],
+    ) -> Tuple[bool, List[str]]:
         """
         Combine multiple validation results.
 

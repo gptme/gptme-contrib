@@ -92,7 +92,9 @@ class CallbackServer:
             return  # Already running
 
         self.server = make_server("localhost", self.port, self.app, threaded=True)
-        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True
+        )
         self.server_thread.start()
 
     def stop(self) -> None:

@@ -104,7 +104,9 @@ class MetricsCollector:
             "error_count": len(failed),
         }
 
-    def get_recent_errors(self, limit: int = 10, platform: Optional[str] = None) -> list[dict]:
+    def get_recent_errors(
+        self, limit: int = 10, platform: Optional[str] = None
+    ) -> list[dict]:
         """
         Get recent error details.
 
@@ -160,7 +162,9 @@ class MetricsCollector:
                 "total": len(ops),
                 "successful": len(successful),
                 "failed": len(completed) - len(successful),
-                "avg_duration": (round(sum(durations) / len(durations), 3) if durations else 0.0),
+                "avg_duration": (
+                    round(sum(durations) / len(durations), 3) if durations else 0.0
+                ),
             }
 
         return result

@@ -16,6 +16,9 @@ import sys
 import time
 from pathlib import Path
 
+# Add parent directory to path for shared communication_utils
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from communication_utils.state.locks import FileLock, LockError
 from lib import AgentEmail
 

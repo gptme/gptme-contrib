@@ -105,7 +105,9 @@ class ConversationTracker:
         """Get path to lock file for conversation."""
         return self.state_dir / f"{conversation_id}.lock"
 
-    def get_message_state(self, conversation_id: str, message_id: str) -> Optional[MessageInfo]:
+    def get_message_state(
+        self, conversation_id: str, message_id: str
+    ) -> Optional[MessageInfo]:
         """
         Get state of a specific message.
 
@@ -354,7 +356,8 @@ class ConversationTracker:
                 data = json.load(f)
 
         messages = [
-            MessageInfo.from_dict(msg_data) for msg_data in data.get("messages", {}).values()
+            MessageInfo.from_dict(msg_data)
+            for msg_data in data.get("messages", {}).values()
         ]
         return sorted(messages, key=lambda m: m.created_at or "")
 
