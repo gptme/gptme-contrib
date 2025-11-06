@@ -48,6 +48,7 @@ from ..email.communication_utils.state import (  # type: ignore[import-untyped, 
     ConversationTracker,
     MessageState,
 )
+from ..email.communication_utils.monitoring import MetricsCollector  # type: ignore[import-untyped, misc]
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -81,6 +82,7 @@ logsdir = workspace_root / "logs_discord" if workspace_root else Path("logs_disc
 # Initialize state management
 state_dir = logsdir / "state"
 conversation_tracker = ConversationTracker(state_dir)
+metrics = MetricsCollector()
 
 # Basic tools only for testing
 tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
@@ -204,6 +206,9 @@ async def async_step(
     channel: discord.abc.Messageable,
 ) -> AsyncGenerator[Message, None]:
     """Async wrapper around gptme.chat.step that supports multiple tool executions."""
+    
+    # Start metrics tracking
+    op = metrics.start_operation("gptme_step", "discord")
 
     def confirm_func(msg: str) -> bool:
         # Auto-confirm all tool executions in Discord
@@ -269,10 +274,15 @@ async def async_step(
                 for tooluse in ToolUse.iter_from_content(last_content)
             )
             if not has_runnable:
+                # Complete metrics tracking on successful exit
+                op.complete(success=True)
                 break
 
         except Exception as e:
             logger.exception("Error in gptme step execution")
+            
+            # Complete metrics tracking on error
+            op.complete(success=False, error=str(e))
             raise RuntimeError(f"Error processing message: {str(e)}")
 
 
@@ -449,6 +459,9 @@ async def send_discord_message(
     Returns:
         Tuple of (message, had_error)
     """
+    # Start metrics tracking
+    op = metrics.start_operation("send_message", "discord")
+    
     try:
         # Log full message content
         logger.info(f"Sending message ({len(content)} chars):\n{content}")
@@ -477,6 +490,8 @@ async def send_discord_message(
             else:
                 current_response = await channel.send(content)
 
+        # Complete metrics tracking
+        op.complete(success=True, message_length=len(content))
         return current_response, False
 
     except discord.HTTPException as e:
@@ -484,6 +499,9 @@ async def send_discord_message(
         await channel.send(
             "```diff\n- Error: Message too complex. Try a shorter response.\n```"
         )
+        
+        # Complete metrics tracking
+        op.complete(success=False, error=str(e))
         return current_response, True
 
 
@@ -499,6 +517,8 @@ async def process_message(
     accumulated_content: str = "",
 ) -> tuple[Optional[discord.Message], bool, Log, str]:
     """Process a message from the assistant or system.
+    
+    Tracks operation with metrics for monitoring message processing performance.
 
     Args:
         msg: Message to process
@@ -510,6 +530,9 @@ async def process_message(
     Returns:
         Tuple of (current_response, had_error, updated_log, accumulated_content)
     """
+    # Start metrics tracking
+    op = metrics.start_operation("process_message", "discord")
+    
     if msg.role == "assistant":
         # Clean thinking tags and normalize newlines
         cleaned_content = re_thinking.sub("", msg.content)
@@ -532,6 +555,8 @@ async def process_message(
         if not had_error and len(cleaned_content.strip()) > 0:
             log = log.append(Message("assistant", cleaned_content))
 
+        # Complete metrics tracking
+        op.complete(success=not had_error)
         return current_response, had_error, log, accumulated_content
 
     elif msg.role == "system":
@@ -546,8 +571,13 @@ async def process_message(
         else:
             had_error = False
         log = log.append(msg)
+        
+        # Complete metrics tracking
+        op.complete(success=not had_error)
         return current_response, had_error, log, accumulated_content
 
+    # Complete metrics tracking (default path)
+    op.complete(success=True)
     return current_response, False, log, accumulated_content
 
 
