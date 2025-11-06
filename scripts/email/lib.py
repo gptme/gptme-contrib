@@ -14,6 +14,7 @@ from typing import Optional
 from communication_utils.state.locks import FileLock, LockError
 from communication_utils.state.tracking import ConversationTracker, MessageState
 from communication_utils.rate_limiting.limiters import RateLimiter
+from communication_utils.monitoring import get_logger, MetricsCollector
 
 import markdown
 
@@ -96,6 +97,10 @@ class AgentEmail:
 
         # Initialize conversation tracker for reply state management
         self.tracker = ConversationTracker(self.locks_dir)
+
+        # Initialize monitoring
+        self.logger = get_logger("email_system", "email", log_dir=self.email_dir / "logs")
+        self.metrics = MetricsCollector()
 
         self._validate_structure()
         self._ensure_processed_state()
@@ -328,8 +333,16 @@ class AgentEmail:
         Returns:
             Number of emails processed
         """
+        # Start metrics tracking
+        op = self.metrics.start_operation("process_unreplied", "email")
+        
         unreplied = self.get_unreplied_emails()
+        self.logger.info("Processing unreplied emails",
+                       unreplied_count=len(unreplied))
+        
         processed_count = 0
+        skipped_count = 0
+        error_count = 0
 
         for message_id, subject, sender in unreplied:
             # Try to acquire lock (non-blocking with timeout=0)
@@ -337,13 +350,30 @@ class AgentEmail:
             try:
                 with FileLock(lock_file, timeout=0):
                     print(f"Processing unreplied email from {sender}: {subject}")
+                    self.logger.info("Processing email",
+                                   message_id=message_id,
+                                   sender=sender,
+                                   subject=subject[:50])
                     callback_func(message_id, subject, sender)
                     processed_count += 1
             except LockError:
                 print(f"Skipping {message_id} (already being processed)")
+                self.logger.debug("Email locked, skipping",
+                                message_id=message_id)
+                skipped_count += 1
             except Exception as e:
                 print(f"Error processing {message_id}: {e}")
+                self.logger.error("Email processing error",
+                                message_id=message_id,
+                                error=str(e))
+                error_count += 1
 
+        self.logger.info("Unreplied email processing complete",
+                       processed=processed_count,
+                       skipped=skipped_count,
+                       errors=error_count,
+                       total=len(unreplied))
+        op.complete(success=True)
         return processed_count
 
     def _generate_message_id(self) -> str:
@@ -443,12 +473,18 @@ class AgentEmail:
         Args:
             message_id: ID of message to send
         """
+        # Start metrics tracking
+        op = self.metrics.start_operation("send_email", "email")
+        
         filename = self._format_filename(message_id)
         draft_path = self.email_dir / "drafts" / filename
         sent_path = self.email_dir / "sent" / filename
 
         if not draft_path.exists():
-            raise ValueError(f"Draft not found: {message_id}")
+            error_msg = f"Draft not found: {message_id}"
+            self.logger.error("Send failed", message_id=message_id, error=error_msg)
+            op.complete(success=False, error=error_msg)
+            raise ValueError(error_msg)
 
         # Read content before moving
         content = draft_path.read_text()
@@ -465,7 +501,17 @@ class AgentEmail:
             sender = headers.get("From") or self.own_email
 
             if not recipient:
-                raise ValueError("No recipient found in email headers")
+                error_msg = "No recipient found in email headers"
+                self.logger.error("Send failed", message_id=message_id, error=error_msg)
+                op.complete(success=False, error=error_msg)
+                raise ValueError(error_msg)
+
+            # Log send operation start
+            self.logger.info("Sending email", 
+                           message_id=message_id,
+                           recipient=recipient,
+                           sender=sender,
+                           content_length=len(content))
 
             # Create proper MIME multipart message
             from email.mime.multipart import MIMEMultipart
@@ -525,15 +571,32 @@ class AgentEmail:
                 timeout=30,
             )
             print(f"Email delivered via SMTP to {recipient} (from {sender}) as HTML")
+            self.logger.info("SMTP send successful", 
+                           message_id=message_id,
+                           recipient=recipient)
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
             print(f"Failed to send {message_id}: {error_msg}")
+            self.logger.error("SMTP send failed", 
+                            message_id=message_id,
+                            error=error_msg)
+            op.complete(success=False, error=error_msg)
             raise
         except subprocess.TimeoutExpired:
+            error_msg = "SMTP server timeout"
             print(f"Timeout sending {message_id}: SMTP server took too long to respond")
+            self.logger.error("SMTP send timeout",
+                            message_id=message_id,
+                            error=error_msg)
+            op.complete(success=False, error=error_msg)
             raise
         except Exception as e:
+            error_msg = str(e)
             print(f"Error sending {message_id}: {e}")
+            self.logger.error("SMTP send error",
+                            message_id=message_id,
+                            error=error_msg)
+            op.complete(success=False, error=error_msg)
             raise
 
         # Move markdown file to sent folder (only after successful sending)
@@ -548,8 +611,16 @@ class AgentEmail:
                 print(f"Marked original message {in_reply_to} as replied to by {message_id}")
             except Exception as e:
                 print(f"Warning: Failed to mark original message as replied: {e}")
+                self.logger.warning("Failed to mark as replied",
+                                  message_id=message_id,
+                                  original_id=in_reply_to,
+                                  error=str(e))
 
         print(f"Message {message_id} sent successfully and archived")
+        self.logger.info("Email send complete",
+                       message_id=message_id,
+                       was_reply=bool(in_reply_to))
+        op.complete(success=True)
 
     def receive(self, message_data: str) -> str:
         """Process received email to inbox.
