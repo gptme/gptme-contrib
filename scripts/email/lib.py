@@ -129,25 +129,25 @@ class AgentEmail:
 
     def _mark_replied(self, original_message_id: str, reply_message_id: str) -> None:
         """Mark a message as replied to."""
-        # Normalize message ID format
-        normalized_id = original_message_id.strip("<>")
-        conversation_id = "email"  # Single conversation for all emails
+        # Ensure message tracked with universal ID
+        universal_id = self._ensure_message_tracked(original_message_id)
+        conversation_id = "email"
 
-        # Set state to COMPLETED with reply info
+        # Set state to COMPLETED
         self.tracker.set_message_state(
-            conversation_id=conversation_id, message_id=normalized_id, state=MessageState.COMPLETED
+            conversation_id=conversation_id, message_id=universal_id, state=MessageState.COMPLETED
         )
 
     def _mark_no_reply_needed(self, message_id: str, reason: str = "no reply needed") -> None:
         """Mark a message as processed but no reply needed."""
-        # Normalize message ID format
-        normalized_id = message_id.strip("<>")
-        conversation_id = "email"  # Single conversation for all emails
+        # Ensure message tracked with universal ID
+        universal_id = self._ensure_message_tracked(message_id)
+        conversation_id = "email"
 
         # Set state to NO_REPLY_NEEDED
         self.tracker.set_message_state(
             conversation_id=conversation_id,
-            message_id=normalized_id,
+            message_id=universal_id,
             state=MessageState.NO_REPLY_NEEDED,
         )
 
@@ -155,13 +155,58 @@ class AgentEmail:
         """Check if message has been completed (replied or marked as no reply needed)."""
         # Normalize message ID format
         normalized_id = message_id.strip("<>")
-        conversation_id = "email"  # Single conversation for all emails
+        conversation_id = "email"
 
-        msg_info = self.tracker.get_message_state(conversation_id, normalized_id)
+        # Check via platform ID lookup
+        msg_info = self.tracker.get_message_by_platform_id(
+            conversation_id, platform="email", platform_message_id=normalized_id
+        )
         return msg_info is not None and msg_info.state in (
             MessageState.COMPLETED,
             MessageState.NO_REPLY_NEEDED,
         )
+
+    def _ensure_message_tracked(
+        self,
+        message_id: str,
+        from_user: str | None = None,
+        to_user: str | None = None,
+        subject: str | None = None,
+    ) -> str:
+        """
+        Ensure message exists in tracking system with universal ID.
+
+        Args:
+            message_id: Platform message ID (email Message-ID)
+            from_user: Optional sender email
+            to_user: Optional recipient email
+            subject: Optional message subject
+
+        Returns:
+            Universal message ID
+        """
+        normalized_id = message_id.strip("<>")
+        conversation_id = "email"
+
+        # Check if already tracked
+        msg_info = self.tracker.get_message_by_platform_id(
+            conversation_id, platform="email", platform_message_id=normalized_id
+        )
+
+        if msg_info:
+            return msg_info.message_id
+
+        # Create new unified message
+        msg_info = self.tracker.create_unified_message(
+            conversation_id=conversation_id,
+            platform="email",
+            platform_message_id=normalized_id,
+            from_user=from_user,
+            to_user=to_user,
+            subject=subject,
+        )
+
+        return msg_info.message_id
 
     def get_unreplied_emails(self) -> list[tuple[str, str, str]]:
         """Get list of emails that haven't been replied to.

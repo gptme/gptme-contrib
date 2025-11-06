@@ -343,13 +343,7 @@ class ConversationTracker:
         """
         Get full conversation thread across all platforms.
 
-        Returns messages in chronological order with threading preserved.
-
-        Args:
-            conversation_id: Conversation identifier
-
-        Returns:
-            List of MessageInfo objects in chronological order
+        Returns messages in chronological order.
         """
         state_file = self._get_state_file(conversation_id)
         if not state_file.exists():
@@ -359,14 +353,43 @@ class ConversationTracker:
             with open(state_file) as f:
                 data = json.load(f)
 
-            messages = []
-            for msg_data in data.get("messages", {}).values():
-                messages.append(MessageInfo.from_dict(msg_data))
+        messages = [
+            MessageInfo.from_dict(msg_data) for msg_data in data.get("messages", {}).values()
+        ]
+        return sorted(messages, key=lambda m: m.created_at or "")
 
-            # Sort by creation time
-            messages.sort(key=lambda m: m.created_at or "")
+    def get_message_by_platform_id(
+        self, conversation_id: str, platform: str, platform_message_id: str
+    ) -> Optional[MessageInfo]:
+        """
+        Get message by platform-specific ID.
 
-            return messages
+        Args:
+            conversation_id: Conversation identifier
+            platform: Platform identifier (email, twitter, discord)
+            platform_message_id: Native platform message ID
+
+        Returns:
+            MessageInfo if found, None otherwise
+        """
+        state_file = self._get_state_file(conversation_id)
+        if not state_file.exists():
+            return None
+
+        with file_lock(self._get_lock_file(conversation_id)):
+            with open(state_file) as f:
+                data = json.load(f)
+
+        # Search for message with matching platform and platform_message_id
+        for msg_data in data.get("messages", {}).values():
+            msg_info = MessageInfo.from_dict(msg_data)
+            if (
+                msg_info.platform == platform
+                and msg_info.platform_message_id == platform_message_id
+            ):
+                return msg_info
+
+        return None
 
     def link_cross_platform(
         self,
