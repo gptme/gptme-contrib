@@ -6,7 +6,8 @@ messages, and completion status across platforms.
 """
 
 import json
-from dataclasses import dataclass, asdict
+import uuid
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -27,11 +28,26 @@ class MessageState(Enum):
 
 @dataclass
 class MessageInfo:
-    """Information about a message."""
+    """Information about a message (cross-platform support)."""
 
+    # Core identifiers
     message_id: str
     conversation_id: Optional[str] = None
-    in_reply_to: Optional[str] = None
+
+    # Platform-specific fields (Phase 3.1)
+    platform: str = "email"  # Platform identifier: email, twitter, discord
+    platform_message_id: str = ""  # Native platform ID (tweet_id, discord_id, etc.)
+
+    # Threading
+    in_reply_to: Optional[str] = None  # Parent message ID (universal)
+    references: Optional[list[str]] = field(default_factory=list)  # Full thread chain
+
+    # Metadata
+    from_user: Optional[str] = None
+    to_user: Optional[str] = None
+    subject: Optional[str] = None
+
+    # State tracking
     state: MessageState = MessageState.PENDING
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -41,13 +57,25 @@ class MessageInfo:
         """Convert to dictionary for JSON serialization."""
         data = asdict(self)
         data["state"] = self.state.value
+        # Ensure references is always a list (not None)
+        if data.get("references") is None:
+            data["references"] = []
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "MessageInfo":
-        """Create from dictionary."""
+        """Create from dictionary with backward compatibility."""
         data = data.copy()
         data["state"] = MessageState(data["state"])
+
+        # Ensure new fields have defaults for backward compatibility
+        data.setdefault("platform", "email")
+        data.setdefault("platform_message_id", "")
+        data.setdefault("references", [])
+        data.setdefault("from_user", None)
+        data.setdefault("to_user", None)
+        data.setdefault("subject", None)
+
         return cls(**data)
 
 
@@ -242,3 +270,140 @@ class ConversationTracker:
                 removed += 1
 
         return removed
+
+    def create_unified_message(
+        self,
+        conversation_id: str,
+        platform: str,
+        platform_message_id: str,
+        in_reply_to: Optional[str] = None,
+        from_user: Optional[str] = None,
+        to_user: Optional[str] = None,
+        subject: Optional[str] = None,
+    ) -> MessageInfo:
+        """
+        Create a message with universal ID for cross-platform tracking.
+
+        Args:
+            conversation_id: Conversation identifier
+            platform: Platform identifier (email, twitter, discord)
+            platform_message_id: Native platform message ID
+            in_reply_to: Optional parent message ID (universal)
+            from_user: Sender identifier
+            to_user: Recipient identifier
+            subject: Message subject/preview
+
+        Returns:
+            Created MessageInfo with universal UUID
+        """
+        # Generate universal message ID
+        universal_id = str(uuid.uuid4())
+
+        # Build references list from parent
+        references = []
+        if in_reply_to:
+            parent = self.get_message_state(conversation_id, in_reply_to)
+            if parent and parent.references:
+                references = parent.references.copy()
+            if in_reply_to not in references:
+                references.append(in_reply_to)
+
+        # Create message info
+        message_info = MessageInfo(
+            message_id=universal_id,
+            conversation_id=conversation_id,
+            platform=platform,
+            platform_message_id=platform_message_id,
+            in_reply_to=in_reply_to,
+            references=references,
+            from_user=from_user,
+            to_user=to_user,
+            subject=subject,
+            state=MessageState.PENDING,
+            created_at=datetime.now().isoformat(),
+        )
+
+        # Save to state
+        state_file = self._get_state_file(conversation_id)
+        with file_lock(self._get_lock_file(conversation_id)):
+            if state_file.exists():
+                with open(state_file) as f:
+                    data = json.load(f)
+            else:
+                data = {"conversation_id": conversation_id, "messages": {}}
+
+            data["messages"][universal_id] = message_info.to_dict()
+
+            with open(state_file, "w") as f:
+                json.dump(data, f, indent=2)
+
+        return message_info
+
+    def get_conversation_thread(self, conversation_id: str) -> list[MessageInfo]:
+        """
+        Get full conversation thread across all platforms.
+
+        Returns messages in chronological order with threading preserved.
+
+        Args:
+            conversation_id: Conversation identifier
+
+        Returns:
+            List of MessageInfo objects in chronological order
+        """
+        state_file = self._get_state_file(conversation_id)
+        if not state_file.exists():
+            return []
+
+        with file_lock(self._get_lock_file(conversation_id)):
+            with open(state_file) as f:
+                data = json.load(f)
+
+            messages = []
+            for msg_data in data.get("messages", {}).values():
+                messages.append(MessageInfo.from_dict(msg_data))
+
+            # Sort by creation time
+            messages.sort(key=lambda m: m.created_at or "")
+
+            return messages
+
+    def link_cross_platform(
+        self,
+        conversation_id: str,
+        message_id: str,
+        linked_platform: str,
+        linked_message_id: str,
+    ) -> None:
+        """
+        Link a message to its counterpart on another platform.
+
+        This allows tracking the same logical message across multiple platforms
+        (e.g., a tweet that was also sent via email).
+
+        Args:
+            conversation_id: Conversation identifier
+            message_id: Universal message ID
+            linked_platform: Platform of the linked message
+            linked_message_id: Platform-specific ID of linked message
+        """
+        state_file = self._get_state_file(conversation_id)
+
+        with file_lock(self._get_lock_file(conversation_id)):
+            with open(state_file) as f:
+                data = json.load(f)
+
+            if message_id not in data["messages"]:
+                raise ValueError(f"Message {message_id} not found")
+
+            # Add cross-platform link
+            if "cross_platform_links" not in data["messages"][message_id]:
+                data["messages"][message_id]["cross_platform_links"] = {}
+
+            data["messages"][message_id]["cross_platform_links"][linked_platform] = (
+                linked_message_id
+            )
+            data["messages"][message_id]["updated_at"] = datetime.now().isoformat()
+
+            with open(state_file, "w") as f:
+                json.dump(data, f, indent=2)
