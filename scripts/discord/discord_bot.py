@@ -206,7 +206,7 @@ async def async_step(
     channel: discord.abc.Messageable,
 ) -> AsyncGenerator[Message, None]:
     """Async wrapper around gptme.chat.step that supports multiple tool executions."""
-    
+
     # Start metrics tracking
     op = metrics.start_operation("gptme_step", "discord")
 
@@ -280,7 +280,7 @@ async def async_step(
 
         except Exception as e:
             logger.exception("Error in gptme step execution")
-            
+
             # Complete metrics tracking on error
             op.complete(success=False, error=str(e))
             raise RuntimeError(f"Error processing message: {str(e)}")
@@ -461,7 +461,7 @@ async def send_discord_message(
     """
     # Start metrics tracking
     op = metrics.start_operation("send_message", "discord")
-    
+
     try:
         # Log full message content
         logger.info(f"Sending message ({len(content)} chars):\n{content}")
@@ -499,7 +499,7 @@ async def send_discord_message(
         await channel.send(
             "```diff\n- Error: Message too complex. Try a shorter response.\n```"
         )
-        
+
         # Complete metrics tracking
         op.complete(success=False, error=str(e))
         return current_response, True
@@ -517,7 +517,7 @@ async def process_message(
     accumulated_content: str = "",
 ) -> tuple[Optional[discord.Message], bool, Log, str]:
     """Process a message from the assistant or system.
-    
+
     Tracks operation with metrics for monitoring message processing performance.
 
     Args:
@@ -532,7 +532,7 @@ async def process_message(
     """
     # Start metrics tracking
     op = metrics.start_operation("process_message", "discord")
-    
+
     if msg.role == "assistant":
         # Clean thinking tags and normalize newlines
         cleaned_content = re_thinking.sub("", msg.content)
@@ -571,7 +571,7 @@ async def process_message(
         else:
             had_error = False
         log = log.append(msg)
-        
+
         # Complete metrics tracking
         op.complete(success=not had_error)
         return current_response, had_error, log, accumulated_content
