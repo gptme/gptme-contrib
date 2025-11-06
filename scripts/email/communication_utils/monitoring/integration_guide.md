@@ -54,31 +54,31 @@ from communication_utils.monitoring import get_logger, MetricsCollector
 class EmailSystem:
     def __init__(self):
         # Setup logging
-        self.logger = get_logger("email_system", "email", 
+        self.logger = get_logger("email_system", "email",
                                 log_dir=Path("logs/email/"))
-        
+
         # Setup metrics
         self.metrics = MetricsCollector()
-    
+
     def send_reply(self, message_id: str, content: str):
         """Send email reply with monitoring."""
         # Start metrics tracking
         op = self.metrics.start_operation("send_reply", "email")
-        
+
         try:
             # Log operation start
-            self.logger.info("Sending reply", 
+            self.logger.info("Sending reply",
                            message_id=message_id,
                            content_length=len(content))
-            
+
             # Perform send operation
             send_email_via_smtp(message_id, content)
-            
+
             # Log success
             self.logger.info("Reply sent successfully",
                            message_id=message_id)
             op.complete(success=True)
-            
+
         except Exception as e:
             # Log error
             self.logger.error("Failed to send reply",
@@ -86,7 +86,7 @@ class EmailSystem:
                             error=str(e))
             op.complete(success=False, error=str(e))
             raise
-    
+
     def get_performance_stats(self) -> dict:
         """Get email system performance statistics."""
         return self.metrics.get_stats("email")
@@ -104,36 +104,36 @@ class TwitterSystem:
         # Setup logging
         self.logger = get_logger("twitter_system", "twitter",
                                 log_dir=Path("logs/twitter/"))
-        
+
         # Setup metrics
         self.metrics = MetricsCollector()
-    
+
     def post_tweet(self, content: str) -> str:
         """Post tweet with monitoring."""
         # Start metrics tracking
         op = self.metrics.start_operation("post_tweet", "twitter")
-        
+
         try:
             # Log operation start
             self.logger.info("Posting tweet",
                            content_length=len(content))
-            
+
             # Post tweet via API
             tweet_id = twitter_api_post(content)
-            
+
             # Log success
             self.logger.info("Tweet posted",
                            tweet_id=tweet_id)
             op.complete(success=True)
             return tweet_id
-            
+
         except Exception as e:
             # Log error
             self.logger.error("Failed to post tweet",
                             error=str(e))
             op.complete(success=False, error=str(e))
             raise
-    
+
     def get_performance_stats(self) -> dict:
         """Get twitter system performance statistics."""
         return self.metrics.get_stats("twitter")
@@ -151,30 +151,30 @@ class DiscordBot:
         # Setup logging
         self.logger = get_logger("discord_bot", "discord",
                                 log_dir=Path("logs/discord/"))
-        
+
         # Setup metrics
         self.metrics = MetricsCollector()
-    
+
     async def handle_message(self, message):
         """Handle Discord message with monitoring."""
         # Start metrics tracking
         op = self.metrics.start_operation("handle_message", "discord")
-        
+
         try:
             # Log operation start
             self.logger.info("Processing message",
                            user=str(message.author),
                            channel=str(message.channel))
-            
+
             # Process message
             response = await process_discord_message(message)
             await message.channel.send(response)
-            
+
             # Log success
             self.logger.info("Message processed",
                            user=str(message.author))
             op.complete(success=True)
-            
+
         except Exception as e:
             # Log error
             self.logger.error("Failed to process message",
@@ -182,7 +182,7 @@ class DiscordBot:
                             error=str(e))
             op.complete(success=False, error=str(e))
             raise
-    
+
     def get_performance_stats(self) -> dict:
         """Get discord bot performance statistics."""
         return self.metrics.get_stats("discord")
@@ -227,14 +227,14 @@ def main():
     parser.add_argument("--errors", action="store_true",
                        help="Show recent errors")
     args = parser.parse_args()
-    
+
     # Get metrics from each platform
     platforms = {
         "email": EmailSystem(),
         "twitter": TwitterSystem(),
         "discord": DiscordBot()
     }
-    
+
     if args.platform == "all":
         for name, system in platforms.items():
             stats = system.get_performance_stats()
@@ -243,7 +243,7 @@ def main():
         system = platforms[args.platform]
         stats = system.get_performance_stats()
         display_platform_stats(args.platform, stats)
-    
+
     # Show recent errors if requested
     if args.errors:
         print("\nRecent Errors:")
@@ -315,7 +315,7 @@ import time
 
 while running:
     handle_requests()
-    
+
     # Every hour, log performance stats
     if time.time() - last_stats_time > 3600:
         stats = metrics.get_stats()
@@ -360,13 +360,13 @@ def save_metrics(metrics: MetricsCollector, path: Path):
     stats = metrics.get_stats()
     breakdown = metrics.get_operation_breakdown()
     errors = metrics.get_recent_errors()
-    
+
     data = {
         "overall_stats": stats,
         "operation_breakdown": breakdown,
         "recent_errors": errors
     }
-    
+
     path.write_text(json.dumps(data, indent=2))
 
 # Save every hour
@@ -383,14 +383,14 @@ from unittest.mock import Mock
 def test_email_send():
     # Create mock logger
     mock_logger = Mock()
-    
+
     # Inject into system
     email_system = EmailSystem()
     email_system.logger = mock_logger
-    
+
     # Test operation
     email_system.send_reply("msg_123", "Test reply")
-    
+
     # Verify logging
     mock_logger.info.assert_called_with("Sending reply",
                                        message_id="msg_123",
@@ -402,11 +402,11 @@ def test_email_send():
 ```python
 def test_metrics_collection():
     metrics = MetricsCollector()
-    
+
     # Track operation
     op = metrics.start_operation("test_op", "test_platform")
     op.complete(success=True)
-    
+
     # Verify stats
     stats = metrics.get_stats()
     assert stats["total_operations"] == 1
