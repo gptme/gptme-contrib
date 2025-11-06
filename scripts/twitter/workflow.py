@@ -64,6 +64,11 @@ from llm import (
 )
 from twitter import cached_get_me, load_twitter_client
 
+# Import monitoring utilities
+from communication_utils.monitoring import get_logger
+
+logger = get_logger(__name__, "twitter")
+
 # Initialize rich console
 console = Console()
 
