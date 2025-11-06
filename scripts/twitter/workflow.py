@@ -65,8 +65,8 @@ from llm import (
 from twitter import cached_get_me, load_twitter_client
 
 # Add parent directory to path for shared communication_utils
-import sys
 from pathlib import Path as _Path
+
 sys.path.insert(0, str(_Path(__file__).parent.parent))
 
 # Import monitoring utilities
@@ -553,7 +553,7 @@ def draft(
 ) -> None:
     """Create a new tweet draft"""
     op = metrics.start_operation("draft_creation", "twitter")
-    
+
     try:
         scheduled_time = datetime.fromisoformat(schedule) if schedule else None
 
@@ -565,22 +565,22 @@ def draft(
         )
 
         path = save_draft(draft, "new")
-        
+
         op.complete(success=True)
-        logger.info("Draft created successfully", extra={
-            "type": type,
-            "scheduled": bool(scheduled_time),
-            "text_length": len(text),
-            "path": str(path)
-        })
-        
+        logger.info(
+            "Draft created successfully",
+            extra={
+                "type": type,
+                "scheduled": bool(scheduled_time),
+                "text_length": len(text),
+                "path": str(path),
+            },
+        )
+
         console.print(f"[green]Created draft: {path}")
     except Exception as e:
         op.complete(success=False, error=str(e))
-        logger.error("Draft creation failed", extra={
-            "type": type,
-            "error": str(e)
-        })
+        logger.error("Draft creation failed", extra={"type": type, "error": str(e)})
         raise
 
 
@@ -728,33 +728,23 @@ def edit(draft_id: str, new_text: str) -> None:
 @click.option("--draft-id", help="Post a specific draft by ID or path")
 def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
     """Post approved tweets"""
-    batch_op = metrics.start_operation("post_batch", "twitter")
-    posted_count = 0
-    skipped_count = 0
-    error_count = 0
-    
-    try:
-        # If a specific draft ID is provided, find only that draft
-        if draft_id:
-            draft_path = find_draft(draft_id, "approved")
-            if not draft_path:
-                batch_op.complete(success=False, error="Draft not found")
-                return
-            drafts = [draft_path]
-        else:
-            drafts = list_drafts("approved")
-
-        if not drafts:
-            console.print("[yellow]No approved tweets to post")
-            batch_op.complete(success=True)
-            logger.info("No drafts to post", extra={"dry_run": dry_run})
+    # If a specific draft ID is provided, find only that draft
+    if draft_id:
+        draft_path = find_draft(draft_id, "approved")
+        if not draft_path:
             return
+        drafts = [draft_path]
+    else:
+        drafts = list_drafts("approved")
 
-        client = load_twitter_client(require_auth=True)
+    if not drafts:
+        console.print("[yellow]No approved tweets to post")
+        return
 
-        for path in drafts:
-            tweet_op = metrics.start_operation("post_tweet", "twitter")
-            draft = TweetDraft.load(path)
+    client = load_twitter_client(require_auth=True)
+
+    for path in drafts:
+        draft = TweetDraft.load(path)
 
         # Skip if scheduled for later
         if draft.scheduled_time and draft.scheduled_time > datetime.now():
@@ -772,13 +762,6 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
         # 3. Neither: Ask for confirmation
 
         if dry_run:
-            skipped_count += 1
-            tweet_op.complete(success=True)
-            logger.info("Tweet dry-run", extra={
-                "draft_id": path.stem,
-                "type": draft.type,
-                "action": "dry_run"
-            })
             console.print("[yellow]Dry run - tweet would be posted")
             console.print(f"[blue]Draft ID: {path.stem}[/blue]")
             continue
@@ -793,59 +776,14 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
 
                 if response.data:
                     tweet_id = response.data["id"]
-                    posted_count += 1
-                    tweet_op.complete(success=True)
-                    logger.info("Tweet posted successfully", extra={
-                        "draft_id": path.stem,
-                        "tweet_id": tweet_id,
-                        "type": draft.type,
-                        "reply_to": draft.in_reply_to
-                    })
                     console.print(f"[green]Posted tweet: {tweet_id}")
                     move_draft(path, "posted")
                 else:
-                    error_count += 1
-                    tweet_op.complete(success=False, error="No response data")
-                    logger.error("Tweet posting failed - no response data", extra={
-                        "draft_id": path.stem,
-                        "type": draft.type
-                    })
                     console.print("[red]Error: No response data from tweet creation")
             except Exception as e:
-                error_count += 1
-                tweet_op.complete(success=False, error=str(e))
-                logger.error("Tweet posting error", extra={
-                    "draft_id": path.stem,
-                    "type": draft.type,
-                    "error": str(e)
-                })
                 console.print(f"[red]Error posting tweet: {e}")
         else:
-            skipped_count += 1
-            tweet_op.complete(success=True)
-            logger.info("Tweet skipped by user", extra={
-                "draft_id": path.stem,
-                "type": draft.type
-            })
             console.print("[yellow]Skipped posting tweet")
-        
-        # Complete batch operation with summary
-        batch_op.complete(success=True)
-        logger.info("Post batch completed", extra={
-            "posted": posted_count,
-            "skipped": skipped_count,
-            "errors": error_count,
-            "dry_run": dry_run
-        })
-    except Exception as e:
-        batch_op.complete(success=False, error=str(e))
-        logger.error("Post batch failed", extra={
-            "posted": posted_count,
-            "skipped": skipped_count,
-            "errors": error_count,
-            "error": str(e)
-        })
-        raise
 
 
 def process_timeline_tweets(
@@ -1055,6 +993,8 @@ def monitor(
     list_id: Optional[str], interval: int, dry_run: bool, times: Optional[int]
 ) -> None:
     """Monitor timeline and generate draft replies"""
+    session_op = metrics.start_operation("monitor_session", "twitter")
+    checks_run = 0
 
     console.print("[green]Starting timeline monitor...")
     console.print(f"[blue]Checking every {interval} seconds")
@@ -1064,6 +1004,10 @@ def monitor(
 
     def check_timeline():
         """Check timeline and generate drafts"""
+        nonlocal checks_run
+        checks_run += 1
+        check_op = metrics.start_operation("timeline_check", "twitter")
+
         try:
             # Get timeline tweets
             if list_id:
@@ -1086,6 +1030,8 @@ def monitor(
 
             if not tweets.data:
                 console.print("[yellow]No new tweets found")
+                check_op.complete(success=True)
+                logger.info("Timeline check - no tweets", extra={"source": source})
                 return
 
             # Process tweets
@@ -1104,7 +1050,19 @@ def monitor(
                 max_drafts=times,  # Use times parameter as max_drafts
             )
 
+            check_op.complete(success=True)
+            logger.info(
+                "Timeline check complete",
+                extra={
+                    "source": source,
+                    "tweets_found": len(tweets.data),
+                    "dry_run": dry_run,
+                },
+            )
+
         except Exception as e:
+            check_op.complete(success=False, error=str(e))
+            logger.error("Timeline check failed", extra={"error": str(e)})
             console.print(f"[red]Error checking timeline: {e}")
             console.print(f"[red]Details: {str(e)}")
 
@@ -1118,6 +1076,17 @@ def monitor(
                 check_timeline()
         except KeyboardInterrupt:
             console.print("\n[yellow]Stopping timeline monitor...")
+            session_op.complete(success=True)
+            logger.info(
+                "Monitor session stopped",
+                extra={"checks_run": checks_run, "reason": "keyboard_interrupt"},
+            )
+    else:
+        session_op.complete(success=True)
+        logger.info(
+            "Monitor session complete",
+            extra={"checks_run": checks_run, "single_run": True},
+        )
 
 
 @cli.command()
