@@ -60,23 +60,32 @@ Unnecessary branches/PRs for trivial changes, staging too much (git add .), leak
    - If accidentally on master: don't commit, create proper branch first
    - Avoid: committing to master when feature branch intended
 
-4) Commit with explicit paths (no staging)
-   - Commit files directly: `git commit path1 path2 -m "type(scope): message"`
+4) Commit with explicit paths
+   - **For tracked files**: Commit directly: `git commit path1 path2 -m "message"`
+   - **For untracked files**: Must add first: `git add path1 path2 && git commit path1 path2 -m "message"`
+   - Check `git status` to see which files are tracked vs untracked
    - This prevents accidentally committing staged files you weren't aware of
    - If you already staged files: review `git status` carefully before committing
    - Avoid: `git add .` then `git commit` (can commit unintended staged changes)
    - Avoid: `git commit -a` (commits all tracked changes)
 
-Example correct workflow:
+Example correct workflows:
 ```bash
-# Check what changed
+# Check what changed (shows tracked vs untracked)
 git status
 
 # Verify on correct branch
 git branch --show-current  # Should show feature-branch, not master
 
-# Commit only intended files
-git commit journal/2025-11-04.md tasks/my-task.md -m "docs: update journal and task"
+# Tracked files: Commit directly
+git commit tasks/existing-task.md lessons/workflow/some-lesson.md -m "docs: update task and lesson"
+
+# Untracked files: Add then commit (explicit in both!)
+git add journal/2025-11-06-topic.md && git commit journal/2025-11-06-topic.md -m "docs(journal): session summary"
+git add people/new-person.md && git commit people/new-person.md -m "docs(people): add profile"
+
+# Mixed (untracked + tracked): Add untracked files, then commit all explicitly
+git add journal/2025-11-06-topic.md && git commit journal/2025-11-06-topic.md tasks/existing-task.md -m "docs: session work"
 
 # If pre-commit fails, run the entire `git commit` command again (don't amend)
 ```
