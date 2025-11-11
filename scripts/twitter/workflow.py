@@ -533,7 +533,7 @@ def list_drafts(status: str) -> List[Path]:
 @click.group()
 @click.option(
     "--model",
-    default=os.getenv("MODEL", "anthropic/claude-3-5-sonnet-20241022"),
+    default=os.getenv("MODEL", "anthropic/claude-sonnet-4-5"),
     help="Model to use for LLM operations",
 )
 def cli(model: str | None = None) -> None:
