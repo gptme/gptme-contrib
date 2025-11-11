@@ -159,7 +159,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                 oauth2_user_handler = tweepy.OAuth2UserHandler(
                     client_id=client_id,
                     client_secret=client_secret,
-                    redirect_uri="http://localhost:9876",
+                    redirect_uri="http://localhost:9876/callback",
                     scope=["tweet.read", "tweet.write", "users.read"],
                 )
 
