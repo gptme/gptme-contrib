@@ -880,9 +880,14 @@ class AgentEmail:
         if not thread_messages:
             return self.read_message(message_id)
 
+        # Count my replies
+        my_replies = sum(
+            1 for msg in thread_messages if msg["folder"].lower() in ["sent", "bob-sent"]
+        )
         output = []
         output.append("=" * 80)
         output.append(f"CONVERSATION THREAD ({len(thread_messages)} messages)")
+        output.append(f"🤖 Your replies: {my_replies} of {len(thread_messages)} messages")
         output.append("=" * 80)
         output.append("")
 
@@ -890,14 +895,29 @@ class AgentEmail:
             # Header for each message
             headers = msg["headers"]
             is_current = msg["id"] == message_id
+            is_my_reply = msg["folder"].lower() in ["sent", "bob-sent"]
 
-            marker = ">>> CURRENT MESSAGE <<<" if is_current else ""
+            # Check replied status for inbox messages
+            replied_status = ""
+            if not is_my_reply:
+                is_replied = self._is_completed(msg["id"])
+                replied_status = " ✅ [REPLIED]" if is_replied else " ⏸️  [PENDING]"
+
+            # Build marker showing message type
+            markers = []
+            if is_current:
+                markers.append(">>> CURRENT MESSAGE <<<")
+            if is_my_reply:
+                markers.append("🤖 [MY REPLY]")
+
+            marker = " ".join(markers) + replied_status
             output.append(f"[{i + 1}/{len(thread_messages)}] {marker}")
             output.append(f"From: {headers.get('From', 'Unknown')}")
             output.append(f"To: {headers.get('To', 'Unknown')}")
             output.append(f"Date: {headers.get('Date', 'Unknown')}")
             output.append(f"Subject: {headers.get('Subject', 'No Subject')}")
             output.append(f"Folder: {msg['folder']}")
+            output.append(f"Message-ID: {msg['id'][:40]}...")  # Truncate for readability
             output.append("-" * 60)
 
             # Message body
