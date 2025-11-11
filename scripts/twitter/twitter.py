@@ -175,7 +175,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     "[yellow]Waiting for authorization (timeout: 5 minutes)..."
                 )
                 try:
-                    response_code = run_oauth_callback(port=9876, timeout=300)
+                    response_code, full_url = run_oauth_callback(port=9876, timeout=300)
                     console.print("[green]Authorization received!")
                 except TimeoutError as e:
                     console.print("[red]Error: Authorization timeout")
@@ -186,8 +186,8 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     console.print(f"[red]Details: {str(e)}")
                     raise
 
-                # Get access token
-                access_token = oauth2_user_handler.fetch_token(response_code)
+                # Get access token using the full callback URL
+                access_token = oauth2_user_handler.fetch_token(full_url)
                 print(f"{access_token=}")
 
                 # Save access token to .env using shared utility
