@@ -1191,3 +1191,82 @@ class AgentEmail:
         print(
             f"Synced {folder}: {success} succeeded, {failed} failed, {skipped} skipped (already exist)"
         )
+
+    def export_to_maildir(self, folder: str, dest_maildir: Path) -> dict[str, int | str]:
+        """Export messages from markdown format to maildir.
+
+        This exports emails from the workspace storage as markdown files
+        to a maildir directory that can be read by mail clients like neomutt.
+
+        Args:
+            folder: Folder to export - supports "inbox", "sent", "drafts", "archive"
+            dest_maildir: Path to destination maildir directory
+
+        Returns:
+            dict: Statistics with 'success', 'failed', 'skipped' counts
+        """
+        import socket
+        import time
+
+        # Map folder to source directory
+        folder_map = {
+            "inbox": self.email_dir / "inbox",
+            "sent": self.email_dir / "sent",
+            "drafts": self.email_dir / "drafts",
+            "archive": self.email_dir / "archive",
+        }
+
+        if folder not in folder_map:
+            raise ValueError(f"Unknown folder: {folder}. Supported: {list(folder_map.keys())}")
+
+        source_dir = folder_map[folder]
+
+        if not source_dir.exists():
+            return {
+                "success": 0,
+                "failed": 0,
+                "skipped": 0,
+                "error": f"Source folder does not exist: {source_dir}",
+            }
+
+        # Create maildir structure
+        for subdir in ["cur", "new", "tmp"]:
+            (dest_maildir / subdir).mkdir(parents=True, exist_ok=True)
+
+        success = 0
+        failed = 0
+        skipped = 0
+
+        hostname = socket.gethostname()
+
+        # Export each markdown file to maildir format
+        for md_file in source_dir.glob("*.md"):
+            try:
+                # Read markdown content
+                content = md_file.read_text()
+
+                # Generate unique maildir filename
+                # Format: <timestamp>.<unique>.<hostname>:2,<flags>
+                # :2,S means Seen (read) flag
+                timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
+                unique_id = md_file.stem
+                filename = f"{timestamp}.{unique_id}.{hostname}:2,S"
+
+                # Write to maildir cur/ directory (for read messages)
+                dest_file = dest_maildir / "cur" / filename
+                dest_file.write_text(content)
+
+                success += 1
+
+            except Exception as e:
+                print(f"Failed to export {md_file.name}: {e}")
+                failed += 1
+                continue
+
+        print(f"Exported {folder}: {success} succeeded, {failed} failed, {skipped} skipped")
+
+        return {
+            "success": success,
+            "failed": failed,
+            "skipped": skipped,
+        }

@@ -603,6 +603,42 @@ def sync_maildir(folder: str) -> None:
 
 
 @cli.command()
+@click.argument("folder", type=str)
+@click.argument("dest_maildir", type=str)
+def export_maildir(folder: str, dest_maildir: str) -> None:
+    """Export messages from markdown to maildir format.
+
+    FOLDER: Folder to export (inbox, sent, drafts, archive, or 'all')
+    DEST_MAILDIR: Destination maildir directory path
+
+    Example:
+        ./cli.py export-maildir inbox ~/test-maildir
+        ./cli.py export-maildir all ~/test-maildir
+    """
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+
+    dest_path = Path(dest_maildir)
+    folders = ["inbox", "sent", "drafts", "archive"] if folder == "all" else [folder]
+
+    for f in folders:
+        click.echo(f"Exporting {f} to {dest_path}...")
+        try:
+            result = email.export_to_maildir(f, dest_path)
+            if "error" in result:
+                click.echo(f"Error: {result['error']}", err=True)
+            else:
+                click.echo(
+                    f"Exported {f}: {result['success']} succeeded, "
+                    f"{result['failed']} failed, {result['skipped']} skipped"
+                )
+        except ValueError as e:
+            click.echo(f"Error exporting {f}: {e}", err=True)
+
+    click.echo("Export complete")
+
+
+@cli.command()
 def check_unreplied() -> None:
     """Check for unreplied emails from allowlisted senders."""
     workspace_dir = get_workspace_dir()
