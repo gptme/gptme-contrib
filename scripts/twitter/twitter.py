@@ -69,11 +69,11 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 # Import shared utilities (type: ignore for mypy - paths are dynamic)
-from ..email.communication_utils.auth import (  # type: ignore  # noqa: E402
+from communication_utils.auth import (  # type: ignore  # noqa: E402
     run_oauth_callback,
     save_token_to_env,
 )
-from ..email.communication_utils.messaging import (  # type: ignore  # noqa: E402
+from communication_utils.messaging import (  # type: ignore  # noqa: E402
     split_thread,
 )
 

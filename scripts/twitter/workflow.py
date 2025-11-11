@@ -538,7 +538,9 @@ def list_drafts(status: str) -> List[Path]:
 )
 def cli(model: str | None = None) -> None:
     """Twitter Workflow Manager"""
-    init_gptme(model=model, interactive=False, tool_allowlist=[])
+    init_gptme(
+        model=model, interactive=False, tool_allowlist=[], tool_format="markdown"
+    )
 
 
 @cli.command()
