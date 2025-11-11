@@ -17,7 +17,7 @@ from datetime import timezone
 
 import click
 
-from lib import AgentEmail
+from lib import AgentEmail  # type: ignore[import-not-found]
 
 
 def get_workspace_dir() -> Path:
@@ -361,6 +361,165 @@ def mark_no_reply(message_id: str, reason: str) -> None:
     email = AgentEmail(workspace_dir)
     email._mark_no_reply_needed(message_id, reason)
     click.echo(f"Marked {message_id} as no reply needed: {reason}")
+
+
+@cli.command()
+@click.option("--threshold", default=0.6, help="Complexity threshold (0.0-1.0)")
+@click.option(
+    "--mark-complex/--no-mark",
+    default=False,
+    help="Automatically mark complex emails as no-reply-needed",
+)
+def check_complexity(threshold: float, mark_complex: bool) -> None:
+    """Check complexity of unreplied emails and optionally mark complex ones."""
+    import re
+
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+
+    # Inline complexity detection
+    SENSITIVE_KEYWORDS = {
+        "financial",
+        "money",
+        "payment",
+        "invoice",
+        "contract",
+        "legal",
+        "lawsuit",
+        "attorney",
+        "court",
+        "confidential",
+        "private",
+        "sensitive",
+        "secret",
+        "personal",
+        "urgent",
+        "critical",
+        "emergency",
+    }
+
+    DECISION_PHRASES = [
+        r"should\s+we",
+        r"which\s+option",
+        r"need\s+to\s+decide",
+        r"what\s+do\s+you\s+think",
+        r"your\s+thoughts",
+        r"approve",
+        r"sign\s+off",
+    ]
+
+    def detect_complexity(msg, body: str):
+        """Detect email complexity. Returns (score, reasons)."""
+        reasons = []
+        score = 0.0
+
+        # Check length
+        word_count = len(body.split())
+        if word_count > 500:
+            reasons.append(f"long email ({word_count} words)")
+            score += 0.2
+
+        # Check paragraphs
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        if len(paragraphs) > 5:
+            reasons.append(f"many paragraphs ({len(paragraphs)})")
+            score += 0.15
+
+        # Check questions
+        questions = body.count("?")
+        if questions > 3:
+            reasons.append(f"multiple questions ({questions})")
+            score += 0.25
+
+        # Check sensitive keywords
+        body_lower = body.lower()
+        found_sensitive = [kw for kw in SENSITIVE_KEYWORDS if kw in body_lower]
+        if found_sensitive:
+            reasons.append(f"sensitive: {', '.join(found_sensitive[:2])}")
+            score += 0.3
+
+        # Check decision phrases
+        if any(re.search(pattern, body_lower) for pattern in DECISION_PHRASES):
+            reasons.append("requires decision")
+            score += 0.25
+
+        # Check multiple recipients
+        to_addrs = msg.get_all("to", [])
+        cc_addrs = msg.get_all("cc", [])
+        total = len(to_addrs) + len(cc_addrs)
+        if total > 2:
+            reasons.append(f"multiple recipients ({total})")
+            score += 0.15
+
+        return min(score, 1.0), reasons
+
+    # Get unreplied emails
+    unreplied = email.get_unreplied_emails()
+
+    if not unreplied:
+        click.echo("No unreplied emails found.")
+        return
+
+    click.echo(f"\nComplexity Analysis (threshold: {threshold}):\n")
+    click.echo(f"{'Sender':<30} | {'Subject':<40} | {'Score':<6} | {'Status':<10}")
+    click.echo("-" * 100)
+
+    complex_count = 0
+    simple_count = 0
+
+    for msg_id, subject, sender in unreplied:
+        # Read email to get message object and body
+        message_data = email.read_message(msg_id)
+
+        # Parse the raw email to get EmailMessage object
+        from email import message_from_string
+
+        msg = message_from_string(message_data)
+
+        # Extract plain text body
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    payload = part.get_payload(decode=True)
+                    if payload and isinstance(payload, bytes):
+                        body = payload.decode("utf-8", errors="replace")
+                    break
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload and isinstance(payload, bytes):
+                body = payload.decode("utf-8", errors="replace")
+
+        # Detect complexity
+        complexity_score, reasons = detect_complexity(msg, body)
+        is_complex = complexity_score > threshold
+
+        status = "COMPLEX" if is_complex else "simple"
+        if is_complex:
+            complex_count += 1
+
+            # Optionally mark as no-reply-needed
+            if mark_complex:
+                email._mark_no_reply_needed(msg_id, f"complex email - {', '.join(reasons[:2])}")
+                status += " (marked)"
+        else:
+            simple_count += 1
+
+        # Truncate sender/subject for display
+        sender_short = sender[:28] + ".." if len(sender) > 30 else sender
+        subject_short = subject[:38] + ".." if len(subject) > 40 else subject
+
+        click.echo(
+            f"{sender_short:<30} | {subject_short:<40} | {complexity_score:<6.2f} | {status:<10}"
+        )
+
+        if reasons:
+            click.echo(f"  Reasons: {', '.join(reasons)}")
+
+    click.echo(f"\nSummary: {simple_count} simple, {complex_count} complex")
+
+    if mark_complex and complex_count > 0:
+        click.echo(f"\nMarked {complex_count} complex emails as no-reply-needed.")
 
 
 @cli.command()
