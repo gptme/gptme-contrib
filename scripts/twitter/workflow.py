@@ -788,6 +788,31 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
             console.print("[yellow]Skipped posting tweet")
 
 
+def should_evaluate_tweet(tweet_text: str, min_length: int = 50) -> Tuple[bool, str]:
+    """
+    Pre-filter tweets before expensive LLM evaluation.
+
+    Returns:
+        (should_evaluate, skip_reason)
+    """
+    # Skip retweets without commentary
+    if tweet_text.strip().startswith("RT @"):
+        return False, "retweet"
+
+    # Skip very short tweets (likely not substantial)
+    if len(tweet_text.strip()) < min_length:
+        return False, f"too short (<{min_length} chars)"
+
+    # Skip pure link tweets (mostly URL)
+    # Count URL characters (approximate)
+    url_chars = sum(len(word) for word in tweet_text.split() if word.startswith("http"))
+    text_chars = len(tweet_text)
+    if url_chars > 0 and (url_chars / text_chars) > 0.7:
+        return False, "mostly links"
+
+    return True, ""
+
+
 def process_timeline_tweets(
     tweets,
     users,
@@ -799,6 +824,7 @@ def process_timeline_tweets(
 ):
     """Process tweets from timeline"""
     drafts_generated = 0
+    tweets_skipped_prefilter = 0
 
     # Create lookup for user info
     user_lookup = {user.id: user for user in users} if users else {}
@@ -827,6 +853,20 @@ def process_timeline_tweets(
                     break
 
             if has_posted_reply:
+                continue
+
+            # Pre-filter tweet before expensive LLM evaluation
+            should_eval, skip_reason = should_evaluate_tweet(tweet.text)
+            if not should_eval:
+                # Get author username safely for skip message
+                author_for_skip = user_lookup.get(tweet.author_id)
+                username_for_skip = (
+                    author_for_skip.username
+                    if author_for_skip
+                    else str(tweet.author_id)
+                )
+                console.print(f"[dim]Skip: {skip_reason} - @{username_for_skip}[/dim]")
+                tweets_skipped_prefilter += 1
                 continue
 
             # Get author info
@@ -979,6 +1019,12 @@ def process_timeline_tweets(
             logging.exception(f"Error processing tweet {tweet.id}")
             console.print(f"[red]Error processing tweet {tweet.id}: {e}")
             raise SystemExit(1)
+
+    # Print filtering summary
+    console.print("\n[bold cyan]Timeline processing complete[/bold cyan]")
+    console.print(f"[blue]Tweets processed: {tweets_processed}")
+    console.print(f"[blue]Tweets skipped (pre-filter): {tweets_skipped_prefilter}")
+    console.print(f"[blue]Drafts generated: {drafts_generated}")
 
 
 @cli.command()
