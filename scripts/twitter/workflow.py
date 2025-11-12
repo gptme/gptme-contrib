@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run
 # /// script
-# requires-python = ">=3.10,<3.12"
+# requires-python = ">=3.10,<3.13"
 # dependencies = [
 #   "gptme @ git+https://github.com/ErikBjare/gptme.git",
 #   "tweepy>=4.14.0",
@@ -35,10 +35,18 @@ Usage:
     ./workflow.py post                 # Post approved tweets
 """
 
+import sys
+from pathlib import Path as _Path
+
+# Add current directory to path FIRST so local twitter/ is found
+# This prevents conflict with any installed 'twitter' package
+sys.path.insert(0, str(_Path(__file__).parent))
+# Add parent directory for shared communication_utils
+sys.path.insert(0, str(_Path(__file__).parent.parent))
+
 import json
 import logging
 import os
-import sys
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -63,11 +71,6 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import cached_get_me, load_twitter_client
-
-# Add parent directory to path for shared communication_utils
-from pathlib import Path as _Path
-
-sys.path.insert(0, str(_Path(__file__).parent.parent))
 
 # Import monitoring utilities
 from communication_utils.monitoring import get_logger, MetricsCollector
