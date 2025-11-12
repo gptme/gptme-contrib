@@ -43,12 +43,12 @@ import discord
 from discord.ext import commands
 
 # Import per-user rate limiting and state management
-from .rate_limiting import PerUserRateLimiter  # type: ignore[import-untyped]
-from ..email.communication_utils.state import (  # type: ignore[import-untyped, misc]
+from .rate_limiting import PerUserRateLimiter
+from ..communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from ..email.communication_utils.monitoring import MetricsCollector  # type: ignore[import-untyped, misc]
+from ..communication_utils.monitoring.metrics import MetricsCollector
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -491,7 +491,7 @@ async def send_discord_message(
                 current_response = await channel.send(content)
 
         # Complete metrics tracking
-        op.complete(success=True, message_length=len(content))
+        op.complete(success=True)
         return current_response, False
 
     except discord.HTTPException as e:
