@@ -1,16 +1,6 @@
-#!/usr/bin/env -S uv run
-# /// script
-# requires-python = ">=3.10,<3.13"
-# dependencies = [
-#   "gptme @ git+https://github.com/ErikBjare/gptme.git",
-#   "tweepy>=4.14.0",
-#   "rich>=13.0.0",
-#   "python-dotenv>=1.0.0",
-#   "click>=8.0.0",
-#   "pyyaml>=6.0.0",
-#   "flask>=3.0.0",
-# ]
-# ///
+#!/home/bob/bob/gptme-contrib/scripts/twitter/.venv/bin/python3
+# Twitter Workflow Manager using dedicated venv
+# Dependencies installed in .venv: tweepy, rich, python-dotenv, click, pyyaml, flask, gptme
 """
 Twitter Workflow Manager - Automated timeline monitoring and tweet drafting.
 
@@ -34,6 +24,10 @@ Usage:
     ./workflow.py review               # Review pending tweets
     ./workflow.py post                 # Post approved tweets
 """
+
+# Import stdlib email.message BEFORE sys.path manipulation
+# This caches the stdlib module and prevents shadowing by scripts/email/ directory
+import email.message  # noqa: F401
 
 import sys
 from pathlib import Path as _Path
