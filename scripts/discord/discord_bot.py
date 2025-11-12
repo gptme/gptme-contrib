@@ -8,6 +8,15 @@
 #   "gptme[telemetry] @ git+https://github.com/gptme/gptme.git",
 # ]
 # ///
+# ruff: noqa: E402
+
+import sys
+from pathlib import Path
+
+# Add scripts directory to path for imports to work when run as script
+# Use append (not insert) to avoid shadowing stdlib modules
+SCRIPTS_DIR = Path(__file__).parent.parent
+sys.path.append(str(SCRIPTS_DIR))
 
 import asyncio
 import logging
@@ -43,12 +52,12 @@ import discord
 from discord.ext import commands
 
 # Import per-user rate limiting and state management
-from .rate_limiting import PerUserRateLimiter
-from ..communication_utils.state.tracking import (
+from discord.rate_limiting import PerUserRateLimiter  # type: ignore
+from communication_utils.state.tracking import (  # type: ignore
     ConversationTracker,
     MessageState,
 )
-from ..communication_utils.monitoring.metrics import MetricsCollector
+from communication_utils.monitoring.metrics import MetricsCollector  # type: ignore
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -1035,7 +1044,12 @@ def main() -> None:
         global tools
 
         # Initialize gptme and tools
-        init(model=MODEL, interactive=False, tool_allowlist=list(tool_allowlist))
+        init(
+            model=MODEL,
+            interactive=False,
+            tool_allowlist=list(tool_allowlist),
+            tool_format="markdown",  # type: ignore
+        )
         tools = init_tools(list(tool_allowlist))
         tools = get_tools()
         if not tools:
