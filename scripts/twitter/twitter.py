@@ -187,7 +187,9 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     raise
 
                 # Get access token using the full callback URL
-                access_token = oauth2_user_handler.fetch_token(full_url)
+                access_token = oauth2_user_handler.fetch_token(
+                    authorization_response=full_url
+                )
                 print(f"{access_token=}")
 
                 # Save access token to .env using shared utility
