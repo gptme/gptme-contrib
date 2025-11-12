@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from communication_utils.state.locks import FileLock, LockError
-from lib import AgentEmail
+from email.lib import AgentEmail
 
 # Configuration
 SCRIPT_DIR = Path(__file__).parent

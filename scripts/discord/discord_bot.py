@@ -52,12 +52,12 @@ import discord
 from discord.ext import commands
 
 # Import per-user rate limiting and state management
-from discord.rate_limiting import PerUserRateLimiter  # type: ignore
-from communication_utils.state.tracking import (  # type: ignore
+from discord.rate_limiting import PerUserRateLimiter
+from communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from communication_utils.monitoring.metrics import MetricsCollector  # type: ignore
+from communication_utils.monitoring.metrics import MetricsCollector
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -1048,7 +1048,7 @@ def main() -> None:
             model=MODEL,
             interactive=False,
             tool_allowlist=list(tool_allowlist),
-            tool_format="markdown",  # type: ignore
+            tool_format="markdown",
         )
         tools = init_tools(list(tool_allowlist))
         tools = get_tools()

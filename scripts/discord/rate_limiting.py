@@ -5,7 +5,7 @@ from typing import Dict
 
 import discord
 
-from communication_utils.rate_limiting.limiters import RateLimiter  # type: ignore[import-not-found]
+from communication_utils.rate_limiting.limiters import RateLimiter
 
 
 class PerUserRateLimiter:

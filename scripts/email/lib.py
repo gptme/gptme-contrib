@@ -5,8 +5,8 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
-from email import message_from_bytes
 from email.message import EmailMessage, Message
+from email.parser import BytesParser
 from email.policy import default
 from email.utils import format_datetime
 from pathlib import Path
@@ -203,7 +203,7 @@ class AgentEmail:
         )
 
         if msg_info:
-            return msg_info.message_id
+            return str(msg_info.message_id)
 
         # Create new unified message
         msg_info = self.tracker.create_unified_message(
@@ -215,7 +215,7 @@ class AgentEmail:
             subject=subject,
         )
 
-        return msg_info.message_id
+        return str(msg_info.message_id)
 
     def get_unreplied_emails(self) -> list[tuple[str, str, str]]:
         """Get list of emails that haven't been replied to.
@@ -1079,7 +1079,7 @@ class AgentEmail:
 
                     # Read message with proper policy
                     msg_bytes = msg_path.read_bytes()
-                    email_msg = message_from_bytes(msg_bytes, policy=default)
+                    email_msg = BytesParser(policy=default).parsebytes(msg_bytes)
 
                     # Get Message-ID
                     message_id = email_msg["Message-ID"]

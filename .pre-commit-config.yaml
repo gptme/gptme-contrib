@@ -32,8 +32,9 @@ repos:
       types-python-crontab,
       exa_py,
       types-Markdown,
+      pytest,
     ]
-    args: [--config-file=mypy.ini]
+    args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
     pass_filenames: true
 - repo: local

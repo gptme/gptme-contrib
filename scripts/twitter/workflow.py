@@ -56,13 +56,13 @@ from gptme.init import init as init_gptme
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from llm import (
+from twitter.llm import (
     EvaluationResponse,
     TweetResponse,
     process_tweet,
     verify_draft,
 )
-from twitter import cached_get_me, load_twitter_client
+from twitter.twitter import cached_get_me, load_twitter_client
 
 # Add parent directory to path for shared communication_utils
 from pathlib import Path as _Path
