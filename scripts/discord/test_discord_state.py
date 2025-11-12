@@ -30,11 +30,13 @@ class TestStateTracking:
         # Initial state: IN_PROGRESS
         tracker.set_message_state(conv_id, msg_id, MessageState.IN_PROGRESS)
         message_info = tracker.get_message_state(conv_id, msg_id)
+        assert message_info is not None
         assert message_info.state == MessageState.IN_PROGRESS
 
         # Success: COMPLETED
         tracker.set_message_state(conv_id, msg_id, MessageState.COMPLETED)
         message_info = tracker.get_message_state(conv_id, msg_id)
+        assert message_info is not None
         assert message_info.state == MessageState.COMPLETED
 
     def test_message_failure_state(self, tmp_path: Path) -> None:
@@ -51,6 +53,7 @@ class TestStateTracking:
             error="Test error occurred",
         )
         message_info = tracker.get_message_state(conv_id, msg_id)
+        assert message_info is not None
         assert message_info.state == MessageState.FAILED
         assert message_info.error == "Test error occurred"
 
@@ -70,6 +73,7 @@ class TestStatePersistence:
         # Create new tracker instance (simulates bot restart)
         tracker2 = ConversationTracker(tmp_path)
         message_info = tracker2.get_message_state(conv_id, msg_id)
+        assert message_info is not None
         assert message_info.state == MessageState.COMPLETED
 
     def test_multiple_messages_persist(self, tmp_path: Path) -> None:
@@ -84,14 +88,17 @@ class TestStatePersistence:
 
         # Recover with new tracker
         tracker2 = ConversationTracker(tmp_path)
-        assert (
-            tracker2.get_message_state(conv_id, "msg1").state == MessageState.COMPLETED
-        )
-        assert (
-            tracker2.get_message_state(conv_id, "msg2").state
-            == MessageState.IN_PROGRESS
-        )
-        assert tracker2.get_message_state(conv_id, "msg3").state == MessageState.FAILED
+        msg1_info = tracker2.get_message_state(conv_id, "msg1")
+        assert msg1_info is not None
+        assert msg1_info.state == MessageState.COMPLETED
+
+        msg2_info = tracker2.get_message_state(conv_id, "msg2")
+        assert msg2_info is not None
+        assert msg2_info.state == MessageState.IN_PROGRESS
+
+        msg3_info = tracker2.get_message_state(conv_id, "msg3")
+        assert msg3_info is not None
+        assert msg3_info.state == MessageState.FAILED
 
 
 class TestConcurrentMessageHandling:
@@ -119,6 +126,7 @@ class TestConcurrentMessageHandling:
         # Verify all messages reached COMPLETED state
         for i in range(10):
             message_info = tracker.get_message_state(conv_id, f"msg{i}")
+            assert message_info is not None
             assert message_info.state == MessageState.COMPLETED
 
     @pytest.mark.asyncio
@@ -140,6 +148,7 @@ class TestConcurrentMessageHandling:
             )
             await asyncio.sleep(0.001)  # Tiny delay to encourage interleaving
             message_info = tracker.get_message_state(conv_id, msg_id)
+            assert message_info is not None
             results.append((iteration, message_info.state))
 
         # Run multiple concurrent accesses

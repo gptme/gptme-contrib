@@ -472,9 +472,10 @@ def check_complexity(threshold: float, mark_complex: bool) -> None:
         message_data = email.read_message(msg_id)
 
         # Parse the raw email to get EmailMessage object
-        from email import message_from_string
+        from email.parser import Parser
+        from email.policy import default
 
-        msg = message_from_string(message_data)
+        msg = Parser(policy=default).parsestr(message_data)
 
         # Extract plain text body
         body = ""
