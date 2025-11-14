@@ -827,11 +827,25 @@ def process_timeline_tweets(
     drafts_generated = 0
     tweets_skipped_prefilter = 0
 
+    # Count existing drafts in new/ directory
+    existing_drafts = len(list(NEW_DIR.glob("*.yml")))
+    total_drafts = existing_drafts + drafts_generated
+
+    # Check if we're already at or over the limit
+    if max_drafts and total_drafts >= max_drafts:
+        console.print(
+            f"[yellow]Already have {existing_drafts} drafts (limit: {max_drafts}), skipping generation"
+        )
+        return 0
+
     # Create lookup for user info
     user_lookup = {user.id: user for user in users} if users else {}
     tweets_processed = 0
 
     console.print(f"\n[bold]Processing tweets from {source}[/bold]")
+    console.print(f"[blue]Existing drafts: {existing_drafts}")
+    if max_drafts:
+        console.print(f"[blue]Draft limit: {max_drafts}")
     if times:
         console.print(f"[blue]Will process {times} tweet(s)[/blue]")
 
@@ -967,6 +981,14 @@ def process_timeline_tweets(
                     },
                 )
 
+                # Check draft limit before creating main draft
+                total_drafts = existing_drafts + drafts_generated
+                if max_drafts and total_drafts >= max_drafts:
+                    console.print(
+                        f"[yellow]Reached draft limit ({max_drafts}), stopping..."
+                    )
+                    return drafts_generated
+
                 if not dry_run:
                     # Save draft
                     path = save_draft(draft, "new")
@@ -1042,14 +1064,27 @@ def process_timeline_tweets(
     help="Number of tweets to process before exiting",
 )
 def monitor(
-    list_id: Optional[str], interval: int, dry_run: bool, times: Optional[int]
+    list_id: Optional[str],
+    interval: int,
+    dry_run: bool,
+    times: Optional[int],
+    max_drafts: int = 10,
 ) -> None:
-    """Monitor timeline and generate draft replies"""
+    """Monitor timeline and generate draft replies
+
+    Args:
+        list_id: Optional Twitter list ID to monitor
+        interval: Check interval in seconds
+        dry_run: If True, don't save drafts
+        times: Optional limit on number of checks to run
+        max_drafts: Maximum total drafts to maintain (default: 10)
+    """
     session_op = metrics.start_operation("monitor_session", "twitter")
     checks_run = 0
 
     console.print("[green]Starting timeline monitor...")
     console.print(f"[blue]Checking every {interval} seconds")
+    console.print(f"[blue]Draft limit: {max_drafts}")
 
     # Initialize Twitter client
     client = load_twitter_client(require_auth=True)
@@ -1099,7 +1134,7 @@ def monitor(
                 client,
                 times=times,
                 dry_run=dry_run,
-                max_drafts=times,  # Use times parameter as max_drafts
+                max_drafts=max_drafts,  # Use proper max_drafts limit
             )
 
             check_op.complete(success=True)
