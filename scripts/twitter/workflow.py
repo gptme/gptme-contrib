@@ -967,6 +967,7 @@ def process_timeline_tweets(
                     # Save draft
                     path = save_draft(draft, "new")
                     console.print(f"[green]Created draft response: {path}")
+                    drafts_generated += 1
                 else:
                     console.print("[yellow]Would create draft response:")
                     console.print(f"[white]{draft.text}")
