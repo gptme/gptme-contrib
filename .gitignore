@@ -4,3 +4,6 @@ __pycache__
 scripts/discord/logs/*
 scripts/*/.env
 scripts/.env
+
+.venv/
+venv/
