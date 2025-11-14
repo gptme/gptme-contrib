@@ -818,8 +818,12 @@ def process_timeline_tweets(
     times: Optional[int] = None,
     dry_run: bool = False,
     max_drafts: Optional[int] = None,
-):
-    """Process tweets from timeline"""
+) -> int:
+    """Process tweets from timeline
+
+    Returns:
+        Number of drafts generated
+    """
     drafts_generated = 0
     tweets_skipped_prefilter = 0
 
@@ -1007,11 +1011,11 @@ def process_timeline_tweets(
                             console.print(
                                 "[yellow]Reached maximum number of drafts, stopping..."
                             )
-                            return
+                            return drafts_generated
 
             if times and tweets_processed >= times:
                 console.print(f"[yellow]Processed {times} tweet(s), stopping...")
-                return
+                return drafts_generated
 
         except Exception as e:
             logging.exception(f"Error processing tweet {tweet.id}")
@@ -1023,6 +1027,8 @@ def process_timeline_tweets(
     console.print(f"[blue]Tweets processed: {tweets_processed}")
     console.print(f"[blue]Tweets skipped (pre-filter): {tweets_skipped_prefilter}")
     console.print(f"[blue]Drafts generated: {drafts_generated}")
+
+    return drafts_generated
 
 
 @cli.command()
@@ -1211,7 +1217,7 @@ def auto(
                 source = f"mentions of @{my_username}"
 
                 # Process mentions to generate drafts
-                process_timeline_tweets(
+                drafts_from_mentions = process_timeline_tweets(
                     mentions.data[: max_tweets - total_tweets_processed],
                     mentions.includes["users"] if mentions.includes else None,
                     source,
@@ -1225,6 +1231,7 @@ def auto(
                 total_tweets_processed += min(
                     len(mentions.data), max_tweets - total_tweets_processed
                 )
+                total_drafts_generated += drafts_from_mentions
             else:
                 console.print("[yellow]No mentions found")
         except Exception as e:
@@ -1278,7 +1285,7 @@ def auto(
                         "[yellow]DRY RUN: Processing tweets but not saving drafts"
                     )
 
-                process_timeline_tweets(
+                drafts_from_timeline = process_timeline_tweets(
                     tweets.data[:remaining_tweets],
                     tweets.includes["users"] if tweets.includes else None,
                     source,
@@ -1290,6 +1297,7 @@ def auto(
 
                 # Update counters
                 total_tweets_processed += min(len(tweets.data), remaining_tweets)
+                total_drafts_generated += drafts_from_timeline
             else:
                 console.print("[yellow]No new tweets found in timeline")
         except Exception as e:
