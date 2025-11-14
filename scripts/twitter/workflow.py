@@ -75,8 +75,12 @@ metrics = MetricsCollector()
 # Initialize rich console
 console = Console()
 
-# Default paths
-TWEETS_DIR = Path("tweets")
+# Calculate agent directory (3 parents up from this script)
+# Script is at: agent_dir/gptme-contrib/scripts/twitter/workflow.py
+AGENT_DIR = Path(__file__).parent.parent.parent.parent
+
+# Default paths (agent-dir-relative)
+TWEETS_DIR = AGENT_DIR / "tweets"
 NEW_DIR = TWEETS_DIR / "new"
 REVIEW_DIR = TWEETS_DIR / "review"
 APPROVED_DIR = TWEETS_DIR / "approved"
