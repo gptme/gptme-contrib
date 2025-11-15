@@ -1,0 +1,18 @@
+[project]
+name = "lessons"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Erik Bjäreholt", email = "erik@bjareho.lt" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "click>=8.0",
+    "python-frontmatter>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
