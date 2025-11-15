@@ -73,6 +73,8 @@ from communication_utils.auth import (  # noqa: E402
     run_oauth_callback,
     save_token_to_env,
 )
+from communication_utils.auth.oauth import OAuthManager  # noqa: E402
+from communication_utils.auth.tokens import TokenInfo  # noqa: E402
 from communication_utils.messaging import (  # noqa: E402
     split_thread,
 )
@@ -132,18 +134,66 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
             # console.print(f"  Client ID: {client_id[:8]}...")
             # console.print(f"  Client Secret: {'*' * 8}...")
 
-            # Check for saved OAuth 2.0 access token
+            # Check for saved OAuth 2.0 tokens (access + refresh)
             saved_token = os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN")
-            if saved_token:
-                console.print("[yellow]Using saved OAuth 2.0 access token")
+            saved_refresh_token = os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN")
+            saved_expires_at_str = os.getenv("TWITTER_OAUTH2_EXPIRES_AT")
+
+            # Try to use saved token with refresh if needed
+            if saved_token and saved_refresh_token and saved_expires_at_str:
                 try:
-                    # Create client with saved token
-                    client = tweepy.Client(
-                        saved_token,
-                        wait_on_rate_limit=True,
+                    # Parse expiration time
+                    expires_at = datetime.fromisoformat(saved_expires_at_str)
+
+                    # Create TokenInfo to check expiration
+                    token_info = TokenInfo(
+                        token=saved_token,
+                        expires_at=expires_at,
+                        refresh_token=saved_refresh_token,
                     )
 
-                    # Test the token
+                    if token_info.is_expired():
+                        console.print("[yellow]Access token expired, refreshing...")
+
+                        # Use OAuthManager to refresh token
+                        oauth_manager = OAuthManager.for_twitter(
+                            client_id, client_secret
+                        )
+                        new_token_info, error = oauth_manager.refresh_token(
+                            saved_refresh_token
+                        )
+
+                        if error or not new_token_info:
+                            raise Exception(f"Token refresh failed: {error}")
+
+                        # Save new tokens
+                        save_token_to_env(
+                            "TWITTER_OAUTH2_ACCESS_TOKEN",
+                            new_token_info.token,
+                            comment="OAuth 2.0 User Context access token (auto-refreshed)",
+                        )
+                        if new_token_info.refresh_token:
+                            save_token_to_env(
+                                "TWITTER_OAUTH2_REFRESH_TOKEN",
+                                new_token_info.refresh_token,
+                                comment="OAuth 2.0 refresh token",
+                            )
+                        if new_token_info.expires_at:
+                            save_token_to_env(
+                                "TWITTER_OAUTH2_EXPIRES_AT",
+                                new_token_info.expires_at.isoformat(),
+                                comment="OAuth 2.0 token expiration time",
+                            )
+
+                        saved_token = new_token_info.token
+                        console.print("[green]Token refreshed successfully")
+                    else:
+                        console.print("[yellow]Using saved OAuth 2.0 access token")
+
+                    # Create client with current token
+                    client = tweepy.Client(saved_token, wait_on_rate_limit=True)
+
+                    # Test the credentials
                     test = cached_get_me(client, user_auth=False)
                     if test.data:
                         console.print(
@@ -151,8 +201,15 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                         )
                         return client
                 except Exception as e:
-                    console.print(f"[yellow]Saved token failed: {e}")
+                    console.print(f"[yellow]Saved token/refresh failed: {e}")
                     console.print("[yellow]Starting new OAuth 2.0 flow...")
+            elif saved_token:
+                console.print(
+                    "[yellow]Saved token exists but missing refresh token or expiry"
+                )
+                console.print(
+                    "[yellow]Starting new OAuth 2.0 flow to get complete credentials..."
+                )
 
             try:
                 # Initialize OAuth 2.0 handler
@@ -160,7 +217,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     client_id=client_id,
                     client_secret=client_secret,
                     redirect_uri="http://localhost:9876/callback",
-                    scope=["tweet.read", "tweet.write", "users.read"],
+                    scope=["tweet.read", "tweet.write", "users.read", "offline.access"],
                 )
 
                 # Get authorization URL and provide it to the user
@@ -192,14 +249,41 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                 )
                 print(f"{access_token=}")
 
-                # Save access token to .env using shared utility
+                # Save all tokens to .env using shared utility
                 try:
                     save_token_to_env(
                         "TWITTER_OAUTH2_ACCESS_TOKEN",
                         access_token["access_token"],
                         comment="OAuth 2.0 User Context access token",
                     )
-                    console.print("[yellow]Saved OAuth 2.0 access token to .env")
+
+                    # Save refresh token if present
+                    if "refresh_token" in access_token:
+                        save_token_to_env(
+                            "TWITTER_OAUTH2_REFRESH_TOKEN",
+                            access_token["refresh_token"],
+                            comment="OAuth 2.0 refresh token",
+                        )
+
+                    # Calculate and save expiration time
+                    if "expires_in" in access_token:
+                        expires_at = datetime.now() + timedelta(
+                            seconds=access_token["expires_in"]
+                        )
+                        save_token_to_env(
+                            "TWITTER_OAUTH2_EXPIRES_AT",
+                            expires_at.isoformat(),
+                            comment="OAuth 2.0 token expiration time",
+                        )
+
+                    if "refresh_token" in access_token:
+                        console.print(
+                            "[yellow]Saved OAuth 2.0 tokens with refresh capability"
+                        )
+                    else:
+                        console.print(
+                            "[yellow]Warning: No refresh token received (add 'offline.access' scope)"
+                        )
                 except Exception as e:
                     console.print(f"[red]Error saving token: {str(e)}")
                     sys.exit(1)

@@ -75,9 +75,56 @@ metrics = MetricsCollector()
 # Initialize rich console
 console = Console()
 
+
 # Calculate agent directory (3 parents up from this script)
 # Script is at: agent_dir/gptme-contrib/scripts/twitter/workflow.py
-AGENT_DIR = Path(__file__).parent.parent.parent.parent
+def _find_agent_dir() -> Path:
+    """
+    Find agent directory by locating git repository structure.
+
+    Returns the parent directory of the git repository this script is in,
+    which should be the agent workspace when gptme-contrib is a submodule.
+
+    Falls back to Path(__file__).parent.parent.parent.parent if git detection fails.
+    """
+    import subprocess
+
+    try:
+        # Find root of current git repo (gptme-contrib)
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        contrib_root = Path(result.stdout.strip())
+
+        # Parent directory should be agent workspace
+        agent_dir = contrib_root.parent
+
+        # Verify parent is also a git repo (agent workspace)
+        parent_check = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=agent_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        parent_root = Path(parent_check.stdout.strip())
+
+        # If parent git root matches parent_dir, we found agent workspace
+        if parent_root == agent_dir:
+            return agent_dir
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Fallback to old method if git detection fails
+    return Path(__file__).parent.parent.parent.parent
+
+
+AGENT_DIR = _find_agent_dir()
 
 # Default paths (agent-dir-relative)
 TWEETS_DIR = AGENT_DIR / "tweets"
