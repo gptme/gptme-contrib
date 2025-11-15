@@ -100,7 +100,7 @@ class GitHubInputSource(InputSource):
             Priority string ("high", "medium", "low") or None
         """
         for label in labels:
-            name = label["name"].lower()
+            name = str(label["name"]).lower()
             if "priority:" in name:
                 return name.split(":")[1].strip()
         return None
@@ -866,7 +866,7 @@ class SchedulerInputSource(InputSource):
         Returns:
             True if task is due based on recurrence pattern
         """
-        task_id = task.get("id")
+        task_id = str(task.get("id", ""))
         schedule = task.get("schedule", {})
         pattern = schedule.get("pattern", "")  # daily, weekly, monthly
         time_str = schedule.get("time", "09:00")  # HH:MM format
@@ -984,7 +984,8 @@ class SchedulerInputSource(InputSource):
             return {}
 
         try:
-            return json.loads(state_file.read_text())
+            result = json.loads(state_file.read_text())
+            return dict(result) if isinstance(result, dict) else {}
         except Exception:
             return {}
 

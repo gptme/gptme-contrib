@@ -244,7 +244,7 @@ class InputSourcesConfig(BaseModel):
         data = self.model_dump()
 
         # Convert Path objects to strings for YAML serialization
-        def convert_paths(obj):
+        def convert_paths(obj):  # type: ignore[no-untyped-def]
             if isinstance(obj, dict):
                 return {k: convert_paths(v) for k, v in obj.items()}
             elif isinstance(obj, list):
@@ -253,7 +253,8 @@ class InputSourcesConfig(BaseModel):
                 return str(obj)
             return obj
 
-        return convert_paths(data)
+        result = convert_paths(data)
+        return dict(result) if isinstance(result, dict) else {}
 
     def to_yaml(self, config_path: Path) -> None:
         """Export configuration to YAML file.

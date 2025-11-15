@@ -5,7 +5,7 @@ external sources like GitHub issues, emails, webhooks, and scheduled triggers.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -44,16 +44,10 @@ class TaskRequest:
     created_at: datetime
     author: Optional[str] = None
     priority: Optional[str] = None  # "high", "medium", "low"
-    tags: List[str] = None
+    tags: List[str] = field(default_factory=list)
 
     # Source-specific data
-    metadata: Dict[str, Any] = None
-
-    def __post_init__(self):
-        if self.tags is None:
-            self.tags = []
-        if self.metadata is None:
-            self.metadata = {}
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -231,7 +225,7 @@ class InputSource(ABC):
         if not self.rate_limiter:
             return True
 
-        return self.rate_limiter.check_limit(self.source_name)
+        return self.rate_limiter.check_limit(self.source_name)  # type: ignore[no-any-return]
 
     def _consume_rate_limit(self) -> bool:
         """Consume rate limit token if available.
@@ -242,7 +236,7 @@ class InputSource(ABC):
         if not self.rate_limiter:
             return True
 
-        return self.rate_limiter.consume(self.source_name)
+        return self.rate_limiter.consume(self.source_name)  # type: ignore[no-any-return]
 
     def _get_rate_limit_wait_time(self) -> float:
         """Get time to wait for rate limit.
@@ -253,7 +247,7 @@ class InputSource(ABC):
         if not self.rate_limiter:
             return 0.0
 
-        return self.rate_limiter.get_wait_time(self.source_name)
+        return self.rate_limiter.get_wait_time(self.source_name)  # type: ignore[no-any-return]
 
     async def process_request(self, request: TaskRequest) -> TaskCreationResult:
         """Process a task request end-to-end.
