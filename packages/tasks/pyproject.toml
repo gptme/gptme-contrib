@@ -1,0 +1,18 @@
+[project]
+name = "tasks"
+version = "0.1.0"
+description = "Task management and work queue generation utilities"
+requires-python = ">=3.10"
+dependencies = [
+    "python-frontmatter>=1.1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
