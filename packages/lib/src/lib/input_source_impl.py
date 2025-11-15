@@ -884,9 +884,18 @@ class SchedulerInputSource(InputSource):
         # Check if it's time based on pattern
         if pattern == "daily":
             # Run once per day at specified time
-            if current_time.hour == hour and current_time.minute == minute:
-                # Check if already run today
-                if last_run and last_run.date() == current_time.date():
+            # Use time window approach: check if current time >= scheduled time
+            # and we haven't run since scheduled time
+            scheduled_time = current_time.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            if current_time >= scheduled_time:
+                # Check if already run since scheduled time today
+                if (
+                    last_run
+                    and last_run >= scheduled_time
+                    and last_run.date() == current_time.date()
+                ):
                     return False
                 return True
 
@@ -904,30 +913,36 @@ class SchedulerInputSource(InputSource):
             }
             target_weekday = weekday_map.get(day, 0)
 
-            if (
-                current_time.weekday() == target_weekday
-                and current_time.hour == hour
-                and current_time.minute == minute
-            ):
-                # Check if already run this week
-                if last_run:
-                    days_since_last_run = (current_time - last_run).days
-                    if days_since_last_run < 7:
-                        return False
-                return True
+            # Use time window approach: check if current time >= scheduled time
+            if current_time.weekday() == target_weekday:
+                scheduled_time = current_time.replace(
+                    hour=hour, minute=minute, second=0, microsecond=0
+                )
+                if current_time >= scheduled_time:
+                    # Check if already run since scheduled time this week
+                    if last_run and last_run >= scheduled_time:
+                        days_since_last_run = (current_time - last_run).days
+                        if days_since_last_run < 7:
+                            return False
+                    return True
 
         elif pattern == "monthly":
             # Run once per month on specified day
+            # Use time window approach: check if current time >= scheduled time
             day_of_month = schedule.get("day_of_month", 1)
-            if (
-                current_time.day == day_of_month
-                and current_time.hour == hour
-                and current_time.minute == minute
-            ):
-                # Check if already run this month
-                if last_run and last_run.month == current_time.month:
-                    return False
-                return True
+            if current_time.day == day_of_month:
+                scheduled_time = current_time.replace(
+                    hour=hour, minute=minute, second=0, microsecond=0
+                )
+                if current_time >= scheduled_time:
+                    # Check if already run since scheduled time this month
+                    if (
+                        last_run
+                        and last_run >= scheduled_time
+                        and last_run.month == current_time.month
+                    ):
+                        return False
+                    return True
 
         return False
 
