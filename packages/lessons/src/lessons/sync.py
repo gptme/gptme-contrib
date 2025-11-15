@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from export import export_all_lessons  # type: ignore[import-not-found]
+    from lessons.export import export_all_lessons  # type: ignore[import-not-found]
 
     # Use importlib for 'import' keyword conflict
-    import_module = importlib.import_module("import")
+    import_module = importlib.import_module("lessons.import")
     review_network_lesson = import_module.review_network_lesson
 except ImportError as e:
     print(f"Error: Phase 1 modules (export.py, import.py) required: {e}")

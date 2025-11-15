@@ -9,7 +9,6 @@ from typing import Dict, List
 
 from gptme.llm import reply
 from gptme.message import Message
-from pathlib import Path
 
 
 def generate_lesson_variants(
@@ -34,12 +33,12 @@ def generate_lesson_variants(
     Returns:
         List of lesson markdown strings
     """
-    # Read template
-    template_path = Path("lessons/templates/lesson-template.md")
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template not found: {template_path}")
+    # Read template using helper from llm module
+    from lessons.utils.llm import _find_lesson_template  # type: ignore[import-not-found]
 
-    with open(template_path, "r") as f:
+    template_path = _find_lesson_template()
+
+    with open(template_path, "r", encoding="utf-8") as f:
         template = f.read()
 
     # Prepare base context

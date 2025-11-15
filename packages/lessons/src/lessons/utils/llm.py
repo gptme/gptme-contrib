@@ -144,6 +144,34 @@ Return ONLY valid JSON."""
         return episode
 
 
+def _find_lesson_template() -> Path:
+    """Find the lesson template file, checking multiple locations."""
+    import os
+
+    # Try 1: Environment variable (workspace root)
+    workspace = os.environ.get("GPTME_WORKSPACE") or os.environ.get("BOB_WORKSPACE")
+    if workspace:
+        template_path = Path(workspace) / "lessons/templates/lesson-template.md"
+        if template_path.exists():
+            return template_path
+
+    # Try 2: Bob's default workspace
+    bob_workspace = Path.home() / "bob" / "lessons/templates/lesson-template.md"
+    if bob_workspace.exists():
+        return bob_workspace
+
+    # Try 3: Relative to package (for bundled template)
+    package_template = Path(__file__).parent.parent / "templates/lesson-template.md"
+    if package_template.exists():
+        return package_template
+
+    raise FileNotFoundError(
+        "Lesson template not found. Set GPTME_WORKSPACE or BOB_WORKSPACE environment variable "
+        "to point to your workspace root, or ensure template exists at "
+        "~/bob/lessons/templates/lesson-template.md"
+    )
+
+
 def llm_author_reflect(
     moment: Dict, conversation_id: str, temperature: float = 0.7
 ) -> str:
@@ -152,11 +180,9 @@ def llm_author_reflect(
     Uses the new signals-first template format with ENHANCED evidence integration.
     """
     # Read the new lesson template
-    template_path = Path("lessons/templates/lesson-template.md")
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template not found: {template_path}")
+    template_path = _find_lesson_template()
 
-    with open(template_path, "r") as f:
+    with open(template_path, "r", encoding="utf-8") as f:
         template = f.read()
 
     # Prepare evidence with enhanced formatting
