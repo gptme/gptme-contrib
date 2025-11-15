@@ -1,0 +1,12 @@
+[project]
+name = "gptme-contrib-workspace"
+version = "0.1.0"
+description = "Community contributions and utilities for gptme agents"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
