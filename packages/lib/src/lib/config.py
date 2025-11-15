@@ -228,7 +228,7 @@ class InputSourcesConfig(BaseModel):
         try:
             import tomllib
         except ImportError:
-            import tomli as tomllib
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
         with open(config_path, "rb") as f:
             config_dict = tomllib.load(f)
@@ -244,7 +244,7 @@ class InputSourcesConfig(BaseModel):
         data = self.model_dump()
 
         # Convert Path objects to strings for YAML serialization
-        def convert_paths(obj):  # type: ignore[no-untyped-def]
+        def convert_paths(obj):
             if isinstance(obj, dict):
                 return {k: convert_paths(v) for k, v in obj.items()}
             elif isinstance(obj, list):
