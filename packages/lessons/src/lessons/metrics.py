@@ -48,8 +48,10 @@ class MetricsAggregator:
     """Aggregates and analyzes lesson effectiveness metrics."""
 
     def __init__(
-        self, history_dir: Path = Path.home() / "gptme-bob" / ".lessons-history"
+        self, history_dir: Path | None = None
     ):
+        if history_dir is None:
+            history_dir = Path.home() / ".gptme" / ".lessons-history"
         self.history_dir = history_dir
         self.metrics_dir = history_dir / "metrics"
         self.metrics_dir.mkdir(parents=True, exist_ok=True)

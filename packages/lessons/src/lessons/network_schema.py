@@ -85,10 +85,11 @@ class NetworkMetadata:
         """
         # Extract lesson slug from path
         # e.g., "lessons/workflow/autonomous-run.md" -> "autonomous-run"
-        slug = lesson_path.split("/")[-1].replace(".md", "")
+        path_obj = Path(lesson_path)
+        slug = path_obj.stem
 
         # Generate lesson_id: {agent}-{category}-{slug}
-        category = lesson_path.split("/")[-2] if "/" in lesson_path else "general"
+        category = path_obj.parent.name if path_obj.parent != Path(".") else "general"
         lesson_id = f"{agent_origin}-{category}-{slug}"
 
         now = datetime.now()

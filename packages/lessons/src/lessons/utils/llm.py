@@ -12,6 +12,30 @@ from gptme.llm import reply
 from gptme.message import Message
 
 
+def extract_json_from_response(content: str) -> str:
+    """
+    Extract JSON string from LLM response, handling code blocks.
+    
+    Args:
+        content: Raw content from LLM response
+        
+    Returns:
+        Extracted JSON string
+    """
+    content_str = str(content)
+    
+    if "```json" in content_str:
+        json_start = content_str.index("```json") + 7
+        json_end = content_str.index("```", json_start)
+        return content_str[json_start:json_end].strip()
+    elif "```" in content_str:
+        json_start = content_str.index("```") + 3
+        json_end = content_str.index("```", json_start)
+        return content_str[json_start:json_end].strip()
+    else:
+        return content_str.strip()
+
+
 def llm_summarize_episode(
     episode: Dict,
     messages: List[Dict],
@@ -104,17 +128,7 @@ Return ONLY valid JSON."""
             content = response.content
 
         # Parse JSON from response
-        content_str = str(content)
-        if "```json" in content_str:
-            json_start = content_str.index("```json") + 7
-            json_end = content_str.index("```", json_start)
-            json_str = content_str[json_start:json_end].strip()
-        elif "```" in content_str:
-            json_start = content_str.index("```") + 3
-            json_end = content_str.index("```", json_start)
-            json_str = content_str[json_start:json_end].strip()
-        else:
-            json_str = content_str.strip()
+        json_str = extract_json_from_response(content)
 
         summary = cast(Dict[str, str], json.loads(json_str))
 

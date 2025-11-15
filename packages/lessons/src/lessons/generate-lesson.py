@@ -11,7 +11,7 @@
 """
 Lesson Generator Entrypoint
 
-Thin wrapper that invokes the learn.generate module.
+Thin wrapper that invokes the lessons.generate module.
 """
 
 from lessons.generate import cli

@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 
 def extract_keywords(lesson_path: Path) -> Tuple[List[str], str]:
     """Extract keywords and full frontmatter from lesson file."""
-    with open(lesson_path) as f:
+    with open(lesson_path, encoding="utf-8") as f:
         content = f.read()
 
     # Extract frontmatter keywords

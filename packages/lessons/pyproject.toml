@@ -11,6 +11,8 @@ dependencies = [
     "PyYAML>=6.0",
     "click>=8.0",
     "python-frontmatter>=1.0.0",
+    "rich>=13.0.0",
+    "gptme>=0.1.0",
 ]
 
 [build-system]

@@ -104,10 +104,14 @@ def create_lesson_pr(
 
     Returns True if successful, False otherwise.
     """
-    # Get repo root (assume we're in gptme-bob repo)
-    repo_root = Path("/home/bob/gptme-bob")
-    if not repo_root.exists():
-        print(f"❌ Repository root not found: {repo_root}")
+    # Get repo root from git
+    try:
+        repo_root = Path(subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            text=True
+        ).strip())
+    except subprocess.CalledProcessError:
+        print("❌ Not in a git repository")
         return False
 
     # Validate lesson first

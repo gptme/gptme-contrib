@@ -69,12 +69,17 @@ def gepa_lite_evolve(
         if verbose:
             print(f"    [{i}/{len(variants)}] Judging variant...")
 
-        scores = llm_judge_score(
-            lesson_markdown=variant,
-            moment=moment,
-            conversation_id=conversation_id,
-            temperature=0.0,  # Deterministic judging
-        )
+        try:
+            scores = llm_judge_score(
+                lesson_markdown=variant,
+                moment=moment,
+                conversation_id=conversation_id,
+                temperature=0.0,  # Deterministic judging
+            )
+        except Exception as e:
+            if verbose:
+                print(f"    ✗ Failed to judge variant: {e}")
+            continue
 
         judged_variants.append((variant, scores))
 
