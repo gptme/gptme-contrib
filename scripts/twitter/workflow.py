@@ -705,6 +705,10 @@ def group_drafts_by_reply_target(drafts: list[Path]) -> dict[str | None, list[Pa
     return groups
 
 
+@cli.command()
+@click.option("--auto-approve", is_flag=True, help="Automatically approve good drafts")
+@click.option("--show-context", is_flag=True, help="Show full context for each draft")
+@click.option("--dry-run", is_flag=True, help="Don't actually approve/reject, just show analysis")
 def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
