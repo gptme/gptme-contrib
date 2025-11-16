@@ -644,6 +644,60 @@ def draft(
 @click.option(
     "--dry-run", is_flag=True, help="Don't prompt for actions, just show review results"
 )
+def check_for_duplicate_replies(draft: TweetDraft) -> dict[str, list[Path]]:
+    """Check if we already have replies to the same tweet.
+
+    Returns dict with keys: 'posted', 'approved', 'new' containing paths to duplicates.
+    """
+    if not draft.in_reply_to:
+        return {}
+
+    duplicates = {}
+    tweet_id = draft.in_reply_to
+
+    # Check each directory
+    for status in ["posted", "approved", "new"]:
+        status_dir = TWEETS_DIR / status
+        if not status_dir.exists():
+            continue
+
+        matching_drafts = []
+        for draft_path in status_dir.glob("*.yml"):
+            try:
+                other_draft = TweetDraft.load(draft_path)
+                if other_draft.in_reply_to == tweet_id:
+                    matching_drafts.append(draft_path)
+            except Exception:
+                continue
+
+        if matching_drafts:
+            duplicates[status] = matching_drafts
+
+    return duplicates
+
+
+def group_drafts_by_reply_target(drafts: list[Path]) -> dict[str | None, list[Path]]:
+    """Group drafts by the tweet they're replying to.
+
+    Returns dict: tweet_id -> [draft_paths]
+    None key for non-reply tweets.
+    """
+    groups: dict[str | None, list[Path]] = {}
+
+    for draft_path in drafts:
+        try:
+            draft = TweetDraft.load(draft_path)
+            target = draft.in_reply_to
+
+            if target not in groups:
+                groups[target] = []
+            groups[target].append(draft_path)
+        except Exception:
+            continue
+
+    return groups
+
+
 def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
@@ -653,13 +707,50 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
         console.print("[yellow]No drafts to review")
         return
 
-    for path in drafts:
-        draft = TweetDraft.load(path)
+    # Group drafts by reply target to handle potential duplicates
+    grouped_drafts = group_drafts_by_reply_target(drafts)
 
-        console.print("\n[bold]Reviewing draft:[/bold]")
-        console.print(f"[cyan]Type: {draft.type}")
-        if draft.in_reply_to:
-            console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+    # Process each group
+    for reply_target, group_paths in grouped_drafts.items():
+        # If multiple drafts reply to same tweet, show warning
+        if len(group_paths) > 1:
+            console.print(
+                f"\n[yellow]⚠ Warning: {len(group_paths)} drafts reply to same tweet!"
+            )
+            console.print(f"[yellow]Tweet ID: {reply_target}")
+            console.print("[yellow]You can choose the best option or reject duplicates")
+
+        for path in group_paths:
+            draft = TweetDraft.load(path)
+
+            console.print("\n[bold]Reviewing draft:[/bold]")
+            console.print(f"[cyan]Type: {draft.type}")
+            if draft.in_reply_to:
+                console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+
+                # Check for duplicate replies
+                duplicates = check_for_duplicate_replies(draft)
+                if duplicates:
+                    console.print("\n[yellow]⚠ Duplicate Detection:[/yellow]")
+                    if "posted" in duplicates:
+                        console.print(
+                            f"[red]Already posted {len(duplicates['posted'])} reply(ies) to this tweet"
+                        )
+                        for dup_path in duplicates["posted"]:
+                            dup_draft = TweetDraft.load(dup_path)
+                            console.print(f"[red]  - Posted: {dup_draft.text[:80]}...")
+                    if "approved" in duplicates:
+                        console.print(
+                            f"[yellow]Found {len(duplicates['approved'])} approved draft(s) for this tweet"
+                        )
+                        for dup_path in duplicates["approved"]:
+                            dup_draft = TweetDraft.load(dup_path)
+                            console.print(
+                                f"[yellow]  - Approved: {dup_draft.text[:80]}..."
+                            )
+                    console.print(
+                        "[yellow]Consider rejecting this duplicate or editing to make it distinct\n"
+                    )
         if draft.scheduled_time:
             console.print(f"[cyan]Scheduled: {draft.scheduled_time}")
         console.print(f"[white]{draft.text}")
@@ -804,6 +895,20 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
         console.print(f"[cyan]Type: {draft.type}")
         if draft.in_reply_to:
             console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+
+            # Check for already posted duplicates
+            duplicates = check_for_duplicate_replies(draft)
+            if "posted" in duplicates:
+                console.print(
+                    f"\n[red]⚠ WARNING: Already posted {len(duplicates['posted'])} reply(ies) to this tweet![/red]"
+                )
+                for dup_path in duplicates["posted"]:
+                    dup_draft = TweetDraft.load(dup_path)
+                    console.print(f"[red]  - Posted: {dup_draft.text[:80]}...[/red]")
+                console.print(
+                    "[red]This would be a duplicate reply. Consider rejecting instead.[/red]\n"
+                )
+
         console.print(f"[white]{draft.text}")
 
         # Three possible actions:
