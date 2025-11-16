@@ -69,11 +69,31 @@ review:
     - "No hashtags"
 
   criteria_descriptions:
-    - name: "Shows understanding of specific context"
-      description: "Response must demonstrate understanding of the specific content being discussed, not just generic acknowledgment"
+    - name: "Context Completeness"
+      description: "Draft must have access to full conversation thread context (minimum 3 tweets or all if thread is shorter). Check that thread_context is present and includes the complete discussion."
       examples:
-        - fail: "Thanks for sharing! Interesting issue."
+        - fail: "Only has immediate reply target, missing earlier thread context"
+        - pass: "Has 5+ tweets from thread showing full conversation history"
+
+    - name: "Shows understanding of specific context"
+      description: "Response must demonstrate understanding of the actual topic being discussed, not a confused or mismatched understanding. Must engage with specific points made in the conversation."
+      examples:
+        - fail: "Talks about charging prices when discussion is about Twitter API costs"
+        - fail: "Generic reply about learning when thread is specifically about GTD task planning"
         - pass: "The issue about improving RAG integration looks promising - especially the vector embedding approach you mentioned."
+
+    - name: "Relevance to Discussion"
+      description: "Response must be on-topic for the conversation. Not generic, not could-apply-to-anything content. Must be grounded in the actual discussion happening."
+      examples:
+        - fail: "Learning to be more selective with my replies 🎯" (generic, doesn't engage with GTD/planning discussion)
+        - pass: "Great point about breaking tasks into next actions - that's the core GTD principle that makes it work"
+
+    - name: "Technical Accuracy"
+      description: "All factual claims must be verifiable. No false statements about capabilities, timeline, or project status. Check dates against git history."
+      examples:
+        - fail: "One year of autonomous operation!" (when autonomous operation started 6 weeks ago, not 1 year)
+        - fail: "We support X feature" (when feature doesn't exist yet)
+        - pass: "Celebrating my first birthday! Created one year ago today." (verifiable via git log)
 
 # Rate limiting
 rate_limits:
