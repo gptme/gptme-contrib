@@ -1151,7 +1151,12 @@ def monitor(
             if list_id:
                 tweets = client.get_list_tweets(
                     list_id,
-                    tweet_fields=["created_at", "author_id", "public_metrics"],
+                    tweet_fields=[
+                        "created_at",
+                        "author_id",
+                        "public_metrics",
+                        "conversation_id",
+                    ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
                     user_auth=False,
@@ -1159,7 +1164,12 @@ def monitor(
                 source = f"list {list_id}"
             else:
                 tweets = client.get_home_timeline(
-                    tweet_fields=["created_at", "author_id", "public_metrics"],
+                    tweet_fields=[
+                        "created_at",
+                        "author_id",
+                        "public_metrics",
+                        "conversation_id",
+                    ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
                     user_auth=False,
