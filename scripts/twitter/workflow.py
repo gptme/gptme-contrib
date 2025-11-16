@@ -190,6 +190,7 @@ class TweetDraft:
         in_reply_to: Optional[str] = None,
         scheduled_time: Optional[datetime] = None,
         context: Optional[Dict] = None,
+        reject_reason: Optional[str] = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread
@@ -197,10 +198,11 @@ class TweetDraft:
         self.scheduled_time = scheduled_time
         self.context = context or {}
         self.created_at = datetime.now()
+        self.reject_reason = reject_reason
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for storage"""
-        return {
+        result = {
             "text": self.text,
             "type": self.type,
             "in_reply_to": self.in_reply_to,
@@ -210,6 +212,10 @@ class TweetDraft:
             "context": self.context,
             "created_at": self.created_at.isoformat(),
         }
+        # Only include reject_reason if it's set
+        if self.reject_reason:
+            result["reject_reason"] = self.reject_reason
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict) -> "TweetDraft":
@@ -224,6 +230,7 @@ class TweetDraft:
                 else None
             ),
             context=data["context"],
+            reject_reason=data.get("reject_reason"),  # Optional, backward compatible
         )
         draft.created_at = datetime.fromisoformat(data["created_at"])
         return draft
@@ -803,6 +810,14 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 move_draft(path, "approved")
                 console.print("[green]Draft approved")
             elif action == "reject":
+                # Prompt for rejection reason
+                reason = Prompt.ask(
+                    "Rejection reason (optional)",
+                    default="",
+                )
+                if reason:
+                    draft.reject_reason = reason
+                    draft.save(path)  # Save with reject_reason before moving
                 move_draft(path, "rejected")
                 console.print("[red]Draft rejected")
             elif action == "edit":
@@ -830,7 +845,8 @@ def approve(draft_id: str) -> None:
 
 @cli.command()
 @click.argument("draft_id")
-def reject(draft_id: str) -> None:
+@click.option("--reason", "-r", help="Reason for rejection", default=None)
+def reject(draft_id: str, reason: Optional[str]) -> None:
     """Reject a draft tweet by ID (works on both new and approved drafts)"""
     # Try to find draft in either new or approved directories
     draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
@@ -839,8 +855,16 @@ def reject(draft_id: str) -> None:
     if not draft_path:
         return
 
+    # Add rejection reason if provided
+    if reason:
+        draft = TweetDraft.load(draft_path)
+        draft.reject_reason = reason
+        draft.save(draft_path)
+
     new_path = move_draft(draft_path, "rejected")
     console.print(f"[red]Draft rejected: {draft_path.name} → {new_path.name}")
+    if reason:
+        console.print(f"[yellow]Reason: {reason}")
 
 
 @cli.command()
