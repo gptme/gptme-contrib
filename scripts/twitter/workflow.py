@@ -708,7 +708,9 @@ def group_drafts_by_reply_target(drafts: list[Path]) -> dict[str | None, list[Pa
 @cli.command()
 @click.option("--auto-approve", is_flag=True, help="Automatically approve good drafts")
 @click.option("--show-context", is_flag=True, help="Show full context for each draft")
-@click.option("--dry-run", is_flag=True, help="Don't actually approve/reject, just show analysis")
+@click.option(
+    "--dry-run", is_flag=True, help="Don't actually approve/reject, just show analysis"
+)
 def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
@@ -1186,9 +1188,9 @@ def process_timeline_tweets(
                 if response.thread_needed and response.follow_up:
                     for i, follow_up in enumerate([response.follow_up], 1):
                         # Assert that eval_result is not None before using asdict()
-                        assert (
-                            eval_result is not None
-                        ), "eval_result should not be None in thread context"
+                        assert eval_result is not None, (
+                            "eval_result should not be None in thread context"
+                        )
 
                         thread_draft = TweetDraft(
                             text=follow_up,

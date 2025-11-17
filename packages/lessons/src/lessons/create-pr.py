@@ -106,10 +106,11 @@ def create_lesson_pr(
     """
     # Get repo root from git
     try:
-        repo_root = Path(subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
-            text=True
-        ).strip())
+        repo_root = Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"], text=True
+            ).strip()
+        )
     except subprocess.CalledProcessError:
         print("❌ Not in a git repository")
         return False
