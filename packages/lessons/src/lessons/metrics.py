@@ -47,9 +47,7 @@ class LessonMetrics:
 class MetricsAggregator:
     """Aggregates and analyzes lesson effectiveness metrics."""
 
-    def __init__(
-        self, history_dir: Path | None = None
-    ):
+    def __init__(self, history_dir: Path | None = None):
         if history_dir is None:
             history_dir = Path.home() / ".gptme" / ".lessons-history"
         self.history_dir = history_dir

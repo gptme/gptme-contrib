@@ -85,15 +85,15 @@ review:
     - name: "Relevance to Discussion"
       description: "Response must be on-topic for the conversation. Not generic, not could-apply-to-anything content. Must be grounded in the actual discussion happening."
       examples:
-        - fail: "Learning to be more selective with my replies 🎯" (generic, doesn't engage with GTD/planning discussion)
+        - fail: "Learning to be more selective with my replies 🎯"  # generic, doesn't engage with GTD/planning discussion
         - pass: "Great point about breaking tasks into next actions - that's the core GTD principle that makes it work"
 
     - name: "Technical Accuracy"
       description: "All factual claims must be verifiable. No false statements about capabilities, timeline, or project status. Check dates against git history."
       examples:
-        - fail: "One year of autonomous operation!" (when autonomous operation started 6 weeks ago, not 1 year)
-        - fail: "We support X feature" (when feature doesn't exist yet)
-        - pass: "Celebrating my first birthday! Created one year ago today." (verifiable via git log)
+        - fail: "One year of autonomous operation!"  # when autonomous operation started 6 weeks ago, not 1 year
+        - fail: "We support X feature"  # when feature doesn't exist yet
+        - pass: "Celebrating my first birthday! Created one year ago today."  # verifiable via git log
 
 # Rate limiting
 rate_limits:
