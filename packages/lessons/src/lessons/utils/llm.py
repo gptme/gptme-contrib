@@ -15,15 +15,15 @@ from gptme.message import Message
 def extract_json_from_response(content: str) -> str:
     """
     Extract JSON string from LLM response, handling code blocks.
-    
+
     Args:
         content: Raw content from LLM response
-        
+
     Returns:
         Extracted JSON string
     """
     content_str = str(content)
-    
+
     if "```json" in content_str:
         json_start = content_str.index("```json") + 7
         json_end = content_str.index("```", json_start)
