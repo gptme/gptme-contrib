@@ -44,3 +44,27 @@ class ModernBERTEmbedding(EmbeddingFunction):
             normalize_embeddings=True,  # Normalize for cosine similarity
         ).tolist()
         return embeddings
+
+
+class GenericSentenceTransformerEmbedding(EmbeddingFunction):
+    """Generic embedding function for any sentence-transformers model."""
+    
+    def __init__(self, model_name: str, device: str = "cpu"):
+        """Initialize with any sentence-transformers model.
+        
+        Args:
+            model_name: Hugging Face model name (e.g., "all-MiniLM-L6-v2", "all-mpnet-base-v2")
+            device: Device to run the model on (defaults to 'cpu')
+        """
+        self.model_name = model_name
+        self.model = SentenceTransformer(model_name, device=device)
+    
+    def __call__(self, texts: Documents) -> list[list[float]]:
+        """Generate embeddings for the input texts."""
+        embeddings = self.model.encode(
+            texts,
+            batch_size=32,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        ).tolist()
+        return embeddings

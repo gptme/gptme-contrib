@@ -2,6 +2,7 @@ import logging
 import subprocess
 import time
 from collections.abc import Generator
+from datetime import datetime
 from fnmatch import fnmatch as fnmatch_path
 from logging import Filter
 from pathlib import Path
@@ -14,7 +15,8 @@ from chromadb.config import Settings
 
 from .document import Document
 from .document_processor import DocumentProcessor
-from ..embeddings import ModernBERTEmbedding
+from ..embeddings import ModernBERTEmbedding, GenericSentenceTransformerEmbedding
+from ..cache import SmartRAGCache, CacheKey, CacheEntry
 
 
 class ChromaDBFilter(Filter):
@@ -72,7 +74,8 @@ class Indexer:
     processor: DocumentProcessor
     is_persistent: bool = False
     persist_directory: Path | None
-    embedding_function: ModernBERTEmbedding | None
+    embedding_function: ModernBERTEmbedding | GenericSentenceTransformerEmbedding | None
+    cache: SmartRAGCache
 
     def __init__(
         self,
@@ -82,7 +85,7 @@ class Indexer:
         chunk_overlap: int | None = None,
         enable_persist: bool = False,  # Default to False due to multi-threading issues
         scoring_weights: dict | None = None,
-        embedding_function: str = "modernbert",  # Options: "modernbert", "default"
+        embedding_function: str = "modernbert",  # Options: "modernbert", "minilm", "mpnet", "default"
         device: str = "cpu",
         force_recreate: bool = False,  # Force recreation of collection
     ):
@@ -111,6 +114,18 @@ class Indexer:
             if self.embedding_function.is_msmarco:
                 default_chunk_size = 512
                 default_chunk_overlap = 64
+        elif embedding_function == "minilm":
+            self.embedding_function = GenericSentenceTransformerEmbedding(
+                "all-MiniLM-L6-v2", device=device
+            )
+            default_chunk_size = 512
+            default_chunk_overlap = 64
+        elif embedding_function == "mpnet":
+            self.embedding_function = GenericSentenceTransformerEmbedding(
+                "all-mpnet-base-v2", device=device
+            )
+            default_chunk_size = 1000
+            default_chunk_overlap = 200
         else:
             self.embedding_function = None  # Use ChromaDB default
 
@@ -142,11 +157,13 @@ class Indexer:
             self.client = get_client(settings)
 
         need_recreate = False
-        current_model = (
-            "modernbert"
-            if isinstance(self.embedding_function, ModernBERTEmbedding)
-            else "default"
-        )
+        if isinstance(self.embedding_function, ModernBERTEmbedding):
+            current_model = "modernbert"
+        elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
+            # Get the actual model name from GenericSentenceTransformerEmbedding
+            current_model = self.embedding_function.model_name
+        else:
+            current_model = "default"
 
         try:
             # Try to get existing collection
@@ -186,6 +203,9 @@ class Indexer:
                 embedding_function=self.embedding_function,
             )
 
+        # Initialize cache with 5-minute TTL and 100MB memory limit
+        self.cache = SmartRAGCache(ttl_seconds=300, max_memory_bytes=100 * 1024 * 1024)
+
         # Initialize document processor with configured chunk sizes
         logger.debug(
             f"Using chunk size: {self.chunk_size}, overlap: {self.chunk_overlap}"
@@ -204,6 +224,16 @@ class Indexer:
         }
         if scoring_weights:
             self.scoring_weights.update(scoring_weights)
+
+    @property
+    def embedding_model_name(self) -> str:
+        """Get the name of the current embedding model."""
+        if isinstance(self.embedding_function, ModernBERTEmbedding):
+            return "modernbert"
+        elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
+            return self.embedding_function.model_name
+        else:
+            return "default"
 
     def _generate_doc_id(self, document: Document) -> Document:
         if not document.doc_id:
@@ -576,6 +606,8 @@ class Indexer:
     ) -> tuple[list[Document], list[float], list[dict[str, Any]] | None]:
         """Search for documents similar to the query.
 
+        Note: Results are cached with 5-minute TTL for performance.
+
         Args:
             query: The search query text
             paths: List of paths to search within (exact path matching)
@@ -608,6 +640,39 @@ class Indexer:
             # Combine paths and filters
             search("query", paths=[Path("docs")], path_filters=("*.md",))
         """
+        # Check cache first (skip if explain=True since explanations aren't cached)
+        if not explain:
+            cache_key = CacheKey.from_search(
+                query=query,
+                paths=paths,
+                n_results=n_results,
+                where=where,
+                group_chunks=group_chunks,
+                path_filters=path_filters,
+                embedding_model=self.embedding_model_name,
+                index_version="v1",
+            )
+
+            cached_entry = self.cache.get(cache_key)
+            if cached_entry:
+                logger.debug(f"Cache hit for query: {query}")
+                # Reconstruct Documents from cached data
+                documents = [
+                    Document(
+                        content=content,
+                        metadata=metadata,
+                        doc_id=doc_id,
+                    )
+                    for content, metadata, doc_id in zip(
+                        cached_entry.document_contents,
+                        cached_entry.document_metadatas,
+                        cached_entry.document_ids,
+                    )
+                ]
+                return documents, cached_entry.distances, None
+
+            logger.debug(f"Cache miss for query: {query}")
+
         # Get more results than needed to allow for filtering
         query_n_results = n_results * 3 if group_chunks else n_results
 
@@ -688,6 +753,23 @@ class Indexer:
                     self.explain_scoring(query, doc, distance, score_breakdown)
                 )
             return list(documents), list(distances), explanations
+
+        # Cache results before returning (only if not explain mode)
+        cache_entry = CacheEntry(
+            document_contents=[doc.content for doc in documents],
+            document_metadatas=[doc.metadata for doc in documents],
+            document_ids=[doc.doc_id for doc in documents],
+            distances=list(distances),
+            created_at=datetime.now(),
+            last_accessed=datetime.now(),
+            access_count=0,
+            workspace_mtime=0.0,  # TODO: Track workspace modification time
+            index_mtime=0.0,      # TODO: Track index modification time
+            embedding_time_ms=0.0,  # TODO: Track embedding time
+            result_count=len(documents),
+        )
+        self.cache.put(cache_key, cache_entry)
+        logger.debug(f"Cached {len(documents)} results for query: {query}")
 
         return list(documents), list(distances), None
 
