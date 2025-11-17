@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-# Add scripts/email to path for communication_utils import
-sys.path.insert(0, str(Path(__file__).parent.parent / "email"))
+# Add scripts to path for communication_utils import
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from communication_utils.state import ConversationTracker, MessageState
 
