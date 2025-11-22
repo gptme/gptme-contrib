@@ -51,7 +51,7 @@ def query_consortium(
             "anthropic/claude-sonnet-4-5",
             "openai/gpt-5.1",
             "google/gemini-3-pro",
-            "xai/grok-2",
+            "xai/grok-4",
         ]
 
     if arbiter is None:
