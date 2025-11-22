@@ -82,12 +82,15 @@ The tool returns:
 ## Configuration
 
 Default models (used if not specified):
-- anthropic/claude-sonnet-4-5
-- openai/gpt-4o
-- openai/o1-mini
+- anthropic/claude-sonnet-4-5 (Claude Sonnet 4.5, Sept 2025)
+- openai/gpt-5.1 (GPT-5.1, Nov 2025)
+- google/gemini-3-pro (Gemini 3 Pro, Nov 2025)
+- xai/grok-2 (Grok 2)
 
 Default arbiter:
-- anthropic/claude-sonnet-4-5
+- anthropic/claude-sonnet-4-5 (Claude Sonnet 4.5)
+
+These represent diverse frontier models for comprehensive perspectives.
 
 ## Future Enhancements
 

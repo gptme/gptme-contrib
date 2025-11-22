@@ -49,8 +49,9 @@ def query_consortium(
     if models is None:
         models = [
             "anthropic/claude-sonnet-4-5",
-            "openai/gpt-4o",
-            "openai/o1-mini",
+            "openai/gpt-5.1",
+            "google/gemini-3-pro",
+            "xai/grok-2",
         ]
 
     if arbiter is None:
@@ -229,7 +230,7 @@ query_consortium(
 query_consortium(
     question="What are the pros and cons of different rate limiting strategies 
     (token bucket, leaky bucket, fixed window, sliding window)?",
-    models=["anthropic/claude-sonnet-4-5", "openai/gpt-4o", "openai/o1"]
+    models=["anthropic/claude-sonnet-4-5", "openai/gpt-5.1", "google/gemini-3-pro"]
 )
 ```
     """,
