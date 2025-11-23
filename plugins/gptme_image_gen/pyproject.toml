@@ -1,0 +1,24 @@
+[project]
+name = "gptme-image-gen"
+version = "0.1.0"
+description = "Multi-provider image generation plugin for gptme"
+requires-python = ">=3.10"
+dependencies = [
+    "gptme>=0.27.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+]
+gemini = [
+    "google-generativeai>=0.3.0",
+]
+dalle = [
+    "openai>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
