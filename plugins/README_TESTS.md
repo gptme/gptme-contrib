@@ -64,7 +64,46 @@ plugins/
 
 ## CI Configuration
 
-See task plan for GitHub Actions workflow configuration that:
-- Runs fast tests on every PR
-- Runs integration tests on push to main
-- Uses repository secrets for API keys
+### GitHub Actions Workflow
+
+The repository includes `.github/workflows/test-plugins.yml` that:
+- Runs unit tests on every push and PR (Python 3.10, 3.11, 3.12)
+- Runs integration tests on push to master (when API keys available)
+- Generates coverage reports and uploads to Codecov
+- Timeout: 30s for unit tests, 120s for integration tests
+
+### Required GitHub Secrets
+
+Configure these secrets in repository settings for integration tests:
+
+- `ANTHROPIC_API_KEY` - For Claude models in consortium
+- `OPENAI_API_KEY` - For GPT models in consortium and DALL-E
+- `GOOGLE_API_KEY` - For Gemini models in image generation
+
+**Setup**: Repository Settings → Secrets and variables → Actions → New repository secret
+
+### Local Testing Before CI
+
+Test the same way CI will run:
+
+```bash
+# Unit tests (fast, no secrets needed)
+pytest plugins/*/tests/ -v -m "not slow and not integration" --timeout=30
+
+# Integration tests (requires API keys)
+export ANTHROPIC_API_KEY="your-key"
+export OPENAI_API_KEY="your-key"
+export GOOGLE_API_KEY="your-key"
+pytest plugins/*/tests/ -v -m "slow or integration" --timeout=120
+
+# Coverage report
+pytest plugins/*/tests/ -v -m "not slow and not integration" \
+  --cov=plugins --cov-report=xml --cov-report=term
+```
+
+### Testing Workflow Changes
+
+To test workflow changes without push to master:
+1. Create feature branch
+2. Push branch to trigger PR workflow
+3. Only unit tests run on PR (integration tests require master push)
