@@ -58,22 +58,30 @@ def query_consortium(
 
     # Get responses from each model
     responses = {}
+    successful_responses = {}
     for model in models:
         try:
             response = _query_single_model(model, question)
             responses[model] = response
+            successful_responses[model] = response
         except Exception as e:
             responses[model] = f"Error: {e}"
 
-    # Synthesize consensus using arbiter
+    # Calculate success rate for confidence adjustment
+    success_rate = len(successful_responses) / len(models) if models else 0
+
+    # Synthesize consensus using arbiter (pass successful responses for better synthesis)
     synthesis = _synthesize_consensus(
-        question, responses, arbiter, confidence_threshold
+        question, successful_responses or responses, arbiter, confidence_threshold
     )
+
+    # Adjust confidence based on success rate
+    adjusted_confidence = synthesis["confidence"] * success_rate
 
     return ConsortiumResult(
         question=question,
         consensus=synthesis["consensus"],
-        confidence=synthesis["confidence"],
+        confidence=adjusted_confidence,
         responses=responses,
         synthesis_reasoning=synthesis["reasoning"],
         models_used=models,
@@ -106,7 +114,8 @@ def _query_single_model(model: str, prompt: str) -> str:
         response = reply(messages, model, stream=False, tools=None)
         return response.content
     except Exception as e:
-        raise Exception(f"Failed to query {model}: {e}") from e
+        error_msg = str(e) if str(e) else "Unknown error - model query failed"
+        raise Exception(f"Failed to query {model}: {error_msg}") from e
 
 
 def _synthesize_consensus(
