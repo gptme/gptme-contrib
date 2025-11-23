@@ -41,10 +41,14 @@ class TestQueryConsortium:
             assert isinstance(result, ConsortiumResult)
             assert result.question == "Test question"
             assert result.consensus == "Test consensus"
-            assert result.confidence == 0.85
+            # Confidence is now: base * success_rate * (0.5 + 0.5 * agreement)
+            # With agreement_score calculated from responses
+            assert 0.6 < result.confidence < 0.9  # Reasonable range
             assert result.synthesis_reasoning == "Test reasoning"
             assert len(result.models_used) == 4  # Default models
             assert result.arbiter_model == "anthropic/claude-sonnet-4-5"
+            assert hasattr(result, "agreement_score")
+            assert 0.0 <= result.agreement_score <= 1.0
 
     def test_query_consortium_custom_models(self):
         """Test consortium query with custom model list."""
@@ -99,13 +103,26 @@ class TestQueryConsortium:
             "gptme_consortium.tools.consortium._query_single_model"
         ) as mock_query, patch(
             "gptme_consortium.tools.consortium._synthesize_consensus"
-        ) as mock_synth:
-            # First model succeeds, second fails, third succeeds, fourth fails
+        ) as mock_synth, patch(
+            "gptme_consortium.tools.consortium.time.sleep"
+        ):  # Mock sleep for faster tests
+            # Account for retries: each error will be retried up to 3 times
+            # Model 1: Success (1 call)
+            # Model 2: Fail all retries (4 calls: initial + 3 retries)
+            # Model 3: Success (1 call)
+            # Model 4: Fail all retries (4 calls: initial + 3 retries)
+            error = Exception("API Error")
             mock_query.side_effect = [
-                "Success 1",
-                Exception("API Error"),
-                "Success 2",
-                Exception("Rate limit"),
+                "Success 1",  # Model 1
+                error,
+                error,
+                error,
+                error,  # Model 2: all attempts fail
+                "Success 2",  # Model 3
+                error,
+                error,
+                error,
+                error,  # Model 4: all attempts fail
             ]
 
             mock_synth.return_value = {
@@ -120,6 +137,7 @@ class TestQueryConsortium:
             assert isinstance(result, ConsortiumResult)
             assert "Success 1" in str(result.responses.values())
             assert "Error: API Error" in str(result.responses.values())
+            assert hasattr(result, "agreement_score")
 
 
 class TestSynthesizeConsensus:
@@ -204,12 +222,14 @@ class TestConsortiumResult:
             synthesis_reasoning="Test reasoning",
             models_used=["model1"],
             arbiter_model="arbiter",
+            agreement_score=0.9,
         )
 
         assert result.question == "Test question"
         assert result.consensus == "Test consensus"
         assert result.confidence == 0.85
         assert result.responses == {"model1": "Response 1"}
+        assert result.agreement_score == 0.9
         assert result.synthesis_reasoning == "Test reasoning"
         assert result.models_used == ["model1"]
         assert result.arbiter_model == "arbiter"
@@ -249,13 +269,18 @@ class TestConsortiumIntegration:
         result = query_consortium(
             question="Compare microservices vs monolith for a 3-person team",
             models=[
-                "anthropic/claude-sonnet-4-5",
-                "openai/gpt-5.1",
-                "google/gemini-3-pro",
+                "openai/gpt-4o",
+                "openai/gpt-4o-mini",
             ],
-            confidence_threshold=0.6,
+            arbiter="openai/gpt-4o",
+            confidence_threshold=0.4,  # Lower threshold to account for agreement scoring
         )
 
         assert isinstance(result, ConsortiumResult)
-        assert result.confidence >= 0.6
+        assert result.confidence >= 0.4  # Adjusted for agreement-based confidence
+        # Verify we got responses from all models
+        assert (
+            len([r for r in result.responses.values() if not r.startswith("Error:")])
+            >= 2
+        )
         assert len(result.synthesis_reasoning) > 100  # Substantive reasoning

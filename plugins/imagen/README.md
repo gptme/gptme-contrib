@@ -13,6 +13,9 @@ The image generation plugin provides a unified interface for generating images f
 - **Automatic file handling**: Images saved to disk with metadata
 - **Quality options**: Choose between standard and HD quality
 - **Flexible sizing**: Provider-specific size options
+- **Multiple options generation**: Generate variations for comparison (count parameter) **[Phase 1]**
+- **View integration**: Display images to assistant for verification (view parameter) **[Phase 1]**
+- **Enhanced error handling**: Clear error messages with context **[Phase 1]**
 
 ## Installation
 
@@ -62,6 +65,50 @@ generate_image(
 )
 ```
 
+### Multiple Options (Phase 1 NEW)
+
+Generate multiple variations for comparison:
+
+```image_gen
+generate_image(
+    prompt="Modern minimalist logo for tech startup",
+    provider="gemini",
+    count=3,
+    output_path="logos/option.png"
+)
+```
+
+Output: `logos/option_001.png`, `logos/option_002.png`, `logos/option_003.png`
+
+### View Integration (Phase 1 NEW)
+
+Display generated images to the assistant for verification and feedback:
+
+```image_gen
+generate_image(
+    prompt="UI mockup for dashboard",
+    provider="gemini",
+    view=True,
+    output_path="mockups/dashboard.png"
+)
+```
+
+The assistant can see the generated image and provide feedback like "The layout looks good, but the colors could be brighter."
+
+### Combined: Multiple Options with View
+
+```image_gen
+generate_image(
+    prompt="Logo concept with geometric shapes",
+    provider="gemini",
+    count=3,
+    view=True,
+    output_path="concepts/logo.png"
+)
+```
+
+The assistant sees all 3 variations and can recommend the best one.
+
 ## Providers
 
 ### Gemini (Imagen 3)
@@ -87,6 +134,8 @@ generate_image(
 - `size` (optional): Image size like "1024x1024" (default: "1024x1024")
 - `quality` (optional): "standard" or "hd" (default: "standard")
 - `output_path` (optional): Save location (default: auto-generated)
+- `count` (optional): Number of variations to generate (default: 1) **[Phase 1 NEW]**
+- `view` (optional): Display generated images to assistant (default: False) **[Phase 1 NEW]**
 
 ## Use Cases
 
@@ -114,11 +163,18 @@ pip install openai               # For DALL-E
 pip install requests             # For image downloads
 ```
 
-## Future Enhancements
+## Phase 1 Enhancements (Completed)
 
-- [ ] Local Stable Diffusion support
-- [ ] Batch generation
+- [x] Multiple options generation (count parameter)
+- [x] View integration (view parameter)
+- [x] Enhanced error handling
+
+## Future Enhancements (Phase 2+)
+
+- [ ] Prompt enhancement with LLM
 - [ ] Style presets
-- [ ] Image editing/inpainting
-- [ ] Aspect ratio templates
+- [ ] Image editing/variations
+- [ ] Batch operations
 - [ ] Cost tracking per provider
+- [ ] Provider comparison tool
+- [ ] Local Stable Diffusion support
