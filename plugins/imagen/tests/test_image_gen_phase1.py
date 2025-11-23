@@ -121,9 +121,7 @@ class TestViewIntegration:
                 metadata={},
             )
 
-            with patch(
-                "gptme_image_gen.tools.image_gen.view_image"
-            ) as mock_view:  # Should not be imported
+            with patch("gptme.tools.vision.view_image") as mock_view:
                 _result = generate_image(prompt="test", provider="gemini", view=False)
 
                 # view_image should not be called
@@ -141,7 +139,7 @@ class TestViewIntegration:
                 metadata={},
             )
 
-            with patch("gptme_image_gen.tools.image_gen.view_image") as mock_view_image:
+            with patch("gptme.tools.vision.view_image") as mock_view_image:
                 _result = generate_image(prompt="test", provider="gemini", view=True)
 
                 # view_image should be called once with the image path
@@ -158,7 +156,7 @@ class TestViewIntegration:
                 for path in paths
             ]
 
-            with patch("gptme_image_gen.tools.image_gen.view_image") as mock_view_image:
+            with patch("gptme.tools.vision.view_image") as mock_view_image:
                 _result = generate_image(
                     prompt="test", provider="gemini", count=3, view=True
                 )
@@ -182,7 +180,7 @@ class TestViewIntegration:
 
             # Simulate ImportError when trying to import view_image
             with patch(
-                "gptme_image_gen.tools.image_gen.view_image",
+                "gptme.tools.vision.view_image",
                 side_effect=ImportError("vision tool not available"),
             ):
                 # Should not raise, just skip viewing
