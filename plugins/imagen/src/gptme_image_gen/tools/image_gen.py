@@ -56,14 +56,17 @@ def generate_image(
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
 
+    # Generate timestamp once for all images
+    if output_path is None:
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # Generate multiple images if count > 1
     results = []
     for i in range(count):
         # Determine output path for this iteration
         if output_path is None:
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if count > 1:
                 current_output = f"generated_{timestamp}_{i + 1:03d}.png"
             else:
@@ -79,6 +82,7 @@ def generate_image(
                 current_output = output_path
 
         current_path = Path(current_output).expanduser().resolve()
+        current_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Generate single image
         try:
