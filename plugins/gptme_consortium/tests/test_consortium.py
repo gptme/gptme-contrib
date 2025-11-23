@@ -249,13 +249,19 @@ class TestConsortiumIntegration:
         result = query_consortium(
             question="Compare microservices vs monolith for a 3-person team",
             models=[
-                "anthropic/claude-sonnet-4-5",
-                "openai/gpt-5.1",
-                "google/gemini-3-pro",
+                "openai/gpt-4o",
+                "openai/gpt-4o-mini",
+                "openai/o1-mini",
             ],
+            arbiter="openai/gpt-4o",
             confidence_threshold=0.6,
         )
 
         assert isinstance(result, ConsortiumResult)
         assert result.confidence >= 0.6
+        # Verify we got responses from all models
+        assert (
+            len([r for r in result.responses.values() if not r.startswith("Error:")])
+            >= 2
+        )
         assert len(result.synthesis_reasoning) > 100  # Substantive reasoning
