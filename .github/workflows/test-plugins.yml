@@ -32,7 +32,9 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest plugins/*/tests/ -v -m "not slow and not integration" --timeout=30
+          pytest plugins/*/tests/ -v -m "not slow and not integration" --timeout=30 \
+            --ignore=plugins/gptme_consortium/tests/integration/ \
+            --ignore=plugins/gptme_image_gen/tests/integration/
 
       - name: Run integration tests (with API keys)
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
