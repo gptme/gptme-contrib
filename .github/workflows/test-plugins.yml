@@ -27,8 +27,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pytest-cov pytest-timeout
           # Install plugin dependencies
-          pip install -e plugins/image_gen
-          pip install -e plugins/consortium
+          pip install -e plugins/gptme_image_gen
+          pip install -e plugins/gptme_consortium
 
       - name: Run unit tests
         run: |
