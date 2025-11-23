@@ -6,7 +6,7 @@ They require API keys to be set in environment variables.
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import generate_image, ImageResult  # type: ignore
+from gptme_image_gen.tools.image_gen import ImageResult, generate_image
 
 
 @pytest.mark.slow
