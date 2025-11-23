@@ -8,6 +8,7 @@ consensus responses with confidence scoring.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -292,8 +293,6 @@ Respond in JSON format:
             pass
 
         # Try extracting from markdown code block
-        import re
-
         json_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
         match = re.search(json_pattern, text, re.DOTALL)
         if match:
@@ -304,7 +303,8 @@ Respond in JSON format:
                 pass
 
         # Try finding JSON object in text
-        json_obj_pattern = r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"
+        # Improved pattern to handle multiple nesting levels
+        json_obj_pattern = r"\{(?:[^{}]|\{[^{}]*\})*\}"
         match = re.search(json_obj_pattern, text, re.DOTALL)
         if match:
             try:
