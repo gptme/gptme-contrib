@@ -1,7 +1,6 @@
 """Pytest configuration for gptme_image_gen tests."""
 
 import os
-from pathlib import Path
 
 import pytest
 
