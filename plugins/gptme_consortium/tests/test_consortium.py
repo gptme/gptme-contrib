@@ -141,7 +141,7 @@ class TestSynthesizeConsensus:
                 question="Test",
                 responses=responses,
                 arbiter="test-arbiter",
-                confidence_threshold=0.8,
+                threshold=0.8,
             )
 
             assert result["consensus"] == "Final answer"
@@ -161,7 +161,7 @@ class TestSynthesizeConsensus:
                 question="Test",
                 responses=responses,
                 arbiter="test-arbiter",
-                confidence_threshold=0.8,
+                threshold=0.8,
             )
 
             # Should fallback gracefully
@@ -182,7 +182,7 @@ class TestSynthesizeConsensus:
                 question="Test",
                 responses=responses,
                 arbiter="test-arbiter",
-                confidence_threshold=0.8,
+                threshold=0.8,
             )
 
             # Should use defaults for missing fields
@@ -240,6 +240,7 @@ class TestConsortiumIntegration:
         assert len(result.responses) == 2
         assert result.models_used == ["anthropic/claude-sonnet-4-5", "openai/gpt-5.1"]
 
+    @pytest.mark.slow
     def test_consensus_convergence(self):
         """Test that diverse models can reach consensus.
 

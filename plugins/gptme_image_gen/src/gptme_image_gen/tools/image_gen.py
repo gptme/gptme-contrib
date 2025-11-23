@@ -181,7 +181,7 @@ def _execute_generate_image(
         f"Provider: {result.provider}",
         f"Prompt: {result.prompt}",
         f"Saved to: {result.image_path}",
-        f"\nMetadata:",
+        "\nMetadata:",
         f"  Model: {result.metadata.get('model')}",
         f"  Size: {result.metadata.get('size')}",
         f"  Quality: {result.metadata.get('quality')}",
@@ -238,7 +238,7 @@ generate_image(
 > Assistant: I'll create a logo using DALL-E 3.
 ```image_gen
 generate_image(
-    prompt="Modern minimalist logo for an AI coding assistant. 
+    prompt="Modern minimalist logo for an AI coding assistant.
     Abstract geometric shapes suggesting intelligence and code.
     Professional, tech-forward aesthetic. Flat design.",
     provider="dalle",

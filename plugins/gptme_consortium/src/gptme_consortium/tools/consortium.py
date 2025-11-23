@@ -8,10 +8,9 @@ consensus responses with confidence scoring.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from gptme.message import Message
 from gptme.tools.base import ToolSpec
 
 
@@ -171,9 +170,9 @@ def _execute_query_consortium(
         f"Question: {result.question}\n",
         f"\nConsensus (confidence: {result.confidence:.2f}):",
         result.consensus,
-        f"\n\nSynthesis Reasoning:",
+        "\n\nSynthesis Reasoning:",
         result.synthesis_reasoning,
-        f"\n\nIndividual Responses:",
+        "\n\nIndividual Responses:",
     ]
 
     for model, response in result.responses.items():
@@ -228,7 +227,7 @@ query_consortium(
 > Assistant: I'll query the consortium for different perspectives.
 ```consortium
 query_consortium(
-    question="What are the pros and cons of different rate limiting strategies 
+    question="What are the pros and cons of different rate limiting strategies
     (token bucket, leaky bucket, fixed window, sliding window)?",
     models=["anthropic/claude-sonnet-4-5", "openai/gpt-5.1", "google/gemini-3-pro"]
 )
