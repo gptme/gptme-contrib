@@ -85,12 +85,28 @@ def _query_single_model(model: str, prompt: str) -> str:
     """
     Query a single model using gptme's infrastructure.
 
-    This is a simplified implementation that would need to integrate
-    with gptme's actual model infrastructure.
+    Args:
+        model: Fully qualified model name (e.g., "anthropic/claude-sonnet-4-5")
+        prompt: The prompt to send to the model
+
+    Returns:
+        The model's response as a string
+
+    Raises:
+        Exception: If model query fails
     """
-    # TODO: Integrate with gptme's model system
-    # For now, return a placeholder
-    return f"Response from {model}: [Would query model here]"
+    from gptme.llm import reply
+    from gptme.message import Message
+
+    # Create message for the model
+    messages = [Message("user", prompt)]
+
+    # Query the model (non-streaming)
+    try:
+        response = reply(messages, model, stream=False, tools=None)
+        return response.content
+    except Exception as e:
+        raise Exception(f"Failed to query {model}: {e}") from e
 
 
 def _synthesize_consensus(
@@ -136,22 +152,64 @@ Respond in JSON format:
 }}"""
 
     # Query arbiter model
-    # TODO: Integrate with gptme's model system
-    arbiter_response = _query_single_model(arbiter, synthesis_prompt)
-
-    # Parse response (simplified - would need proper JSON extraction)
     try:
-        result = json.loads(arbiter_response)
+        arbiter_response = _query_single_model(arbiter, synthesis_prompt)
+    except Exception as e:
+        # If arbiter fails, return a basic consensus from responses
+        return {
+            "consensus": "Unable to synthesize consensus due to arbiter failure",
+            "confidence": 0.3,
+            "reasoning": f"Arbiter model failed: {e}",
+        }
+
+    # Parse JSON response (handle markdown code blocks)
+    def extract_json(text: str) -> dict[str, Any] | None:
+        """Extract JSON from text that might contain markdown code blocks."""
+        # Try direct JSON parse first
+        try:
+            result = json.loads(text)
+            return result if isinstance(result, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting from markdown code block
+        import re
+
+        json_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+        match = re.search(json_pattern, text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1))
+                return result if isinstance(result, dict) else None
+            except json.JSONDecodeError:
+                pass
+
+        # Try finding JSON object in text
+        json_obj_pattern = r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"
+        match = re.search(json_obj_pattern, text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(0))
+                return result if isinstance(result, dict) else None
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    result = extract_json(arbiter_response)
+
+    if result:
         return {
             "consensus": result.get("consensus", "Unable to reach consensus"),
-            "confidence": result.get("confidence", 0.5),
+            "confidence": float(result.get("confidence", 0.5)),
             "reasoning": result.get("reasoning", "No reasoning provided"),
         }
-    except json.JSONDecodeError:
+    else:
+        # Fallback: use raw response as consensus
         return {
             "consensus": arbiter_response,
             "confidence": 0.5,
-            "reasoning": "Unable to parse structured response",
+            "reasoning": "Unable to parse structured response - using raw output",
         }
 
 
