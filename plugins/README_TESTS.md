@@ -107,3 +107,51 @@ To test workflow changes without push to master:
 1. Create feature branch
 2. Push branch to trigger PR workflow
 3. Only unit tests run on PR (integration tests require master push)
+
+## Phase 4: Feature Tests (COMPLETE)
+
+### Overview
+Simplified feature tests focusing on configuration, error handling, edge cases, and data structures.
+These tests verify plugin interfaces and behavior without requiring complex API mocking.
+
+### Coverage
+- **Error Handling**: Invalid inputs, missing dependencies, API key validation
+- **Configuration**: Parameter validation, default values, option acceptance
+- **Edge Cases**: Long inputs, unicode, special characters, empty values
+- **Data Structures**: Dataclass definitions, field types, proper structure
+- **Integration**: ToolSpec configuration, function callability, block types
+
+### Test Counts
+- **image_gen**: 12 tests
+  - Error handling: 3 tests
+  - Configuration: 2 tests
+  - Edge cases: 3 tests
+  - Provider options: 2 tests
+  - Data structures: 2 tests
+
+- **consortium**: 16 tests
+  - Configuration: 4 tests
+  - Edge cases: 4 tests
+  - Data structures: 2 tests
+  - Provider options: 2 tests
+  - Integration: 4 tests
+
+### Running Phase 4 Tests
+```bash
+# Run all Phase 4 tests
+uv run pytest plugins/gptme_image_gen/tests/feature/test_features_simple.py
+uv run pytest plugins/gptme_consortium/tests/feature/test_features_simple.py
+
+# Run specific test class
+uv run pytest plugins/gptme_image_gen/tests/feature/test_features_simple.py::TestErrorHandling -v
+```
+
+### Design Philosophy
+Phase 4 tests are intentionally simplified compared to the initial comprehensive feature test attempt:
+- Focus on what's testable without complex mocking
+- Complement Phase 1 (unit) and Phase 2 (integration) tests
+- Verify plugin interfaces and configuration handling
+- Ensure robust error handling and edge case coverage
+- Fast execution (< 2 seconds total)
+
+This pragmatic approach provides valuable coverage without the maintenance burden of extensive mock-based tests.
