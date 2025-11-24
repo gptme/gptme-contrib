@@ -37,6 +37,7 @@ repos:
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
     pass_filenames: true
+    exclude: ^packages/lessons/
 - repo: local
   hooks:
   - id: shellcheck

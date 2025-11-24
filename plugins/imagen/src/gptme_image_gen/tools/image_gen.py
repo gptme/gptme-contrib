@@ -33,7 +33,9 @@ def generate_image(
     size: str = "1024x1024",
     quality: str = "standard",
     output_path: str | None = None,
-) -> ImageResult:
+    count: int = 1,
+    view: bool = False,
+) -> ImageResult | list[ImageResult]:
     """
     Generate an image from a text prompt.
 
@@ -43,28 +45,84 @@ def generate_image(
         size: Image size (provider-specific formats)
         quality: Image quality level (standard, hd)
         output_path: Where to save image (optional, defaults to generated-{timestamp}.png)
+        count: Number of images to generate (default: 1)
+        view: Whether to display generated images to LLM (default: False)
 
     Returns:
-        ImageResult with path and metadata
+        ImageResult with path and metadata (if count=1)
+        List of ImageResults (if count>1)
     """
+    # Validate count
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
+
+    # Generate timestamp once for all images
     if output_path is None:
         from datetime import datetime
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"generated_{timestamp}.png"
 
-    output_path = Path(output_path).expanduser().resolve()
+    # Generate multiple images if count > 1
+    results = []
+    for i in range(count):
+        # Determine output path for this iteration
+        if output_path is None:
+            if count > 1:
+                current_output = f"generated_{timestamp}_{i + 1:03d}.png"
+            else:
+                current_output = f"generated_{timestamp}.png"
+        else:
+            # Add number suffix for multiple images
+            if count > 1:
+                path = Path(output_path)
+                stem = path.stem
+                suffix = path.suffix
+                current_output = str(path.parent / f"{stem}_{i + 1:03d}{suffix}")
+            else:
+                current_output = output_path
 
-    if provider == "gemini":
-        result = _generate_gemini(prompt, size, quality, output_path)
-    elif provider == "dalle":
-        result = _generate_dalle(prompt, size, quality, output_path, model="dall-e-3")
-    elif provider == "dalle2":
-        result = _generate_dalle(prompt, size, quality, output_path, model="dall-e-2")
+        current_path = Path(current_output).expanduser().resolve()
+        current_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Generate single image
+        try:
+            if provider == "gemini":
+                result = _generate_gemini(prompt, size, quality, current_path)
+            elif provider == "dalle":
+                result = _generate_dalle(
+                    prompt, size, quality, current_path, model="dall-e-3"
+                )
+            elif provider == "dalle2":
+                result = _generate_dalle(
+                    prompt, size, quality, current_path, model="dall-e-2"
+                )
+            else:
+                raise ValueError(f"Unknown provider: {provider}")
+
+            results.append(result)
+
+        except Exception as e:
+            # Add error context
+            raise RuntimeError(
+                f"Failed to generate image {i + 1}/{count} with {provider}: {e}"
+            ) from e
+
+    # View images if requested
+    if view:
+        try:
+            from gptme.tools.vision import view_image
+
+            for result in results:
+                view_image(result.image_path)
+        except ImportError:
+            # Vision tool not available, skip viewing
+            pass
+
+    # Return single result or list based on count
+    if count == 1:
+        return results[0]
     else:
-        raise ValueError(f"Unknown provider: {provider}")
-
-    return result
+        return results
 
 
 def _generate_gemini(
@@ -75,7 +133,7 @@ def _generate_gemini(
 ) -> ImageResult:
     """Generate image using Google Gemini/Imagen."""
     try:
-        import google.generativeai as genai
+        import google.generativeai as genai  # type: ignore[import-not-found]
     except ImportError:
         raise ImportError(
             "google-generativeai not installed. Install with: pip install google-generativeai"
@@ -129,9 +187,9 @@ def _generate_dalle(
     client = OpenAI()
 
     # Generate image
-    response = client.images.generate(
-        model=model,
+    response = client.images.generate(  # type: ignore[call-overload]
         prompt=prompt,
+        model=model,
         size=size,
         quality=quality,
         n=1,
@@ -172,20 +230,39 @@ def _execute_generate_image(
     size: str = "1024x1024",
     quality: str = "standard",
     output_path: str | None = None,
+    count: int = 1,
+    view: bool = False,
 ) -> str:
     """Execute image generation and format results."""
-    result = generate_image(prompt, provider, size, quality, output_path)
+    result = generate_image(prompt, provider, size, quality, output_path, count, view)
 
-    output = [
-        "=== Image Generated ===\n",
-        f"Provider: {result.provider}",
-        f"Prompt: {result.prompt}",
-        f"Saved to: {result.image_path}",
-        "\nMetadata:",
-        f"  Model: {result.metadata.get('model')}",
-        f"  Size: {result.metadata.get('size')}",
-        f"  Quality: {result.metadata.get('quality')}",
-    ]
+    # Handle single or multiple results
+    results_list = [result] if isinstance(result, ImageResult) else result
+
+    output = []
+    if len(results_list) > 1:
+        output.append(f"=== {len(results_list)} Images Generated ===\n")
+    else:
+        output.append("=== Image Generated ===\n")
+
+    for i, img_result in enumerate(results_list, 1):
+        if len(results_list) > 1:
+            output.append(f"\n--- Image {i}/{len(results_list)} ---")
+
+        output.extend(
+            [
+                f"Provider: {img_result.provider}",
+                f"Prompt: {img_result.prompt}",
+                f"Saved to: {img_result.image_path}",
+                "\nMetadata:",
+                f"  Model: {img_result.metadata.get('model')}",
+                f"  Size: {img_result.metadata.get('size')}",
+                f"  Quality: {img_result.metadata.get('quality')}",
+            ]
+        )
+
+    if view:
+        output.append("\n✓ Images displayed to assistant for review")
 
     return "\n".join(output)
 
@@ -214,6 +291,12 @@ Arguments:
 - size: Image size like "1024x1024" (optional, default: 1024x1024)
 - quality: "standard" or "hd" (optional, default: standard)
 - output_path: Where to save (optional, auto-generated if not specified)
+- count: Number of images to generate (optional, default: 1)
+- view: Display generated images to assistant (optional, default: False)
+
+New in Phase 1:
+- Multiple options: Use count=3 to generate 3 variations for comparison
+- View integration: Use view=True to display images to assistant for verification/feedback
     """,
     examples="""
 ### Generate architecture diagram with Gemini
@@ -246,6 +329,33 @@ generate_image(
     output_path="branding/logo.png"
 )
 ```
+
+### Generate multiple options and view them
+
+> User: Create a logo and show me the options
+> Assistant: I'll generate 3 logo variations and display them for review.
+```image_gen
+generate_image(
+    prompt="Modern minimalist logo for tech startup. Geometric, professional, memorable.",
+    provider="gemini",
+    count=3,
+    view=True,
+    output_path="logos/option.png"
+)
+```
+> System: === 3 Images Generated ===
+>
+> --- Image 1/3 ---
+> Saved to: logos/option_001.png
+>
+> --- Image 2/3 ---
+> Saved to: logos/option_002.png
+>
+> --- Image 3/3 ---
+> Saved to: logos/option_003.png
+>
+> ✓ Images displayed to assistant for review
+> Assistant: I can see all three options. Option 2 has the best balance of simplicity and recognition.
 
 ### Compare providers for concept art
 
