@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import pytest
 
 from gptme_image_gen.tools.image_gen import (
     STYLE_PRESETS,
@@ -149,6 +150,159 @@ class TestPromptEnhancement:
             assert captured_prompt is not None
             assert len(captured_prompt) > len(original_prompt)
             assert any(kw in captured_prompt.lower() for kw in ["quality", "detailed"])
+
+
+class TestProgressIndicators:
+    """Tests for progress indicator functionality."""
+
+    def test_progress_shown_for_single_image(self, tmp_path, capsys):
+        """Test progress indicator shown for single image."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.return_value = ImageResult(
+                provider="gemini",
+                prompt="test",
+                image_path=tmp_path / "test.png",
+                metadata={},
+            )
+
+            generate_image(
+                prompt="test",
+                provider="gemini",
+                show_progress=True,
+                output_path=str(tmp_path / "test.png"),
+            )
+
+            captured = capsys.readouterr()
+            assert "🎨 Generating image with gemini" in captured.out
+            assert "✅ Image generated successfully" in captured.out
+
+    def test_progress_shown_for_multiple_images(self, tmp_path, capsys):
+        """Test progress indicators for multiple images."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.side_effect = [
+                ImageResult(
+                    provider="gemini",
+                    prompt="test",
+                    image_path=tmp_path / f"test_{i}.png",
+                    metadata={},
+                )
+                for i in range(3)
+            ]
+
+            generate_image(
+                prompt="test",
+                provider="gemini",
+                count=3,
+                show_progress=True,
+                output_path=str(tmp_path / "test.png"),
+            )
+
+            captured = capsys.readouterr()
+            assert "🎨 Generating 3 images with gemini" in captured.out
+            assert "→ Image 1/3" in captured.out
+            assert "→ Image 2/3" in captured.out
+            assert "→ Image 3/3" in captured.out
+            assert "✅ Generated 3/3 images successfully" in captured.out
+            assert captured.out.count("✓") == 3
+
+    def test_progress_disabled(self, tmp_path, capsys):
+        """Test that show_progress=False disables indicators."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.return_value = ImageResult(
+                provider="gemini",
+                prompt="test",
+                image_path=tmp_path / "test.png",
+                metadata={},
+            )
+
+            generate_image(
+                prompt="test",
+                provider="gemini",
+                show_progress=False,
+                output_path=str(tmp_path / "test.png"),
+            )
+
+            captured = capsys.readouterr()
+            assert "🎨" not in captured.out
+            assert "✅" not in captured.out
+
+    def test_progress_with_error(self, tmp_path, capsys):
+        """Test progress indicators when generation fails."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.side_effect = [
+                ImageResult(
+                    provider="gemini",
+                    prompt="test",
+                    image_path=tmp_path / "test_1.png",
+                    metadata={},
+                ),
+                ValueError("API error"),
+            ]
+
+            with pytest.raises(RuntimeError):
+                generate_image(
+                    prompt="test",
+                    provider="gemini",
+                    count=2,
+                    show_progress=True,
+                    output_path=str(tmp_path / "test.png"),
+                )
+
+            captured = capsys.readouterr()
+            assert "→ Image 1/2... ✓" in captured.out
+            assert "→ Image 2/2... ✗" in captured.out
+
+
+class TestEnhancedErrorMessages:
+    """Tests for enhanced error message functionality."""
+
+    def test_api_key_error_message(self, tmp_path):
+        """Test that API key errors get helpful messages."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.side_effect = ValueError("API key not found")
+
+            with pytest.raises(RuntimeError) as exc_info:
+                generate_image(
+                    prompt="test",
+                    provider="gemini",
+                    output_path=str(tmp_path / "test.png"),
+                )
+
+            error_message = str(exc_info.value)
+            assert "Missing or invalid API key" in error_message
+            assert "GEMINI_API_KEY" in error_message
+
+    def test_quota_error_message(self, tmp_path):
+        """Test that quota errors get helpful messages."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.side_effect = ValueError("Quota exceeded")
+
+            with pytest.raises(RuntimeError) as exc_info:
+                generate_image(
+                    prompt="test",
+                    provider="gemini",
+                    output_path=str(tmp_path / "test.png"),
+                )
+
+            error_message = str(exc_info.value)
+            assert "quota or rate limit" in error_message.lower()
+            assert "Wait a moment" in error_message
+
+    def test_network_error_message(self, tmp_path):
+        """Test that network errors get helpful messages."""
+        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+            mock_gen.side_effect = ValueError("Network connection failed")
+
+            with pytest.raises(RuntimeError) as exc_info:
+                generate_image(
+                    prompt="test",
+                    provider="gemini",
+                    output_path=str(tmp_path / "test.png"),
+                )
+
+            error_message = str(exc_info.value)
+            assert "Network connection issue" in error_message
+            assert "Check your internet connection" in error_message
 
 
 class TestCombinedPhase2Features:

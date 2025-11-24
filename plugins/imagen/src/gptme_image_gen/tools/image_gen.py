@@ -59,6 +59,7 @@ def generate_image(
     view: bool = False,
     style: Style | None = None,
     enhance: bool = False,
+    show_progress: bool = True,
 ) -> ImageResult | list[ImageResult]:
     """
     Generate an image from a text prompt.
@@ -73,6 +74,7 @@ def generate_image(
         view: Whether to display generated images to LLM (default: False)
         style: Apply style preset to enhance prompt (optional)
         enhance: Use LLM to enhance prompt for better results (optional, default: False)
+        show_progress: Show progress indicators during generation (default: True)
 
     Returns:
         ImageResult with path and metadata (if count=1)
@@ -97,9 +99,19 @@ def generate_image(
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Show initial progress message
+    if show_progress:
+        if count > 1:
+            print(f"🎨 Generating {count} images with {provider}...")
+        else:
+            print(f"🎨 Generating image with {provider}...")
+
     # Generate multiple images if count > 1
     results = []
     for i in range(count):
+        # Show progress for current image
+        if show_progress and count > 1:
+            print(f"  → Image {i + 1}/{count}...", end=" ", flush=True)
         # Determine output path for this iteration
         if output_path is None:
             if count > 1:
@@ -136,11 +148,38 @@ def generate_image(
 
             results.append(result)
 
+            # Show completion for this image
+            if show_progress and count > 1:
+                print("✓")
+
         except Exception as e:
-            # Add error context
-            raise RuntimeError(
-                f"Failed to generate image {i + 1}/{count} with {provider}: {e}"
-            ) from e
+            # Show error indicator
+            if show_progress and count > 1:
+                print("✗")
+
+            # Add detailed error context
+            error_msg = f"Failed to generate image {i + 1}/{count} with {provider}"
+            if "API key" in str(e).lower():
+                error_msg += f": Missing or invalid API key. Check your {provider.upper()}_API_KEY environment variable."
+            elif "quota" in str(e).lower() or "rate limit" in str(e).lower():
+                error_msg += (
+                    ": API quota or rate limit exceeded. Wait a moment and try again."
+                )
+            elif "network" in str(e).lower() or "connection" in str(e).lower():
+                error_msg += (
+                    ": Network connection issue. Check your internet connection."
+                )
+            else:
+                error_msg += f": {e}"
+
+            raise RuntimeError(error_msg) from e
+
+    # Show final completion message
+    if show_progress:
+        if count > 1:
+            print(f"✅ Generated {len(results)}/{count} images successfully")
+        else:
+            print("✅ Image generated successfully")
 
     # View images if requested
     if view:
@@ -305,10 +344,20 @@ def _execute_generate_image(
     view: bool = False,
     style: Style | None = None,
     enhance: bool = False,
+    show_progress: bool = True,
 ) -> str:
     """Execute image generation and format results."""
     result = generate_image(
-        prompt, provider, size, quality, output_path, count, view, style, enhance
+        prompt,
+        provider,
+        size,
+        quality,
+        output_path,
+        count,
+        view,
+        style,
+        enhance,
+        show_progress,
     )
 
     # Handle single or multiple results
@@ -370,6 +419,7 @@ Arguments:
 - view: Display generated images to assistant (optional, default: False)
 - style: Apply style preset (optional, choices: photo, illustration, sketch, technical-diagram, flat-design, cyberpunk, watercolor, oil-painting)
 - enhance: Auto-enhance prompt for better results (optional, default: False)
+- show_progress: Show progress indicators during generation (optional, default: True)
 
 Phase 1 Features:
 - Multiple options: Use count=3 to generate 3 variations for comparison
@@ -378,6 +428,8 @@ Phase 1 Features:
 Phase 2 Features:
 - Style presets: Use style="technical-diagram" for common styles
 - Prompt enhancement: Use enhance=True to auto-improve prompts
+- Progress indicators: Automatic progress tracking for multi-image generation
+- Enhanced error messages: Clear, actionable error messages with recovery suggestions
     """,
     examples="""
 ### Generate architecture diagram with Gemini
@@ -485,6 +537,26 @@ generate_image(
 ```
 > System: === Image Generated ===
 > Enhanced prompt: "logo for tech startup, high quality, detailed, professional, well-composed, clear focus"
+
+### Progress indicators for multi-image generation
+
+> User: Generate 5 logo variations
+> Assistant: I'll generate multiple variations with progress tracking.
+```image_gen
+generate_image(
+    prompt="tech startup logo",
+    provider="gemini",
+    count=5,
+    output_path="logos/variation.png"
+)
+```
+> System: 🎨 Generating 5 images with gemini...
+>   → Image 1/5... ✓
+>   → Image 2/5... ✓
+>   → Image 3/5... ✓
+>   → Image 4/5... ✓
+>   → Image 5/5... ✓
+> ✅ Generated 5/5 images successfully
 
 ### Combine Phase 2 features
 
