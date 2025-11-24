@@ -19,6 +19,7 @@ The image generation plugin provides a unified interface for generating images f
 - **Style presets**: 8 predefined styles for consistent results (style parameter) **[Phase 2]**
 - **Prompt enhancement**: Automatic quality and composition improvements (enhance parameter) **[Phase 2]**
 - **Progress indicators**: Visual feedback during multi-image generation **[Phase 2]**
+- **Cost tracking**: Automatic tracking and reporting of generation costs **[Phase 3]**
 
 ## Installation
 
@@ -227,10 +228,58 @@ generate_image(
 )
 ```
 
+## Cost Tracking
+
+All image generations are automatically tracked in a local SQLite database (`~/.gptme/imagen_costs.db`).
+
+### Query Total Cost
+
+```ipython
+from gptme_image_gen.tools.image_gen import get_total_cost
+
+# Get total cost across all providers
+total = get_total_cost()
+print(f"Total spent: ${total:.2f}")
+
+# Filter by provider
+gemini_cost = get_total_cost(provider="gemini")
+print(f"Gemini cost: ${gemini_cost:.2f}")
+
+# Filter by date range
+cost = get_total_cost(start_date="2024-11-01", end_date="2024-11-30")
+print(f"November cost: ${cost:.2f}")
+```
+
+### Cost Breakdown
+
+```ipython
+from gptme_image_gen.tools.image_gen import get_cost_breakdown
+
+breakdown = get_cost_breakdown()
+for provider, cost in breakdown.items():
+    print(f"{provider}: ${cost:.2f}")
+```
+
+### Generation History
+
+```ipython
+from gptme_image_gen.tools.image_gen import get_generation_history
+
+history = get_generation_history(limit=10)
+for gen in history:
+    print(f"{gen['timestamp']}: {gen['prompt'][:50]}... (${gen['cost_usd']:.3f})")
+```
+
+**Cost per image** (approximate as of Nov 2024):
+- Gemini Imagen-3: $0.04 per image (standard)
+- DALL-E 3: $0.04 per image (standard), $0.08 per image (HD)
+- DALL-E 2: $0.02 per image
+
+**Note**: Costs are tracked automatically with each generation and stored locally.
+
 ## Future Enhancements (Phase 3+)
 
 - [ ] Image editing/variations
 - [ ] Batch operations
-- [ ] Cost tracking per provider
 - [ ] Provider comparison tool
 - [ ] Local Stable Diffusion support

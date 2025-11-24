@@ -14,6 +14,8 @@ from typing import Literal
 
 from gptme.tools.base import ToolSpec
 
+from .cost_tracker import get_cost_tracker
+
 Provider = Literal["gemini", "dalle", "dalle2"]
 Style = Literal[
     "photo",
@@ -279,14 +281,32 @@ def _generate_gemini(
     else:
         raise ValueError("No image data in response")
 
+    # Calculate and record cost
+    cost_tracker = get_cost_tracker()
+    model = "imagen-3-fast"
+    cost = cost_tracker.calculate_cost(
+        provider="gemini", quality=quality, count=1, model=model
+    )
+    cost_tracker.record_generation(
+        provider="gemini",
+        prompt=prompt,
+        cost=cost,
+        model=model,
+        size=size,
+        quality=quality,
+        count=1,
+        output_path=str(output_path),
+    )
+
     return ImageResult(
         provider="gemini",
         prompt=prompt,
         image_path=output_path,
         metadata={
-            "model": "imagen-3-fast",
+            "model": model,
             "size": size,
             "quality": quality,
+            "cost_usd": cost,
         },
     )
 
@@ -332,14 +352,32 @@ def _generate_dalle(
     else:
         raise ValueError("No image data in response")
 
+    # Calculate and record cost
+    cost_tracker = get_cost_tracker()
+    provider = "dalle" if model == "dall-e-3" else "dalle2"
+    cost = cost_tracker.calculate_cost(
+        provider=provider, quality=quality, count=1, model=model
+    )
+    cost_tracker.record_generation(
+        provider=provider,
+        prompt=prompt,
+        cost=cost,
+        model=model,
+        size=size,
+        quality=quality,
+        count=1,
+        output_path=str(output_path),
+    )
+
     return ImageResult(
-        provider="dalle" if model == "dall-e-3" else "dalle2",
+        provider=provider,
         prompt=prompt,
         image_path=output_path,
         metadata={
             "model": model,
             "size": size,
             "quality": quality,
+            "cost_usd": cost,
         },
     )
 
@@ -399,6 +437,80 @@ def _execute_generate_image(
         output.append("\n✓ Images displayed to assistant for review")
 
     return "\n".join(output)
+
+
+# Cost tracking helper functions
+def get_total_cost(
+    provider: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> float:
+    """
+    Get total cost of image generations.
+
+    Args:
+        provider: Filter by provider (gemini, dalle, dalle2)
+        start_date: Start date in ISO format (e.g., "2024-01-01")
+        end_date: End date in ISO format
+
+    Returns:
+        Total cost in USD
+
+    Example:
+        >>> cost = get_total_cost()  # All time
+        >>> print(f"Total spent: ${cost:.2f}")
+        >>>
+        >>> cost = get_total_cost(provider="gemini")  # Gemini only
+        >>> cost = get_total_cost(start_date="2024-11-01")  # This month
+    """
+    tracker = get_cost_tracker()
+    return tracker.get_total_cost(provider, start_date, end_date)
+
+
+def get_cost_breakdown(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, float]:
+    """
+    Get cost breakdown by provider.
+
+    Args:
+        start_date: Start date in ISO format
+        end_date: End date in ISO format
+
+    Returns:
+        Dictionary mapping provider to total cost
+
+    Example:
+        >>> breakdown = get_cost_breakdown()
+        >>> for provider, cost in breakdown.items():
+        ...     print(f"{provider}: ${cost:.2f}")
+    """
+    tracker = get_cost_tracker()
+    return tracker.get_cost_breakdown(start_date, end_date)
+
+
+def get_generation_history(
+    limit: int = 50,
+    provider: str | None = None,
+) -> list[dict]:
+    """
+    Get recent generation history.
+
+    Args:
+        limit: Maximum number of records (default: 50)
+        provider: Filter by provider
+
+    Returns:
+        List of generation records with timestamps, prompts, costs, etc.
+
+    Example:
+        >>> history = get_generation_history(limit=10)
+        >>> for gen in history:
+        ...     print(f"{gen['timestamp']}: {gen['prompt'][:50]}... (${gen['cost_usd']:.3f})")
+    """
+    tracker = get_cost_tracker()
+    return tracker.get_generation_history(limit, provider)
 
 
 # Tool specification
