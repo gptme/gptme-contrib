@@ -277,9 +277,63 @@ for gen in history:
 
 **Note**: Costs are tracked automatically with each generation and stored locally.
 
-## Future Enhancements (Phase 3+)
+## Phase 3.2 Enhancements (Completed)
 
-- [ ] Image editing/variations
-- [ ] Batch operations
-- [ ] Provider comparison tool
+### Image Variations
+
+Generate variations of existing images (DALL-E 2 only):
+
+```image_gen
+generate_variation(
+    image_path="original.png",
+    provider="dalle2",
+    count=4,
+    view=True
+)
+```
+
+**Note**: Image variations are currently only supported by DALL-E 2. For other providers, use `generate_image` with descriptive prompts.
+
+### Batch Operations
+
+Generate multiple images from a list of prompts efficiently:
+
+```image_gen
+batch_generate(
+    prompts=["sunset over ocean", "mountain landscape", "city skyline"],
+    provider="gemini",
+    style="photo",
+    output_dir="landscapes",
+    view=True
+)
+```
+
+Benefits:
+- Process multiple prompts in one call
+- Automatic filename generation
+- Progress tracking
+- Optional view all results
+
+### Provider Comparison
+
+Compare the same prompt across multiple providers:
+
+```image_gen
+compare_providers(
+    prompt="futuristic city skyline at night",
+    providers=["gemini", "dalle"],
+    quality="hd",
+    view=True
+)
+```
+
+Results are saved with provider-specific filenames for easy comparison. Perfect for:
+- Evaluating provider strengths
+- Choosing best result for your use case
+- A/B testing prompts
+
+## Future Enhancements (Phase 4+)
+
 - [ ] Local Stable Diffusion support
+- [ ] Image editing with masks (inpainting)
+- [ ] Advanced image-to-image transformations

@@ -440,6 +440,265 @@ def _execute_generate_image(
 
 
 # Cost tracking helper functions
+def generate_variation(
+    image_path: str,
+    provider: Provider = "dalle2",
+    count: int = 1,
+    size: str = "1024x1024",
+    output_path: str | None = None,
+    view: bool = False,
+) -> ImageResult | list[ImageResult]:
+    """
+    Generate variations of an existing image.
+
+    Note: Currently only DALL-E 2 supports image variations.
+    For other providers, use generate_image with a descriptive prompt.
+
+    Args:
+        image_path: Path to the input image
+        provider: Image generation provider (currently only "dalle2" supported)
+        count: Number of variations to generate (default: 1)
+        size: Output image size (default: "1024x1024")
+        output_path: Where to save variations (optional)
+        view: Whether to display generated images to LLM (default: False)
+
+    Returns:
+        ImageResult (if count=1) or list of ImageResults (if count>1)
+
+    Example:
+        variation = generate_variation(
+            image_path="original.png",
+            provider="dalle2",
+            count=3,
+            view=True
+        )
+    """
+    if provider != "dalle2":
+        raise ValueError(
+            f"Image variations only supported for dalle2, got {provider}. "
+            "For other providers, use generate_image with a descriptive prompt."
+        )
+
+    # Validate image exists
+    image_file = Path(image_path)
+    if not image_file.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    # Load and encode image
+    with open(image_file, "rb") as f:
+        image_data = f.read()
+
+    # Generate variations using OpenAI API
+    import openai
+
+    client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+    # Generate variations
+    results = []
+    for i in range(count):
+        if count > 1:
+            print(f"  → Variation {i+1}/{count}...")
+
+        from typing import cast
+
+        response = client.images.create_variation(
+            image=image_data,
+            n=1,
+            size=cast(Literal["256x256", "512x512", "1024x1024"], size),
+        )
+
+        # Download and save image
+        if not response.data:
+            raise ValueError("No image data in response")
+        img_url = response.data[0].url
+        img_data = __import__("requests").get(img_url).content
+
+        # Determine output path
+        if output_path:
+            if count > 1:
+                base, ext = os.path.splitext(output_path)
+                save_path = f"{base}_{i+1:03d}{ext}"
+            else:
+                save_path = output_path
+        else:
+            timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"variation_{timestamp}_{i+1:03d}.png"
+
+        # Save image
+        save_file = Path(save_path)
+        save_file.parent.mkdir(parents=True, exist_ok=True)
+        save_file.write_bytes(img_data)
+
+        # Track cost
+        cost = 0.02  # DALL-E 2 variation cost per image
+        tracker = get_cost_tracker()
+        tracker.record_generation(
+            provider="dalle2",
+            prompt=f"variation of {image_path}",
+            cost=cost,
+            model="dall-e-2",
+            size=size,
+        )
+
+        result = ImageResult(
+            provider="dalle2",
+            prompt=f"variation of {image_path}",
+            image_path=save_file,
+            metadata={"model": "dall-e-2", "size": size, "type": "variation"},
+        )
+        results.append(result)
+
+    # Handle view parameter
+    if view:
+        from gptme.tools.vision import view_image
+
+        for result in results:
+            view_image(result.image_path)
+
+    return results[0] if count == 1 else results
+
+
+def batch_generate(
+    prompts: list[str],
+    provider: Provider = "gemini",
+    output_dir: str | None = None,
+    view: bool = False,
+    **kwargs,
+) -> list[ImageResult]:
+    """
+    Generate multiple images from a list of prompts.
+
+    Args:
+        prompts: List of text descriptions for images to generate
+        provider: Image generation provider (gemini, dalle, dalle2)
+        output_dir: Directory to save images (optional, defaults to current dir)
+        view: Whether to display all generated images to LLM (default: False)
+        **kwargs: Additional arguments passed to generate_image (size, quality, style, etc.)
+
+    Returns:
+        List of ImageResults, one per prompt
+
+    Example:
+        results = batch_generate(
+            prompts=["sunset over ocean", "mountain landscape", "city skyline"],
+            provider="gemini",
+            style="photo",
+            output_dir="batch_images"
+        )
+    """
+    results = []
+    total = len(prompts)
+
+    for i, prompt in enumerate(prompts, 1):
+        # Generate output path if output_dir specified
+        output_path = None
+        if output_dir:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            # Create filename from sanitized prompt
+            safe_name = "".join(c if c.isalnum() else "_" for c in prompt[:30])
+            output_path = f"{output_dir}/{safe_name}_{i:03d}.png"
+
+        print(f"🎨 Batch generation: {i}/{total}")
+
+        # Ensure count=1 for batch generation (one image per prompt)
+        kwargs_copy = kwargs.copy()
+        kwargs_copy.pop("count", None)  # Remove count if present
+
+        result = generate_image(
+            prompt=prompt,
+            provider=provider,
+            output_path=output_path,
+            view=False,  # Don't view individual images
+            count=1,  # Explicitly set count=1
+            **kwargs_copy,
+        )
+
+        # generate_image returns ImageResult when count=1
+        assert isinstance(result, ImageResult), "Expected single ImageResult"
+        results.append(result)
+
+    if view:
+        # Display all images to LLM after generation
+        from gptme.tools.vision import view_image
+
+        print(f"\n✓ Displaying {total} generated images to assistant")
+        for result in results:
+            view_image(result.image_path)
+
+    return results
+
+
+def compare_providers(
+    prompt: str,
+    providers: list[Provider] | None = None,
+    view: bool = True,
+    **kwargs,
+) -> dict[str, ImageResult]:
+    """
+    Generate the same prompt across multiple providers for comparison.
+
+    Args:
+        prompt: Text description of image to generate
+        providers: List of providers to compare (default: all available)
+        view: Whether to display all generated images to LLM (default: True)
+        **kwargs: Additional arguments passed to generate_image (size, quality, etc.)
+
+    Returns:
+        Dictionary mapping provider name to ImageResult
+
+    Example:
+        results = compare_providers(
+            prompt="futuristic city skyline at night",
+            providers=["gemini", "dalle"],
+            quality="hd"
+        )
+    """
+    if providers is None:
+        providers = ["gemini", "dalle"]
+
+    results: dict[str, ImageResult] = {}
+    total = len(providers)
+
+    for i, provider in enumerate(providers, 1):
+        print(f"🔍 Comparing providers: {i}/{total} ({provider})")
+
+        # Generate with unique output path per provider
+        base_name = "".join(c if c.isalnum() else "_" for c in prompt[:30])
+        output_path = f"comparison/{base_name}_{provider}.png"
+
+        try:
+            # Ensure count=1 for comparison (one image per provider)
+            kwargs_copy = kwargs.copy()
+            kwargs_copy.pop("count", None)  # Remove count if present
+
+            result = generate_image(
+                prompt=prompt,
+                provider=provider,
+                output_path=output_path,
+                view=False,  # Don't view individual images
+                count=1,  # Explicitly set count=1
+                **kwargs_copy,
+            )
+
+            # generate_image returns ImageResult when count=1
+            assert isinstance(result, ImageResult), "Expected single ImageResult"
+            results[provider] = result
+        except Exception as e:
+            print(f"❌ {provider} failed: {e}")
+            continue
+
+    if view and results:
+        # Display all images to LLM for comparison
+        from gptme.tools.vision import view_image
+
+        print(f"\n✓ Displaying {len(results)} images for comparison")
+        for prov, result in results.items():
+            print(f"\n--- {prov.upper()} ---")
+            view_image(result.image_path)
+
+    return results
+
+
 def get_total_cost(
     provider: str | None = None,
     start_date: str | None = None,
@@ -694,7 +953,58 @@ generate_image(
     output_path="illustrations/office.png"
 )
 ```
+
+### Batch generation (Phase 3.2)
+
+> User: Generate images for these three concepts
+> Assistant: I'll use batch generation for efficiency.
+```image_gen
+batch_generate(
+    prompts=["sunset over ocean", "mountain landscape", "city skyline"],
+    provider="gemini",
+    style="photo",
+    output_dir="landscapes",
+    view=True
+)
+```
+> System: 🎨 Batch generation: 1/3
+> 🎨 Batch generation: 2/3
+> 🎨 Batch generation: 3/3
+> ✓ Displaying 3 generated images to assistant
+
+### Provider comparison (Phase 3.2)
+
+> User: Compare how different providers render this prompt
+> Assistant: I'll generate with multiple providers for comparison.
+```image_gen
+compare_providers(
+    prompt="futuristic holographic interface with data visualizations",
+    providers=["gemini", "dalle"],
+    quality="hd"
+)
+```
+> System: 🔍 Comparing providers: 1/2 (gemini)
+> 🔍 Comparing providers: 2/2 (dalle)
+> ✓ Displaying 2 images for comparison
+
+### Image variations (Phase 3.2)
+
+> User: Create variations of this logo
+> Assistant: I'll generate variations using DALL-E 2.
+```image_gen
+generate_variation(
+    image_path="logo_original.png",
+    provider="dalle2",
+    count=4,
+    view=True
+)
+```
+> System: → Variation 1/4... ✓
+> → Variation 2/4... ✓
+> → Variation 3/4... ✓
+> → Variation 4/4... ✓
+> ✓ Images displayed to assistant for review
     """,
-    functions=[generate_image],
+    functions=[generate_image, generate_variation, batch_generate, compare_providers],
     block_types=["image_gen"],
 )
