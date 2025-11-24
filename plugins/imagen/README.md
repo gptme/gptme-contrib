@@ -16,6 +16,9 @@ The image generation plugin provides a unified interface for generating images f
 - **Multiple options generation**: Generate variations for comparison (count parameter) **[Phase 1]**
 - **View integration**: Display images to assistant for verification (view parameter) **[Phase 1]**
 - **Enhanced error handling**: Clear error messages with context **[Phase 1]**
+- **Style presets**: 8 predefined styles for consistent results (style parameter) **[Phase 2]**
+- **Prompt enhancement**: Automatic quality and composition improvements (enhance parameter) **[Phase 2]**
+- **Progress indicators**: Visual feedback during multi-image generation **[Phase 2]**
 
 ## Installation
 
@@ -169,10 +172,63 @@ pip install requests             # For image downloads
 - [x] View integration (view parameter)
 - [x] Enhanced error handling
 
-## Future Enhancements (Phase 2+)
+## Phase 2 Enhancements (Completed)
 
-- [ ] Prompt enhancement with LLM
-- [ ] Style presets
+### Style Presets
+
+Apply predefined style presets to enhance your prompts with consistent artistic direction:
+
+**Available Styles:**
+- `photo` - Photorealistic rendering
+- `illustration` - Digital illustration style
+- `sketch` - Hand-drawn sketch aesthetic
+- `technical-diagram` - Clean technical visualization
+- `flat-design` - Minimalist flat design
+- `cyberpunk` - Futuristic neon aesthetic
+- `watercolor` - Traditional watercolor painting
+- `oil-painting` - Classic oil painting style
+
+**Usage:**
+```image_gen
+generate_image(
+    prompt="mountain landscape",
+    style="watercolor",
+    provider="gemini"
+)
+```
+
+### Prompt Enhancement
+
+Automatically enhance prompts with quality keywords and composition guidance:
+
+**Usage:**
+```image_gen
+generate_image(
+    prompt="cat sitting",
+    enhance=True,
+    provider="gemini"
+)
+```
+
+The enhance parameter adds:
+- Quality keywords (high quality, detailed, professional)
+- Composition guidance for short prompts
+- Avoids duplicate keywords already in prompt
+
+**Combined Example:**
+```image_gen
+generate_image(
+    prompt="futuristic city",
+    style="cyberpunk",
+    enhance=True,
+    count=3,
+    view=True,
+    provider="gemini"
+)
+```
+
+## Future Enhancements (Phase 3+)
+
 - [ ] Image editing/variations
 - [ ] Batch operations
 - [ ] Cost tracking per provider

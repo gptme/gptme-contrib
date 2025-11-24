@@ -84,14 +84,16 @@ def generate_image(
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
 
-    # Apply style preset if specified
-    if style:
-        style_desc = STYLE_PRESETS.get(style, "")
-        prompt = f"{prompt}. Style: {style_desc}"
-
-    # Enhance prompt if requested
+    # Enhance prompt BEFORE applying style preset
+    # This ensures enhancement works on user's original prompt
     if enhance:
         prompt = _enhance_prompt(prompt)
+
+    # Apply style preset if specified (after enhancement)
+    if style:
+        style_desc = STYLE_PRESETS.get(style, "")
+        # Strip trailing period to avoid awkward punctuation
+        prompt = f"{prompt.rstrip('.')}. Style: {style_desc}"
 
     # Generate timestamp once for all images
     if output_path is None:
