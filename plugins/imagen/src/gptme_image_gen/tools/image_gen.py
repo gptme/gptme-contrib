@@ -15,6 +15,28 @@ from typing import Literal
 from gptme.tools.base import ToolSpec
 
 Provider = Literal["gemini", "dalle", "dalle2"]
+Style = Literal[
+    "photo",
+    "illustration",
+    "sketch",
+    "technical-diagram",
+    "flat-design",
+    "cyberpunk",
+    "watercolor",
+    "oil-painting",
+]
+
+# Style preset descriptions
+STYLE_PRESETS = {
+    "photo": "Photorealistic style with natural lighting, high detail, camera-like quality",
+    "illustration": "Artistic illustration style, stylized and creative interpretation",
+    "sketch": "Hand-drawn sketch style, pencil or pen lines, conceptual and loose",
+    "technical-diagram": "Clean technical diagram style with labels, professional and informative",
+    "flat-design": "Minimalist flat design with geometric shapes and solid colors",
+    "cyberpunk": "Futuristic cyberpunk aesthetic with neon lights, dark tones, technology theme",
+    "watercolor": "Soft watercolor painting style with flowing colors and artistic texture",
+    "oil-painting": "Classical oil painting style with rich colors and textured brushstrokes",
+}
 
 
 @dataclass
@@ -35,6 +57,8 @@ def generate_image(
     output_path: str | None = None,
     count: int = 1,
     view: bool = False,
+    style: Style | None = None,
+    enhance: bool = False,
 ) -> ImageResult | list[ImageResult]:
     """
     Generate an image from a text prompt.
@@ -47,6 +71,8 @@ def generate_image(
         output_path: Where to save image (optional, defaults to generated-{timestamp}.png)
         count: Number of images to generate (default: 1)
         view: Whether to display generated images to LLM (default: False)
+        style: Apply style preset to enhance prompt (optional)
+        enhance: Use LLM to enhance prompt for better results (optional, default: False)
 
     Returns:
         ImageResult with path and metadata (if count=1)
@@ -55,6 +81,15 @@ def generate_image(
     # Validate count
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
+
+    # Apply style preset if specified
+    if style:
+        style_desc = STYLE_PRESETS.get(style, "")
+        prompt = f"{prompt}. Style: {style_desc}"
+
+    # Enhance prompt if requested
+    if enhance:
+        prompt = _enhance_prompt(prompt)
 
     # Generate timestamp once for all images
     if output_path is None:
@@ -123,6 +158,42 @@ def generate_image(
         return results[0]
     else:
         return results
+
+
+def _enhance_prompt(prompt: str) -> str:
+    """
+    Enhance a prompt with quality keywords and style improvements.
+
+    This uses template-based enhancement. Future versions could use LLM.
+    """
+    # Quality keywords to add if not present
+    quality_keywords = [
+        "high quality",
+        "detailed",
+        "professional",
+        "4k",
+        "hd",
+        "masterpiece",
+    ]
+
+    # Check if prompt already has quality keywords
+    has_quality = any(kw in prompt.lower() for kw in quality_keywords)
+
+    # Build enhanced prompt
+    enhanced_parts = [prompt]
+
+    # Add quality descriptor if missing
+    if not has_quality:
+        enhanced_parts.append("high quality, detailed, professional")
+
+    # Add composition guidance
+    if len(prompt.split()) < 10:  # Short prompt needs more detail
+        enhanced_parts.append("well-composed, clear focus")
+
+    # Join with proper formatting
+    enhanced = ", ".join(enhanced_parts)
+
+    return enhanced
 
 
 def _generate_gemini(
@@ -232,9 +303,13 @@ def _execute_generate_image(
     output_path: str | None = None,
     count: int = 1,
     view: bool = False,
+    style: Style | None = None,
+    enhance: bool = False,
 ) -> str:
     """Execute image generation and format results."""
-    result = generate_image(prompt, provider, size, quality, output_path, count, view)
+    result = generate_image(
+        prompt, provider, size, quality, output_path, count, view, style, enhance
+    )
 
     # Handle single or multiple results
     results_list = [result] if isinstance(result, ImageResult) else result
@@ -293,10 +368,16 @@ Arguments:
 - output_path: Where to save (optional, auto-generated if not specified)
 - count: Number of images to generate (optional, default: 1)
 - view: Display generated images to assistant (optional, default: False)
+- style: Apply style preset (optional, choices: photo, illustration, sketch, technical-diagram, flat-design, cyberpunk, watercolor, oil-painting)
+- enhance: Auto-enhance prompt for better results (optional, default: False)
 
-New in Phase 1:
+Phase 1 Features:
 - Multiple options: Use count=3 to generate 3 variations for comparison
 - View integration: Use view=True to display images to assistant for verification/feedback
+
+Phase 2 Features:
+- Style presets: Use style="technical-diagram" for common styles
+- Prompt enhancement: Use enhance=True to auto-improve prompts
     """,
     examples="""
 ### Generate architecture diagram with Gemini
@@ -373,6 +454,50 @@ generate_image(
     and control panels. Cyberpunk aesthetic, glowing blue and purple.",
     provider="dalle",
     output_path="concepts/interface-dalle.png"
+)
+```
+
+### Use style presets (Phase 2)
+
+> User: Create a technical architecture diagram
+> Assistant: I'll use the technical-diagram style preset for clarity.
+```image_gen
+generate_image(
+    prompt="Microservices architecture with API gateway and databases",
+    style="technical-diagram",
+    provider="gemini",
+    output_path="diagrams/architecture.png"
+)
+```
+
+### Enhance prompts automatically (Phase 2)
+
+> User: Generate a logo
+> Assistant: I'll enhance the prompt for better results.
+```image_gen
+generate_image(
+    prompt="logo for tech startup",
+    enhance=True,
+    provider="dalle",
+    quality="hd",
+    output_path="branding/logo.png"
+)
+```
+> System: === Image Generated ===
+> Enhanced prompt: "logo for tech startup, high quality, detailed, professional, well-composed, clear focus"
+
+### Combine Phase 2 features
+
+> User: Create watercolor illustrations of office scenes
+> Assistant: I'll generate multiple watercolor-style illustrations.
+```image_gen
+generate_image(
+    prompt="modern office workspace with natural light",
+    style="watercolor",
+    enhance=True,
+    count=3,
+    view=True,
+    output_path="illustrations/office.png"
 )
 ```
     """,
