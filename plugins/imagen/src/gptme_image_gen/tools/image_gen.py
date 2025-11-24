@@ -38,6 +38,13 @@ STYLE_PRESETS = {
     "oil-painting": "Classical oil painting style with rich colors and textured brushstrokes",
 }
 
+# Map provider names to their environment variable names
+PROVIDER_ENV_VAR = {
+    "gemini": "GOOGLE_API_KEY",
+    "dalle": "OPENAI_API_KEY",
+    "dalle2": "OPENAI_API_KEY",
+}
+
 
 @dataclass
 class ImageResult:
@@ -162,7 +169,8 @@ def generate_image(
             # Add detailed error context
             error_msg = f"Failed to generate image {i + 1}/{count} with {provider}"
             if "API key" in str(e).lower():
-                error_msg += f": Missing or invalid API key. Check your {provider.upper()}_API_KEY environment variable."
+                env_var = PROVIDER_ENV_VAR.get(provider, f"{provider.upper()}_API_KEY")
+                error_msg += f": Missing or invalid API key. Check your {env_var} environment variable."
             elif "quota" in str(e).lower() or "rate limit" in str(e).lower():
                 error_msg += (
                     ": API quota or rate limit exceeded. Wait a moment and try again."
