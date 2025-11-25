@@ -52,8 +52,13 @@ def check_naming_conventions(filepath: str) -> List[str]:
         func_match = re.match(r"^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", line)
         if func_match:
             name = func_match.group(1)
+            # Check for CONSTANT_CASE (all uppercase with underscores)
+            if name.isupper():
+                issues.append(
+                    f"{filepath}:{i} Function '{name}' uses CONSTANT_CASE (should be for constants, not functions)"
+                )
             # Functions should be lowercase_with_underscores (or private with leading _)
-            if not name.islower() and not name.startswith("_"):
+            elif not name.replace("_", "").islower() and not name.startswith("_"):
                 issues.append(
                     f"{filepath}:{i} Function '{name}' should use lowercase_with_underscores"
                 )
@@ -119,12 +124,25 @@ def detect_code_smells(filepath: str) -> List[str]:
 
         # Check for magic numbers
         if stripped and not stripped.startswith("#"):
-            # Find numeric literals except 0, 1, -1 (both single digits and multi-digit)
-            # [2-9] catches single digits 2-9
-            # \d{2,} catches numbers with 2+ digits
-            # \d*\.\d+ catches decimals
-            numbers = re.findall(r"\b([2-9]|\d{2,}|\d*\.\d+)\b", stripped)
-            for num in numbers:
+            # Skip if line is a string literal
+            if (
+                '"""' in line
+                or "'''" in line
+                or (line.count('"') >= 2)
+                or (line.count("'") >= 2)
+            ):
+                continue
+
+            # Find numeric literals except 0, 1, -1
+            # Match: single digits 2-9, multi-digit numbers, decimals
+            # Pattern: \b to ensure word boundary, then digits
+            numbers = re.findall(r"\b([2-9]|[1-9]\d+|\d*\.\d+)\b", stripped)
+
+            # Filter out numbers inside string literals (basic check)
+            clean_numbers = [
+                n for n in numbers if f'"{n}"' not in line and f"'{n}'" not in line
+            ]
+            for num in clean_numbers:
                 if "range(" not in stripped and "sleep(" not in stripped:
                     smells.append(
                         f"{filepath}:{i} Magic number '{num}'. Consider defining as a named constant."
@@ -195,9 +213,9 @@ def analyze_complexity(filepath: str) -> int:
     content = path.read_text()
     complexity = 1  # Base complexity
 
-    # Count decision points (control flow only, not boolean operators)
-    # Note: "and"/"or" are boolean operators, not decision points
-    decision_keywords = ["if ", "elif ", "for ", "while ", "except "]
+    # Count decision points (including boolean operators)
+    # Boolean operators create additional execution paths
+    decision_keywords = ["if ", "elif ", "for ", "while ", "except ", " and ", " or "]
 
     # Parse line by line to avoid counting in comments/strings
     lines = content.split("\n")
@@ -212,55 +230,46 @@ def analyze_complexity(filepath: str) -> int:
                 complexity += line.count(keyword)
 
     # Count early returns within functions (multiple returns in same function)
-    lines = content.split("\n")
-    functions: dict[str, tuple[int, int | None, list[int]]] = {}
-    current_func = None
-    current_indent = None
+    # Use regex to find function boundaries more reliably
+    func_pattern = r"^\s*def\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\):"
+    return_pattern = r"\breturn\b"
 
-    for i, line in enumerate(lines):
+    current_returns: list[str] = []
+    in_function = False
+    function_indent = 0
+
+    for line in lines:
         stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
 
         # Detect function start
-        if stripped.startswith("def "):
-            match = re.match(r"def\s+([a-zA-Z_][a-zA-Z0-9_]*)", stripped)
-            if match:
-                func_name = f"{match.group(1)}_{i}"  # Unique name with line number
-                indent = len(line) - len(stripped)
-                functions[func_name] = (i, None, [])
-                current_func = func_name
-                current_indent = indent
+        if re.match(func_pattern, line):
+            # Process previous function's returns
+            if in_function and len(current_returns) > 1:
+                complexity += len(current_returns) - 1
 
-        # Detect function end (dedent or end of file)
-        elif current_func and not stripped.startswith("#"):
-            if stripped and current_indent is not None:
-                indent = len(line) - len(stripped)
-                if indent <= current_indent and stripped:
-                    # Function ended
-                    functions[current_func] = (
-                        functions[current_func][0],
-                        i - 1,
-                        functions[current_func][2],
-                    )
-                    current_func = None
-                    current_indent = None
+            current_returns = []
+            in_function = True
+            function_indent = len(line) - len(stripped)
 
-        # Track returns within current function
-        if current_func and "return " in stripped and not stripped.startswith("#"):
-            functions[current_func][2].append(i)
+        # Detect function end by dedent
+        elif in_function and stripped:
+            current_indent = len(line) - len(stripped)
+            if current_indent <= function_indent:
+                # Function ended, process returns
+                if len(current_returns) > 1:
+                    complexity += len(current_returns) - 1
+                in_function = False
+                current_returns = []
 
-    # Close last function if any
-    if current_func:
-        functions[current_func] = (
-            functions[current_func][0],
-            len(lines) - 1,
-            functions[current_func][2],
-        )
+        # Track returns in current function
+        elif in_function and re.search(return_pattern, stripped):
+            current_returns.append(line)
 
-    # Count functions with multiple returns (early returns)
-    for func_name, (start, end, returns) in functions.items():
-        if len(returns) > 1:
-            # Multiple returns = early return pattern
-            complexity += len(returns) - 1
+    # Process final function if still in one
+    if in_function and len(current_returns) > 1:
+        complexity += len(current_returns) - 1
 
     return complexity
 

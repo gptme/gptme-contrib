@@ -378,5 +378,5 @@ if __name__ == "__main__":
 
 ## Related
 
-- [GitHub PR Workflow](../../lessons/workflow/git-workflow.md) - Git practices
+- [GitHub PR Workflow](https://github.com/ErikBjare/gptme/blob/master/docs/lessons/workflows/git.md) - Git practices
 - [gptme patch tool](https://gptme.org/docs/tools.html#patch) - Code modification
