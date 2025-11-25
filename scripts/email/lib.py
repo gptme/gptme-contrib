@@ -1270,3 +1270,99 @@ class AgentEmail:
             "failed": failed,
             "skipped": skipped,
         }
+
+    def import_from_maildir(self, source_maildir: Path, folder: str) -> dict[str, int | str]:
+        """Import messages from maildir format to markdown.
+
+        This imports emails from a maildir directory (as used by mail clients)
+        to the workspace storage as markdown files.
+
+        Args:
+            source_maildir: Path to source maildir directory
+            folder: Destination folder - supports "inbox", "sent", "drafts", "archive"
+
+        Returns:
+            dict: Statistics with 'success', 'failed', 'skipped' counts
+        """
+        # Map folder to destination directory
+        folder_map = {
+            "inbox": self.email_dir / "inbox",
+            "sent": self.email_dir / "sent",
+            "drafts": self.email_dir / "drafts",
+            "archive": self.email_dir / "archive",
+        }
+
+        if folder not in folder_map:
+            raise ValueError(f"Unknown folder: {folder}. Supported: {list(folder_map.keys())}")
+
+        dest_dir = folder_map[folder]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        success = 0
+        failed = 0
+        skipped = 0
+
+        # Import from both cur/ (read) and new/ (unread) directories
+        for subdir in ["cur", "new"]:
+            maildir_subdir = source_maildir / subdir
+
+            if not maildir_subdir.exists():
+                continue
+
+            # Process each maildir file
+            for maildir_file in maildir_subdir.iterdir():
+                if not maildir_file.is_file():
+                    continue
+
+                try:
+                    # Read maildir content
+                    content = maildir_file.read_text()
+
+                    # Parse to extract Message-ID
+                    # Split headers and body
+                    if "\n\n" not in content:
+                        print(f"Invalid format (no header/body separator): {maildir_file.name}")
+                        failed += 1
+                        continue
+
+                    headers_part, _ = content.split("\n\n", 1)
+
+                    # Extract Message-ID
+                    message_id = None
+                    for line in headers_part.split("\n"):
+                        if line.lower().startswith("message-id:"):
+                            message_id = line.split(":", 1)[1].strip()
+                            # Remove angle brackets if present
+                            message_id = message_id.strip("<>")
+                            break
+
+                    if not message_id:
+                        print(f"No Message-ID found: {maildir_file.name}")
+                        failed += 1
+                        continue
+
+                    # Generate filename from message ID
+                    filename = self._format_filename(message_id)
+                    dest_file = dest_dir / filename
+
+                    # Skip if already exists
+                    if dest_file.exists():
+                        skipped += 1
+                        continue
+
+                    # Write to markdown storage
+                    dest_file.write_text(content)
+                    success += 1
+
+                except Exception as e:
+                    print(f"Failed to import {maildir_file.name}: {e}")
+                    failed += 1
+                    continue
+
+        print(f"Imported {folder}: {success} succeeded, {failed} failed, {skipped} skipped")
+
+        return {
+            "success": success,
+            "failed": failed,
+            "skipped": skipped,
+        }

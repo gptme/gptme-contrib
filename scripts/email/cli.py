@@ -640,6 +640,46 @@ def export_maildir(folder: str, dest_maildir: str) -> None:
 
 
 @cli.command()
+@click.argument("source_maildir", type=str)
+@click.argument("folder", type=str)
+def import_maildir(source_maildir: str, folder: str) -> None:
+    """Import messages from maildir to markdown format.
+
+    SOURCE_MAILDIR: Source maildir directory path
+    FOLDER: Destination folder (inbox, sent, drafts, archive, or 'all')
+
+    Example:
+        ./cli.py import-maildir ~/test-maildir inbox
+        ./cli.py import-maildir ~/test-maildir all
+    """
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+
+    source_path = Path(source_maildir)
+    if not source_path.exists():
+        click.echo(f"Error: Source directory does not exist: {source_path}", err=True)
+        return
+
+    folders = ["inbox", "sent", "drafts", "archive"] if folder == "all" else [folder]
+
+    for f in folders:
+        click.echo(f"Importing {f} from {source_path}...")
+        try:
+            result = email.import_from_maildir(source_path, f)
+            if "error" in result:
+                click.echo(f"Error: {result['error']}", err=True)
+            else:
+                click.echo(
+                    f"Imported {f}: {result['success']} succeeded, "
+                    f"{result['failed']} failed, {result['skipped']} skipped"
+                )
+        except ValueError as e:
+            click.echo(f"Error importing {f}: {e}", err=True)
+
+    click.echo("Import complete")
+
+
+@cli.command()
 def check_unreplied() -> None:
     """Check for unreplied emails from allowlisted senders."""
     workspace_dir = get_workspace_dir()
