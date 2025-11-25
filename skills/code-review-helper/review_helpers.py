@@ -211,14 +211,56 @@ def analyze_complexity(filepath: str) -> int:
             if keyword in line:
                 complexity += line.count(keyword)
 
-    # Count early returns (returns not at end of function)
+    # Count early returns within functions (multiple returns in same function)
     lines = content.split("\n")
+    functions: dict[str, tuple[int, int | None, list[int]]] = {}
+    current_func = None
+    current_indent = None
+
     for i, line in enumerate(lines):
-        if "return " in line and i < len(lines) - 3:
-            # Check if there's more code after this return
-            remaining = "\n".join(lines[i + 1 :])
-            if remaining.strip():
-                complexity += 1
+        stripped = line.strip()
+
+        # Detect function start
+        if stripped.startswith("def "):
+            match = re.match(r"def\s+([a-zA-Z_][a-zA-Z0-9_]*)", stripped)
+            if match:
+                func_name = f"{match.group(1)}_{i}"  # Unique name with line number
+                indent = len(line) - len(stripped)
+                functions[func_name] = (i, None, [])
+                current_func = func_name
+                current_indent = indent
+
+        # Detect function end (dedent or end of file)
+        elif current_func and not stripped.startswith("#"):
+            if stripped and current_indent is not None:
+                indent = len(line) - len(stripped)
+                if indent <= current_indent and stripped:
+                    # Function ended
+                    functions[current_func] = (
+                        functions[current_func][0],
+                        i - 1,
+                        functions[current_func][2],
+                    )
+                    current_func = None
+                    current_indent = None
+
+        # Track returns within current function
+        if current_func and "return " in stripped and not stripped.startswith("#"):
+            functions[current_func][2].append(i)
+
+    # Close last function if any
+    if current_func:
+        functions[current_func] = (
+            functions[current_func][0],
+            len(lines) - 1,
+            functions[current_func][2],
+        )
+
+    # Count functions with multiple returns (early returns)
+    for func_name, (start, end, returns) in functions.items():
+        if len(returns) > 1:
+            # Multiple returns = early return pattern
+            complexity += len(returns) - 1
 
     return complexity
 

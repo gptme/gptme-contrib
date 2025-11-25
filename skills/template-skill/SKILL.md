@@ -132,4 +132,3 @@ Example:
 ## Related
 
 - [Skills README](../README.md) - Skills system overview
-- [Lessons](../../lessons/README.md) - Lesson system documentation
