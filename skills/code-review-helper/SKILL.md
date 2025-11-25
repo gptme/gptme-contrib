@@ -1,15 +1,6 @@
 ---
-type: skill
 name: code-review-helper
 description: Systematic code review workflows with bundled utilities for analyzing code quality, detecting patterns, and providing structured feedback. Use this skill when reviewing pull requests or conducting code audits.
-status: active
-match:
-  keywords: [code review, pr review, review code, code quality, code audit]
-  tools: [shell, patch]
-scripts:
-  - review_helpers.py
-dependencies:
-  - ast_grep_py
 ---
 
 # Code Review Helper Skill

@@ -74,13 +74,13 @@ Skills extend gptme's lesson system by providing executable components alongside
 
 ### Loading a Skill
 
-Skills are activated by keywords in conversation or can be referenced directly:
+Skills are explicitly loaded when needed:
 
 ```text
 > User: I need to do a code review
-> Assistant: I'll use the code-review-helper skill...
+> Assistant: Let me load the code-review-helper skill...
 
-[Skill loaded automatically via keywords]
+[Skill loaded explicitly by assistant]
 ```
 
 ### Accessing Bundled Scripts
@@ -116,21 +116,16 @@ skills/your-skill-name/
 
 ### 2. SKILL.md Format
 
-Create `SKILL.md` with YAML frontmatter:
+Create `SKILL.md` with YAML frontmatter following Anthropic's skill format:
 
 ```yaml
 ---
-description: Brief one-line description
-keywords:
-  - "specific phrase"
-  - "exact trigger"
-version: 1.0.0
-dependencies:
-  python:
-    - package-name>=version
-status: active  # active, beta, or deprecated
+name: skill-name
+description: Brief one-line description of what the skill does and when to use it
 ---
 ```
+
+**Note**: Skills use Anthropic's minimal frontmatter format with only `name` and `description`. For dependencies, create a `requirements.txt` file in the skill directory.
 
 ### 3. Documentation Structure
 
@@ -194,13 +189,6 @@ if __name__ == "__main__":
 - **Clear naming**: Descriptive directory names (use hyphens)
 - **Minimal dependencies**: Only essential packages
 - **Complete examples**: Working code samples in docs
-
-### Keywords
-
-- **Specific phrases**: Use multi-word phrases, not single words
-- **Natural language**: Match how users would ask for this
-- **Unique triggers**: Avoid overlapping with other skills
-- **Test activation**: Verify keywords work as expected
 
 ### Documentation
 

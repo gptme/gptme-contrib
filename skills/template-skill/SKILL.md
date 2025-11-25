@@ -1,12 +1,6 @@
 ---
-type: skill
 name: template-skill
 description: Template for creating new skills in gptme-contrib. Use this as a starting point when creating your own skills.
-status: active
-match:
-  keywords: [skill template, create skill, new skill]
-scripts: []
-dependencies: []
 ---
 
 # Template Skill
