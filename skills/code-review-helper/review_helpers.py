@@ -52,11 +52,11 @@ def check_naming_conventions(filepath: str) -> List[str]:
         func_match = re.match(r"^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", line)
         if func_match:
             name = func_match.group(1)
+            # Functions should be lowercase_with_underscores (or private with leading _)
             if not name.islower() and not name.startswith("_"):
-                if not all(c.isupper() or c == "_" for c in name):
-                    issues.append(
-                        f"{filepath}:{i} Function '{name}' should use lowercase_with_underscores"
-                    )
+                issues.append(
+                    f"{filepath}:{i} Function '{name}' should use lowercase_with_underscores"
+                )
 
         # Check class definitions
         class_match = re.match(r"^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)", line)
@@ -119,8 +119,11 @@ def detect_code_smells(filepath: str) -> List[str]:
 
         # Check for magic numbers
         if stripped and not stripped.startswith("#"):
-            # Find numeric literals except 0, 1, -1
-            numbers = re.findall(r"\b([2-9]\d+|\d*\.\d+)\b", stripped)
+            # Find numeric literals except 0, 1, -1 (both single digits and multi-digit)
+            # [2-9] catches single digits 2-9
+            # \d{2,} catches numbers with 2+ digits
+            # \d*\.\d+ catches decimals
+            numbers = re.findall(r"\b([2-9]|\d{2,}|\d*\.\d+)\b", stripped)
             for num in numbers:
                 if "range(" not in stripped and "sleep(" not in stripped:
                     smells.append(
@@ -192,10 +195,21 @@ def analyze_complexity(filepath: str) -> int:
     content = path.read_text()
     complexity = 1  # Base complexity
 
-    # Count decision points
-    decision_keywords = ["if ", "elif ", "for ", "while ", "except ", "and ", "or "]
-    for keyword in decision_keywords:
-        complexity += content.count(keyword)
+    # Count decision points (control flow only, not boolean operators)
+    # Note: "and"/"or" are boolean operators, not decision points
+    decision_keywords = ["if ", "elif ", "for ", "while ", "except "]
+
+    # Parse line by line to avoid counting in comments/strings
+    lines = content.split("\n")
+    for line in lines:
+        stripped = line.strip()
+        # Skip comments
+        if stripped.startswith("#"):
+            continue
+        # Count decision keywords in actual code
+        for keyword in decision_keywords:
+            if keyword in line:
+                complexity += line.count(keyword)
 
     # Count early returns (returns not at end of function)
     lines = content.split("\n")

@@ -380,4 +380,3 @@ if __name__ == "__main__":
 
 - [GitHub PR Workflow](../../lessons/workflow/git-workflow.md) - Git practices
 - [gptme patch tool](https://gptme.org/docs/tools.html#patch) - Code modification
-- [Systematic Test Failure Analysis](../../lessons/workflow/systematic-test-failure-analysis.md) - Test analysis

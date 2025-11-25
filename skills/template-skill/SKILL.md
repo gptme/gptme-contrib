@@ -132,5 +132,4 @@ Example:
 ## Related
 
 - [Skills README](../README.md) - Skills system overview
-- [Lessons](../../lessons/README.md) - Lesson system
-- [gptme Skills](https://github.com/gptme/gptme/blob/master/docs/skills/README.md) - Core documentation
+- [Lessons](../../lessons/README.md) - Lesson system documentation

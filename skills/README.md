@@ -107,3 +107,126 @@ python3 skills/code-review-helper/review_helpers.py src/module.py
 ### 1. Directory Structure
 
 Create a new directory in `skills/`:
+
+```text
+skills/your-skill-name/
+├── SKILL.md              # Required: Main documentation
+└── helper_script.py      # Optional: Bundled utilities
+```
+
+### 2. SKILL.md Format
+
+Create `SKILL.md` with YAML frontmatter:
+
+```yaml
+---
+description: Brief one-line description
+keywords:
+  - "specific phrase"
+  - "exact trigger"
+version: 1.0.0
+dependencies:
+  python:
+    - package-name>=version
+status: active  # active, beta, or deprecated
+---
+```
+
+### 3. Documentation Structure
+
+Structure your SKILL.md with clear sections:
+
+```markdown
+# Skill Name
+
+## Overview
+What this skill does and when to use it
+
+## Workflow
+Step-by-step process with examples
+
+## Bundled Utilities
+Documentation for any helper scripts
+
+## Examples
+Concrete usage examples
+
+## Related
+Links to lessons, other skills, or resources
+```
+
+### 4. Bundled Scripts
+
+If including Python utilities:
+
+1. **Self-contained**: All code in one file when possible
+2. **Documented**: Docstrings for all public functions
+3. **Executable**: Include `if __name__ == "__main__"` block
+4. **Dependencies**: List in YAML frontmatter
+
+Example structure:
+```python
+#!/usr/bin/env python3
+"""Brief module description.
+
+Usage:
+    from skill_name.helper import function_name
+    result = function_name(args)
+"""
+
+def helper_function(arg: str) -> str:
+    """Function documentation."""
+    return result
+
+def main():
+    """CLI usage example."""
+    pass
+
+if __name__ == "__main__":
+    main()
+```
+
+## Best Practices
+
+### Skill Design
+
+- **Focused scope**: One workflow or tool per skill
+- **Clear naming**: Descriptive directory names (use hyphens)
+- **Minimal dependencies**: Only essential packages
+- **Complete examples**: Working code samples in docs
+
+### Keywords
+
+- **Specific phrases**: Use multi-word phrases, not single words
+- **Natural language**: Match how users would ask for this
+- **Unique triggers**: Avoid overlapping with other skills
+- **Test activation**: Verify keywords work as expected
+
+### Documentation
+
+- **Self-contained**: User should understand from SKILL.md alone
+- **Practical examples**: Show real usage, not toy examples
+- **Link to lessons**: Connect to related behavioral patterns
+- **Version tracking**: Update version on significant changes
+
+### Maintenance
+
+- **Status field**: Mark beta/deprecated as appropriate
+- **Test utilities**: Verify bundled scripts work
+- **Update docs**: Keep examples synchronized with code
+- **Dependencies**: Keep dependency versions current
+
+## Migration from Lessons
+
+When converting a lesson to a skill:
+
+1. **Preserve lesson**: Keep the original lesson for keyword matching
+2. **Create skill**: Build complete workflow with utilities
+3. **Link bidirectionally**: Lesson references skill, skill references lesson
+4. **Clear distinction**: Lesson = when/why, Skill = what/how
+
+Example:
+- Lesson: `lessons/workflow/code-review-best-practices.md` (30 lines)
+- Skill: `skills/code-review-helper/SKILL.md` (200+ lines + utilities)
+- Lesson references skill for complete workflow
+- Skill references lesson for patterns and constraints
