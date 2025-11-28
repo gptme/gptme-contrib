@@ -223,7 +223,7 @@ class TweetDraft:
         draft = cls(
             text=data["text"],
             type=data["type"],
-            in_reply_to=data["in_reply_to"],
+            in_reply_to=data.get("in_reply_to"),
             scheduled_time=(
                 datetime.fromisoformat(data["scheduled_time"])
                 if data["scheduled_time"]
@@ -641,18 +641,8 @@ def draft(
         raise
 
 
-@cli.command()
-@click.option(
-    "--auto-approve",
-    is_flag=True,
-    help="Automatically approve drafts that pass all checks",
-)
-@click.option("--show-context", is_flag=True, help="Show full context for each draft")
-@click.option(
-    "--dry-run", is_flag=True, help="Don't prompt for actions, just show review results"
-)
-def check_for_duplicate_replies(draft: TweetDraft) -> dict[str, list[Path]]:
-    """Check if we already have replies to the same tweet.
+def _check_for_duplicate_replies_internal(draft: TweetDraft) -> dict[str, list[Path]]:
+    """Internal utility to check if we already have replies to the same tweet.
 
     Returns dict with keys: 'posted', 'approved', 'new' containing paths to duplicates.
     """
@@ -681,6 +671,27 @@ def check_for_duplicate_replies(draft: TweetDraft) -> dict[str, list[Path]]:
             duplicates[status] = matching_drafts
 
     return duplicates
+
+
+@cli.command()
+@click.argument("draft_path", type=click.Path(exists=True))
+def check_for_duplicate_replies(draft_path):
+    """Check if we already have replies to the same tweet (CLI command).
+
+    DRAFT_PATH: Path to the draft file to check for duplicates.
+    """
+    draft = TweetDraft.load(Path(draft_path))
+    duplicates = _check_for_duplicate_replies_internal(draft)
+
+    if not duplicates:
+        click.echo("No duplicate replies found.")
+        return
+
+    click.echo(f"Found duplicate replies to tweet {draft.in_reply_to}:")
+    for status, paths in duplicates.items():
+        click.echo(f"\n{status.upper()}:")
+        for path in paths:
+            click.echo(f"  - {path}")
 
 
 def group_drafts_by_reply_target(drafts: list[Path]) -> dict[str | None, list[Path]]:
@@ -742,7 +753,7 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 console.print(f"[cyan]Reply to: {draft.in_reply_to}")
 
                 # Check for duplicate replies
-                duplicates = check_for_duplicate_replies(draft)
+                duplicates = _check_for_duplicate_replies_internal(draft)
                 if duplicates:
                     console.print("\n[yellow]⚠ Duplicate Detection:[/yellow]")
                     if "posted" in duplicates:
@@ -927,7 +938,7 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
             console.print(f"[cyan]Reply to: {draft.in_reply_to}")
 
             # Check for already posted duplicates
-            duplicates = check_for_duplicate_replies(draft)
+            duplicates = _check_for_duplicate_replies_internal(draft)
             if "posted" in duplicates:
                 console.print(
                     f"\n[red]⚠ WARNING: Already posted {len(duplicates['posted'])} reply(ies) to this tweet![/red]"
