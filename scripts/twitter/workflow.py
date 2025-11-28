@@ -675,7 +675,7 @@ def _check_for_duplicate_replies_internal(draft: TweetDraft) -> dict[str, list[P
 
 @cli.command()
 @click.argument("draft_path", type=click.Path(exists=True))
-def check_for_duplicate_replies(draft_path):
+def check_for_duplicate_replies(draft_path: str):
     """Check if we already have replies to the same tweet (CLI command).
 
     DRAFT_PATH: Path to the draft file to check for duplicates.
