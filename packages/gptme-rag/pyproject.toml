@@ -23,9 +23,8 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.10,<3.13"  # numpy 1.x lacks wheels for 3.13
-numpy = "<2.0.0"  # https://github.com/chroma-core/chroma/issues/2359
-chromadb = "^0.4"
+python = "^3.10,<3.13"  # PyTorch Dynamo doesn't support Python 3.13 yet
+chromadb = "^1.0"
 click = "*"
 rich = "*"
 tiktoken = ">=0.7"

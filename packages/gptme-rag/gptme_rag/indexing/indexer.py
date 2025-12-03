@@ -12,6 +12,7 @@ import chromadb
 from chromadb import Collection
 from chromadb.api import ClientAPI
 from chromadb.config import Settings
+from chromadb.errors import NotFoundError
 
 from .document import Document
 from .document_processor import DocumentProcessor
@@ -59,8 +60,8 @@ def get_collection(client: ClientAPI, name: str, embedding_function=None) -> Col
     try:
         # Try to get existing collection
         return client.get_collection(name=name, embedding_function=embedding_function)
-    except ValueError:
-        # Create if it doesn't exist
+    except (ValueError, NotFoundError):
+        # Create if it doesn't exist (chromadb 1.x may raise NotFoundError)
         return client.create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},
@@ -191,7 +192,7 @@ class Indexer:
             # Delete if exists
             try:
                 self.client.delete_collection(collection_name)
-            except ValueError:
+            except (ValueError, NotFoundError):
                 pass
 
             # Create new collection
@@ -246,7 +247,7 @@ class Indexer:
         """Reset the collection to a clean state."""
         try:
             self.client.delete_collection(self.collection_name)
-        except ValueError:
+        except (ValueError, NotFoundError):
             pass
         self.collection = self.client.create_collection(
             name=self.collection_name, metadata={"hnsw:space": "cosine"}
@@ -710,7 +711,7 @@ class Indexer:
         results = self.collection.query(
             query_texts=[query],
             n_results=query_n_results,
-            where=search_where,
+            where=search_where or None,  # chromadb 1.x rejects empty dict
         )
 
         if not results["ids"][0]:
