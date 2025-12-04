@@ -72,6 +72,12 @@ class IndexEventHandler(FileSystemEventHandler):
         try:
             # Read file content first to ensure it's readable
             content = path.read_text()
+        except FileNotFoundError:
+            # File was moved/deleted during the update delay - this is expected for move events
+            logger.debug(f"File no longer exists (likely moved/deleted), skipping: {path}")
+            return
+        
+        try:
             canonical_path = str(path.resolve())
 
             # Delete old versions
@@ -84,6 +90,9 @@ class IndexEventHandler(FileSystemEventHandler):
             if n_indexed == 0:
                 logger.warning(f"No documents indexed for {path}")
                 return
+
+            # Clear search cache to ensure fresh results for verification
+            self.indexer.cache.clear()
 
             # Verify the update
             logger.debug(f"Verifying update for {canonical_path}")
@@ -102,8 +111,8 @@ class IndexEventHandler(FileSystemEventHandler):
         """Handle file move events."""
         if not event.is_directory:
             logger.info(f"File moved: {event.src_path} -> {event.dest_path}")
-            src_path = Path(event.src_path).absolute()
-            dest_path = Path(event.dest_path).absolute()
+            src_path = Path(event.src_path).resolve()
+            dest_path = Path(event.dest_path).resolve()
 
             # Remove old file from index if it was being tracked
             if self._should_process(event.src_path):
@@ -128,6 +137,9 @@ class IndexEventHandler(FileSystemEventHandler):
                         content = dest_path.read_text()
                         # Index the file
                         self.indexer.index_file(dest_path)
+
+                        # Clear search cache to ensure fresh results for verification
+                        self.indexer.cache.clear()
 
                         # Verify the update with content-based search
                         results, _, _ = self.indexer.search(
@@ -398,3 +410,4 @@ class FileWatcher:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Stop watching when exiting context manager."""
         self.stop()
+

@@ -530,6 +530,8 @@ class Indexer:
         Returns:
             bool: True if document matches any path or filter
         """
+        if doc.metadata is None:
+            return False
         source = doc.metadata.get("source", "")
         if not source:
             return False
