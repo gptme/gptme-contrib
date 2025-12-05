@@ -16,11 +16,14 @@ class TestQueryConsortium:
 
     def test_query_consortium_basic(self):
         """Test basic consortium query with default models."""
-        with patch(
-            "gptme_consortium.tools.consortium._query_single_model"
-        ) as mock_query, patch(
-            "gptme_consortium.tools.consortium._synthesize_consensus"
-        ) as mock_synth:
+        with (
+            patch(
+                "gptme_consortium.tools.consortium._query_single_model"
+            ) as mock_query,
+            patch(
+                "gptme_consortium.tools.consortium._synthesize_consensus"
+            ) as mock_synth,
+        ):
             # Mock individual model responses
             mock_query.side_effect = [
                 "Response from model 1",
@@ -54,11 +57,14 @@ class TestQueryConsortium:
         """Test consortium query with custom model list."""
         custom_models = ["anthropic/claude-sonnet-4-5", "openai/gpt-5.1"]
 
-        with patch(
-            "gptme_consortium.tools.consortium._query_single_model"
-        ) as mock_query, patch(
-            "gptme_consortium.tools.consortium._synthesize_consensus"
-        ) as mock_synth:
+        with (
+            patch(
+                "gptme_consortium.tools.consortium._query_single_model"
+            ) as mock_query,
+            patch(
+                "gptme_consortium.tools.consortium._synthesize_consensus"
+            ) as mock_synth,
+        ):
             mock_query.side_effect = ["Response 1", "Response 2"]
             mock_synth.return_value = {
                 "consensus": "Custom consensus",
@@ -78,11 +84,14 @@ class TestQueryConsortium:
         """Test consortium query with custom arbiter model."""
         custom_arbiter = "openai/gpt-5.1"
 
-        with patch(
-            "gptme_consortium.tools.consortium._query_single_model"
-        ) as mock_query, patch(
-            "gptme_consortium.tools.consortium._synthesize_consensus"
-        ) as mock_synth:
+        with (
+            patch(
+                "gptme_consortium.tools.consortium._query_single_model"
+            ) as mock_query,
+            patch(
+                "gptme_consortium.tools.consortium._synthesize_consensus"
+            ) as mock_synth,
+        ):
             mock_query.return_value = "Response"
             mock_synth.return_value = {
                 "consensus": "Test",
@@ -99,12 +108,14 @@ class TestQueryConsortium:
 
     def test_query_consortium_error_handling(self):
         """Test that individual model errors are captured."""
-        with patch(
-            "gptme_consortium.tools.consortium._query_single_model"
-        ) as mock_query, patch(
-            "gptme_consortium.tools.consortium._synthesize_consensus"
-        ) as mock_synth, patch(
-            "gptme_consortium.tools.consortium.time.sleep"
+        with (
+            patch(
+                "gptme_consortium.tools.consortium._query_single_model"
+            ) as mock_query,
+            patch(
+                "gptme_consortium.tools.consortium._synthesize_consensus"
+            ) as mock_synth,
+            patch("gptme_consortium.tools.consortium.time.sleep"),
         ):  # Mock sleep for faster tests
             # Account for retries: each error will be retried up to 3 times
             # Model 1: Success (1 call)

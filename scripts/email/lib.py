@@ -78,9 +78,7 @@ class AgentEmail:
         self.email_dir = self.workspace / "email"
         # Ensure own_email is always a string (never None due to fallback)
         self.own_email = (
-            own_email
-            if own_email is not None
-            else os.getenv("AGENT_EMAIL", "agent@example.org")
+            own_email if own_email is not None else os.getenv("AGENT_EMAIL", "agent@example.org")
         )
 
         # External maildir paths (from mbsync)

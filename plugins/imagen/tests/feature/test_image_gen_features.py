@@ -17,9 +17,11 @@ from gptme_image_gen.tools.image_gen import ImageResult, generate_image
 @pytest.fixture
 def mock_gemini():
     """Mock Google Gemini API."""
-    with patch("google.generativeai.GenerativeModel") as mock_model_class, patch(
-        "google.generativeai.configure"
-    ), patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with (
+        patch("google.generativeai.GenerativeModel") as mock_model_class,
+        patch("google.generativeai.configure"),
+        patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}),
+    ):
         mock_model = MagicMock()
         mock_response = MagicMock()
         mock_response.images = [b"fake_image_data"]
@@ -32,8 +34,9 @@ def mock_gemini():
 @pytest.fixture
 def mock_openai():
     """Mock OpenAI API."""
-    with patch("openai.OpenAI") as mock_client_class, patch.dict(
-        os.environ, {"OPENAI_API_KEY": "test_key"}
+    with (
+        patch("openai.OpenAI") as mock_client_class,
+        patch.dict(os.environ, {"OPENAI_API_KEY": "test_key"}),
     ):
         mock_client = MagicMock()
         mock_response = MagicMock()

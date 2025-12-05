@@ -782,7 +782,9 @@ class SchedulerInputSource(InputSource):
         import yaml
 
         schedule_config_path = Path(
-            self.config.get("schedule_config_path", "~/.config/gptme-agent/schedule.yaml")
+            self.config.get(
+                "schedule_config_path", "~/.config/gptme-agent/schedule.yaml"
+            )
         ).expanduser()
 
         if not schedule_config_path.exists():
@@ -978,7 +980,9 @@ class SchedulerInputSource(InputSource):
             Dictionary of task states
         """
         state_file = Path(
-            self.config.get("state_file_path", "~/.local/share/gptme-agent/schedule-state.json")
+            self.config.get(
+                "state_file_path", "~/.local/share/gptme-agent/schedule-state.json"
+            )
         ).expanduser()
 
         if not state_file.exists():
@@ -997,7 +1001,9 @@ class SchedulerInputSource(InputSource):
             state: Dictionary of task states to save
         """
         state_file = Path(
-            self.config.get("state_file_path", "~/.local/share/gptme-agent/schedule-state.json")
+            self.config.get(
+                "state_file_path", "~/.local/share/gptme-agent/schedule-state.json"
+            )
         ).expanduser()
 
         state_file.parent.mkdir(parents=True, exist_ok=True)
