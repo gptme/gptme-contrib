@@ -8,3 +8,4 @@ scripts/.env
 .venv/
 venv/
 .gptme/
+packages/__pycache__/

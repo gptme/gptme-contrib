@@ -1,0 +1,76 @@
+name: Test Packages
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'packages/**'
+      - '.github/workflows/test-packages.yml'
+      - 'Makefile'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'packages/**'
+      - '.github/workflows/test-packages.yml'
+      - 'Makefile'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install package dependencies
+        run: |
+          # Install each package with its dev dependencies
+          for pkg_dir in packages/*/; do
+            pkg_name=$(basename "$pkg_dir")
+            if [ -f "$pkg_dir/pyproject.toml" ]; then
+              echo "Installing $pkg_name..."
+              uv pip install --system -e "$pkg_dir[dev]" || uv pip install --system -e "$pkg_dir"
+            fi
+          done
+
+      - name: Run package tests
+        run: make test
+
+  typecheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install package dependencies
+        run: |
+          # Install each package with its dev dependencies
+          for pkg_dir in packages/*/; do
+            pkg_name=$(basename "$pkg_dir")
+            if [ -f "$pkg_dir/pyproject.toml" ]; then
+              echo "Installing $pkg_name..."
+              uv pip install --system -e "$pkg_dir[dev]" || uv pip install --system -e "$pkg_dir"
+            fi
+          done
+
+      - name: Run package typecheck
+        run: make typecheck
