@@ -40,6 +40,14 @@ repos:
     exclude: ^packages/lessons/
 - repo: local
   hooks:
+  - id: check-names
+    name: Check for agent-instance names
+    description: Verifies that we are not accidentally using names of agents or users in the shared scripts (should be configurable).
+    entry: make check-names
+    language: system
+    pass_filenames: false
+    always_run: true
+
   - id: shellcheck
     name: ShellCheck
     description: Shell script linter for bash/sh files
