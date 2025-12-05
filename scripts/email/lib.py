@@ -70,16 +70,29 @@ class AgentEmail:
         Args:
             workspace_dir: Path to the workspace directory
             own_email: The agent's own email address (used to avoid replying to self).
-                      If None, will use AGENT_EMAIL environment variable or default to "agent@example.org"
+                      If None, will use AGENT_EMAIL environment variable.
+                      Raises ValueError if not configured.
+
+        Raises:
+            ValueError: If own_email is not provided and AGENT_EMAIL is not set.
         """
         import os
 
         self.workspace = Path(workspace_dir)
         self.email_dir = self.workspace / "email"
-        # Ensure own_email is always a string (never None due to fallback)
-        self.own_email = (
-            own_email if own_email is not None else os.getenv("AGENT_EMAIL", "agent@example.org")
-        )
+
+        # Resolve email address: explicit arg > env var > error
+        if own_email is not None:
+            self.own_email = own_email
+        else:
+            env_email = os.getenv("AGENT_EMAIL")
+            if env_email:
+                self.own_email = env_email
+            else:
+                raise ValueError(
+                    "AGENT_EMAIL environment variable must be set. "
+                    "Email functionality requires a valid agent email address."
+                )
 
         # External maildir paths (from mbsync)
         # Use environment variables with fallback to defaults for backward compatibility
@@ -270,16 +283,22 @@ class AgentEmail:
         return unreplied
 
     def _is_allowlisted_sender(self, sender: str) -> bool:
-        """Check if sender is allowlisted for auto-responses."""
-        # TODO: set in config or env variable
-        allowlisted = [
-            "erik@bjareho.lt",
-            "erik.bjareholt@gmail.com",
-            "filip.harald@gmail.com",
-            "agent@example.org",
-            "other@example.org",
-            "rickard.edic@gmail.com",
-        ]
+        """Check if sender is allowlisted for auto-responses.
+
+        Allowlist is read from EMAIL_ALLOWLIST environment variable.
+        Format: comma-separated list of email addresses.
+        Example: EMAIL_ALLOWLIST="user1@example.com,user2@example.com"
+        """
+        import os
+
+        # Read allowlist from environment variable
+        allowlist_str = os.getenv("EMAIL_ALLOWLIST", "")
+        if not allowlist_str:
+            # No allowlist configured - log warning and return False
+            # In production, the allowlist should always be configured
+            return False
+
+        allowlisted = [email.strip().lower() for email in allowlist_str.split(",") if email.strip()]
 
         # Remove +tag from email address for comparison
         clean_sender = sender.lower()

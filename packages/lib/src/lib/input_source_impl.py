@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import get_default_repo, get_workspace_path
+from .config import get_agent_config_dir, get_default_repo, get_workspace_path
 from .input_sources import (
     InputSource,
     InputSourceType,
@@ -781,10 +781,10 @@ class SchedulerInputSource(InputSource):
         """
         import yaml
 
+        # Use get_agent_config_dir() helper for consistent config path resolution
+        default_schedule_path = str(get_agent_config_dir() / "schedule.yaml")
         schedule_config_path = Path(
-            self.config.get(
-                "schedule_config_path", "~/.config/gptme-agent/schedule.yaml"
-            )
+            self.config.get("schedule_config_path", default_schedule_path)
         ).expanduser()
 
         if not schedule_config_path.exists():
