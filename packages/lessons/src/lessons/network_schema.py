@@ -24,7 +24,7 @@ class NetworkMetadata:
 
     # Identification
     lesson_id: str  # Format: "{agent}-{sequence}-{slug}"
-    agent_origin: str  # Which agent created this (e.g., "bob", "alice")
+    agent_origin: str  # Which agent created this (e.g., "agent1", "agent2")
 
     # Timestamps
     created: datetime
@@ -71,14 +71,14 @@ class NetworkMetadata:
     def generate_default(
         cls,
         lesson_path: str,
-        agent_origin: str = "bob",
+        agent_origin: str = "agent",
         confidence: float = 0.8,
     ) -> "NetworkMetadata":
         """Generate default network metadata for a lesson.
 
         Args:
             lesson_path: Path to lesson file (e.g., "lessons/workflow/autonomous-run.md")
-            agent_origin: Which agent created this (default: "bob")
+            agent_origin: Which agent created this (default: "agent")
             confidence: Initial confidence score (default: 0.8)
 
         Returns:

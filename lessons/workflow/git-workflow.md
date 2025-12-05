@@ -115,4 +115,4 @@ git checkout feature-branch  # Switch to feature branch
 - [When to Rebase PRs](./when-to-rebase-prs.md) - When to rebase
 
 ## Origin
-Established 2025-08-08 from Erik/Bob session to reduce review overhead and PR noise.
+Established 2025-08-08 from user/agent session to reduce review overhead and PR noise.

@@ -100,12 +100,12 @@ uv sync
 4. **Testing**: Provide test coverage for core functionality
 5. **Type Hints**: Use type annotations throughout
 
-## Migration from Bob's Workspace
+## Migration History
 
-These packages were originally developed in Bob's workspace (`ErikBjare/bob`) and migrated to gptme-contrib to enable reuse across all gptme agents.
+These packages were originally developed in a gptme agent workspace and migrated to gptme-contrib to enable reuse across all gptme agents.
 
 **Original Locations**:
-- `lib` → from `bob/packages/lib/`
+- `lib` → from `agent/packages/lib/`
 
 ## Related
 

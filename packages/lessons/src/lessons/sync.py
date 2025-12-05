@@ -108,7 +108,7 @@ def export_to_network(
     Export local lessons to agent-specific directory in network repo.
 
     Args:
-        agent: Agent name (e.g., "bob")
+        agent: Agent name (e.g., "agent")
         lessons_dir: Source lessons directory
         network_dir: Network repository directory
 
@@ -294,16 +294,16 @@ def main():
         epilog="""
 Examples:
   # Full sync (pull, export, push)
-  %(prog)s --agent bob --lessons lessons/
+  %(prog)s --agent <agent> --lessons lessons/
 
   # Only push local changes
-  %(prog)s --agent bob --lessons lessons/ --push-only
+  %(prog)s --agent <agent> --lessons lessons/ --push-only
 
   # Only pull network updates
-  %(prog)s --agent bob --pull-only
+  %(prog)s --agent <agent> --pull-only
 
   # List available lessons from network
-  %(prog)s --agent bob --list
+  %(prog)s --agent <agent> --list
 
   # Initialize/reset network repo
   %(prog)s --init
@@ -312,8 +312,8 @@ Examples:
 
     parser.add_argument(
         "--agent",
-        default="bob",
-        help="Agent name for directory structure (default: bob)",
+        default="agent",
+        help="Agent name for directory structure (default: agent)",
     )
     parser.add_argument(
         "--lessons",

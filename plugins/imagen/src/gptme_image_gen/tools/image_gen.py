@@ -497,7 +497,7 @@ def generate_variation(
     results = []
     for i in range(count):
         if count > 1:
-            print(f"  → Variation {i+1}/{count}...")
+            print(f"  → Variation {i + 1}/{count}...")
 
         from typing import cast
 
@@ -517,12 +517,12 @@ def generate_variation(
         if output_path:
             if count > 1:
                 base, ext = os.path.splitext(output_path)
-                save_path = f"{base}_{i+1:03d}{ext}"
+                save_path = f"{base}_{i + 1:03d}{ext}"
             else:
                 save_path = output_path
         else:
             timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = f"variation_{timestamp}_{i+1:03d}.png"
+            save_path = f"variation_{timestamp}_{i + 1:03d}.png"
 
         # Save image
         save_file = Path(save_path)

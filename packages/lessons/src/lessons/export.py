@@ -51,7 +51,7 @@ def parse_lesson_frontmatter(content: str) -> tuple[Optional[dict], str]:
 def add_network_metadata(
     frontmatter: dict,
     lesson_path: str,
-    agent_origin: str = "bob",
+    agent_origin: str = "agent",
 ) -> dict:
     """Add network metadata to lesson frontmatter.
 
@@ -87,7 +87,7 @@ def add_network_metadata(
 def export_lesson(
     lesson_path: Path,
     output_dir: Path,
-    agent_origin: str = "bob",
+    agent_origin: str = "agent",
     force: bool = False,
 ) -> bool:
     """Export a single lesson to interchange format.
@@ -157,7 +157,7 @@ def export_lesson(
 def export_all_lessons(
     lessons_dir: Path,
     output_dir: Path,
-    agent_origin: str = "bob",
+    agent_origin: str = "agent",
     force: bool = False,
 ) -> dict[str, int]:
     """Export all lessons from lessons directory.
@@ -227,8 +227,8 @@ def main():
     )
     parser.add_argument(
         "--agent",
-        default="bob",
-        help="Agent origin identifier (default: bob)",
+        default="agent",
+        help="Agent origin identifier (default: agent)",
     )
     parser.add_argument(
         "--force",

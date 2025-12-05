@@ -232,7 +232,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Review network lessons")
-    parser.add_argument("--agent", default="bob", help="Current agent name")
+    parser.add_argument("--agent", default="agent", help="Current agent name")
     parser.add_argument(
         "--network-dir",
         type=Path,

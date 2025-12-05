@@ -1,4 +1,4 @@
-#!/home/bob/bob/gptme-contrib/scripts/twitter/.venv/bin/python3
+#!/usr/bin/env python3
 # Twitter Workflow Manager using dedicated venv
 # Dependencies installed in .venv: tweepy, rich, python-dotenv, click, pyyaml, flask, gptme
 """

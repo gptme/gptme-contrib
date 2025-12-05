@@ -149,16 +149,16 @@ def _find_lesson_template() -> Path:
     import os
 
     # Try 1: Environment variable (workspace root)
-    workspace = os.environ.get("GPTME_WORKSPACE") or os.environ.get("BOB_WORKSPACE")
+    workspace = os.environ.get("GPTME_WORKSPACE") or os.environ.get("AGENT_WORKSPACE")
     if workspace:
         template_path = Path(workspace) / "lessons/templates/lesson-template.md"
         if template_path.exists():
             return template_path
 
-    # Try 2: Bob's default workspace
-    bob_workspace = Path.home() / "bob" / "lessons/templates/lesson-template.md"
-    if bob_workspace.exists():
-        return bob_workspace
+    # Try 2: Agent's default workspace
+    agent_workspace = Path.home() / "workspace" / "lessons/templates/lesson-template.md"
+    if agent_workspace.exists():
+        return agent_workspace
 
     # Try 3: Relative to package (for bundled template)
     package_template = Path(__file__).parent.parent / "templates/lesson-template.md"
@@ -166,9 +166,9 @@ def _find_lesson_template() -> Path:
         return package_template
 
     raise FileNotFoundError(
-        "Lesson template not found. Set GPTME_WORKSPACE or BOB_WORKSPACE environment variable "
+        "Lesson template not found. Set GPTME_WORKSPACE environment variable "
         "to point to your workspace root, or ensure template exists at "
-        "~/bob/lessons/templates/lesson-template.md"
+        "~/workspace/lessons/templates/lesson-template.md"
     )
 
 
@@ -217,15 +217,15 @@ You MUST incorporate the provided evidence snippets throughout the lesson. This 
 **How to Integrate Evidence** (Examples of >0.90 score):
 
 1. **In Failure Signals**: Quote actual error messages from evidence
-   - Error: "cd: /home/bob/Programming/gptme: No such file" [Evidence 1]
+   - Error: "cd: /home/user/Programming/project: No such file" [Evidence 1]
 
 2. **In Anti-pattern**: Show actual failing commands from evidence
    # smell: from [Evidence 1]
-   cd /home/bob/Programming/gptme  # WRONG: caused error
+   cd /home/user/Programming/project  # WRONG: caused error
 
 3. **In Recommended Pattern**: Reference evidence showing correct approach
    # correct: from [Evidence 2]
-   cd /home/bob/gptme  # RIGHT: this worked
+   cd /home/user/project  # RIGHT: this worked
 
 4. **In Rationale**: Cite specific metrics from evidence
    This issue occurred 15+ times [Evidence 1], causing errors [Evidence 2]
