@@ -4,4 +4,4 @@ test:  ## Run tests for this package
 	uv run pytest tests/ -v -m "not slow"
 
 typecheck:  ## Run mypy for this package
-	uv run mypy -p run_loops
+	uv run --with mypy mypy -p run_loops

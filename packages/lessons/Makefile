@@ -8,4 +8,4 @@ test:  ## Run tests for this package
 	fi
 
 typecheck:  ## Run mypy for this package
-	uv run mypy -p lessons
+	uv run --with mypy --with types-PyYAML mypy -p lessons --disable-error-code=unused-ignore
