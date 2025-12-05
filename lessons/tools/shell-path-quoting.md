@@ -76,7 +76,5 @@ Results in:
 - Fewer "cd: too many arguments" errors
 - Consistent behavior across all environments
 
-**Note**: This error is now automatically detected by [Shell Command Validation](../../TOOLS.md#shell-command-validation) before execution.
-
 ## Related
-- [Shell Command Validation](../../TOOLS.md#shell-command-validation) - Automated detection
+- [Shell Command Chaining](./shell-command-chaining.md) - Chain related commands

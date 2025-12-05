@@ -72,9 +72,6 @@ Benefits demonstrated:
 - Explicit about Python version used
 - Compatible with CI/CD workflows
 
-**Note**: This error is now automatically detected by [Shell Command Validation](../../TOOLS.md#shell-command-validation) before execution.
-
 ## Related
 - [Python File Execution](./python-file-execution.md) - Context-aware execution methods
-- [Shell Command Validation](../../TOOLS.md#shell-command-validation) - Automated detection
 - [PEP 394](https://peps.python.org/pep-0394/) - Python version specification

@@ -70,5 +70,4 @@ Benefits:
 **What happens without language tags**: Parser may misinterpret closing ```, cutting content early. Your attention should recognize this pattern when seeing incomplete saves or files ending with ":" or "**".
 
 ## Related
-- [Save Tool](../../TOOLS.md#save) - File writing
-- [Append Tool](../../TOOLS.md#append) - Content appending
+- Use gptme's `save` and `append` tools for file writing

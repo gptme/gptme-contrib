@@ -68,4 +68,4 @@ Benefits:
 - Clear logical grouping
 
 ## Related
-- [Shell Tool Documentation](../../TOOLS.md#shell) - Shell tool capabilities
+- See gptme's shell tool documentation for capabilities
