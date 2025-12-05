@@ -160,7 +160,9 @@ class CommentLoopDetector:
         # Clean old entries outside window
         cutoff = now.timestamp() - (self.LOOP_WINDOW_HOURS * 3600)
         state["comments"] = [
-            c for c in state.get("comments", []) if c.get("timestamp", 0) > cutoff  # type: ignore[operator]
+            c
+            for c in state.get("comments", [])
+            if c.get("timestamp", 0) > cutoff  # type: ignore[operator]
         ]
 
         # Count identical comments in window
