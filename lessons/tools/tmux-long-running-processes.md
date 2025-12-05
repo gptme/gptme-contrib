@@ -34,17 +34,17 @@ Common examples:
 Use tmux with proper verification:
 ```bash
 # Start long-running process in tmux
-tmux new-session 'cd /path/to/project && command with args'
+tmux new-session -d -s mysession 'cd /path/to/project && command with args'
 
 # Monitor progress periodically
-tmux inspect-pane session_name
+tmux capture-pane -p -t mysession
 
 # After completion, retrieve results
-tmux inspect-pane session_name
+tmux capture-pane -p -t mysession
 # Process results...
 
 # Clean up when done
-tmux kill-session session_name
+tmux kill-session -t mysession
 ```
 
 **Anti-pattern**: Using shell tool for long processes
@@ -61,7 +61,7 @@ tmux new-session 'poetry run python -m long_benchmark --train-size 20 ...'
 ## Outcome
 Following this pattern ensures:
 - **Process persistence**: Runs complete despite shell timeouts
-- **Progress monitoring**: Can check status with inspect-pane
+- **Progress monitoring**: Can check status with capture-pane
 - **Result preservation**: Output captured when complete
 - **No wasted work**: Process completes without interruption
 
