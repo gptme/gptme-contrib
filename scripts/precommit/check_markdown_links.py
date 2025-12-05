@@ -20,13 +20,13 @@ import sys
 from pathlib import Path
 
 # Link pattern for markdown
-LINK_PATTERN = re.compile(r'\[([^\]]*)\]\(([^)]+)\)')
+LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
 # Protocols to skip (URLs)
-SKIP_PROTOCOLS = ('http://', 'https://', 'ftp://', 'mailto:', '#')
+SKIP_PROTOCOLS = ("http://", "https://", "ftp://", "mailto:", "#")
 
 # Directories to skip
-SKIP_DIRS = {'worktree', '.git', 'node_modules', '__pycache__', '.venv'}
+SKIP_DIRS = {"worktree", ".git", "node_modules", "__pycache__", ".venv"}
 
 
 def get_repo_root() -> Path:
@@ -50,17 +50,17 @@ def resolve_link(link: str, file_path: Path, repo_root: Path) -> Path | None:
         return None
 
     # Remove anchor from link
-    link_path = link.split('#')[0]
+    link_path = link.split("#")[0]
     if not link_path:
         return None
 
     # Remove query strings
-    link_path = link_path.split('?')[0]
+    link_path = link_path.split("?")[0]
 
     # Resolve relative to file's directory
     file_dir = file_path.parent
 
-    if link_path.startswith('/'):
+    if link_path.startswith("/"):
         # Root-relative path
         resolved = repo_root / link_path[1:]
     else:
@@ -75,7 +75,7 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
     errors = []
 
     try:
-        content = file_path.read_text(encoding='utf-8')
+        content = file_path.read_text(encoding="utf-8")
     except Exception as e:
         errors.append(f"{file_path}: Could not read file: {e}")
         return errors
@@ -115,7 +115,7 @@ def main() -> int:
         file_path = Path(file_arg).resolve()
         if not file_path.exists():
             continue
-        if file_path.suffix.lower() != '.md':
+        if file_path.suffix.lower() != ".md":
             continue
         # Skip files in excluded directories
         if any(skip_dir in file_path.parts for skip_dir in SKIP_DIRS):
