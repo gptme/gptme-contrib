@@ -6,21 +6,6 @@ match:
   - spaces quoting
   - cd
   - too many arguments
-lesson_id: tools_shell-path-quoting_2d9b4b60
-version: 1.0.0
-usage_count: 0
-helpful_count: 0
-harmful_count: 0
-created: '2025-11-04T18:14:42.642904Z'
-updated: '2025-11-27T07:02:00.000000Z'
-last_used: null
-automation:
-  status: automated
-  validator: scripts/lessons/validators/shell_path_quoting.py
-  detection_scope: workspace
-  violation_baseline: 0
-  pre_commit_integrated: true
-  integration_date: '2025-11-27'
 ---
 
 # Shell Path Quoting for Spaces
@@ -38,13 +23,7 @@ Observable signals that you need proper quoting:
 - File operations failing with "No such file or directory" on partial paths
 - Arguments split incorrectly due to unquoted spaces
 
-Common errors from logs (5+ occurrences):
-- `cd /path with spaces` → too many arguments
-- `cat /file name.txt` → No such file: /file
-- `mv /source path /dest path` → Incorrect argument count
-
 ## Pattern
-Show the minimal correct approach:
 ```shell
 # Wrong: unquoted path with spaces
 cd /path with spaces  # Error: too many arguments
@@ -73,8 +52,8 @@ Following this pattern prevents:
 
 Results in:
 - Reliable path handling with or without spaces
-- Fewer "cd: too many arguments" errors
 - Consistent behavior across all environments
 
 ## Related
-- [Shell Command Chaining](./shell-command-chaining.md) - Chain related commands
+- [Shell Command Chaining](./shell-command-chaining.md) - Combining commands
+- [Python Invocation](./python-invocation.md) - Python execution

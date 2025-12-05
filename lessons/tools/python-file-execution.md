@@ -8,14 +8,6 @@ match:
   - shebang
   - uv run
   - poetry run
-lesson_id: tools_python-file-execution_ff3c2971
-version: 1.0.0
-usage_count: 0
-helpful_count: 0
-harmful_count: 0
-created: '2025-11-04T18:14:42.632728Z'
-updated: '2025-11-04T18:14:42.632728Z'
-last_used: null
 ---
 
 # Python File Execution
@@ -35,42 +27,42 @@ Observable signals that you need proper execution method:
 - Commands failing with permission or module errors
 
 ## Pattern
-Show the decision tree and minimal examples:
-
 **Quick decision**:
 ```text
-Poetry project (pyproject.toml)? → poetry run python3 script.py
-UV script (#!/usr/bin/env -S uv run)? → ./script.py
-Standalone with deps? → uv run --script script.py
-Simple stdlib-only? → python3 script.py
+Script has shebang (#!/usr/bin/env python3) and +x → ./script.py
+Poetry project → poetry run python script.py
+uv project → uv run python script.py
+Standalone → python3 script.py
 ```
 
-**Examples**:
-```shell
-# Correct: direct execution for uv script
-./scripts/tasks.py  # UV handles dependencies
+**For uv scripts with inline metadata**:
+```bash
+# If script has: # /// script dependencies = [...] ///
+./script.py  # Direct execution works
 
-# Correct: poetry run in poetry project
-poetry run python3 test_script.py
-poetry run pytest tests/
+# Or explicitly
+uv run script.py
+```
 
-# Correct: python3 for simple script without deps
-python3 analyze.py  # Stdlib-only script
+**For poetry projects**:
+```bash
+poetry run python script.py
+poetry run pytest
+```
+
+**Setting executable permissions**:
+```bash
+chmod +x script.py
+./script.py
 ```
 
 ## Outcome
-Following this pattern results in:
-- **Context-aware execution**: Right method for each script type
-- **No permission errors**: Proper shebangs or explicit interpreter
-- **Dependencies available**: UV/poetry manage dependencies correctly
-- **Reliable automation**: Scripts work in different contexts
-
-Benefits demonstrated:
-- Poetry projects: virtualenv with all dependencies
-- UV scripts: automatic dependency management
-- Standalone scripts: explicit interpreter invocation
-- No ModuleNotFoundError from missing dependencies
+Following this pattern leads to:
+- Scripts execute with correct dependencies
+- No permission errors
+- Proper tooling context available
+- Consistent execution across environments
 
 ## Related
-
-- [Python Invocation](./python-invocation.md) - Use python3 not python
+- [Python Invocation](./python-invocation.md) - Use `python3` not `python`
+- [Shell Command Chaining](./shell-command-chaining.md) - Combining commands

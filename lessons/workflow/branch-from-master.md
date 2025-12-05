@@ -60,3 +60,6 @@ Following this pattern:
 - Matches PR description exactly
 
 ## Related
+- [Git Worktree Workflow](./git-worktree-workflow.md) - Worktree management
+- [Git Workflow](./git-workflow.md) - General git practices
+- [When to Rebase PRs](./when-to-rebase-prs.md) - Rebase guidance

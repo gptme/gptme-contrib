@@ -5,19 +5,6 @@ match:
   - python3
   - command not found
   - python invocation
-automation:
-  status: automated
-  validator: scripts/precommit/validators/validate_python_invocation.py
-  enforcement: warning
-  automated_date: 2025-11-26
-lesson_id: tools_python-invocation_265c0a80
-version: 1.0.0
-usage_count: 1
-helpful_count: 1
-harmful_count: 0
-created: '2025-11-04T18:14:42.634076Z'
-updated: '2025-11-04T18:24:16.449224Z'
-last_used: '2025-11-04T18:24:16.449224Z'
 ---
 
 # Python Invocation
@@ -34,10 +21,8 @@ Observable signals that you need `python3`:
 - Python scripts failing with "command not found"
 - Running on Ubuntu 20.04+ or Debian 11+ systems
 - Working with Docker images or CI/CD pipelines
-- 4+ occurrences found in autonomous run logs
 
 ## Pattern
-Show the minimal correct approach:
 ```shell
 # Wrong: assumes python exists
 python script.py  # Error: command not found
@@ -66,12 +51,6 @@ Following this pattern results in:
 - **Consistency**: Same command works across all environments
 - **PEP 394 compliance**: Follows Python's official recommendation
 
-Benefits demonstrated:
-- Prevents "command not found" errors (4+ occurrences avoided)
-- Works on systems without `python` symlink
-- Explicit about Python version used
-- Compatible with CI/CD workflows
-
 ## Related
 - [Python File Execution](./python-file-execution.md) - Context-aware execution methods
-- [PEP 394](https://peps.python.org/pep-0394/) - Python version specification
+- [Shell Command Chaining](./shell-command-chaining.md) - Combining commands

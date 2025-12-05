@@ -5,14 +5,6 @@ match:
   - shell
   - sequential execution
   - operator
-lesson_id: tools_shell-command-chaining_1e9a06b7
-version: 1.0.0
-usage_count: 1
-helpful_count: 1
-harmful_count: 0
-created: '2025-11-04T18:14:42.636973Z'
-updated: '2025-11-04T18:24:16.449224Z'
-last_used: '2025-11-04T18:24:16.449224Z'
 ---
 
 # Shell Command Chaining
@@ -62,10 +54,6 @@ Following this pattern results in:
 - **Atomicity**: Operations complete together or fail together
 - **Clarity**: Complete operation visible at once
 
-Benefits:
-- No variable scoping issues
-- Reduced tool execution overhead
-- Clear logical grouping
-
 ## Related
-- See gptme's shell tool documentation for capabilities
+- [Python Invocation](./python-invocation.md) - Python command execution
+- [Shell Path Quoting](./shell-path-quoting.md) - Proper path handling
