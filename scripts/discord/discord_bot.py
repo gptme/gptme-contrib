@@ -802,7 +802,7 @@ async def about(ctx: commands.Context) -> None:
     is_dm = isinstance(ctx.channel, discord.DMChannel)
 
     base_msg = (
-        "👋 I'm {bot_name}, an AI assistant powered by gptme!\n\n"
+        f"👋 I'm {bot_name}, an AI assistant powered by gptme!\n\n"
         "I can help with:\n"
         "- Programming and development\n"
         "- Running code and commands\n"
