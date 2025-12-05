@@ -70,26 +70,37 @@ class AgentEmail:
         Args:
             workspace_dir: Path to the workspace directory
             own_email: The agent's own email address (used to avoid replying to self).
-                      If None, will use AGENT_EMAIL environment variable or default to "bob@superuserlabs.org"
+                      If None, will use AGENT_EMAIL environment variable.
+                      Raises ValueError if not configured.
+
+        Raises:
+            ValueError: If own_email is not provided and AGENT_EMAIL is not set.
         """
         import os
 
         self.workspace = Path(workspace_dir)
         self.email_dir = self.workspace / "email"
-        # Ensure own_email is always a string (never None due to fallback)
-        self.own_email = (
-            own_email
-            if own_email is not None
-            else os.getenv("AGENT_EMAIL", "bob@superuserlabs.org")
-        )
+
+        # Resolve email address: explicit arg > env var > error
+        if own_email is not None:
+            self.own_email = own_email
+        else:
+            env_email = os.getenv("AGENT_EMAIL")
+            if env_email:
+                self.own_email = env_email
+            else:
+                raise ValueError(
+                    "AGENT_EMAIL environment variable must be set. "
+                    "Email functionality requires a valid agent email address."
+                )
 
         # External maildir paths (from mbsync)
         # Use environment variables with fallback to defaults for backward compatibility
-        self.external_maildir_bob = Path(
-            os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/Bob"))
+        self.external_maildir = Path(
+            os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/agent"))
         )
         self.external_maildir_sent = Path(
-            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Bob/Sent"))
+            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/agent/Sent"))
         )
 
         # State files for tracking
@@ -272,16 +283,22 @@ class AgentEmail:
         return unreplied
 
     def _is_allowlisted_sender(self, sender: str) -> bool:
-        """Check if sender is allowlisted for auto-responses."""
-        # TODO: set in config or env variable
-        allowlisted = [
-            "erik@bjareho.lt",
-            "erik.bjareholt@gmail.com",
-            "filip.harald@gmail.com",
-            "bob@superuserlabs.org",
-            "alice@superuserlabs.org",
-            "rickard.edic@gmail.com",
-        ]
+        """Check if sender is allowlisted for auto-responses.
+
+        Allowlist is read from EMAIL_ALLOWLIST environment variable.
+        Format: comma-separated list of email addresses.
+        Example: EMAIL_ALLOWLIST="user1@example.com,user2@example.com"
+        """
+        import os
+
+        # Read allowlist from environment variable
+        allowlist_str = os.getenv("EMAIL_ALLOWLIST", "")
+        if not allowlist_str:
+            # No allowlist configured - log warning and return False
+            # In production, the allowlist should always be configured
+            return False
+
+        allowlisted = [email.strip().lower() for email in allowlist_str.split(",") if email.strip()]
 
         # Remove +tag from email address for comparison
         clean_sender = sender.lower()
@@ -406,7 +423,7 @@ class AgentEmail:
             to: Recipient email address
             subject: Email subject
             content: Message content in Markdown
-            from_address: Optional custom sender address (defaults to bob@superuserlabs.org)
+            from_address: Optional custom sender address (defaults to agent@example.org)
             reply_to: Optional message ID being replied to
             references: Optional list of referenced message IDs
 
@@ -882,7 +899,7 @@ class AgentEmail:
 
         # Count my replies
         my_replies = sum(
-            1 for msg in thread_messages if msg["folder"].lower() in ["sent", "bob-sent"]
+            1 for msg in thread_messages if msg["folder"].lower() in ["sent", "agent-sent"]
         )
         output = []
         output.append("=" * 80)
@@ -895,7 +912,7 @@ class AgentEmail:
             # Header for each message
             headers = msg["headers"]
             is_current = msg["id"] == message_id
-            is_my_reply = msg["folder"].lower() in ["sent", "bob-sent"]
+            is_my_reply = msg["folder"].lower() in ["sent", "agent-sent"]
 
             # Check replied status for inbox messages
             replied_status = ""
@@ -1029,7 +1046,7 @@ class AgentEmail:
         """
         # For now, use simple domain-based mapping
         # This could be enhanced to read msmtp config file
-        if "gmail.com" in from_address or "+bob@gmail.com" in from_address:
+        if "gmail.com" in from_address or "+agent@gmail.com" in from_address:
             return "gmail"
         return None  # Use default account
 
@@ -1040,12 +1057,12 @@ class AgentEmail:
         into the workspace storage as markdown files.
 
         Args:
-            folder: Folder to sync - supports "inbox" (Bob label) and "sent" (Bob-sent label)
+            folder: Folder to sync - supports "inbox" (agent label) and "sent" (agent-sent label)
         """
 
         # Choose appropriate external maildir
         if folder == "inbox":
-            maildir_folder = self.external_maildir_bob
+            maildir_folder = self.external_maildir
         elif folder == "sent":
             maildir_folder = self.external_maildir_sent
         else:

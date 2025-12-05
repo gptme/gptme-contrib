@@ -14,7 +14,7 @@
 # exclude-newer = "2024-01-23T00:00:00Z"
 # ///
 """
-RSS reader tool for gptme-bob.
+RSS reader tool for gptme agents.
 
 Reads RSS feeds and displays them in a compact format.
 """

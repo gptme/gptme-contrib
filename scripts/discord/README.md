@@ -1,13 +1,13 @@
-# Bob's Discord Bot
+# Agent Discord Bot
 
-A Discord bot interface for Bob, powered by gptme. This bot allows Bob to interact with users on Discord, with full access to gptme's capabilities including running code, executing commands, and browsing the web.
+A Discord bot interface powered by gptme. This bot allows the agent to interact with users on Discord, with full access to gptme's capabilities including running code, executing commands, and browsing the web.
 
 ## Setup
 
 1. Create a Discord Application
    - Go to https://discord.com/developers/applications
    - Click "New Application"
-   - Name it "Bob" (or whatever you prefer)
+   - Name it appropriately (or whatever you prefer)
    - Go to the "Bot" section
    - Click "Add Bot"
    - Copy the bot token
@@ -111,7 +111,7 @@ A Discord bot interface for Bob, powered by gptme. This bot allows Bob to intera
 
 ### User Commands
 - `!help` - Show help message
-- `!about` - Show information about Bob
+- `!about` - Show information about the agent
 - `!clear` - Clear conversation history
 - `!status` - Show conversation status
 - `!model [name]` - Get or set the model for this channel

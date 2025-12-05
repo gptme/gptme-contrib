@@ -15,12 +15,27 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
-def parse_log_file(log_path: Path) -> Tuple[Optional[datetime], List[str]]:
+# Default agent names to match in log files
+DEFAULT_AGENT_NAMES = ["Assistant", "Bob", "Alice", "Agent"]
+
+
+def parse_log_file(
+    log_path: Path, agent_names: Optional[List[str]] = None
+) -> Tuple[Optional[datetime], List[str]]:
     """Parse a single log file and extract included lessons.
+
+    Args:
+        log_path: Path to the log file
+        agent_names: List of agent names to match (e.g., ["Bob", "Alice", "Agent"]).
+                    Used to detect agent response boundaries in logs.
+                    Defaults to DEFAULT_AGENT_NAMES.
 
     Returns:
         (timestamp, list of lesson titles)
     """
+    if agent_names is None:
+        agent_names = DEFAULT_AGENT_NAMES
+
     # Extract timestamp from filename: autonomous-YYYYMMDD-HHMMSS.log
     match = re.search(r"autonomous-(\d{8})-(\d{6})\.log", log_path.name)
     if not match:
@@ -35,7 +50,11 @@ def parse_log_file(log_path: Path) -> Tuple[Optional[datetime], List[str]]:
 
         # Find all "Auto-included X lessons:" sections
         # Pattern: "Auto-included X lessons:" followed by lesson titles
-        pattern = r"Auto-included \d+ lessons:\s+((?:.*?\n)+?)(?:Skipped|Bob:|\[)"
+        # Agent name boundary is configurable (Bob:, Agent:, Assistant:, etc.)
+        agent_pattern = "|".join(re.escape(name) + ":" for name in agent_names)
+        pattern = (
+            rf"Auto-included \d+ lessons:\s+((?:.*?\n)+?)(?:Skipped|{agent_pattern}|\[)"
+        )
 
         for match in re.finditer(pattern, content, re.MULTILINE):
             lesson_block = match.group(1)

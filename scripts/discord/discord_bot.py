@@ -126,7 +126,7 @@ logger.info(f"  Logs directory: {logsdir}")
 # Bot configuration
 intents = discord.Intents.default()
 intents.message_content = True  # Required for reading message content
-bot_name = "Bob"  # TODO: load from auth
+bot_name = os.environ.get("AGENT_NAME", "Agent")  # Configurable agent name
 
 # Optional privileged intents, must be enabled in Discord Developer Portal
 if ENABLE_PRIVILEGED_INTENTS:
@@ -140,14 +140,14 @@ else:
 COMMAND_PREFIX: str = "!"
 
 
-class BobBot(commands.Bot):
+class AgentBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
 
-bot = BobBot(
+bot = AgentBot(
     command_prefix=COMMAND_PREFIX,
-    description="Bob - A gptme-powered Discord bot",
+    description="A gptme-powered Discord bot",
     intents=intents,
 )
 
@@ -798,11 +798,11 @@ async def tools_(ctx: commands.Context) -> None:
 
 @bot.command()
 async def about(ctx: commands.Context) -> None:
-    """Show information about Bob."""
+    """Show information about the agent."""
     is_dm = isinstance(ctx.channel, discord.DMChannel)
 
     base_msg = (
-        "👋 I'm Bob, an AI assistant powered by gptme!\n\n"
+        f"👋 I'm {bot_name}, an AI assistant powered by gptme!\n\n"
         "I can help with:\n"
         "- Programming and development\n"
         "- Running code and commands\n"
@@ -863,7 +863,7 @@ async def handle_gptme_error(message: discord.Message, error: Exception) -> None
 async def handle_new_dm(message: discord.Message) -> None:
     """Send welcome message for new DM conversations."""
     welcome_msg = (
-        "👋 Welcome! You're now in a direct chat with Bob.\n\n"
+        "👋 Welcome! You're now in a direct chat with the agent.\n\n"
         "🔒 DMs are the preferred way to interact during testing, as they provide:\n"
         "- More reliable tool access\n"
         "- Better error handling\n"

@@ -18,7 +18,7 @@ This tool supports both OAuth 1.0a and OAuth 2.0 authentication for Twitter API 
 
 Authentication Methods:
 
-1. OAuth 2.0 (Recommended for @TimeToBuildBob)
+1. OAuth 2.0 (Recommended for agent Twitter)
    Required environment variables:
    - TWITTER_CLIENT_ID: OAuth 2.0 client ID
    - TWITTER_CLIENT_SECRET: OAuth 2.0 client secret

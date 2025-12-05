@@ -50,7 +50,7 @@ For real email integration, configure:
 
 1. **mbsync/isync** for IMAP synchronization
 2. **msmtp** for SMTP sending
-3. **Gmail labels** (Bob, Bob-sent) for filtering
+3. **Gmail labels** (agent labels) for filtering
 
 See the full documentation in this directory for detailed setup instructions.
 
@@ -58,7 +58,7 @@ See the full documentation in this directory for detailed setup instructions.
 
 ```bash
 # Compose and send
-./gptme-contrib/scripts/email/cli.py compose alice@example.com "Project Update" "Status report..."
+./gptme-contrib/scripts/email/cli.py compose recipient@example.com "Project Update" "Status report..."
 ./gptme-contrib/scripts/email/cli.py send <message-id>
 
 # Read with threading

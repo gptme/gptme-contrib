@@ -1,12 +1,47 @@
 """Configuration management for input sources.
 
 Centralized configuration loading and validation using Pydantic for type safety.
+All paths and identifiers are configurable via environment variables.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def get_workspace_path() -> Path:
+    """Get workspace path from environment or default."""
+    if path := os.environ.get("GPTME_WORKSPACE"):
+        return Path(path)
+    return Path.home() / "workspace"
+
+
+def get_agent_config_dir() -> Path:
+    """Get agent config directory from environment or default."""
+    if path := os.environ.get("GPTME_CONFIG_DIR"):
+        return Path(path)
+    return Path.home() / ".config" / "gptme-agent"
+
+
+def get_agent_data_dir() -> Path:
+    """Get agent data directory from environment or default."""
+    if path := os.environ.get("GPTME_DATA_DIR"):
+        return Path(path)
+    return Path.home() / ".local" / "share" / "gptme-agent"
+
+
+def get_default_repo() -> str:
+    """Get default GitHub repo from environment or default."""
+    return os.environ.get("GPTME_AGENT_REPO", "owner/agent")
+
+
+def get_maildir_path() -> Path:
+    """Get maildir path from environment or default."""
+    if path := os.environ.get("MAILDIR_PATH"):
+        return Path(path)
+    return Path.home() / ".local" / "share" / "mail" / "agent"
 
 
 class RateLimitConfig(BaseModel):
@@ -38,9 +73,9 @@ class GitHubSourceConfig(BaseModel):
     """
 
     enabled: bool = Field(default=True)
-    repo: str = Field(default="ErikBjare/bob")
+    repo: str = Field(default_factory=get_default_repo)
     label: str = Field(default="task-request")
-    workspace_path: Path = Field(default=Path("/home/bob/bob"))
+    workspace_path: Path = Field(default_factory=get_workspace_path)
     poll_interval_seconds: int = Field(default=300, ge=60)
     priority_labels: List[str] = Field(
         default_factory=lambda: ["priority:urgent", "priority:high"]
@@ -70,9 +105,9 @@ class EmailSourceConfig(BaseModel):
     """
 
     enabled: bool = Field(default=True)
-    maildir_path: Path = Field(default=Path.home() / ".local/share/mail/timetobuildbob")
-    allowlist_file: Path = Field(default=Path("/home/bob/bob/.env"))
-    workspace_path: Path = Field(default=Path("/home/bob/bob"))
+    maildir_path: Path = Field(default_factory=get_maildir_path)
+    allowlist_file: Path = Field(default_factory=lambda: get_workspace_path() / ".env")
+    workspace_path: Path = Field(default_factory=get_workspace_path)
     poll_interval_seconds: int = Field(default=300, ge=60)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
@@ -99,7 +134,7 @@ class WebhookSourceConfig(BaseModel):
 
     enabled: bool = Field(default=True)
     queue_dir: Path = Field(default=Path.home() / ".local/share/webhook-queue")
-    workspace_path: Path = Field(default=Path("/home/bob/bob"))
+    workspace_path: Path = Field(default_factory=get_workspace_path)
     poll_interval_seconds: int = Field(default=60, ge=10)
     auth_token: Optional[str] = Field(default=None)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
@@ -126,11 +161,13 @@ class SchedulerSourceConfig(BaseModel):
     """
 
     enabled: bool = Field(default=True)
-    schedule_file: Path = Field(default=Path.home() / ".config/bob/schedule.yaml")
-    state_file: Path = Field(
-        default=Path.home() / ".local/share/bob/schedule-state.json"
+    schedule_file: Path = Field(
+        default_factory=lambda: get_agent_config_dir() / "schedule.yaml"
     )
-    workspace_path: Path = Field(default=Path("/home/bob/bob"))
+    state_file: Path = Field(
+        default_factory=lambda: get_agent_data_dir() / "schedule-state.json"
+    )
+    workspace_path: Path = Field(default_factory=get_workspace_path)
     check_interval_seconds: int = Field(default=60, ge=30)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
@@ -155,7 +192,7 @@ class MonitoringConfig(BaseModel):
     """
 
     enabled: bool = Field(default=True)
-    metrics_dir: Path = Field(default=Path.home() / ".local/share/bob/metrics")
+    metrics_dir: Path = Field(default_factory=lambda: get_agent_data_dir() / "metrics")
     health_check_interval_seconds: int = Field(default=300, ge=60)
     max_consecutive_failures: int = Field(default=3, ge=1)
     log_level: str = Field(default="INFO")

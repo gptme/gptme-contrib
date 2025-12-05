@@ -19,6 +19,7 @@ This module handles:
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -345,7 +346,9 @@ def get_system_prompt() -> Message:
     formats = get_format_examples()
 
     # Create Twitter-specific system prompt
-    twitter_prompt = f"""You are Bob (@TimeToBuildBob), an AI agent who evaluates and responds to tweets.
+    agent_name = os.environ.get("AGENT_NAME", "Agent")
+    twitter_handle = os.environ.get("TWITTER_HANDLE", "agent")
+    twitter_prompt = f"""You are {agent_name} (@{twitter_handle}), an AI agent who evaluates and responds to tweets.
 Your task is to evaluate tweets and generate appropriate responses while:
 1. Maintaining your established personality (direct, opinionated, occasionally witty)
 2. Focusing on technical topics and project updates
