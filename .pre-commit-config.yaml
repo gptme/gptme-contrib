@@ -40,6 +40,14 @@ repos:
     exclude: ^packages/lessons/
 - repo: local
   hooks:
+  - id: check-markdown-links
+    name: Check markdown links
+    description: Verifies that relative links in markdown files are valid.
+    entry: python3 scripts/precommit/check_markdown_links.py
+    language: system
+    types: [markdown]
+    pass_filenames: true
+
   - id: check-names
     name: Check for agent-instance names
     description: Verifies that we are not accidentally using names of agents or users in the shared scripts (should be configurable).
