@@ -76,7 +76,7 @@ def execute_gptme(
 
         # Use tee to stream output to both terminal and log file
         # This gives us real-time journald logging AND complete log file
-        cmd_with_tee = f"{' '.join(cmd)} 2>&1 | tee {log_file}"
+        cmd_with_tee = f"{' '.join(cmd)} 2>&1 | tee '{log_file}'"
 
         # Write header to log file first
         with log_file.open("w") as f:
@@ -105,10 +105,9 @@ def execute_gptme(
             return ExecutionResult(exit_code=result.returncode)
 
         except subprocess.TimeoutExpired:
-            # Log timeout to file
-            with log_file.open("w") as f:
-                f.write(f"=== {run_type} run at {timestamp} ===\n")
-                f.write(f"Working directory: {workspace}\n")
+            # Log timeout to file (append to preserve tee output)
+            with log_file.open("a") as f:
+                f.write("\n=== Execution timed out ===\n")
                 f.write(f"Status: TIMED OUT after {timeout}s\n")
 
             print(f"ERROR: Execution timed out after {timeout}s", file=sys.stderr)
