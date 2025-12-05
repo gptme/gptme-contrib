@@ -41,14 +41,16 @@ class ProjectMonitoringRun(BaseRunLoop):
         self,
         workspace: Path,
         target_org: str = "gptme",
-        author: str = "TimeToBuildBob",
+        author: str = "",
+        agent_name: str = "Agent",
     ):
         """Initialize project monitoring run.
 
         Args:
             workspace: Path to workspace directory
             target_org: GitHub organization to monitor
-            author: GitHub username for filtering
+            author: GitHub username for filtering (GitHub handle)
+            agent_name: Name of the agent for prompts
         """
         super().__init__(
             workspace=workspace,
@@ -59,6 +61,7 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         self.target_org = target_org
         self.author = author
+        self.agent_name = agent_name
         self.state_dir = workspace / "logs/.project-monitoring-state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -307,14 +310,14 @@ class ProjectMonitoringRun(BaseRunLoop):
         return work_items
 
     def _is_last_activity_by_self(self, repo: str, pr_number: int) -> bool:
-        """Check if the last activity on the PR was by Bob.
+        """Check if the last activity on the PR was by the agent.
 
         Args:
             repo: Repository name (owner/repo)
             pr_number: PR number
 
         Returns:
-            True if last comment/activity was by self (TimeToBuildBob)
+            True if last comment/activity was by self (the configured author)
         """
         try:
             # Get last comment on PR
@@ -447,7 +450,7 @@ class ProjectMonitoringRun(BaseRunLoop):
 
                     # Rule 1: PR updated since last comment (new commits/reviews)
                     if current_updated > pr_updated:
-                        # Check if last activity was by Bob (skip own comments)
+                        # Check if last activity was by agent (skip own comments)
                         if self._is_last_activity_by_self(repo, pr_number):
                             self.logger.info(
                                 f"PR {repo}#{pr_number} updated by self, skipping"
@@ -635,7 +638,7 @@ class ProjectMonitoringRun(BaseRunLoop):
             for item in work_items
         )
 
-        return f"""You are Bob, processing project-specific work via monitoring system.
+        return f"""You are {self.agent_name}, processing project-specific work via monitoring system.
 
 **Current Time**: {datetime.now().strftime("%Y-%m-%d %H:%M UTC")}
 **Context Budget**: 200k tokens (use ~160k for work, save ~40k margin)
@@ -685,22 +688,22 @@ Classify each work item:
 - MUST update PR after fixing (don't just commit)
 - Never commit directly to master/main
 
-**For Workspace Repo** (gptme-bob):
+**For Workspace Repo**:
 - Can commit directly to master
 
 ## Critical File Operations
 
 **Always use ABSOLUTE PATHS**:
-- Correct: `/home/bob/bob/journal/2025-11-25-topic.md`
+- Correct: `{self.workspace}/journal/2025-11-25-topic.md`
 - Wrong: `journal/2025-11-25-topic.md`
 
 **Journal Location**:
-- Create in workspace: `/home/bob/bob/journal/YYYY-MM-DD-HHMMSS-description.md` (timestamp-based)
+- Create in workspace: `{self.workspace}/journal/YYYY-MM-DD-HHMMSS-description.md` (timestamp-based)
 
 ## Session Completion
 
 **Brief Documentation** (2-5 min max):
-1. Return to workspace: `cd /home/bob/bob`
+1. Return to workspace: `cd {self.workspace}`
 2. Create journal entry with timestamp: `journal/{datetime.now().strftime("%Y-%m-%d-%H%M%S")}-description.md`
 3. Commit: `git add journal/*.md && git commit -m "docs(monitoring): session summary" && git push`
 4. Use `complete` tool when finished

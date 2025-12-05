@@ -7,6 +7,7 @@ from typing import Optional
 
 def generate_base_prompt(
     run_type: str,
+    agent_name: str = "Agent",
     current_time: Optional[str] = None,
     context_budget: int = 200000,
     additional_sections: Optional[str] = None,
@@ -15,6 +16,7 @@ def generate_base_prompt(
 
     Args:
         run_type: Type of run (autonomous, email, monitoring)
+        agent_name: Name of the agent running the loop
         current_time: ISO formatted time (defaults to now)
         context_budget: Token budget for the run
         additional_sections: Additional prompt sections to append
@@ -25,7 +27,7 @@ def generate_base_prompt(
     if current_time is None:
         current_time = datetime.now().astimezone().isoformat()
 
-    prompt = f"""You are Bob, running in {run_type} mode.
+    prompt = f"""You are {agent_name}, running in {run_type} mode.
 
 **Current Time**: {current_time}
 **Context Budget**: {context_budget:,} tokens

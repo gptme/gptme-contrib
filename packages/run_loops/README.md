@@ -82,7 +82,7 @@ Run loops are typically configured via systemd timers:
 
 ```bash
 # Example timer for autonomous runs
-~/.config/systemd/user/bob-autonomous.timer
+~/.config/systemd/user/agent-autonomous.timer
 ```
 
 See `dotfiles/.config/systemd/user/` in agent workspaces for examples.

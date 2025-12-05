@@ -51,7 +51,7 @@ class TestIsBotUser:
     def test_normal_users(self):
         """Normal usernames are not detected as bots."""
         assert is_bot_user("ErikBjare") is False
-        assert is_bot_user("TimeToBuildBob") is False
+        assert is_bot_user("test-human-user") is False
         assert is_bot_user("octocat") is False
         assert is_bot_user("john_doe") is False
         assert is_bot_user("roberto") is False  # Contains 'bot' but not as pattern
@@ -269,14 +269,14 @@ class TestCommentLoopDetector:
 
         # Record a comment
         detector.check_and_record(
-            repo="ErikBjare/bob",
+            repo="example/repo",
             pr_number=42,
             comment_content="Test",
             comment_type="test",
         )
 
         # Check state file exists
-        expected_file = temp_state_dir / "ErikBjare-bob-pr-42-loop.json"
+        expected_file = temp_state_dir / "example-repo-pr-42-loop.json"
         assert expected_file.exists()
 
         # Verify content structure

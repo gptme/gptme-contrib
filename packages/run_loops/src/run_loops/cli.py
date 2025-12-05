@@ -1,5 +1,6 @@
 """Command-line interface for run loops."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -58,12 +59,17 @@ def email(workspace: Path):
 )
 @click.option(
     "--author",
-    default="TimeToBuildBob",
-    help="GitHub username for filtering",
+    default=os.environ.get("GITHUB_AUTHOR", ""),
+    help="GitHub username for filtering (default: $GITHUB_AUTHOR env var)",
 )
-def monitoring(workspace: Path, org: str, author: str):
+@click.option(
+    "--agent-name",
+    default=os.environ.get("AGENT_NAME", "Agent"),
+    help="Agent name for prompts (default: $AGENT_NAME env var or 'Agent')",
+)
+def monitoring(workspace: Path, org: str, author: str, agent_name: str):
     """Run project monitoring loop."""
-    run = ProjectMonitoringRun(workspace, target_org=org, author=author)
+    run = ProjectMonitoringRun(workspace, target_org=org, author=author, agent_name=agent_name)
     exit_code = run.run()
     sys.exit(exit_code)
 

@@ -1,6 +1,7 @@
 """Execution utilities for running gptme."""
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -53,10 +54,11 @@ def execute_gptme(
 
     try:
         # Build gptme command
-        # Make sure we are using the system (pipx-managed) gptme and not the one in the uv-workspace
-        # TODO: do this cleaner by modifying the PATH?
-        cmd = ["/home/bob/.local/bin/gptme"]
-        # cmd = ["gptme"]
+        # Find gptme in PATH (typically pipx-managed)
+        gptme_path = shutil.which("gptme")
+        if not gptme_path:
+            raise RuntimeError("gptme not found in PATH. Install with: pipx install gptme")
+        cmd = [gptme_path]
         if non_interactive:
             cmd.append("--non-interactive")
 

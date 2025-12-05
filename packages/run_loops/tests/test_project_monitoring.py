@@ -30,7 +30,8 @@ def test_project_monitoring_init(workspace):
     assert run.timeout == 1800  # 30 minutes
     assert run.lock_wait is False
     assert run.target_org == "gptme"
-    assert run.author == "TimeToBuildBob"
+    assert run.author == ""  # No default author
+    assert run.agent_name == "Agent"  # Default agent name
     assert run.state_dir.exists()
 
 
