@@ -3,6 +3,7 @@
 import logging
 import time
 from pathlib import Path
+from threading import Lock, Timer
 from datetime import datetime
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -35,6 +36,8 @@ class IndexEventHandler(FileSystemEventHandler):
         self._pending_updates: set[Path] = set()
         self._last_update = time.time()
         self._update_delay = 1.0  # seconds
+        self._lock = Lock()
+        self._timers: dict[Path, Timer] = {}
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Handle file modification events."""
@@ -60,40 +63,57 @@ class IndexEventHandler(FileSystemEventHandler):
         )
 
     def _queue_update(self, path: Path) -> None:
-        """Queue a file for update."""
-        if self._should_skip_file(path, set()):
-            return
+        """Queue a file for update with debouncing.
+        
+        Multiple rapid events for the same file are coalesced into a single update.
+        """
+        resolved_path = path.resolve()
+        
+        with self._lock:
+            if self._should_skip_file(path, set()):
+                return
+            
+            # Cancel any existing timer for this path
+            if resolved_path in self._timers:
+                self._timers[resolved_path].cancel()
+            
+            # Schedule update after delay (debouncing)
+            timer = Timer(self._update_delay, self._process_update, args=[resolved_path])
+            self._timers[resolved_path] = timer
+            timer.start()
+            logger.debug(f"Queued update for {path} (delay: {self._update_delay}s)")
 
+    def _process_update(self, path: Path) -> None:
+        """Process a queued file update."""
+        with self._lock:
+            # Remove timer reference
+            self._timers.pop(path, None)
+        
         logger.debug(f"Processing update for {path}")
-
-        # Wait for file to be fully written
-        time.sleep(self._update_delay)
-
-        try:
-            # Read file content first to ensure it's readable
-            content = path.read_text()
-        except FileNotFoundError:
-            # File was moved/deleted during the update delay - this is expected for move events
-            logger.debug(f"File no longer exists (likely moved/deleted), skipping: {path}")
-            return
         
         try:
-            canonical_path = str(path.resolve())
-
+            if not path.exists():
+                logger.debug(f"File no longer exists, skipping: {path}")
+                return
+            
+            # Read file content to ensure it's readable
+            content = path.read_text()
+            canonical_path = str(path)
+            
             # Delete old versions
             logger.debug(f"Deleting old versions for {canonical_path}")
             self.indexer.delete_documents({"source": canonical_path})
-
+            
             # Index new content
             logger.debug(f"Indexing new content for {canonical_path}")
             n_indexed = self.indexer.index_file(path)
             if n_indexed == 0:
                 logger.warning(f"No documents indexed for {path}")
                 return
-
-            # Clear search cache to ensure fresh results for verification
+            
+            # Clear search cache to ensure fresh results
             self.indexer.cache.clear()
-
+            
             # Verify the update
             logger.debug(f"Verifying update for {canonical_path}")
             results, _, _ = self.indexer.search(content[:100], n_results=1)
@@ -103,7 +123,9 @@ class IndexEventHandler(FileSystemEventHandler):
                 logger.warning(f"Found results but source doesn't match for {path}")
             else:
                 logger.debug(f"Successfully updated {path}")
-
+                
+        except FileNotFoundError:
+            logger.debug(f"File no longer exists (likely moved/deleted): {path}")
         except Exception as e:
             logger.error(f"Error updating {path}: {e}", exc_info=True)
 
@@ -348,6 +370,13 @@ class IndexEventHandler(FileSystemEventHandler):
         self._pending_updates.clear()
         self._last_update = time.time()
         logger.info("Finished processing updates")
+    
+    def cancel_pending_updates(self) -> None:
+        """Cancel all pending update timers."""
+        with self._lock:
+            for timer in self._timers.values():
+                timer.cancel()
+            self._timers.clear()
 
 
 class FileWatcher:
@@ -398,6 +427,8 @@ class FileWatcher:
 
     def stop(self) -> None:
         """Stop watching for file changes."""
+        # Cancel any pending update timers before stopping
+        self.event_handler.cancel_pending_updates()
         self.observer.stop()
         self.observer.join()
         logger.info("Stopped file watcher")
@@ -410,4 +441,3 @@ class FileWatcher:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Stop watching when exiting context manager."""
         self.stop()
-
