@@ -28,7 +28,7 @@ run-loops autonomous --workspace /path/to/workspace
 # Run project monitoring
 run-loops project-monitoring --workspace /path/to/workspace
 
-# Run email monitoring  
+# Run email monitoring
 run-loops email --workspace /path/to/workspace
 ```
 

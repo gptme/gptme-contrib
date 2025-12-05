@@ -54,7 +54,7 @@ class AutonomousRun(BaseRunLoop):
 
 **Step 2**: Task Selection via CASCADE (5-10 min max)
 1. **PRIMARY**: Read state/queue-manual.md "Planned Next" section
-2. **SECONDARY**: Check notifications for direct assignments  
+2. **SECONDARY**: Check notifications for direct assignments
 3. **TERTIARY**: Check workspace tasks if PRIMARY/SECONDARY blocked
 
 **Step 3**: EXECUTION (20-30 min - the main focus!)
