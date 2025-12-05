@@ -63,3 +63,12 @@ repos:
     language: system
     types: [shell]
     args: ["--severity=warning"]
+
+  - id: typecheck-packages
+    name: Typecheck packages
+    description: Run mypy for all packages
+    entry: make typecheck-packages
+    language: system
+    pass_filenames: false
+    always_run: true
+    types: [python]

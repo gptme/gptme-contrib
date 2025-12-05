@@ -15,6 +15,12 @@ dependencies = [
     "gptme>=0.1.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.0.0",
+    "pytest>=7.0.0",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
