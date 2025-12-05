@@ -37,7 +37,7 @@ from typing import (
 )
 
 import click
-import frontmatter  # type: ignore[import-untyped]
+import frontmatter
 from rich.console import Console
 from rich.table import Table
 from tabulate import tabulate
@@ -1333,7 +1333,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         # Optional fields with validation
         "priority": {"type": "enum", "values": ["high", "medium", "low", "none"]},
         "task_type": {"type": "enum", "values": ["project", "action", "none"]},
-        "assigned_to": {"type": "enum", "values": ["bob", "erik", "both", "none"]},
+        "assigned_to": {"type": "enum", "values": ["agent", "human", "both", "none"]},
         "waiting_since": {"type": "date"},
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},
