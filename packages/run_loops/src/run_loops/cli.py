@@ -69,7 +69,9 @@ def email(workspace: Path):
 )
 def monitoring(workspace: Path, org: str, author: str, agent_name: str):
     """Run project monitoring loop."""
-    run = ProjectMonitoringRun(workspace, target_org=org, author=author, agent_name=agent_name)
+    run = ProjectMonitoringRun(
+        workspace, target_org=org, author=author, agent_name=agent_name
+    )
     exit_code = run.run()
     sys.exit(exit_code)
 

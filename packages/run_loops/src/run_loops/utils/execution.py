@@ -57,7 +57,9 @@ def execute_gptme(
         # Find gptme in PATH (typically pipx-managed)
         gptme_path = shutil.which("gptme")
         if not gptme_path:
-            raise RuntimeError("gptme not found in PATH. Install with: pipx install gptme")
+            raise RuntimeError(
+                "gptme not found in PATH. Install with: pipx install gptme"
+            )
         cmd = [gptme_path]
         if non_interactive:
             cmd.append("--non-interactive")
