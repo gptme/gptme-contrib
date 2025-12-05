@@ -1,6 +1,10 @@
-"""CLI entry point for tasks package."""
+"""Main entry point for tasks CLI.
 
-from tasks.generate_queue import main  # type: ignore[import-not-found]
+Provides a unified command-line interface for task management operations.
+Supports both direct invocation (`python -m tasks`) and package entry point.
+"""
+
+from tasks.cli import cli
 
 if __name__ == "__main__":
-    main()
+    cli()

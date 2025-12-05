@@ -8,4 +8,4 @@ test:  ## Run tests for this package
 	fi
 
 typecheck:  ## Run mypy for this package
-	uv run --with mypy mypy -p tasks --disable-error-code=unused-ignore
+	uv run --with mypy --with types-tabulate mypy -p tasks --disable-error-code=unused-ignore
