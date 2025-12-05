@@ -40,6 +40,14 @@ repos:
     exclude: ^packages/lessons/
 - repo: local
   hooks:
+  - id: check-markdown-links
+    name: Check markdown links
+    description: Verifies that relative links in markdown files are valid.
+    entry: python3 scripts/precommit/check_markdown_links.py
+    language: system
+    types: [markdown]
+    pass_filenames: true
+
   - id: shellcheck
     name: ShellCheck
     description: Shell script linter for bash/sh files

@@ -9,14 +9,14 @@ Multi-model consensus decision-making system that orchestrates multiple LLMs to 
 
 **Use for**: Important decisions, architectural choices, code review from multiple perspectives, model comparison.
 
-[Documentation](./gptme_consortium/README.md)
+[Documentation](./consortium/README.md)
 
-### 🎨 image_gen
+### 🎨 imagen
 Multi-provider image generation supporting Google Gemini (Imagen), OpenAI DALL-E, and more with a unified interface.
 
 **Use for**: Creating diagrams, UI mockups, presentation graphics, visual prototyping.
 
-[Documentation](./gptme_image_gen/README.md)
+[Documentation](./imagen/README.md)
 
 ## Installation
 
@@ -33,7 +33,7 @@ paths = [
 ]
 
 # Optional: enable specific plugins only
-enabled = ["gptme_consortium", "gptme_image_gen"]
+enabled = ["consortium", "imagen"]
 ```
 
 ### 2. Install Dependencies
