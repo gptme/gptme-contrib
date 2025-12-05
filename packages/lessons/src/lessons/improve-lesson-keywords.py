@@ -59,7 +59,7 @@ def suggest_improvements() -> Dict[str, List[str]]:
             "Replace: directory → project directory, project location",
             "Replace: path → remove (too generic with 'cd' already)",
             "Keep: cd, projects, Programming (specific to issue)",
-            "Suggested: [project directory, project location, cd, projects, Programming, /home/bob]",
+            "Suggested: [project directory, project location, cd, projects, Programming, /home/user]",
         ],
         "working-directory-awareness.md": [
             "Replace: directory → working directory, cwd",

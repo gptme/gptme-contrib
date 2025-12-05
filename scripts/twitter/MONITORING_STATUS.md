@@ -73,7 +73,7 @@
 
 ```bash
 # Test draft with monitoring
-cd ~/bob/gptme-contrib/scripts/twitter
+cd ~/workspace/scripts/twitter
 ./workflow.py draft "Test tweet" --dry-run
 
 # Test post with monitoring

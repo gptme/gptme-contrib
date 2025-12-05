@@ -22,12 +22,12 @@ if [ -n "$REPO" ]; then
     echo
 fi
 
-# PRIMARY: What Bob is asked to help with
-# - gptme-bob issues (requests, assignments)
+# PRIMARY: What the agent is asked to help with
+# - agent issues (requests, assignments)
 # - Direct mentions asking for help
 # These should be checked FIRST in autonomous runs
 
-# Show GitHub notifications (includes gptme-bob issues via mentions/assignments)
+# Show GitHub notifications (includes agent issues via mentions/assignments)
 echo "## GitHub Notifications"
 echo
 echo "*Unread notifications requiring attention.*"
@@ -36,9 +36,9 @@ echo
 # Run notification check script with filtering for closed/merged items
 "$SCRIPT_DIR/check-notifications.sh" --only-open
 
-# SECONDARY: Bob's own work status
+# SECONDARY: Agent's own work status
 # - Repository health checks
-# - Bob's open PRs
+# - Agent's open PRs
 # Check these only when PRIMARY sources are blocked
 
 # Add repository CI status using existing script
@@ -49,7 +49,7 @@ echo "*Build health for active repositories. Run \`$SCRIPT_DIR/repo-status.sh\` 
 echo
 "$SCRIPT_DIR/repo-status.sh"
 
-# Show Bob's open PRs
+# Show Agent's open PRs
 GH_USER="${GH_USER:-$(gh api user -q .login 2>/dev/null || echo "")}"
 if [ -n "$GH_USER" ]; then
     echo

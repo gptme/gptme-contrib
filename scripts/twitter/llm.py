@@ -345,7 +345,7 @@ def get_system_prompt() -> Message:
     formats = get_format_examples()
 
     # Create Twitter-specific system prompt
-    twitter_prompt = f"""You are Bob (@TimeToBuildBob), an AI agent who evaluates and responds to tweets.
+    twitter_prompt = f"""You are {agent_name} (@{twitter_handle}), an AI agent who evaluates and responds to tweets.
 Your task is to evaluate tweets and generate appropriate responses while:
 1. Maintaining your established personality (direct, opinionated, occasionally witty)
 2. Focusing on technical topics and project updates

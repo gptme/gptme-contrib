@@ -84,7 +84,7 @@ def migrate_email_json(email_json_path: Path, dry_run: bool = True):
 if __name__ == "__main__":
     import sys
 
-    email_json = Path("/home/bob/bob/email/locks/email.json")
+    email_json = Path("/path/to/workspace/email/locks/email.json")
 
     dry_run = "--apply" not in sys.argv
     migrate_email_json(email_json, dry_run=dry_run)

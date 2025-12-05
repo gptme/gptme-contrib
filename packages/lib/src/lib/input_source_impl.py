@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .config import get_default_repo, get_workspace_path
 from .input_sources import (
     InputSource,
     InputSourceType,
@@ -24,7 +25,7 @@ class GitHubInputSource(InputSource):
     Configuration keys:
         - repo: Repository in owner/name format
         - label: Label to filter issues (e.g., "task-request")
-        - workspace_path: Path to Bob's workspace
+        - workspace_path: Path to agent workspace
     """
 
     def _get_source_type(self) -> InputSourceType:
@@ -36,7 +37,7 @@ class GitHubInputSource(InputSource):
         Returns:
             List of TaskRequest objects from GitHub issues
         """
-        repo = self.config.get("repo", "ErikBjare/bob")
+        repo = self.config.get("repo", get_default_repo())
         label = self.config.get("label", "task-request")
 
         # Fetch issues with label using gh CLI
@@ -114,7 +115,7 @@ class GitHubInputSource(InputSource):
         Returns:
             True if task already exists for this issue
         """
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
 
         # Check for task file containing this issue number
@@ -141,7 +142,7 @@ class GitHubInputSource(InputSource):
         Returns:
             Result of task creation
         """
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -277,7 +278,7 @@ class EmailInputSource(InputSource):
     Configuration keys:
         - maildir_path: Path to maildir (e.g., ~/.local/share/mail/inbox)
         - allowlist: List of allowed sender emails
-        - workspace_path: Path to Bob's workspace
+        - workspace_path: Path to agent workspace
     """
 
     def _get_source_type(self) -> InputSourceType:
@@ -413,7 +414,7 @@ class EmailInputSource(InputSource):
         Returns:
             True if task already exists for this email
         """
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
 
         # Check for task mentioning this email subject
@@ -445,7 +446,7 @@ class EmailInputSource(InputSource):
             Result of task creation
         """
         # Similar to GitHubInputSource.create_task
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -538,7 +539,7 @@ class WebhookInputSource(InputSource):
 
     Configuration keys:
         - webhook_queue_path: Path to webhook queue directory
-        - workspace_path: Path to Bob's workspace
+        - workspace_path: Path to agent workspace
         - require_auth_token: Optional authentication token
     """
 
@@ -613,7 +614,7 @@ class WebhookInputSource(InputSource):
         Returns:
             True if task already exists for this webhook
         """
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
 
         # Check for task mentioning this webhook ID
@@ -638,7 +639,7 @@ class WebhookInputSource(InputSource):
         Returns:
             Result of task creation
         """
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -732,7 +733,7 @@ class SchedulerInputSource(InputSource):
 
     Configuration keys:
         - schedule_config_path: Path to schedule YAML/JSON file
-        - workspace_path: Path to Bob's workspace
+        - workspace_path: Path to agent workspace
         - state_file_path: Path to store scheduling state
 
     Schedule format (YAML):
@@ -781,7 +782,7 @@ class SchedulerInputSource(InputSource):
         import yaml
 
         schedule_config_path = Path(
-            self.config.get("schedule_config_path", "~/.config/bob/schedule.yaml")
+            self.config.get("schedule_config_path", "~/.config/gptme-agent/schedule.yaml")
         ).expanduser()
 
         if not schedule_config_path.exists():
@@ -977,7 +978,7 @@ class SchedulerInputSource(InputSource):
             Dictionary of task states
         """
         state_file = Path(
-            self.config.get("state_file_path", "~/.local/share/bob/schedule-state.json")
+            self.config.get("state_file_path", "~/.local/share/gptme-agent/schedule-state.json")
         ).expanduser()
 
         if not state_file.exists():
@@ -996,7 +997,7 @@ class SchedulerInputSource(InputSource):
             state: Dictionary of task states to save
         """
         state_file = Path(
-            self.config.get("state_file_path", "~/.local/share/bob/schedule-state.json")
+            self.config.get("state_file_path", "~/.local/share/gptme-agent/schedule-state.json")
         ).expanduser()
 
         state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1016,7 +1017,7 @@ class SchedulerInputSource(InputSource):
         Returns:
             Result of task creation
         """
-        workspace_path = Path(self.config.get("workspace_path", "/home/bob/bob"))
+        workspace_path = Path(self.config.get("workspace_path", get_workspace_path()))
         tasks_dir = workspace_path / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
 

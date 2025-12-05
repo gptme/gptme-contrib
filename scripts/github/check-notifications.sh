@@ -1,5 +1,5 @@
 #!/bin/bash
-# Check GitHub notifications for Bob
+# Check GitHub notifications for the agent
 #
 # TODO: Future enhancements
 # - Fetch and display PR/issue details (status, author, labels, etc.)

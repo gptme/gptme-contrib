@@ -11,7 +11,7 @@ class EmailConfig(BaseConfig):
     Configuration for email system.
 
     Environment Variables:
-    - AGENT_EMAIL: Agent's email address (default: bob@superuserlabs.org)
+    - AGENT_EMAIL: Agent's email address (default: agent@example.org)
     - MAILDIR_INBOX: Path to inbox maildir
     - MAILDIR_SENT: Path to sent maildir
     - EMAIL_ALLOWLIST: Comma-separated list of allowed sender addresses
@@ -27,20 +27,20 @@ class EmailConfig(BaseConfig):
 
         # Load email-specific configuration
         self.agent_email = (
-            self.get_env("AGENT_EMAIL", default="bob@superuserlabs.org")
-            or "bob@superuserlabs.org"
+            self.get_env("AGENT_EMAIL", default="agent@example.org")
+            or "agent@example.org"
         )
 
         inbox_path = self.get_env(
             "MAILDIR_INBOX",
-            default=str(Path.home() / ".local/share/mail/gmail/Bob"),
-        ) or str(Path.home() / ".local/share/mail/gmail/Bob")
+            default=str(Path.home() / ".local/share/mail/gmail/agent"),
+        ) or str(Path.home() / ".local/share/mail/gmail/agent")
         self.maildir_inbox = Path(inbox_path)
 
         sent_path = self.get_env(
             "MAILDIR_SENT",
-            default=str(Path.home() / ".local/share/mail/gmail/Bob/Sent"),
-        ) or str(Path.home() / ".local/share/mail/gmail/Bob/Sent")
+            default=str(Path.home() / ".local/share/mail/gmail/agent/Sent"),
+        ) or str(Path.home() / ".local/share/mail/gmail/agent/Sent")
         self.maildir_sent = Path(sent_path)
 
         # Allowlist for auto-response

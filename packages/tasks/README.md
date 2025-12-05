@@ -115,12 +115,12 @@ make typecheck
 ## Example
 
 ```bash
-# Generate queue for Bob's workspace
+# Generate queue for agent workspace
 python3 -m tasks.generate_queue \
-    --workspace /home/bob/bob \
-    --github-username TimeToBuildBob
+    --workspace /path/to/workspace \
+    --github-username AgentUsername
 
-# Output: /home/bob/bob/state/queue-generated.md
+# Output: /path/to/workspace/state/queue-generated.md
 ```
 
 ## Integration

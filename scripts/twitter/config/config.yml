@@ -30,7 +30,7 @@ evaluation:
   # Engagement triggers
   triggers:
     - type: mention
-      description: "Direct mentions of @TimeToBuildBob"
+      description: "Direct mentions of the agent"
     - type: project_mention
       description: "Mentions of our projects"
     - type: relevant_discussion

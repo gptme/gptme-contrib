@@ -35,7 +35,7 @@ def parse_log_file(log_path: Path) -> Tuple[Optional[datetime], List[str]]:
 
         # Find all "Auto-included X lessons:" sections
         # Pattern: "Auto-included X lessons:" followed by lesson titles
-        pattern = r"Auto-included \d+ lessons:\s+((?:.*?\n)+?)(?:Skipped|Bob:|\[)"
+        pattern = r"Auto-included \d+ lessons:\s+((?:.*?\n)+?)(?:Skipped|Assistant:|\[)"
 
         for match in re.finditer(pattern, content, re.MULTILINE):
             lesson_block = match.group(1)
