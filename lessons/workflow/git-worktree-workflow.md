@@ -198,27 +198,6 @@ cat knowledge/implement-unified-message-system-phase2-status.md
 - Critical details like "SKIP X" or "defer Y" often only in status files
 - Reveals actual implementation state for resuming work
 
-**Checking phase status documents**:
-```shell
-# When resuming multi-phase tasks, check for detailed status files
-ls knowledge/*-phase*-status.md
-
-# Example: Main task shows "Phase 2.2 complete" but unclear what that means
-cat knowledge/implement-unified-message-system-phase2-status.md
-
-# Look for:
-# - Session-by-session progress (Session 789, 790, etc.)
-# - Implementation decisions ("decided to SKIP rate limiting")
-# - Actual completion details beyond main task file
-# - What was implemented vs. what was deferred
-```
-
-**Why phase status files matter**:
-- Main task files show high-level phase completion
-- Status files contain session-specific decisions and context
-- Critical details like "SKIP X" or "defer Y" often only in status files
-- Reveals actual implementation state for resuming work
-
 ## When Stuck: Research Before Extended Stumbling
 
 If you encounter problems during worktree workflow:
@@ -241,6 +220,7 @@ If you encounter problems during worktree workflow:
 - Leverages existing knowledge from community
 - Research can resolve issues in ~2 minutes vs extended trial-and-error
 - Accelerates learning by understanding root cause
+
 ## Outcome
 Following this pattern results in:
 - **Parallel work**: Multiple features simultaneously
@@ -251,8 +231,6 @@ Following this pattern results in:
 - **Avoid duplicate work**: Discover existing implementations before building
 - **Faster completion**: Use existing features instead of reimplementing
 - **Better code quality**: Leverage tested, existing functionality
-- **Better context**: Session-specific decisions and implementation details
-- **Avoid rework**: Understand what was skipped vs. completed
 - **Better context**: Session-specific decisions and implementation details
 - **Avoid rework**: Understand what was skipped vs. completed
 - **Faster problem resolution**: Research resolves blocks in ~2 minutes vs 20+ minutes of stumbling

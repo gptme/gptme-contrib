@@ -72,9 +72,7 @@ Following this pattern prevents:
 
 Benefits:
 - Explicit destination prevents errors
-- Clear in
-
-tent documented in command
+- Clear intent documented in command
 - Upstream tracking set correctly
 - PRs created from correct branch
 
