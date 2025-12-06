@@ -80,7 +80,7 @@ class TestEffectivenessTracker:
 
 ## Test Lesson One
 
-*Path: /home/bob/bob/lessons/workflow/test-one.md*
+*Path: /workspace/lessons/workflow/test-one.md*
 
 *Category: workflow*
 
@@ -93,7 +93,7 @@ Test rule here.
 
 ## Another Lesson
 
-*Path: /home/bob/bob/lessons/tools/test-two.md*
+*Path: /workspace/lessons/tools/test-two.md*
 
 *Matched by: tool:shell*
 
@@ -107,8 +107,8 @@ Another rule.
 
         assert len(lessons) >= 2
         paths = [lesson["path"] for lesson in lessons]
-        assert "/home/bob/bob/lessons/workflow/test-one.md" in paths
-        assert "/home/bob/bob/lessons/tools/test-two.md" in paths
+        assert "/workspace/lessons/workflow/test-one.md" in paths
+        assert "/workspace/lessons/tools/test-two.md" in paths
 
     def test_state_persistence(self) -> None:
         """Test that state is saved and loaded correctly."""
