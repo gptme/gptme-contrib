@@ -34,7 +34,7 @@ def generate_lesson_variants(
         List of lesson markdown strings
     """
     # Read template using helper from llm module
-    from lessons.utils.llm import _find_lesson_template  # type: ignore[import-not-found]
+    from lessons.utils.llm import _find_lesson_template
 
     template_path = _find_lesson_template()
 

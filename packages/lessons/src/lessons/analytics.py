@@ -45,7 +45,7 @@ from typing import Dict, List, Set, Tuple
 
 from rich.console import Console
 from rich.table import Table
-import frontmatter  # type: ignore[import-untyped]
+import frontmatter
 
 
 @dataclass
