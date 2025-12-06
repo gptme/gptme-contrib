@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from lessons.export import export_all_lessons  # type: ignore[import-not-found]
+    from lessons.export import export_all_lessons
 
     # Use importlib for 'import' keyword conflict
     import_module = importlib.import_module("lessons.import")
