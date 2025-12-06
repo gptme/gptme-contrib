@@ -270,7 +270,7 @@ def get_last_modified_date(file_path: Path) -> datetime:
         pass
 
     # Fallback to file mtime
-    return datetime.fromtimestamp(file_path.stat().st_mtime)
+    return datetime.fromtimestamp(file_path.stat().st_mtime).astimezone()
 
 
 def calculate_staleness_score(
