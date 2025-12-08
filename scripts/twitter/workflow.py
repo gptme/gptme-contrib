@@ -225,14 +225,24 @@ class TweetDraft:
             type=data["type"],
             in_reply_to=data.get("in_reply_to"),
             scheduled_time=(
-                datetime.fromisoformat(data["scheduled_time"])
-                if data["scheduled_time"]
-                else None
+                data["scheduled_time"]
+                if isinstance(data.get("scheduled_time"), datetime)
+                else (
+                    datetime.fromisoformat(data["scheduled_time"])
+                    if data.get("scheduled_time")
+                    else None
+                )
             ),
             context=data["context"],
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
         )
-        draft.created_at = datetime.fromisoformat(data["created_at"])
+        created_at = data["created_at"]
+        if isinstance(created_at, str):
+            draft.created_at = datetime.fromisoformat(created_at)
+        elif isinstance(created_at, datetime):
+            draft.created_at = created_at
+        else:
+            raise ValueError(f"Invalid created_at format: {type(created_at)}")
         return draft
 
     def save(self, path: Path) -> None:
