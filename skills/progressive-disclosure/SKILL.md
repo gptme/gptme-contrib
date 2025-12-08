@@ -85,7 +85,7 @@ The index should contain:
 
 **Example slim index structure:**
 
-```markdown
+```txt
 # Topic Name
 
 Brief overview of what this covers and core concepts.
@@ -166,4 +166,4 @@ files = ["topic_dir/README.md"]
 ## Related
 
 - [Issue #49](https://github.com/gptme/gptme-contrib/issues/49) - Original proposal
-- [ErikBjare/bob#196](https://github.com/ErikBjare/bob/issues/196) - Implementation reference
+- [TimeToBuildBob/bob#196](https://github.com/TimeToBuildBob/bob/issues/196) - Implementation reference
