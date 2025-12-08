@@ -23,6 +23,7 @@ class OAuthConfig:
     auth_url: str  # Authorization endpoint
     token_url: str  # Token exchange endpoint
     scopes: list[str]
+    use_basic_auth: bool = True  # Use HTTP Basic auth (RFC 6749) vs body params
 
     def get_authorization_url(self, state: Optional[str] = None) -> str:
         """
@@ -81,14 +82,28 @@ class OAuthManager:
         Get authorization headers for token requests.
 
         Returns:
-            Headers dict with Basic auth for confidential clients.
+            Headers dict, with Basic auth if configured.
         """
-        credentials = base64.b64encode(
-            f"{self.config.client_id}:{self.config.client_secret}".encode()
-        ).decode()
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if self.config.use_basic_auth:
+            credentials = base64.b64encode(
+                f"{self.config.client_id}:{self.config.client_secret}".encode()
+            ).decode()
+            headers["Authorization"] = f"Basic {credentials}"
+        return headers
+
+    def _get_client_credentials(self) -> dict[str, str]:
+        """
+        Get client credentials for body params (when not using Basic auth).
+
+        Returns:
+            Dict with client_id and client_secret if not using Basic auth.
+        """
+        if self.config.use_basic_auth:
+            return {}
         return {
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "client_id": self.config.client_id,
+            "client_secret": self.config.client_secret,
         }
 
     def exchange_code_for_token(
@@ -107,6 +122,7 @@ class OAuthManager:
             "grant_type": "authorization_code",
             "code": authorization_code,
             "redirect_uri": self.config.redirect_uri,
+            **self._get_client_credentials(),
         }
 
         try:
@@ -139,6 +155,7 @@ class OAuthManager:
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
+            **self._get_client_credentials(),
         }
 
         try:
@@ -244,5 +261,6 @@ class OAuthManager:
             auth_url="https://github.com/login/oauth/authorize",
             token_url="https://github.com/login/oauth/access_token",
             scopes=["repo", "user"],
+            use_basic_auth=False,  # GitHub accepts credentials in POST body
         )
         return cls(config)
