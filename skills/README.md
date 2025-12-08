@@ -46,7 +46,24 @@ Skills extend gptme's lesson system by providing executable components alongside
 
 **Keywords**: `skill template`, `create skill`, `new skill`
 
-### 2. code-review-helper
+### 2. progressive-disclosure
+
+**Purpose**: Template and guide for restructuring large documentation files into token-efficient directory structures
+
+**Use cases**:
+- Migrating large documentation files (500+ lines)
+- Reducing always-included context tokens
+- Creating slim index + detail directory structures
+
+**Features**:
+- Complete migration guide
+- Template structures and examples
+- Implementation checklist
+- Anti-patterns to avoid
+
+**Keywords**: `documentation`, `token`, `context`, `large file`, `auto-include`
+
+### 3. code-review-helper
 
 **Purpose**: Systematic code review workflows with automation utilities
 
