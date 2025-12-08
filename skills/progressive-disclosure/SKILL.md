@@ -102,9 +102,9 @@ Brief overview of what this covers and core concepts.
 
 For specific topics, see:
 
-- **[Topic 1](./topic1/README.md)** - When you need X
-- **[Topic 2](./topic2/README.md)** - When you need Y
-- **[Topic 3](./topic3/README.md)** - When you need Z
+- **Topic 1** (topic1/README.md) - When you need X
+- **Topic 2** (topic2/README.md) - When you need Y
+- **Topic 3** (topic3/README.md) - When you need Z
 
 ## Principles
 
@@ -166,4 +166,3 @@ files = ["topic_dir/README.md"]
 ## Related
 
 - [Issue #49](https://github.com/gptme/gptme-contrib/issues/49) - Original proposal
-- [TimeToBuildBob/bob#196](https://github.com/TimeToBuildBob/bob/issues/196) - Implementation reference
