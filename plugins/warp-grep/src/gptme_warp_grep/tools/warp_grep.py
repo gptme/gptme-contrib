@@ -29,6 +29,13 @@ DEFAULT_EXCLUDES = [
     "venv",
     "__pycache__",
     ".pyc",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".tox",
+    ".nox",
+    ".coverage",
+    "htmlcov",
     "dist",
     "build",
     ".egg-info",
@@ -38,6 +45,9 @@ DEFAULT_EXCLUDES = [
     "yarn.lock",
     "pnpm-lock.yaml",
     "*.lock",
+    ".DS_Store",
+    "*.pyc",
+    "*.pyo",
 ]
 
 # System prompt from Morph documentation
