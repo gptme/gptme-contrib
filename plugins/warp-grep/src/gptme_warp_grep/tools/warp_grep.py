@@ -179,15 +179,28 @@ class ResolvedFile:
 
 
 def parse_tool_calls(text: str) -> list[ToolCall]:
-    """Parse tool calls from model output XML format."""
+    """Parse tool calls from model output (XML or plain format)."""
     # Remove think blocks
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
-    # Extract tool calls
     tool_calls = []
-    for match in re.finditer(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL):
-        call_text = match.group(1).strip()
-        tool_call = _parse_single_tool_call(call_text)
+
+    # Try XML format first: <tool_call>...</tool_call>
+    xml_matches = list(re.finditer(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL))
+    if xml_matches:
+        for match in xml_matches:
+            call_text = match.group(1).strip()
+            tool_call = _parse_single_tool_call(call_text)
+            if tool_call:
+                tool_calls.append(tool_call)
+        return tool_calls
+
+    # Fall back to plain format: one command per line
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        tool_call = _parse_single_tool_call(line)
         if tool_call:
             tool_calls.append(tool_call)
 
