@@ -167,3 +167,36 @@ class TestLocalProvider:
         assert "src" in names
         assert "tests" in names
         assert "README.md" in names
+
+
+class TestSecurityPathTraversal:
+    """Test security: path traversal prevention."""
+
+    def test_grep_path_traversal(self, tmp_path):
+        """Grep should reject paths outside repo root."""
+        provider = LocalProvider(tmp_path)
+        result = provider.grep("test", "../../../etc/passwd")
+        assert "error" in result
+        assert "outside repository" in result["error"].lower()
+
+    def test_read_path_traversal(self, tmp_path):
+        """Read should reject paths outside repo root."""
+        provider = LocalProvider(tmp_path)
+        result = provider.read("../../../etc/passwd")
+        assert "error" in result
+        assert "outside repository" in result["error"].lower()
+
+    def test_analyse_path_traversal(self, tmp_path):
+        """Analyse should reject paths outside repo root."""
+        provider = LocalProvider(tmp_path)
+        result = provider.analyse("../../../etc")
+        assert len(result) == 1
+        assert "error" in result[0]
+
+    def test_resolve_finish_files_path_traversal(self, tmp_path):
+        """Resolve_finish_files should reject paths outside repo root."""
+        provider = LocalProvider(tmp_path)
+        files = [{"path": "../../../etc/passwd", "lines": [(1, 10)]}]
+        result = provider.resolve_finish_files(files)
+        assert len(result) == 1
+        assert "outside repository" in result[0].content.lower()

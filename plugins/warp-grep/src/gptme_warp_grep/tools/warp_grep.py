@@ -293,7 +293,10 @@ class LocalProvider:
 
     def grep(self, pattern: str, path: str) -> dict:
         """Search for pattern using ripgrep."""
-        search_path = self.repo_root / path
+        search_path = (self.repo_root / path).resolve()
+        # Security: prevent path traversal attacks
+        if not search_path.is_relative_to(self.repo_root):
+            return {"lines": [], "error": f"Path outside repository: {path}"}
         if not search_path.exists():
             return {"lines": [], "error": f"Path not found: {path}"}
 
@@ -324,7 +327,10 @@ class LocalProvider:
 
     def read(self, path: str, start: int | None = None, end: int | None = None) -> dict:
         """Read file contents with optional line range."""
-        file_path = self.repo_root / path
+        file_path = (self.repo_root / path).resolve()
+        # Security: prevent path traversal attacks
+        if not file_path.is_relative_to(self.repo_root):
+            return {"lines": [], "error": f"Path outside repository: {path}"}
         if not file_path.exists():
             return {"lines": [], "error": f"File not found: {path}"}
         if not file_path.is_file():
@@ -363,7 +369,18 @@ class LocalProvider:
         max_depth: int = 3,
     ) -> list[dict]:
         """List directory structure."""
-        target_path = self.repo_root / path
+        target_path = (self.repo_root / path).resolve()
+        # Security: prevent path traversal attacks
+        if not target_path.is_relative_to(self.repo_root):
+            return [
+                {
+                    "name": path,
+                    "path": path,
+                    "type": "error",
+                    "depth": 0,
+                    "error": "Path outside repository",
+                }
+            ]
         if not target_path.exists():
             return [{"name": path, "path": path, "type": "error", "depth": 0}]
 
@@ -380,8 +397,11 @@ class LocalProvider:
                 return
 
             for item in items:
-                # Skip excluded patterns
-                if any(exc in str(item) for exc in DEFAULT_EXCLUDES):
+                # Skip excluded patterns (exact name match to avoid false positives like "rebuild" matching "build")
+                if any(
+                    item.name == exc or item.name.endswith(exc)
+                    for exc in DEFAULT_EXCLUDES
+                ):
                     continue
 
                 rel_path = str(item.relative_to(self.repo_root))
@@ -415,7 +435,15 @@ class LocalProvider:
             path = file_spec["path"]
             ranges = file_spec.get("lines", [])
 
-            file_path = self.repo_root / path
+            file_path = (self.repo_root / path).resolve()
+            # Security: prevent path traversal attacks
+            if not file_path.is_relative_to(self.repo_root):
+                resolved.append(
+                    ResolvedFile(
+                        path=path, content=f"# Path outside repository: {path}"
+                    )
+                )
+                continue
             if not file_path.exists():
                 resolved.append(
                     ResolvedFile(path=path, content=f"# File not found: {path}")
