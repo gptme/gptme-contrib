@@ -5,6 +5,7 @@ Provides common OAuth patterns for authorization, token exchange,
 and token refresh across different platforms.
 """
 
+import base64
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlencode, urlparse, parse_qs
@@ -22,6 +23,7 @@ class OAuthConfig:
     auth_url: str  # Authorization endpoint
     token_url: str  # Token exchange endpoint
     scopes: list[str]
+    use_basic_auth: bool = True  # Use HTTP Basic auth (RFC 6749) vs body params
 
     def get_authorization_url(self, state: Optional[str] = None) -> str:
         """
@@ -75,6 +77,35 @@ class OAuthManager:
         """
         return self.config.get_authorization_url(state)
 
+    def _get_auth_headers(self) -> dict[str, str]:
+        """
+        Get authorization headers for token requests.
+
+        Returns:
+            Headers dict, with Basic auth if configured.
+        """
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if self.config.use_basic_auth:
+            credentials = base64.b64encode(
+                f"{self.config.client_id}:{self.config.client_secret}".encode()
+            ).decode()
+            headers["Authorization"] = f"Basic {credentials}"
+        return headers
+
+    def _get_client_credentials(self) -> dict[str, str]:
+        """
+        Get client credentials for body params (when not using Basic auth).
+
+        Returns:
+            Dict with client_id and client_secret if not using Basic auth.
+        """
+        if self.config.use_basic_auth:
+            return {}
+        return {
+            "client_id": self.config.client_id,
+            "client_secret": self.config.client_secret,
+        }
+
     def exchange_code_for_token(
         self, authorization_code: str
     ) -> tuple[Optional[TokenInfo], Optional[str]]:
@@ -91,12 +122,16 @@ class OAuthManager:
             "grant_type": "authorization_code",
             "code": authorization_code,
             "redirect_uri": self.config.redirect_uri,
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
+            **self._get_client_credentials(),
         }
 
         try:
-            response = requests.post(self.config.token_url, data=data, timeout=30)
+            response = requests.post(
+                self.config.token_url,
+                headers=self._get_auth_headers(),
+                data=data,
+                timeout=30,
+            )
             response.raise_for_status()
 
             token_data = response.json()
@@ -120,12 +155,16 @@ class OAuthManager:
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
+            **self._get_client_credentials(),
         }
 
         try:
-            response = requests.post(self.config.token_url, data=data, timeout=30)
+            response = requests.post(
+                self.config.token_url,
+                headers=self._get_auth_headers(),
+                data=data,
+                timeout=30,
+            )
             response.raise_for_status()
 
             token_data = response.json()
@@ -222,5 +261,6 @@ class OAuthManager:
             auth_url="https://github.com/login/oauth/authorize",
             token_url="https://github.com/login/oauth/access_token",
             scopes=["repo", "user"],
+            use_basic_auth=False,  # GitHub accepts credentials in POST body
         )
         return cls(config)
