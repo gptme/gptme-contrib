@@ -172,7 +172,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--state",
                     "open",
                     "--json",
-                    "number,title,updatedAt,url",
+                    "number,title,updatedAt,url,headRefName",
                 ],
                 capture_output=True,
                 text=True,
@@ -206,6 +206,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                         # Update state file
                         state_file.write_text(updated_at)
 
+                        branch_name = pr.get("headRefName", "unknown")
                         work_items.append(
                             WorkItem(
                                 repo=repo,
@@ -213,7 +214,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                                 number=pr_number,
                                 title=pr["title"],
                                 url=pr["url"],
-                                details=f"PR #{pr_number} updated: {updated_at}",
+                                details=f"PR #{pr_number} updated: {updated_at}\n  - **Branch**: `{branch_name}` (push to this branch!)",
                             )
                         )
 
@@ -687,6 +688,11 @@ Classify each work item:
 - MUST use worktrees for PRs
 - MUST update PR after fixing (don't just commit)
 - Never commit directly to master/main
+
+**Branch Verification (CRITICAL)**:
+- Work item shows branch name: push to THAT branch
+- Before pushing: `git branch -vv` → verify correct upstream
+- If tracking wrong branch: `git branch --unset-upstream && git push -u origin <branch>`
 
 **For Workspace Repo**:
 - Can commit directly to master
