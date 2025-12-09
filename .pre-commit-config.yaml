@@ -48,6 +48,14 @@ repos:
     types: [markdown]
     pass_filenames: true
 
+  - id: validate-submodule-commits
+    name: Validate submodule commits exist upstream
+    description: Ensures submodule references point to commits that exist in upstream repos.
+    entry: python3 scripts/precommit/validate_submodule_commits.py
+    language: system
+    pass_filenames: false
+    always_run: true
+
   - id: check-names
     name: Check for agent-instance names
     description: Verifies that we are not accidentally using names of agents or users in the shared scripts (should be configurable).
