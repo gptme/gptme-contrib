@@ -44,22 +44,7 @@ def get_submodules() -> dict[str, str]:
 
 def get_staged_submodule_sha(submodule_path: str) -> str | None:
     """Get the SHA that a submodule is staged/committed to point to."""
-    try:
-        # Get the staged tree entry for the submodule
-        result = subprocess.run(
-            ["git", "ls-tree", "HEAD", submodule_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        # Format: mode type sha\tpath
-        parts = result.stdout.strip().split()
-        if len(parts) >= 3 and parts[1] == "commit":
-            return parts[2]
-    except subprocess.CalledProcessError:
-        pass
-
-    # Also check staged changes
+    # First check staged changes (takes precedence over HEAD)
     try:
         result = subprocess.run(
             ["git", "diff-index", "--cached", "HEAD", "--", submodule_path],
@@ -78,29 +63,30 @@ def get_staged_submodule_sha(submodule_path: str) -> str | None:
     except subprocess.CalledProcessError:
         pass
 
+    # Fall back to HEAD if nothing is staged
+    try:
+        result = subprocess.run(
+            ["git", "ls-tree", "HEAD", submodule_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # Format: mode type sha\tpath
+        parts = result.stdout.strip().split()
+        if len(parts) >= 3 and parts[1] == "commit":
+            return parts[2]
+    except subprocess.CalledProcessError:
+        pass
+
     return None
 
 
 def check_commit_exists_upstream(submodule_path: str, sha: str, url: str) -> bool:
     """Check if a commit SHA exists in the upstream repository."""
-    # Try using git ls-remote to check if the commit exists
+    # Use git fetch with depth=1 to check if commit is fetchable
+    # Note: git ls-remote only finds refs (branches/tags), not arbitrary commits,
+    # so we go directly to fetch which works for any commit SHA
     try:
-        result = subprocess.run(
-            ["git", "ls-remote", url, sha],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        # If the commit exists as a ref, it will be returned
-        if sha in result.stdout:
-            return True
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        pass
-
-    # For commits that aren't refs, we need to try fetching
-    # This is more expensive but necessary for arbitrary commit SHAs
-    try:
-        # Use git fetch with depth=1 to check if commit is fetchable
         result = subprocess.run(
             ["git", "-C", submodule_path, "fetch", "--depth=1", "origin", sha],
             capture_output=True,
