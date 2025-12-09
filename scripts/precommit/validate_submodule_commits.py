@@ -43,8 +43,13 @@ def get_submodules() -> dict[str, str]:
 
 
 def get_staged_submodule_sha(submodule_path: str) -> str | None:
-    """Get the SHA that a submodule is staged/committed to point to."""
-    # First check staged changes (takes precedence over HEAD)
+    """Get the SHA that a submodule is staged to point to.
+
+    Only returns a SHA if the submodule is actually being modified in this commit.
+    Returns None if the submodule is not staged (no changes to validate).
+    """
+    # Only check staged changes - do NOT fall back to HEAD
+    # This ensures we only validate submodules being modified in this commit
     try:
         result = subprocess.run(
             ["git", "diff-index", "--cached", "HEAD", "--", submodule_path],
@@ -63,21 +68,7 @@ def get_staged_submodule_sha(submodule_path: str) -> str | None:
     except subprocess.CalledProcessError:
         pass
 
-    # Fall back to HEAD if nothing is staged
-    try:
-        result = subprocess.run(
-            ["git", "ls-tree", "HEAD", submodule_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        # Format: mode type sha\tpath
-        parts = result.stdout.strip().split()
-        if len(parts) >= 3 and parts[1] == "commit":
-            return parts[2]
-    except subprocess.CalledProcessError:
-        pass
-
+    # No staged changes for this submodule - skip validation
     return None
 
 

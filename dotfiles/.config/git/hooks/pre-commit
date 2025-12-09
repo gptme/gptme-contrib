@@ -80,9 +80,10 @@ fi
 # This prevents CI failures from submodules pointing to unpushed commits
 if [ -f ".gitmodules" ]; then
     # Find the validation script relative to this hook
-    # Hook location: gptme-contrib/dotfiles/.config/git/hooks/
+    # Hook location: gptme-contrib/dotfiles/.config/git/hooks/pre-commit
+    # Need to go 4 levels up: hooks -> git -> .config -> dotfiles -> gptme-contrib
     # Script location: gptme-contrib/scripts/precommit/validate_submodule_commits.py
-    GPTME_CONTRIB_DIR="$(cd "$HOOK_DIR/../../.." && pwd)"
+    GPTME_CONTRIB_DIR="$(cd "$HOOK_DIR/../../../.." && pwd)"
     VALIDATE_SCRIPT="$GPTME_CONTRIB_DIR/scripts/precommit/validate_submodule_commits.py"
 
     if [ -x "$VALIDATE_SCRIPT" ]; then
