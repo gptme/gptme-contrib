@@ -81,6 +81,7 @@ def get_staged_submodule_sha(submodule_path: str) -> str | None:
     return None
 
 
+# TODO: The 'url' parameter is not used in check_commit_exists_upstream. Either use it to fetch from the correct remote or remove it to avoid confusion.
 def check_commit_exists_upstream(submodule_path: str, sha: str, url: str) -> bool:
     """Check if a commit SHA exists in the upstream repository."""
     # Use git fetch with depth=1 to check if commit is fetchable
