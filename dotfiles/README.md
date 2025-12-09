@@ -36,8 +36,8 @@ Edit `.config/git/hooks/pre-commit` and add patterns to `ALLOWED_PATTERNS` (repo
 
 ```bash
 ALLOWED_PATTERNS=(
-    "gptme-bob"
-    "alice"
+    "my-agent-workspace"
+    "another-agent"
     "your-agent/workspace"  # Add your agent workspaces here
 )
 ```
