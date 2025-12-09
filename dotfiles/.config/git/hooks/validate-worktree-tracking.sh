@@ -22,14 +22,20 @@ if [ -z "$upstream" ]; then
     # Check if this is a push to create new remote branch
     # Pre-push hook receives: local_ref local_sha remote_ref remote_sha on stdin
     # For new branches with -u, remote_ref will be refs/heads/<branch>
+    new_branch_push=false
     while read -r _local_ref _local_sha remote_ref _remote_sha; do
         expected_ref="refs/heads/$current_branch"
         if [ "$remote_ref" = "$expected_ref" ]; then
             # Pushing to same-named branch on origin - likely creating new branch
-            echo "ℹ️  No upstream set - assuming new branch push to origin/$current_branch"
-            exit 0
+            new_branch_push=true
+            break
         fi
     done
+
+    if [ "$new_branch_push" = true ]; then
+        echo "ℹ️  No upstream set - assuming new branch push to origin/$current_branch"
+        exit 0
+    fi
 
     echo "❌ Error: Branch '$current_branch' has no upstream tracking branch"
     echo "   This can cause pushes to wrong location or branch."

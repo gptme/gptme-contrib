@@ -30,15 +30,15 @@ The dotfiles install global git hooks that apply to ALL repositories:
 
 ## Customization
 
-### Adding Protected Repos
+### Adding Allowed Repos
 
-Edit `.config/git/hooks/pre-commit` and add patterns to `FORBIDDEN_PATTERNS`:
+Edit `.config/git/hooks/pre-commit` and add patterns to `ALLOWED_PATTERNS` (repos where master commits are permitted):
 
 ```bash
-FORBIDDEN_PATTERNS=(
-    "gptme/gptme"
-    "gptme/gptme-contrib"
-    "your-org/your-repo"  # Add your repos here
+ALLOWED_PATTERNS=(
+    "gptme-bob"
+    "alice"
+    "your-agent/workspace"  # Add your agent workspaces here
 )
 ```
 
