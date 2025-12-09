@@ -1,10 +1,11 @@
 #!/bin/bash
-# Pre-commit hook: validates branch, prevents protected commits, and runs pre-commit with auto-staging
+# Pre-commit hook: validates branch, prevents protected commits, validates submodules, and runs pre-commit
 #
 # Features:
 # 1. Prevents commits to master/main in external repos without push access
 # 2. Warns if branch is not based on latest origin/master
-# 3. Runs pre-commit with auto-staging (re-stages files modified by formatters)
+# 3. Validates submodule commits exist upstream (prevents CI failures)
+# 4. Runs pre-commit with auto-staging (re-stages files modified by formatters)
 
 set -e
 
@@ -72,6 +73,28 @@ HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -x "$HOOK_DIR/validate-branch-base.sh" ]; then
     # Run validation but don't fail on warnings
     "$HOOK_DIR/validate-branch-base.sh" || true
+fi
+
+# --- Part 4: Submodule commit validation ---
+# Validates that submodule commits exist upstream before committing
+# This prevents CI failures from submodules pointing to unpushed commits
+if [ -f ".gitmodules" ]; then
+    # Find the validation script relative to this hook
+    # Hook location: gptme-contrib/dotfiles/.config/git/hooks/
+    # Script location: gptme-contrib/scripts/precommit/validate_submodule_commits.py
+    GPTME_CONTRIB_DIR="$(cd "$HOOK_DIR/../../.." && pwd)"
+    VALIDATE_SCRIPT="$GPTME_CONTRIB_DIR/scripts/precommit/validate_submodule_commits.py"
+
+    if [ -x "$VALIDATE_SCRIPT" ]; then
+        echo -e "${GREEN}Validating submodule commits...${NC}"
+        if ! python3 "$VALIDATE_SCRIPT"; then
+            echo -e "${RED}✗ Submodule validation failed${NC}"
+            echo "   Some submodule commits don't exist upstream."
+            echo "   Push your submodule commits before committing the parent repo."
+            exit 1
+        fi
+        echo -e "${GREEN}✓ Submodule commits validated${NC}"
+    fi
 fi
 
 # --- Part 3: Pre-commit with auto-staging ---
