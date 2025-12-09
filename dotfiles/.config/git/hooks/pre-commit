@@ -86,7 +86,7 @@ if [ -f ".gitmodules" ]; then
     GPTME_CONTRIB_DIR="$(cd "$HOOK_DIR/../../../.." && pwd)"
     VALIDATE_SCRIPT="$GPTME_CONTRIB_DIR/scripts/precommit/validate_submodule_commits.py"
 
-    if [ -x "$VALIDATE_SCRIPT" ]; then
+    if [ -f "$VALIDATE_SCRIPT" ]; then
         echo -e "${GREEN}Validating submodule commits...${NC}"
         if ! python3 "$VALIDATE_SCRIPT"; then
             echo -e "${RED}✗ Submodule validation failed${NC}"
