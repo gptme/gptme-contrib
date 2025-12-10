@@ -7,6 +7,7 @@ over multiple turns until relevant code is found.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -14,8 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-
 from gptme.tools.base import ToolSpec
+
+logger = logging.getLogger(__name__)
 
 # Constants from Morph SDK
 MAX_TURNS = 4
@@ -435,6 +437,15 @@ class LocalProvider:
             path = file_spec["path"]
             ranges = file_spec.get("lines", [])
 
+            # Normalize path: strip repo_root prefix if model included it
+            # e.g., "home/user/project/file.md" -> "file.md"
+            repo_root_str = str(self.repo_root)
+            if path.startswith(repo_root_str):
+                path = path[len(repo_root_str) :].lstrip("/")
+            elif path.startswith(repo_root_str.lstrip("/")):
+                # Handle missing leading slash: "home/user/..." -> strip it
+                path = path[len(repo_root_str.lstrip("/")) :].lstrip("/")
+
             file_path = (self.repo_root / path).resolve()
             # Security: prevent path traversal attacks
             if not file_path.is_relative_to(self.repo_root):
@@ -459,8 +470,8 @@ class LocalProvider:
                 for start, end in ranges:
                     start_idx = max(0, start - 1)
                     end_idx = min(len(all_lines), end)
-                    for i, line in enumerate(all_lines[start_idx:end_idx], start=start):
-                        content_lines.append(f"{i}|{line.rstrip()}")
+                    for line in all_lines[start_idx:end_idx]:
+                        content_lines.append(line.rstrip())
                     content_lines.append("")  # Separator between ranges
 
                 resolved.append(
@@ -476,6 +487,7 @@ class LocalProvider:
 
 def _call_morph_api(messages: list[dict], api_key: str) -> str:
     """Call the Morph warp-grep API."""
+    logger.info("Calling Morph API: %d messages", len(messages))
     with httpx.Client(timeout=TIMEOUT_MS / 1000) as client:
         response = client.post(
             "https://api.morphllm.com/v1/chat/completions",
@@ -591,6 +603,96 @@ def warp_grep_search(
     return []  # No results if we exhaust turns without finish
 
 
+# File extension to language mapping for syntax highlighting
+EXT_TO_LANG = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".jsx": "jsx",
+    ".tsx": "tsx",
+    ".rs": "rust",
+    ".go": "go",
+    ".rb": "ruby",
+    ".java": "java",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".php": "php",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".scala": "scala",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "zsh",
+    ".fish": "fish",
+    ".ps1": "powershell",
+    ".sql": "sql",
+    ".html": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".xml": "xml",
+    ".md": "markdown",
+    ".rst": "rst",
+    ".tex": "latex",
+    ".vim": "vim",
+    ".lua": "lua",
+    ".r": "r",
+    ".R": "r",
+    ".jl": "julia",
+    ".ex": "elixir",
+    ".exs": "elixir",
+    ".erl": "erlang",
+    ".hs": "haskell",
+    ".ml": "ocaml",
+    ".clj": "clojure",
+    ".lisp": "lisp",
+    ".el": "elisp",
+    ".dockerfile": "dockerfile",
+    ".tf": "terraform",
+    ".hcl": "hcl",
+    ".nix": "nix",
+    ".zig": "zig",
+    ".v": "v",
+    ".nim": "nim",
+    ".cr": "crystal",
+    ".d": "d",
+    ".ada": "ada",
+    ".f90": "fortran",
+    ".f95": "fortran",
+    ".pl": "perl",
+    ".pm": "perl",
+    ".awk": "awk",
+    ".sed": "sed",
+    ".proto": "protobuf",
+    ".graphql": "graphql",
+    ".gql": "graphql",
+}
+
+
+def _get_language(path: str) -> str:
+    """Get syntax highlighting language from file path."""
+    from pathlib import Path
+
+    ext = Path(path).suffix.lower()
+    # Handle special cases
+    name = Path(path).name.lower()
+    if name == "dockerfile":
+        return "dockerfile"
+    if name == "makefile":
+        return "makefile"
+    if name.endswith(".mk"):
+        return "makefile"
+    return EXT_TO_LANG.get(ext, "")
+
+
 # Tool function for gptme
 def warp_grep(query: str, repo_root: str = ".") -> str:
     """
@@ -610,7 +712,8 @@ def warp_grep(query: str, repo_root: str = ".") -> str:
 
         output_parts = []
         for file in results:
-            output_parts.append(f"### {file.path}\n```\n{file.content}\n```")
+            lang = _get_language(file.path)
+            output_parts.append(f"### {file.path}\n```{lang}\n{file.content}\n```")
 
         return "\n\n".join(output_parts)
     except ValueError as e:
