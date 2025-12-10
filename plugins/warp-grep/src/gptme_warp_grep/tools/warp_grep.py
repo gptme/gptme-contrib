@@ -511,7 +511,14 @@ def warp_grep_search(
     Returns:
         List of ResolvedFile with path and content of relevant code
     """
-    api_key = api_key or os.environ.get("MORPH_API_KEY")
+    if api_key is None:
+        # Try gptme config first, then fall back to os.environ
+        try:
+            from gptme.config import get_config
+
+            api_key = get_config().get_env("MORPH_API_KEY")
+        except ImportError:
+            api_key = os.environ.get("MORPH_API_KEY")
     if not api_key:
         raise ValueError(
             "MORPH_API_KEY not set. Get one at https://morphllm.com/dashboard"
