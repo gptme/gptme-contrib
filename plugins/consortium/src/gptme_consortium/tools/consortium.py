@@ -145,12 +145,12 @@ def query_consortium(
     """
     if models is None:
         # Default to latest frontier models from major providers
-        # Requires API keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, XAI_API_KEY
+        # Requires API keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY
         # Falls back gracefully if some providers unavailable
         models = [
             "anthropic/claude-opus-4-5",
             "openai/gpt-5.1",
-            "google/gemini-3-pro-preview",
+            "gemini/gemini-3-pro-preview",
             "xai/grok-4",
         ]
 
@@ -383,10 +383,10 @@ Best for:
 Default models (latest frontier):
 - anthropic/claude-opus-4-5 (Claude Opus 4.5)
 - openai/gpt-5.1 (GPT-5.1)
-- google/gemini-3-pro-preview (Gemini 3 Pro)
+- gemini/gemini-3-pro-preview (Gemini 3 Pro)
 - xai/grok-4 (Grok 4)
 
-Requires API keys for each provider (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, XAI_API_KEY).
+Requires API keys for each provider (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY).
 Models without valid keys will gracefully fail and be excluded from consensus.
 
 Arguments:
@@ -419,7 +419,7 @@ query_consortium(
 query_consortium(
     question="What are the pros and cons of different rate limiting strategies
     (token bucket, leaky bucket, fixed window, sliding window)?",
-    models=["anthropic/claude-opus-4-5", "openai/gpt-5.1", "google/gemini-3-pro-preview"]
+    models=["anthropic/claude-opus-4-5", "openai/gpt-5.1", "gemini/gemini-3-pro-preview"]
 )
 ```
     """,
