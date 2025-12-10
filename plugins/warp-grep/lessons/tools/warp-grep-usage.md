@@ -6,10 +6,10 @@ match:
 # Using Warp-Grep for Semantic Code Search
 
 ## Rule
-Use warp-grep for natural language code search across repositories, preferring smaller focused repos and code-oriented queries.
+Use warp-grep for natural language code search across repositories; it works on any git repo regardless of size.
 
 ## Context
-When you need to understand unfamiliar codebases, find implementations, or locate specific patterns using natural language queries.
+When you need to understand unfamiliar codebases, find implementations, locate patterns, or search through documentation/journals using natural language.
 
 ## Detection
 Observable signals that warp-grep is appropriate:
@@ -18,6 +18,7 @@ Observable signals that warp-grep is appropriate:
 - Searching across multiple files for related functionality
 - Traditional grep/ripgrep would require knowing exact patterns
 - Exploring unfamiliar code structure
+- Finding historical context (journals, session logs)
 
 ## Pattern
 ```python
@@ -33,16 +34,28 @@ results.append(warp_grep("How are errors handled", repo))
 results.append(warp_grep("What validation is performed", repo))
 # Process results...
 
-# Code-focused queries work best
-warp_grep("Find the function that validates user input", repo)  # ✅ Good
-warp_grep("Find documentation about the API", repo)  # ⚠️ May miss markdown
+# Works for both code and documentation
+warp_grep("Find the ToolSpec class definition", repo)  # ✅ Code
+warp_grep("What work was done in Session 1695", repo)  # ✅ Journals/markdown
+warp_grep("Find shell command execution", repo)       # ✅ Implementation details
+
+# Multi-repo exploration
+repos = ["/path/to/project1", "/path/to/project2", "/path/to/project3"]
+for repo in repos:
+    result = warp_grep("How are plugins loaded", repo)
+    print(f"{repo}: {result[:500]}")
 ```
 
-**Limitations to know:**
-- 176k token context limit - large repos may fail
-- Optimized for code, not documentation (markdown less reliable)
-- Each query takes 2-6 API calls (~5-15 seconds)
-- Some queries return empty results - try rephrasing
+**How it works:**
+- Uses git grep + git ls-files (only searches tracked files)
+- Model generates search commands, we execute locally, send results back
+- Typically 2-4 API calls per query (~5-15 seconds)
+- Results include syntax-highlighted code blocks
+
+**Tips:**
+- Specific queries work better than broad ones
+- If no results, try rephrasing or being more specific
+- Works on large repos (gptme: 130k files → searches only 431 tracked)
 
 ## Outcome
 Following this pattern leads to:
@@ -50,12 +63,13 @@ Following this pattern leads to:
 - **Natural queries**: No need to know exact patterns
 - **Comprehensive search**: Finds related code across files
 - **Syntax highlighting**: Results formatted with proper language tags
+- **Large repo support**: Git-aware search prevents context overflow
 
 Batch queries enable thorough exploration:
-- 4 queries covering different aspects (~40s total)
+- 3-4 queries covering different aspects (~30-45s total)
 - Results can be cross-referenced for full picture
 - Better than single broad query that may miss aspects
 
 ## Related
-- [Warp-Grep Plugin](../../plugins/warp-grep/) - Implementation
+- [Warp-Grep Plugin](../../) - Implementation
 - [Morph Documentation](https://docs.morphllm.com/sdk/components/warp-grep/) - API reference
