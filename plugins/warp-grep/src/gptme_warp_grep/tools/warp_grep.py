@@ -22,15 +22,25 @@ logger = logging.getLogger(__name__)
 # Constants from Morph SDK
 MAX_TURNS = 4
 TIMEOUT_MS = 30000
+MAX_CONTEXT_TOKENS = 150000  # Leave headroom below 176k limit
+CHARS_PER_TOKEN = 4  # Rough estimate
 
 # Default excludes (common patterns to skip)
 DEFAULT_EXCLUDES = [
-    "node_modules",
+    # Version control
     ".git",
+    ".svn",
+    ".hg",
+    # Dependencies
+    "node_modules",
     ".venv",
     "venv",
+    "vendor",
+    "third_party",
+    # Build/cache
     "__pycache__",
     ".pyc",
+    ".pyo",
     ".mypy_cache",
     ".ruff_cache",
     ".pytest_cache",
@@ -41,15 +51,43 @@ DEFAULT_EXCLUDES = [
     "dist",
     "build",
     ".egg-info",
+    "target",  # Rust
+    # Lock files
     "*.min.js",
     "*.min.css",
     "package-lock.json",
     "yarn.lock",
     "pnpm-lock.yaml",
+    "uv.lock",
+    "poetry.lock",
+    "Cargo.lock",
     "*.lock",
+    # Data/logs
+    "*.log",
+    "logs",
+    "*.csv",
+    "*.parquet",
+    # Media
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.svg",
+    "*.ico",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
+    # OS
     ".DS_Store",
-    "*.pyc",
-    "*.pyo",
+    "Thumbs.db",
+    # Large generated
+    "*.map",
+    "*.chunk.js",
+    # Documentation (often large, search code instead)
+    "docs/_build",
+    "site",
+    "_site",
 ]
 
 # System prompt from Morph documentation
@@ -292,9 +330,34 @@ class LocalProvider:
 
     def __init__(self, repo_root: str | Path):
         self.repo_root = Path(repo_root).resolve()
+        self._is_git_repo = (self.repo_root / ".git").exists()
+        self._git_files: set[str] | None = None
+
+    def _get_git_files(self) -> set[str]:
+        """Get set of git-tracked files (cached)."""
+        if self._git_files is None:
+            if not self._is_git_repo:
+                self._git_files = set()
+            else:
+                try:
+                    result = subprocess.run(
+                        ["git", "ls-files"],
+                        capture_output=True,
+                        text=True,
+                        cwd=self.repo_root,
+                        timeout=10,
+                    )
+                    self._git_files = (
+                        set(result.stdout.strip().split("\n"))
+                        if result.stdout.strip()
+                        else set()
+                    )
+                except Exception:
+                    self._git_files = set()
+        return self._git_files
 
     def grep(self, pattern: str, path: str) -> dict:
-        """Search for pattern using ripgrep."""
+        """Search for pattern using git grep (if git repo) or ripgrep."""
         search_path = (self.repo_root / path).resolve()
         # Security: prevent path traversal attacks
         if not search_path.is_relative_to(self.repo_root):
@@ -302,19 +365,35 @@ class LocalProvider:
         if not search_path.exists():
             return {"lines": [], "error": f"Path not found: {path}"}
 
-        # Build exclude args
-        exclude_args = []
-        for exc in DEFAULT_EXCLUDES:
-            exclude_args.extend(["--glob", f"!{exc}"])
-
         try:
-            result = subprocess.run(
-                ["rg", "--line-number", "--no-heading", pattern, str(search_path)]
-                + exclude_args,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            # Use git grep for git repos (respects .gitignore automatically)
+            if self._is_git_repo:
+                # git grep searches from repo root
+                rel_path = (
+                    search_path.relative_to(self.repo_root)
+                    if search_path != self.repo_root
+                    else Path(".")
+                )
+                result = subprocess.run(
+                    ["git", "grep", "-n", "--no-color", pattern, "--", str(rel_path)],
+                    capture_output=True,
+                    text=True,
+                    cwd=self.repo_root,
+                    timeout=30,
+                )
+            else:
+                # Fall back to ripgrep with excludes
+                exclude_args = []
+                for exc in DEFAULT_EXCLUDES:
+                    exclude_args.extend(["--glob", f"!{exc}"])
+                result = subprocess.run(
+                    ["rg", "--line-number", "--no-heading", pattern, str(search_path)]
+                    + exclude_args,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
             lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
             # Limit output to prevent token explosion
             if len(lines) > 100:
@@ -323,7 +402,7 @@ class LocalProvider:
         except subprocess.TimeoutExpired:
             return {"lines": [], "error": "Search timed out"}
         except FileNotFoundError:
-            return {"lines": [], "error": "ripgrep (rg) not found"}
+            return {"lines": [], "error": "git/ripgrep not found"}
         except Exception as e:
             return {"lines": [], "error": str(e)}
 
@@ -370,7 +449,7 @@ class LocalProvider:
         max_results: int = 100,
         max_depth: int = 3,
     ) -> list[dict]:
-        """List directory structure."""
+        """List directory structure, using git-tracked files for git repos."""
         target_path = (self.repo_root / path).resolve()
         # Security: prevent path traversal attacks
         if not target_path.is_relative_to(self.repo_root):
@@ -389,6 +468,11 @@ class LocalProvider:
         entries: list[dict] = []
         pattern_re = re.compile(pattern) if pattern else None
 
+        # For git repos, use git ls-files to only show tracked files
+        if self._is_git_repo:
+            return self._analyse_git(target_path, pattern_re, max_results, max_depth)
+
+        # Fall back to filesystem walk for non-git repos
         def walk(p: Path, depth: int = 0):
             if depth > max_depth or len(entries) >= max_results:
                 return
@@ -399,7 +483,7 @@ class LocalProvider:
                 return
 
             for item in items:
-                # Skip excluded patterns (exact name match to avoid false positives like "rebuild" matching "build")
+                # Skip excluded patterns
                 if any(
                     item.name == exc or item.name.endswith(exc)
                     for exc in DEFAULT_EXCLUDES
@@ -429,6 +513,80 @@ class LocalProvider:
 
         walk(target_path)
         return entries
+
+    def _analyse_git(
+        self,
+        target_path: Path,
+        pattern_re: re.Pattern | None,
+        max_results: int,
+        max_depth: int,
+    ) -> list[dict]:
+        """Analyse using git-tracked files only."""
+        git_files = self._get_git_files()
+        rel_target = (
+            target_path.relative_to(self.repo_root)
+            if target_path != self.repo_root
+            else Path(".")
+        )
+        target_prefix = str(rel_target) + "/" if str(rel_target) != "." else ""
+
+        # Filter files under target path
+        relevant_files = []
+        for f in git_files:
+            if target_prefix and not f.startswith(target_prefix):
+                continue
+            # Remove target prefix to get relative path from target
+            rel_from_target = f[len(target_prefix) :] if target_prefix else f
+            if not rel_from_target:
+                continue
+            relevant_files.append((f, rel_from_target))
+
+        # Build directory tree from file paths
+        entries: list[dict] = []
+        seen_dirs: set[str] = set()
+
+        for full_path, rel_path in sorted(relevant_files):
+            parts = rel_path.split("/")
+            depth = len(parts) - 1
+
+            # Skip if too deep
+            if depth > max_depth:
+                continue
+
+            # Add parent directories
+            for i in range(len(parts) - 1):
+                dir_path = "/".join(parts[: i + 1])
+                if dir_path not in seen_dirs and len(entries) < max_results:
+                    seen_dirs.add(dir_path)
+                    name = parts[i]
+                    if pattern_re and not pattern_re.search(name):
+                        continue
+                    entries.append(
+                        {
+                            "name": name,
+                            "path": (target_prefix + dir_path)
+                            if target_prefix
+                            else dir_path,
+                            "type": "dir",
+                            "depth": i,
+                        }
+                    )
+
+            # Add file
+            if len(entries) < max_results:
+                name = parts[-1]
+                if pattern_re and not pattern_re.search(name):
+                    continue
+                entries.append(
+                    {
+                        "name": name,
+                        "path": full_path,
+                        "type": "file",
+                        "depth": depth,
+                    }
+                )
+
+        return entries[:max_results]
 
     def resolve_finish_files(self, files: list[dict]) -> list[ResolvedFile]:
         """Read file ranges specified in a finish command."""
