@@ -16,6 +16,17 @@ from gptme.tools.base import ToolSpec
 
 from .cost_tracker import get_cost_tracker
 
+
+def _get_api_key(env_var: str) -> str | None:
+    """Get API key from gptme config first, then fall back to os.environ."""
+    try:
+        from gptme.config import get_config
+
+        return get_config().get_env(env_var)
+    except ImportError:
+        return os.environ.get(env_var)
+
+
 Provider = Literal["gemini", "dalle", "dalle2"]
 Style = Literal[
     "photo",
@@ -262,9 +273,9 @@ def _generate_gemini(
         )
 
     # Configure API key
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    api_key = _get_api_key("GOOGLE_API_KEY") or _get_api_key("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY environment variable not set")
+        raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set in env or config")
 
     genai.configure(api_key=api_key)
 
@@ -324,7 +335,10 @@ def _generate_dalle(
     except ImportError:
         raise ImportError("openai not installed. Install with: pip install openai")
 
-    client = OpenAI()
+    api_key = _get_api_key("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not set in env or config")
+    client = OpenAI(api_key=api_key)
 
     # Generate image
     response = client.images.generate(  # type: ignore[call-overload]
@@ -491,7 +505,10 @@ def generate_variation(
     # Generate variations using OpenAI API
     import openai
 
-    client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    api_key = _get_api_key("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not set in env or config")
+    client = openai.OpenAI(api_key=api_key)
 
     # Generate variations
     results = []
