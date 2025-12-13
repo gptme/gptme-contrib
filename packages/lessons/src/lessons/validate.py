@@ -452,6 +452,7 @@ def validate_directory(
         for f in directory.glob(pattern)
         if f.is_file()
         and not f.name.startswith("README")
+        # Skip symlinks pointing to gptme-contrib (validated separately)
         and not (f.is_symlink() and "gptme-contrib" in str(f.resolve()))
     ]
 
