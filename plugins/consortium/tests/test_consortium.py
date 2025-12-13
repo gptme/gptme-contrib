@@ -24,12 +24,13 @@ class TestQueryConsortium:
                 "gptme_consortium.tools.consortium._synthesize_consensus"
             ) as mock_synth,
         ):
-            # Mock individual model responses
+            # Mock individual model responses (5 default models)
             mock_query.side_effect = [
                 "Response from model 1",
                 "Response from model 2",
                 "Response from model 3",
                 "Response from model 4",
+                "Response from model 5",
             ]
 
             # Mock synthesis result
@@ -48,7 +49,7 @@ class TestQueryConsortium:
             # With agreement_score calculated from responses
             assert 0.6 < result.confidence < 0.9  # Reasonable range
             assert result.synthesis_reasoning == "Test reasoning"
-            assert len(result.models_used) == 4  # Default models
+            assert len(result.models_used) == 5  # Default models (5 frontier models)
             assert result.arbiter_model == "anthropic/claude-sonnet-4-5"
             assert hasattr(result, "agreement_score")
             assert 0.0 <= result.agreement_score <= 1.0
