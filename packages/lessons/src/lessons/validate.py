@@ -450,7 +450,9 @@ def validate_directory(
     lesson_files = [
         f
         for f in directory.glob(pattern)
-        if f.is_file() and not f.name.startswith("README")
+        if f.is_file()
+        and not f.name.startswith("README")
+        and not (f.is_symlink() and "gptme-contrib" in str(f.resolve()))
     ]
 
     if not lesson_files:
