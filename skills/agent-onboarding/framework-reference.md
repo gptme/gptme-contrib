@@ -13,7 +13,7 @@ This framework provides a systematic approach for gptme agents to onboard new us
 1. **User-Centric Discovery**: Understand user needs before demonstrating capabilities
 2. **Progressive Trust Building**: Start small, prove value incrementally
 3. **Clear Boundary Setting**: Define what the agent does/doesn't do upfront
-4. **Value-First Communication**: lead with solving user problems, not showcasing features
+4. **Value-First Communication**: Lead with solving user problems, not showcasing features
 5. **Adaptive Flexibility**: Customize approach based on user's technical comfort and domain
 
 ## Pre-Onboarding Assessment
