@@ -1,20 +1,12 @@
 ---
 match:
   keywords:
-  - commits behind
-  - "\u27F3 behind"
-  - "\u26A0 CONFLICTS"
-  - mergeable=false
-  - rebase based on behind count
-  - rebasing without checking for conflicts
-lesson_id: workflow_when-to-rebase-prs_6f0590fc
-version: 1.0.0
-usage_count: 0
-helpful_count: 0
-harmful_count: 0
-created: '2025-11-04T18:14:42.700580Z'
-updated: '2025-11-04T18:14:42.700580Z'
-last_used: null
+    - commits behind
+    - "⟳ behind"
+    - "⚠ CONFLICTS"
+    - mergeable=false
+    - rebase based on behind count
+    - rebasing without checking for conflicts
 ---
 
 # When to Rebase PRs

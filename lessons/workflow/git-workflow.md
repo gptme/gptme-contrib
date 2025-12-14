@@ -21,76 +21,65 @@ match:
 # Git Workflow
 
 ## Rule
-Stage only intended files explicitly, verify branch before committing, and commit inside submodules before updating superproject pointers.
+Stage only intended files, commit with explicit paths, verify branch before committing, and follow scope-based PR decisions.
 
 ## Context
-When committing changes via git.
+When committing changes via git in Bob's workspace or external repositories.
 
 ## Detection
-Observable signals indicating git workflow issues:
-- Using `git add .` or `git commit -a` (stages unintended files)
-- Creating branches/PRs for trivial docs/journal changes
-- Committing to master when feature branch was intended
-- Secrets/tokens appearing in git status (e.g., gptme.toml)
-- Submodule changes not committed inside submodule first
-- Pushing without explicit permission for non-trivial changes
+Observable signals indicating need for careful git workflow:
+- About to use `git add .` or `git commit -a`
+- Making changes without checking `git status` first
+- Creating branch/PR for trivial docs change
+- Committing without verifying current branch
+- Editing files that might contain secrets (gptme.toml)
+- Working with submodules
 
 ## Pattern
-Execute systematic git workflow:
+Follow scope-based workflow:
 
-```txt
-1. Decide scope
-   - Trivial docs/journal → commit directly on master
-   - Non-trivial/code changes → ask first; then branch + PR if approved
+**Scope Decision**:
+- Small docs/journal tweaks: commit directly on master (no PR)
+- Non-trivial/behavioral/code changes: ask first; if approved, branch + PR
+- Never use `git add .` or `git commit -a`
+- Use Conventional Commits format
 
-2. Prepare working tree
-   - Run `git status` to see exactly what changed
-   - If sensitive files touched, `git restore <file>`
-
-3. Verify branch (CRITICAL)
-   - Check: `git branch --show-current`
-   - If on master but should be feature branch: switch now
-   - Recovery: `git branch feature && git reset --hard HEAD~1 && git checkout feature`
-
-4. Commit with explicit paths
-   - Tracked files: `git commit path1 path2 -m "message"`
-   - Untracked files: `git add path1 && git commit path1 -m "message"`
-   - NEVER: `git add .` or `git commit -a`
-
-5. Submodules
-   - First: commit inside submodule
-   - Then: `git add <submodule>` in superproject
-
-6. Push/PR
-   - Don't push unless requested
-   - Feature branches: push and create PR with clear title
-```
-
-**Correct examples**:
+**Commit Workflow**:
 ```bash
-# Check what changed (shows tracked vs untracked)
+# 1. Check what changed
 git status
 
-# Verify on correct branch
-git branch --show-current  # Should show feature-branch, not master
+# 2. Verify on correct branch
+git branch --show-current
 
-# Tracked files: Commit directly
-git commit tasks/task.md lessons/lesson.md -m "docs: update task and lesson"
+# 3. Restore any sensitive files
+git restore gptme.toml  # If touched
 
-# Untracked files: Add then commit (explicit in both!)
-git add journal/2025-11-06.md && git commit journal/2025-11-06.md -m "docs(journal): summary"
+# 4. Commit with explicit paths
+# Tracked files:
+git commit path1 path2 -m "docs: update files"
 
-# Mixed: Add untracked, then commit all explicitly
-git add journal/new.md && git commit journal/new.md tasks/existing.md -m "docs: session work"
+# Untracked files (must add first):
+git add journal/2025-11-06.md && git commit journal/2025-11-06.md -m "docs(journal): session"
 ```
+
+**Recovery from accidental master commit**:
+```bash
+git branch feature-branch    # Create branch at current HEAD
+git reset --hard HEAD~1      # Move master back
+git checkout feature-branch  # Switch to feature branch
+```
+
+**Submodules**:
+- Commit inside submodule first
+- Then in superproject: `git add <submodule>` and commit
 
 ## Outcome
 Following this pattern results in:
-- **Clean commits**: Only intended files staged
-- **Protected secrets**: Sensitive files never committed
-- **Correct branches**: Work on intended branch
-- **Clean submodules**: Changes tracked properly in both repos
-- **Reduced review burden**: No PRs for trivial changes
+- **Clean history**: Only intended files committed
+- **No secrets leaked**: Sensitive files restored before commit
+- **Appropriate PRs**: Right scope for each change type
+- **Safe operations**: Branch verified before commit
 
 ## Related
 - [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs (read together!)

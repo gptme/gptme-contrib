@@ -61,4 +61,6 @@ Examples:
 - Directory listing: 10k files, ~15k tokens → Filtered: 20 files, ~300 tokens (98% reduction)
 
 ## Related
+## Related
 - [Shell Command Chaining](./shell-command-chaining.md) - Combining commands efficiently
+- [Shell Path Quoting](./shell-path-quoting.md) - Proper path handling
