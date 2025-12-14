@@ -1,85 +1,108 @@
 ---
 match:
   keywords:
-    - git workflow
-    - branch management
-    - PR creation
-    - git add
-    - git restore
-    - master branch
-    - feature branch
-    - Conventional Commits
-    - submodule update
-    - secret protection
-    - git status
-    - commit
-    - stage
-    - checkout
-    - push
+  - git workflow
+  - branch management
+  - PR creation
+  - git add
+  - git restore
+  - master branch
+  - feature branch
+  - Conventional Commits
+  - submodule update
+  - secret protection
+  - git status
+  - commit
+  - stage
+  - checkout
+  - push
 ---
 
 # Git Workflow
 
 ## Rule
-Stage only intended files, commit with explicit paths, verify branch before committing, and follow scope-based PR decisions.
+Stage only intended files explicitly, never use `git add .` or `git commit -a`, and commit trivial docs/journal directly to master while using branches/PRs for non-trivial changes.
 
 ## Context
-When committing changes via git in your workspace or external repositories.
+When committing changes via git.
 
 ## Detection
-Observable signals indicating need for careful git workflow:
-- About to use `git add .` or `git commit -a`
-- Making changes without checking `git status` first
-- Creating branch/PR for trivial docs change
-- Committing without verifying current branch
-- Editing files that might contain secrets (gptme.toml)
-- Working with submodules
+Observable signals that indicate need for proper git workflow:
+- Creating unnecessary branches/PRs for trivial changes
+- Using `git add .` which stages unintended files
+- Leaking secrets (e.g., gptme.toml) into commits
+- Submodule noise from improper update sequence
+- Committing to master when feature branch intended
 
 ## Pattern
-Follow scope-based workflow:
+Follow this step-by-step workflow:
 
-**Scope Decision**:
-- Small docs/journal tweaks: commit directly on master (no PR)
-- Non-trivial/behavioral/code changes: ask first; if approved, branch + PR
-- Never use `git add .` or `git commit -a`
-- Use Conventional Commits format
+**1) Decide scope**
+- If trivial docs/journal → commit on master.
+- If non-trivial/needs review → ask; then branch + PR if approved.
+- Avoid: creating branches/PRs for tiny edits.
 
-**Commit Workflow**:
+**2) Prepare working tree**
+- Run `git status` to see exactly what changed.
+- If sensitive files (e.g., gptme.toml) were touched, `git restore <file>`.
+- Avoid: carrying unrelated/untracked files into commits.
+
+**3) Verify branch** (prevents accidental master commits)
+- Check current branch: `git branch --show-current`
+- If on master but should be on feature branch: switch now
+- If accidentally on master: don't commit, create proper branch first
+
+**4) Commit with explicit paths**
+- **For tracked files**: `git commit path1 path2 -m "message"`
+- **For untracked files**: `git add path1 path2 && git commit path1 path2 -m "message"`
+- Avoid: `git add .` then `git commit` (can commit unintended staged changes)
+- Avoid: `git commit -a` (commits all tracked changes)
+
+Example correct workflows:
 ```bash
-# 1. Check what changed
+# Check what changed (shows tracked vs untracked)
 git status
 
-# 2. Verify on correct branch
-git branch --show-current
+# Verify on correct branch
+git branch --show-current  # Should show feature-branch, not master
 
-# 3. Restore any sensitive files
-git restore gptme.toml  # If touched
+# Tracked files: Commit directly
+git commit tasks/existing-task.md lessons/workflow/some-lesson.md -m "docs: update task and lesson"
 
-# 4. Commit with explicit paths
-# Tracked files:
-git commit path1 path2 -m "docs: update files"
+# Untracked files: Add then commit (explicit in both!)
+git add journal/2025-11-06-topic.md && git commit journal/2025-11-06-topic.md -m "docs(journal): session summary"
+git add people/new-person.md && git commit people/new-person.md -m "docs(people): add profile"
 
-# Untracked files (must add first):
-git add journal/2025-11-06.md && git commit journal/2025-11-06.md -m "docs(journal): session"
+# Mixed (untracked + tracked): Add untracked files, then commit all explicitly
+git add journal/2025-11-06-topic.md && git commit journal/2025-11-06-topic.md tasks/existing-task.md -m "docs: session work"
+
+# If pre-commit fails, run the entire `git commit` command again (don't amend)
 ```
 
-**Recovery from accidental master commit**:
+Recovery from accidental master commit:
 ```bash
+# If you committed to master by accident:
 git branch feature-branch    # Create branch at current HEAD
-git reset --hard HEAD~1      # Move master back
+git reset --hard HEAD~1      # Move master back one commit
 git checkout feature-branch  # Switch to feature branch
+# Now you're on feature-branch with your commit, master is clean
 ```
 
-**Submodules**:
-- Commit inside submodule first
-- Then in superproject: `git add <submodule>` and commit
+**5) Submodules** (when applicable)
+- In the submodule: commit the actual file changes.
+- In the superproject: `git add <submodule>` and commit ("chore: bump …").
+
+**6) Push/PR**
+- Don't push or open PRs unless requested.
+- If on a feature branch and review is desired: push and open PR with a clear title/body.
 
 ## Outcome
 Following this pattern results in:
-- **Clean history**: Only intended files committed
-- **No secrets leaked**: Sensitive files restored before commit
-- **Appropriate PRs**: Right scope for each change type
-- **Safe operations**: Branch verified before commit
+- Clean git history with explicit commits
+- No accidental staging of unintended files
+- Proper branch management (trivial vs non-trivial)
+- Protected secrets (restore sensitive files)
+- Correct submodule update sequence
 
 ## Related
 - [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs (read together!)

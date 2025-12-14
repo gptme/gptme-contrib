@@ -1,14 +1,12 @@
 ---
 match:
   keywords:
-    - shell
-    - grep
-    - head
-    - tail
-    - large output
-    - token efficiency
-    - filter output
-    - tokens
+  - shell
+  - output
+  - tokens
+  - grep
+  - filter
+  - large output
 ---
 
 # Shell Output Filtering for Token Efficiency
@@ -61,6 +59,6 @@ Examples:
 - Directory listing: 10k files, ~15k tokens → Filtered: 20 files, ~300 tokens (98% reduction)
 
 ## Related
-## Related
-- [Shell Command Chaining](./shell-command-chaining.md) - Combining commands efficiently
+- Full context: [knowledge/lessons/shell-output-filtering.md](../../knowledge/lessons/tools/shell-output-filtering.md)
+- [Shell Command Chaining](./shell-command-chaining.md) - Combining commands
 - [Shell Path Quoting](./shell-path-quoting.md) - Proper path handling
