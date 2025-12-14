@@ -24,7 +24,7 @@ match:
 Stage only intended files, commit with explicit paths, verify branch before committing, and follow scope-based PR decisions.
 
 ## Context
-When committing changes via git in Bob's workspace or external repositories.
+When committing changes via git in your workspace or external repositories.
 
 ## Detection
 Observable signals indicating need for careful git workflow:
