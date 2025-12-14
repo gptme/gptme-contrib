@@ -59,6 +59,5 @@ Examples:
 - Directory listing: 10k files, ~15k tokens → Filtered: 20 files, ~300 tokens (98% reduction)
 
 ## Related
-- Full context: [knowledge/lessons/shell-output-filtering.md](../../knowledge/lessons/tools/shell-output-filtering.md)
 - [Shell Command Chaining](./shell-command-chaining.md) - Combining commands
 - [Shell Path Quoting](./shell-path-quoting.md) - Proper path handling
