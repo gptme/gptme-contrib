@@ -16,58 +16,47 @@ match:
   - stage
   - checkout
   - push
-lesson_id: workflow_git-workflow_49086c79
-version: 1.0.0
-usage_count: 1
-helpful_count: 1
-harmful_count: 0
-created: '2025-11-04T18:14:42.679244Z'
-updated: '2025-11-04T18:24:16.449224Z'
-last_used: '2025-11-04T18:24:16.449224Z'
 ---
 
 # Git Workflow
 
+## Rule
+Stage only intended files explicitly, never use `git add .` or `git commit -a`, and commit trivial docs/journal directly to master while using branches/PRs for non-trivial changes.
+
 ## Context
 When committing changes via git.
 
-## Problem
-Unnecessary branches/PRs for trivial changes, staging too much (git add .), leaking secrets, and submodule noise increase friction and review overhead.
+## Detection
+Observable signals that indicate need for proper git workflow:
+- Creating unnecessary branches/PRs for trivial changes
+- Using `git add .` which stages unintended files
+- Leaking secrets (e.g., gptme.toml) into commits
+- Submodule noise from improper update sequence
+- Committing to master when feature branch intended
 
-## Defaults
-- Small docs/journal tweaks: commit directly on master (no PR).
-- Non-trivial/behavioral/code changes: ask first; if approved, branch + PR.
-- Stage only intended files; never use `git add .` or `git commit -a`.
-- Use Conventional Commits; single, clear commit for small changes.
-- Never commit secrets/tokens (e.g., gptme.toml env); restore if edited.
-- Submodules: commit inside the submodule first, then update the superproject pointer.
-- Don’t push or create PRs unless requested.
+## Pattern
+Follow this step-by-step workflow:
 
-## Step-by-step workflow
-1) Decide scope
-   - If trivial docs/journal → commit on master.
-   - If non-trivial/needs review → ask; then branch + PR if approved.
-   - Avoid: creating branches/PRs for tiny edits.
+**1) Decide scope**
+- If trivial docs/journal → commit on master.
+- If non-trivial/needs review → ask; then branch + PR if approved.
+- Avoid: creating branches/PRs for tiny edits.
 
-2) Prepare working tree
-   - Run `git status` to see exactly what changed.
-   - If sensitive files (e.g., gptme.toml) were touched, `git restore <file>`.
-   - Avoid: carrying unrelated/untracked files into commits.
+**2) Prepare working tree**
+- Run `git status` to see exactly what changed.
+- If sensitive files (e.g., gptme.toml) were touched, `git restore <file>`.
+- Avoid: carrying unrelated/untracked files into commits.
 
-3) Verify branch (prevents accidental master commits)
-   - Check current branch: `git branch --show-current`
-   - If on master but should be on feature branch: switch now
-   - If accidentally on master: don't commit, create proper branch first
-   - Avoid: committing to master when feature branch intended
+**3) Verify branch** (prevents accidental master commits)
+- Check current branch: `git branch --show-current`
+- If on master but should be on feature branch: switch now
+- If accidentally on master: don't commit, create proper branch first
 
-4) Commit with explicit paths
-   - **For tracked files**: Commit directly: `git commit path1 path2 -m "message"`
-   - **For untracked files**: Must add first: `git add path1 path2 && git commit path1 path2 -m "message"`
-   - Check `git status` to see which files are tracked vs untracked
-   - This prevents accidentally committing staged files you weren't aware of
-   - If you already staged files: review `git status` carefully before committing
-   - Avoid: `git add .` then `git commit` (can commit unintended staged changes)
-   - Avoid: `git commit -a` (commits all tracked changes)
+**4) Commit with explicit paths**
+- **For tracked files**: `git commit path1 path2 -m "message"`
+- **For untracked files**: `git add path1 path2 && git commit path1 path2 -m "message"`
+- Avoid: `git add .` then `git commit` (can commit unintended staged changes)
+- Avoid: `git commit -a` (commits all tracked changes)
 
 Example correct workflows:
 ```bash
@@ -99,15 +88,21 @@ git checkout feature-branch  # Switch to feature branch
 # Now you're on feature-branch with your commit, master is clean
 ```
 
-5) Submodules (when applicable)
-   - In the submodule: commit the actual file changes.
-   - In the superproject: `git add <submodule>` and commit (“chore: bump …”).
-   - Avoid: editing submodule files only from the superproject without committing inside the submodule.
+**5) Submodules** (when applicable)
+- In the submodule: commit the actual file changes.
+- In the superproject: `git add <submodule>` and commit ("chore: bump …").
 
-6) Push/PR
-   - Don’t push or open PRs unless requested.
-   - If on a feature branch and review is desired: push and open PR with a clear title/body.
-   - Avoid: pushing master without confirmation for non-trivial changes.
+**6) Push/PR**
+- Don't push or open PRs unless requested.
+- If on a feature branch and review is desired: push and open PR with a clear title/body.
+
+## Outcome
+Following this pattern results in:
+- Clean git history with explicit commits
+- No accidental staging of unintended files
+- Proper branch management (trivial vs non-trivial)
+- Protected secrets (restore sensitive files)
+- Correct submodule update sequence
 
 ## Related
 - [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs (read together!)

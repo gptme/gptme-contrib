@@ -57,3 +57,7 @@ Following this pattern results in:
 Examples:
 - Full log: 50k lines, ~40k tokens → Filtered: 50 lines, ~400 tokens (99% reduction)
 - Directory listing: 10k files, ~15k tokens → Filtered: 20 files, ~300 tokens (98% reduction)
+
+## Related
+- [Shell Command Chaining](./shell-command-chaining.md) - Combining commands
+- [Shell Path Quoting](./shell-path-quoting.md) - Proper path handling
