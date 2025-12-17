@@ -5,6 +5,7 @@ helping catch errors immediately after edits.
 """
 
 import logging
+import shutil
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
@@ -38,13 +39,8 @@ def _run_quick_diagnostics(file: Path, workspace: Path | None = None) -> str | N
 def _check_python(file: Path, workspace: Path | None = None) -> str | None:
     """Run pyright on a Python file."""
     try:
-        # Quick check if pyright is available
-        which_result = subprocess.run(
-            ["which", "pyright"],
-            capture_output=True,
-            timeout=5,
-        )
-        if which_result.returncode != 0:
+        # Quick check if pyright is available (cross-platform)
+        if not shutil.which("pyright"):
             return None  # pyright not available, skip silently
 
         # Run pyright
