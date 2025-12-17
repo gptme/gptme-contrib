@@ -10,6 +10,7 @@ Initially focused on diagnostics (Phase 1).
 
 import json
 import logging
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -324,15 +325,7 @@ def detect_language_servers(workspace: Path) -> list[tuple[str, list[str]]]:
 
 def _is_server_available(command: str) -> bool:
     """Check if a language server command is available."""
-    try:
-        result = subprocess.run(
-            ["which", command],
-            capture_output=True,
-            timeout=5,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    return shutil.which(command) is not None
 
 
 class LSPManager:
