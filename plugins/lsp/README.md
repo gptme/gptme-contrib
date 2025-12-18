@@ -11,11 +11,15 @@ LSP (Language Server Protocol) integration plugin for gptme, providing code inte
 - **`lsp check`** - Run diagnostics on all changed files (git)
 - **Post-save hook** - Automatically shows errors after saving files
 
-### Phase 2.1: Navigation ✅ (NEW)
+### Phase 2.1: Navigation ✅
 
 - **`lsp definition <file:line:col>`** - Jump to symbol definition
 - **`lsp references <file:line:col>`** - Find all references to a symbol
 - **`lsp hover <file:line:col>`** - Get documentation and type information
+
+### Phase 2.2: Refactoring Tools ✅ (NEW)
+
+- **`lsp rename <file:line:col> <new_name>`** - Rename symbol across project
 
 ## Supported Languages
 
@@ -67,6 +71,21 @@ lsp references src/utils.py:15:5
 lsp hover src/config.py:8:12
 ```
 
+### Refactoring (Phase 2.2)
+
+```bash
+# Rename a function across the entire project
+lsp rename src/utils.py:15:5 new_function_name
+
+# Rename a class
+lsp rename src/models.py:10:7 NewClassName
+
+# Rename a variable
+lsp rename src/config.py:5:1 NEW_CONSTANT_NAME
+```
+
+**Note:** The rename command shows all proposed changes for preview. Use the patch tool to apply the edits.
+
 ### Post-Save Hook
 
 When enabled, the plugin automatically runs diagnostics after you save files:
@@ -107,8 +126,8 @@ path = "~/.local/share/gptme/plugins/lsp"
 - Performance: lazy server initialization
 
 ### Phase 3: Advanced Features (Planned)
-- Auto-fix suggestions
-- Refactoring support
+- Auto-fix suggestions (code actions)
+- Workspace symbols search
 - Multi-language session support
 
 ## Architecture
