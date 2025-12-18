@@ -18,7 +18,7 @@ if _plugin_src not in sys.path:
 # Now imports can happen at module level (path setup required first)
 from gptme_lsp.hooks import register  # noqa: E402
 from gptme_lsp.tools import tool  # noqa: E402
-from gptme_lsp.tools.lsp_tool import _ensure_pyright, _get_workspace, execute  # noqa: E402
+from gptme_lsp.tools.lsp_tool import _get_workspace, execute  # noqa: E402
 
 
 def test_tool_spec():
@@ -39,12 +39,14 @@ def test_get_workspace_git_repo(tmp_path):
         assert result is not None
 
 
-def test_ensure_pyright_available():
-    """Test pyright availability check."""
-    # This test will pass if pyright is installed, skip if not
-    result = _ensure_pyright()
-    # Result depends on system state - just ensure it doesn't crash
-    assert isinstance(result, bool)
+def test_server_availability():
+    """Test LSP server availability check."""
+    # This test checks if LSP server detection works
+    # The result depends on system state - just ensure it doesn't crash
+    from gptme_lsp.lsp_client import KNOWN_SERVERS
+
+    assert isinstance(KNOWN_SERVERS, dict)
+    assert "python" in KNOWN_SERVERS
 
 
 def test_execute_status():
@@ -148,3 +150,31 @@ def test_tools_module_exists():
     # Just test that tool spec is exported
     assert tool is not None
     assert tool.name == "lsp"
+
+
+def test_tool_has_command():
+    """Test that the tool has the /lsp command registered."""
+    assert "lsp" in tool.commands
+    assert callable(tool.commands["lsp"])
+
+
+def test_lsp_command_returns_generator():
+    """Test that the lsp command returns a generator."""
+    from unittest.mock import MagicMock
+    from gptme_lsp.tools.lsp_tool import _lsp_command
+
+    # Create a mock CommandContext
+    mock_ctx = MagicMock()
+    mock_ctx.args = ["status"]
+    mock_ctx.confirm = lambda *args, **kwargs: True
+
+    # Call the command and ensure it's a generator
+    result = _lsp_command(mock_ctx)
+    import types
+
+    assert isinstance(result, types.GeneratorType)
+
+    # Consume the generator
+    messages = list(result)
+    assert len(messages) == 1
+    assert "LSP Status" in messages[0].content

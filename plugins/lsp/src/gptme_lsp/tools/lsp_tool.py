@@ -14,6 +14,7 @@ rust-analyzer (Rust), and any other LSP-compliant server.
 import logging
 import shutil
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,7 @@ from gptme.tools.base import ConfirmFunc, Parameter, ToolSpec
 from ..lsp_client import LSPServer, KNOWN_SERVERS
 
 if TYPE_CHECKING:
+    from gptme.commands import CommandContext
     from gptme.tools.base import ConfirmFunc  # noqa: F811
 
 logger = logging.getLogger(__name__)
@@ -379,6 +381,32 @@ def execute(
         )
 
 
+def _lsp_command(ctx: "CommandContext") -> Generator[Message, None, None]:
+    """Handler for /lsp command.
+
+    Usage:
+        /lsp                      - Show status of available LSP servers
+        /lsp diagnostics <file>   - Get errors/warnings for a file
+        /lsp status               - Show available language servers
+        /lsp check                - Run diagnostics on all changed files
+    """
+    # Parse arguments
+    args = ctx.args if ctx.args else []
+
+    # Default to status if no args
+    if not args:
+        args = ["status"]
+
+    # Use the execute function with the parsed args
+    result = execute(
+        code=None,
+        args=args,
+        kwargs=None,
+        confirm=ctx.confirm,
+    )
+    yield result
+
+
 # Tool specification
 tool = ToolSpec(
     name="lsp",
@@ -417,6 +445,7 @@ diagnostics src/myfile.py
             required=False,
         ),
     ],
+    commands={"lsp": _lsp_command},
 )
 
 
