@@ -168,8 +168,22 @@ def _parse_position(target: str) -> tuple[Path, int, int]:
 
     Raises:
         ValueError: If target format is invalid
+
+    Note:
+        Handles Windows paths with drive letters (e.g., C:/path/file.py:10:5)
     """
-    parts = target.rsplit(":", 2)
+    # Handle Windows drive letters (e.g., C:/path/file.py:10:5)
+    # We need to be careful not to split on the drive letter colon
+    if len(target) >= 2 and target[1] == ":" and target[0].isalpha():
+        # Windows path - split only from after the drive letter
+        rest = target[2:]
+        parts = rest.rsplit(":", 2)
+        # Reconstruct file path with drive letter
+        if len(parts) >= 1:
+            parts[0] = target[0:2] + parts[0]
+    else:
+        parts = target.rsplit(":", 2)
+
     if len(parts) < 2:
         raise ValueError(
             f"Invalid position format: {target}. Expected 'file:line' or 'file:line:col'"
@@ -628,7 +642,7 @@ def execute(
         return Message(
             "system",
             f"Unknown action: {action}\n\n"
-            "Available actions: diagnostics, status, check",
+            "Available actions: diagnostics, definition, references, hover, status, check",
         )
 
 

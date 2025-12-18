@@ -284,25 +284,12 @@ class LSPServer:
         if not self._initialized or self.process is None:
             return []
 
-        # Open the file (triggers diagnostics)
-        uri = file.as_uri()
+        # Open the file (triggers diagnostics) - reuse _ensure_file_open
         try:
-            content = file.read_text()
+            uri = self._ensure_file_open(file)
         except Exception as e:
-            logger.error(f"Cannot read file {file}: {e}")
+            logger.error(f"Cannot open file {file}: {e}")
             return []
-
-        self._send_notification(
-            "textDocument/didOpen",
-            {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": self._guess_language_id(file),
-                    "version": 1,
-                    "text": content,
-                }
-            },
-        )
 
         # Wait for diagnostics to arrive (server sends them asynchronously)
         import time
