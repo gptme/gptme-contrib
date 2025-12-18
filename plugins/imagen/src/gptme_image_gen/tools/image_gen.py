@@ -280,17 +280,27 @@ def _generate_gemini(
     genai.configure(api_key=api_key)
 
     # Use Imagen model
-    model = genai.GenerativeModel("imagen-3-fast-generate-001")
+    model = genai.GenerativeModel("gemini-3-pro-image-preview")
 
     response = model.generate_content(prompt)
 
-    # Save image
-    if hasattr(response, "images") and response.images:
-        image_data = response.images[0]
-        with open(output_path, "wb") as f:
-            f.write(image_data)
+    # Save image - handle Gemini response format
+    if response.candidates and len(response.candidates) > 0:
+        candidate = response.candidates[0]
+        if candidate.content and candidate.content.parts:
+            for part in candidate.content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    # inline_data.data is already binary, not base64
+                    image_data = part.inline_data.data
+                    with open(output_path, "wb") as f:
+                        f.write(image_data)
+                    break
+            else:
+                raise ValueError("No image data found in response parts")
+        else:
+            raise ValueError("No content parts in response")
     else:
-        raise ValueError("No image data in response")
+        raise ValueError("No candidates in response")
 
     # Calculate and record cost
     cost_tracker = get_cost_tracker()
