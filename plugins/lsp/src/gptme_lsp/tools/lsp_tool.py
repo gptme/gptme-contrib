@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from gptme.message import Message
 from gptme.tools.base import ConfirmFunc, Parameter, ToolSpec
 
-from ..lsp_client import LSPServer, KNOWN_SERVERS
+from ..lsp_client import LSPServer, KNOWN_SERVERS, Location, HoverInfo
 
 if TYPE_CHECKING:
     from gptme.commands import CommandContext
@@ -157,6 +157,141 @@ def _get_lsp_diagnostics(file: Path, workspace: Path | None = None) -> str | Non
 # works with any LSP-compliant server (pyright, typescript-language-server, gopls, etc.)
 
 
+def _parse_position(target: str) -> tuple[Path, int, int]:
+    """Parse a position string like 'file.py:10:5' into (path, line, col).
+
+    Args:
+        target: Position string in format 'file:line:col' or 'file:line'
+
+    Returns:
+        Tuple of (Path, line, column) - line and column are 1-indexed
+
+    Raises:
+        ValueError: If target format is invalid
+    """
+    parts = target.rsplit(":", 2)
+    if len(parts) < 2:
+        raise ValueError(
+            f"Invalid position format: {target}. Expected 'file:line' or 'file:line:col'"
+        )
+
+    if len(parts) == 2:
+        file_path, line_str = parts
+        col = 1
+    else:
+        file_path, line_str, col_str = parts
+        try:
+            col = int(col_str)
+        except ValueError:
+            raise ValueError(f"Invalid column number: {col_str}")
+
+    try:
+        line = int(line_str)
+    except ValueError:
+        raise ValueError(f"Invalid line number: {line_str}")
+
+    return Path(file_path), line, col
+
+
+def _get_lsp_definition(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> list[Location] | None:
+    """Get definition location(s) for a symbol using LSP.
+
+    Returns list of Location objects, or None if LSP not available.
+    """
+    ext_to_lang = {
+        ".py": "python",
+        ".pyi": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+    }
+
+    suffix = file.suffix.lower()
+    language = ext_to_lang.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.get_definition(file, line, column)
+
+
+def _get_lsp_references(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> list[Location] | None:
+    """Find all references to a symbol using LSP.
+
+    Returns list of Location objects, or None if LSP not available.
+    """
+    ext_to_lang = {
+        ".py": "python",
+        ".pyi": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+    }
+
+    suffix = file.suffix.lower()
+    language = ext_to_lang.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.get_references(file, line, column)
+
+
+def _get_lsp_hover(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> HoverInfo | None:
+    """Get hover information for a symbol using LSP.
+
+    Returns HoverInfo object, or None if LSP not available or no info.
+    """
+    ext_to_lang = {
+        ".py": "python",
+        ".pyi": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+    }
+
+    suffix = file.suffix.lower()
+    language = ext_to_lang.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.get_hover(file, line, column)
+
+
 def execute(
     code: str | None,
     args: list[str] | None,
@@ -167,6 +302,9 @@ def execute(
 
     Usage:
         lsp diagnostics <file>     - Get errors/warnings for a file
+        lsp definition <file:line:col> - Jump to definition
+        lsp references <file:line:col> - Find all references
+        lsp hover <file:line:col>      - Get documentation/type info
         lsp status                 - Show available language servers
         lsp check                  - Run diagnostics on all changed files
     """
@@ -175,9 +313,12 @@ def execute(
             "system",
             "Usage: lsp <action> [args]\n\n"
             "Actions:\n"
-            "  diagnostics <file>  - Get errors/warnings for a file\n"
-            "  status              - Show available language servers\n"
-            "  check               - Run diagnostics on all changed files (git)",
+            "  diagnostics <file>       - Get errors/warnings for a file\n"
+            "  definition <file:line:col> - Jump to symbol definition\n"
+            "  references <file:line:col> - Find all references to symbol\n"
+            "  hover <file:line:col>      - Get documentation/type info\n"
+            "  status                   - Show available language servers\n"
+            "  check                    - Run diagnostics on all changed files (git)",
         )
 
     action = args[0].lower()
@@ -238,10 +379,120 @@ def execute(
             )
             return Message(
                 "system",
-                f"No LSP server available for {suffix} files.\n\n" f"Install: {hint}",
+                f"No LSP server available for {suffix} files.\n\nInstall: {hint}",
             )
 
         return Message("system", f"**Diagnostics for {file.name}**\n\n{result}")
+
+    elif action == "definition":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp definition <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        locations = _get_lsp_definition(file, line, col, workspace)
+
+        if locations is None:
+            suffix = file.suffix.lower()
+            return Message(
+                "system",
+                f"No LSP server available for {suffix} files.\n\n"
+                "Install the appropriate language server to enable this feature.",
+            )
+
+        if not locations:
+            return Message(
+                "system", f"No definition found for symbol at {file.name}:{line}:{col}"
+            )
+
+        # Format results
+        lines = [f"**Definition for symbol at {file.name}:{line}:{col}**\n"]
+        for loc in locations:
+            lines.append(f"📍 {loc}")
+        return Message("system", "\n".join(lines))
+
+    elif action == "references":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp references <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        locations = _get_lsp_references(file, line, col, workspace)
+
+        if locations is None:
+            suffix = file.suffix.lower()
+            return Message(
+                "system",
+                f"No LSP server available for {suffix} files.\n\n"
+                "Install the appropriate language server to enable this feature.",
+            )
+
+        if not locations:
+            return Message(
+                "system", f"No references found for symbol at {file.name}:{line}:{col}"
+            )
+
+        # Format results
+        lines = [
+            f"**References for symbol at {file.name}:{line}:{col}** ({len(locations)} found)\n"
+        ]
+        for loc in locations:
+            lines.append(f"📍 {loc}")
+        return Message("system", "\n".join(lines))
+
+    elif action == "hover":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp hover <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        hover_info = _get_lsp_hover(file, line, col, workspace)
+
+        if hover_info is None:
+            suffix = file.suffix.lower()
+            return Message(
+                "system",
+                f"No hover information available for symbol at {file.name}:{line}:{col}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The position doesn't point to a symbol\n"
+                "- The language server doesn't have info for this symbol",
+            )
+
+        return Message(
+            "system",
+            f"**Hover info at {file.name}:{line}:{col}**\n\n{hover_info.contents}",
+        )
 
     elif action == "status":
         status_lines = ["**LSP Status**\n"]
@@ -413,20 +664,35 @@ tool = ToolSpec(
     desc="Language Server Protocol integration for code intelligence",
     instructions="""Use LSP to get code intelligence:
 
-- `lsp diagnostics <file>` - Get errors/warnings for a Python or TypeScript file
-- `lsp status` - Show available language servers
+**Diagnostics** (errors and warnings):
+- `lsp diagnostics <file>` - Get errors/warnings for a file
 - `lsp check` - Run diagnostics on all changed files (git)
 
-This tool helps catch errors before running code, find issues in edited files,
-and maintain code quality.
+**Navigation** (Phase 2):
+- `lsp definition <file:line:col>` - Jump to symbol definition
+- `lsp references <file:line:col>` - Find all references to a symbol
+- `lsp hover <file:line:col>` - Get documentation/type information
+
+**Status**:
+- `lsp status` - Show available language servers
 
 **Supported languages:**
 - Python (requires pyright: `npm install -g pyright`)
-- TypeScript/JavaScript (requires tsc via npm)
+- TypeScript/JavaScript (requires typescript-language-server)
+- Go (requires gopls)
+- Rust (requires rust-analyzer)
 
 **Example usage:**
 ```lsp
 diagnostics src/myfile.py
+```
+
+```lsp
+definition src/myfile.py:42:10
+```
+
+```lsp
+hover src/utils.py:15:5
 ```
 """,
     execute=execute,
@@ -435,13 +701,13 @@ diagnostics src/myfile.py
         Parameter(
             name="action",
             type="string",
-            description="Action to perform: diagnostics, status, or check",
+            description="Action: diagnostics, definition, references, hover, status, check",
             required=True,
         ),
         Parameter(
-            name="file",
+            name="target",
             type="string",
-            description="File path for diagnostics action",
+            description="File path or position (file:line:col) depending on action",
             required=False,
         ),
     ],

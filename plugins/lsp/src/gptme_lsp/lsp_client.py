@@ -39,6 +39,32 @@ class Diagnostic:
 
 
 @dataclass
+class Location:
+    """Represents an LSP location (file + position)."""
+
+    file: Path
+    line: int  # 1-indexed for display
+    column: int  # 1-indexed for display
+    end_line: int | None = None
+    end_column: int | None = None
+
+    def __str__(self) -> str:
+        return f"{self.file}:{self.line}:{self.column}"
+
+
+@dataclass
+class HoverInfo:
+    """Represents hover information from LSP."""
+
+    contents: str  # Markdown or plain text
+    range_start: tuple[int, int] | None = None  # (line, column), 1-indexed
+    range_end: tuple[int, int] | None = None
+
+    def __str__(self) -> str:
+        return self.contents
+
+
+@dataclass
 class LSPServer:
     """Manages a language server process."""
 
@@ -294,6 +320,221 @@ class LSPServer:
         # Return empty if no diagnostics received (file might have no issues)
         logger.debug(f"No diagnostics received for {uri} after {timeout}s")
         return self._diagnostics.get(uri, [])
+
+    def _ensure_file_open(self, file: Path) -> str:
+        """Ensure a file is open in the language server. Returns URI."""
+        uri = file.as_uri()
+        try:
+            content = file.read_text()
+        except Exception as e:
+            logger.error(f"Cannot read file {file}: {e}")
+            raise
+
+        self._send_notification(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": self._guess_language_id(file),
+                    "version": 1,
+                    "text": content,
+                }
+            },
+        )
+        return uri
+
+    def get_definition(self, file: Path, line: int, column: int) -> list[Location]:
+        """Get definition location(s) for a symbol.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number
+
+        Returns:
+            List of Location objects representing definition locations.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return []
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/definition",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+            },
+        )
+
+        return self._parse_locations(result)
+
+    def get_references(
+        self, file: Path, line: int, column: int, include_declaration: bool = True
+    ) -> list[Location]:
+        """Find all references to a symbol.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number
+            include_declaration: Whether to include the declaration in results
+
+        Returns:
+            List of Location objects representing reference locations.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return []
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/references",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+                "context": {"includeDeclaration": include_declaration},
+            },
+        )
+
+        return self._parse_locations(result)
+
+    def get_hover(self, file: Path, line: int, column: int) -> HoverInfo | None:
+        """Get hover information (documentation, type info) for a symbol.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number
+
+        Returns:
+            HoverInfo object or None if no hover info available.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/hover",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+            },
+        )
+
+        if result is None:
+            return None
+
+        return self._parse_hover(result)
+
+    def _parse_locations(self, result: Any) -> list[Location]:
+        """Parse LSP location response into Location objects."""
+        if result is None:
+            return []
+
+        from urllib.parse import unquote, urlparse
+
+        locations: list[Location] = []
+
+        # Result can be Location, Location[], or LocationLink[]
+        if isinstance(result, dict):
+            result = [result]
+
+        for item in result:
+            # Handle LocationLink (has targetUri) vs Location (has uri)
+            if "targetUri" in item:
+                uri = item["targetUri"]
+                range_info = item.get(
+                    "targetRange", item.get("targetSelectionRange", {})
+                )
+            else:
+                uri = item.get("uri", "")
+                range_info = item.get("range", {})
+
+            # Parse URI to file path
+            parsed = urlparse(uri)
+            file_path = Path(unquote(parsed.path))
+
+            start = range_info.get("start", {})
+            end = range_info.get("end", {})
+
+            locations.append(
+                Location(
+                    file=file_path,
+                    line=start.get("line", 0) + 1,  # 0-indexed to 1-indexed
+                    column=start.get("character", 0) + 1,
+                    end_line=end.get("line", 0) + 1 if end else None,
+                    end_column=end.get("character", 0) + 1 if end else None,
+                )
+            )
+
+        return locations
+
+    def _parse_hover(self, result: dict) -> HoverInfo | None:
+        """Parse LSP hover response into HoverInfo object."""
+        if not result:
+            return None
+
+        contents = result.get("contents")
+        if contents is None:
+            return None
+
+        # Contents can be MarkedString | MarkedString[] | MarkupContent
+        content_str = ""
+        if isinstance(contents, str):
+            content_str = contents
+        elif isinstance(contents, dict):
+            # MarkupContent: { kind: "markdown"|"plaintext", value: str }
+            # or MarkedString: { language: str, value: str }
+            if "value" in contents:
+                content_str = contents["value"]
+                # Add language fence if it's a code block
+                if "language" in contents and contents["language"]:
+                    content_str = f"```{contents['language']}\n{content_str}\n```"
+        elif isinstance(contents, list):
+            # Array of MarkedString
+            parts = []
+            for item in contents:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and "value" in item:
+                    val = item["value"]
+                    if "language" in item and item["language"]:
+                        val = f"```{item['language']}\n{val}\n```"
+                    parts.append(val)
+            content_str = "\n\n".join(parts)
+
+        if not content_str.strip():
+            return None
+
+        # Parse range if present
+        range_start = None
+        range_end = None
+        if "range" in result:
+            r = result["range"]
+            start = r.get("start", {})
+            end = r.get("end", {})
+            range_start = (start.get("line", 0) + 1, start.get("character", 0) + 1)
+            range_end = (end.get("line", 0) + 1, end.get("character", 0) + 1)
+
+        return HoverInfo(
+            contents=content_str.strip(),
+            range_start=range_start,
+            range_end=range_end,
+        )
 
     def _guess_language_id(self, file: Path) -> str:
         """Guess the LSP language ID from file extension."""
