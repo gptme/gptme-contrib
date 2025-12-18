@@ -1,12 +1,12 @@
 """LSP plugin configuration management.
 
 Supports loading custom language server configurations from:
-1. Project-level: .gptme-lsp.toml in workspace root
-2. User-level: ~/.config/gptme/lsp.toml
+1. Project-level: gptme.toml in workspace root
+2. User-level: ~/.config/gptme/config.toml
 
-Configuration format:
+Configuration format (using plugin.lsp namespace):
 ```toml
-[servers]
+[plugin.lsp.servers]
 python = ["pyright-langserver", "--stdio"]
 typescript = ["typescript-language-server", "--stdio"]
 go = ["gopls", "serve"]
@@ -73,8 +73,8 @@ def load_config(workspace: Path) -> dict[str, list[str]]:
 
     Searches for config in order (later overrides earlier):
     1. Default built-in servers
-    2. User config: ~/.config/gptme/lsp.toml
-    3. Project config: .gptme-lsp.toml in workspace root
+    2. User config: ~/.config/gptme/config.toml [plugin.lsp.servers]
+    3. Project config: gptme.toml in workspace root [plugin.lsp.servers]
 
     Returns:
         Dict mapping language name to server command list
@@ -82,18 +82,20 @@ def load_config(workspace: Path) -> dict[str, list[str]]:
     servers = DEFAULT_SERVERS.copy()
 
     # User-level config
-    user_config_path = Path.home() / ".config" / "gptme" / "lsp.toml"
+    user_config_path = Path.home() / ".config" / "gptme" / "config.toml"
     user_config = _load_toml(user_config_path)
-    if "servers" in user_config:
-        logger.debug(f"Loaded user config from {user_config_path}")
-        servers.update(user_config["servers"])
+    plugin_lsp = user_config.get("plugin", {}).get("lsp", {})
+    if "servers" in plugin_lsp:
+        logger.debug(f"Loaded user LSP config from {user_config_path}")
+        servers.update(plugin_lsp["servers"])
 
     # Project-level config (overrides user)
-    project_config_path = workspace / ".gptme-lsp.toml"
+    project_config_path = workspace / "gptme.toml"
     project_config = _load_toml(project_config_path)
-    if "servers" in project_config:
-        logger.info(f"Loaded project config from {project_config_path}")
-        servers.update(project_config["servers"])
+    plugin_lsp = project_config.get("plugin", {}).get("lsp", {})
+    if "servers" in plugin_lsp:
+        logger.info(f"Loaded project LSP config from {project_config_path}")
+        servers.update(plugin_lsp["servers"])
 
     return servers
 

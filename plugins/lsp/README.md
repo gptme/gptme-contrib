@@ -23,7 +23,7 @@ LSP (Language Server Protocol) integration plugin for gptme, providing code inte
 
 ### Phase 2.3: User Experience ✅ (NEW)
 
-- **Config file support** - Custom language server paths via `.gptme-lsp.toml`
+- **Config file support** - Custom language server paths via `gptme.toml`
 - **Better error messages** - Helpful hints when servers not found or fail
 - **Lazy initialization** - Servers start only when first needed (better performance)
 
@@ -31,10 +31,12 @@ LSP (Language Server Protocol) integration plugin for gptme, providing code inte
 
 ### Custom Language Servers
 
-Configure custom servers in `.gptme-lsp.toml` (project root) or `~/.config/gptme/lsp.toml` (user-level):
+Configure custom servers in `gptme.toml` (project root) or `~/.config/gptme/config.toml` (user-level).
+
+Uses the `[plugin.lsp]` namespace to integrate with gptme's existing config system:
 
 ```toml
-[servers]
+[plugin.lsp.servers]
 # Override default server
 python = ["pyright-langserver", "--stdio"]
 
@@ -48,7 +50,7 @@ go = ["/custom/path/to/gopls", "serve"]
 ocaml = ["ocamllsp"]
 ```
 
-Project config (`.gptme-lsp.toml`) overrides user config (`~/.config/gptme/lsp.toml`), which overrides built-in defaults.
+Project config (`gptme.toml`) overrides user config (`~/.config/gptme/config.toml`), which overrides built-in defaults.
 
 ### Lazy Initialization
 
