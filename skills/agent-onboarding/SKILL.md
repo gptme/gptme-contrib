@@ -12,6 +12,8 @@ A systematic framework for gptme agents to conduct effective user onboarding tha
 
 This skill addresses a critical gap in gptme agent deployment: how to transition from technical setup to productive user-agent collaboration. Based on analysis of real agent deployments and user interaction patterns, it provides proven strategies for:
 
+> **📖 Detailed Reference**: For comprehensive implementation details, validation criteria, and advanced patterns, see [framework-reference.md](./framework-reference.md).
+
 - **User Assessment**: Systematically understanding user needs, technical comfort, and domain context
 - **Capability Communication**: Adaptive templates for different user types (technical, creative, academic, personal)
 - **Trust Building**: Progressive protocols that establish confidence through appropriate boundaries
@@ -148,6 +150,12 @@ Before diving into capabilities, assess:
 **Recovery:** Reset to basics. "Let me focus on just one thing: [specific capability]. We can explore other features once this is working smoothly for you."
 
 ## Supporting Templates and Resources
+
+For comprehensive implementation details, advanced patterns, and validation criteria, see the **[Framework Reference](./framework-reference.md)** which includes:
+- Detailed phase-by-phase implementation guide
+- Inter-agent collaboration patterns
+- Self-modification safety patterns
+- Success metric frameworks
 
 This skill incorporates patterns from:
 - Real agent deployment analysis (agent + user collaboration patterns)
