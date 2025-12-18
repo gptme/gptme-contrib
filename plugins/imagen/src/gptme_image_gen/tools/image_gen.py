@@ -289,7 +289,7 @@ def _generate_gemini(
         candidate = response.candidates[0]
         if candidate.content and candidate.content.parts:
             for part in candidate.content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
+                if hasattr(part, "inline_data") and part.inline_data:
                     # inline_data.data is already binary, not base64
                     image_data = part.inline_data.data
                     with open(output_path, "wb") as f:
