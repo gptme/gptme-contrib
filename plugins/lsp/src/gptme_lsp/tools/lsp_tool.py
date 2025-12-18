@@ -2,9 +2,10 @@
 
 This tool provides access to LSP features:
 - diagnostics: Get errors/warnings for a file
-- definition: Jump to definition (Phase 2)
-- references: Find all references (Phase 2)
-- hover: Get documentation (Phase 2)
+- definition: Jump to definition (Phase 2.1)
+- references: Find all references (Phase 2.1)
+- hover: Get documentation (Phase 2.1)
+- rename: Rename symbols across project (Phase 2.2)
 
 Uses proper LSP protocol to communicate with language servers generically,
 supporting pyright (Python), typescript-language-server (JS/TS), gopls (Go),
@@ -21,7 +22,13 @@ from typing import TYPE_CHECKING
 from gptme.message import Message
 from gptme.tools.base import ConfirmFunc, Parameter, ToolSpec
 
-from ..lsp_client import LSPServer, KNOWN_SERVERS, Location, HoverInfo
+from ..lsp_client import (
+    LSPServer,
+    KNOWN_SERVERS,
+    Location,
+    HoverInfo,
+    WorkspaceEdit,
+)
 
 if TYPE_CHECKING:
     from gptme.commands import CommandContext
@@ -306,6 +313,39 @@ def _get_lsp_hover(
     return server.get_hover(file, line, column)
 
 
+def _get_lsp_rename(
+    file: Path, line: int, column: int, new_name: str, workspace: Path | None = None
+) -> WorkspaceEdit | None:
+    """Rename a symbol using LSP.
+
+    Returns WorkspaceEdit containing all changes, or None if LSP not available.
+    """
+    ext_to_lang = {
+        ".py": "python",
+        ".pyi": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+    }
+
+    suffix = file.suffix.lower()
+    language = ext_to_lang.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.rename(file, line, column, new_name)
+
+
 def execute(
     code: str | None,
     args: list[str] | None,
@@ -319,6 +359,7 @@ def execute(
         lsp definition <file:line:col> - Jump to definition
         lsp references <file:line:col> - Find all references
         lsp hover <file:line:col>      - Get documentation/type info
+        lsp rename <file:line:col> <new_name> - Rename symbol across project
         lsp status                 - Show available language servers
         lsp check                  - Run diagnostics on all changed files
     """
@@ -331,6 +372,7 @@ def execute(
             "  definition <file:line:col> - Jump to symbol definition\n"
             "  references <file:line:col> - Find all references to symbol\n"
             "  hover <file:line:col>      - Get documentation/type info\n"
+            "  rename <file:line:col> <new_name> - Rename symbol across project\n"
             "  status                   - Show available language servers\n"
             "  check                    - Run diagnostics on all changed files (git)",
         )
@@ -508,6 +550,63 @@ def execute(
             f"**Hover info at {file.name}:{line}:{col}**\n\n{hover_info.contents}",
         )
 
+    elif action == "rename":
+        if len(args) < 3:
+            return Message("system", "Usage: lsp rename <file:line:col> <new_name>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        new_name = args[2]
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        workspace_edit = _get_lsp_rename(file, line, col, new_name, workspace)
+
+        if workspace_edit is None:
+            return Message(
+                "system",
+                f"Cannot rename symbol at {file.name}:{line}:{col}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The position doesn't point to a renameable symbol\n"
+                "- The language server doesn't support rename",
+            )
+
+        # Format the workspace edit for display
+        lines = [
+            f"**Rename to '{new_name}'** - {workspace_edit.edit_count} edit(s) in {workspace_edit.file_count} file(s)\n"
+        ]
+
+        for file_path, edits in workspace_edit.edits_by_file.items():
+            rel_path = Path(file_path)
+            if workspace and rel_path.is_absolute():
+                try:
+                    rel_path = rel_path.relative_to(workspace)
+                except ValueError:
+                    pass
+
+            lines.append(f"\n**{rel_path}**")
+            for edit in edits:
+                lines.append(
+                    f"  - Line {edit.start_line}:{edit.start_column}-{edit.end_line}:{edit.end_column}: "
+                    f"`{edit.new_text}`"
+                )
+
+        lines.append(
+            "\n\n⚠️ **Note:** These changes are shown for preview only. "
+            "Use the patch tool to apply the edits to each file."
+        )
+
+        return Message("system", "\n".join(lines))
+
     elif action == "status":
         status_lines = ["**LSP Status**\n"]
 
@@ -642,7 +741,7 @@ def execute(
         return Message(
             "system",
             f"Unknown action: {action}\n\n"
-            "Available actions: diagnostics, definition, references, hover, status, check",
+            "Available actions: diagnostics, definition, references, hover, rename, status, check",
         )
 
 
@@ -682,10 +781,13 @@ tool = ToolSpec(
 - `lsp diagnostics <file>` - Get errors/warnings for a file
 - `lsp check` - Run diagnostics on all changed files (git)
 
-**Navigation** (Phase 2):
+**Navigation** (Phase 2.1):
 - `lsp definition <file:line:col>` - Jump to symbol definition
 - `lsp references <file:line:col>` - Find all references to a symbol
 - `lsp hover <file:line:col>` - Get documentation/type information
+
+**Refactoring** (Phase 2.2):
+- `lsp rename <file:line:col> <new_name>` - Rename symbol across project
 
 **Status**:
 - `lsp status` - Show available language servers
@@ -708,6 +810,10 @@ definition src/myfile.py:42:10
 ```lsp
 hover src/utils.py:15:5
 ```
+
+```lsp
+rename src/myfile.py:15:5 new_function_name
+```
 """,
     execute=execute,
     block_types=["lsp"],
@@ -715,7 +821,7 @@ hover src/utils.py:15:5
         Parameter(
             name="action",
             type="string",
-            description="Action: diagnostics, definition, references, hover, status, check",
+            description="Action: diagnostics, definition, references, hover, rename, status, check",
             required=True,
         ),
         Parameter(

@@ -65,6 +65,51 @@ class HoverInfo:
 
 
 @dataclass
+class TextEdit:
+    """Represents a single text edit (insert, replace, or delete)."""
+
+    file: Path
+    start_line: int  # 1-indexed
+    start_column: int  # 1-indexed
+    end_line: int  # 1-indexed
+    end_column: int  # 1-indexed
+    new_text: str
+
+    def __str__(self) -> str:
+        return f"{self.file}:{self.start_line}:{self.start_column}-{self.end_line}:{self.end_column}"
+
+
+@dataclass
+class WorkspaceEdit:
+    """Represents a set of changes across multiple files (e.g., from rename)."""
+
+    edits: list[TextEdit]
+    # Maps file path to list of edits for that file
+    edits_by_file: dict[str, list[TextEdit]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Group edits by file for easier processing."""
+        for edit in self.edits:
+            file_str = str(edit.file)
+            if file_str not in self.edits_by_file:
+                self.edits_by_file[file_str] = []
+            self.edits_by_file[file_str].append(edit)
+
+    @property
+    def file_count(self) -> int:
+        """Number of files affected."""
+        return len(self.edits_by_file)
+
+    @property
+    def edit_count(self) -> int:
+        """Total number of edits."""
+        return len(self.edits)
+
+    def __str__(self) -> str:
+        return f"WorkspaceEdit({self.edit_count} edits in {self.file_count} files)"
+
+
+@dataclass
 class LSPServer:
     """Manages a language server process."""
 
@@ -426,6 +471,158 @@ class LSPServer:
             return None
 
         return self._parse_hover(result)
+
+    def rename(
+        self, file: Path, line: int, column: int, new_name: str
+    ) -> WorkspaceEdit | None:
+        """Rename a symbol across the project.
+
+        Args:
+            file: The file path containing the symbol
+            line: 1-indexed line number
+            column: 1-indexed column number
+            new_name: The new name for the symbol
+
+        Returns:
+            WorkspaceEdit containing all changes, or None if rename not possible.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/rename",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+                "newName": new_name,
+            },
+        )
+
+        return self._parse_workspace_edit(result)
+
+    def prepare_rename(
+        self, file: Path, line: int, column: int
+    ) -> tuple[str, tuple[int, int], tuple[int, int]] | None:
+        """Check if rename is valid and get the default range.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number
+
+        Returns:
+            Tuple of (placeholder_text, start_pos, end_pos) or None if not renameable.
+            Positions are 1-indexed (line, column) tuples.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/prepareRename",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+            },
+        )
+
+        if not result:
+            return None
+
+        # Result can be Range | { range: Range, placeholder: string }
+        if "placeholder" in result:
+            placeholder = result["placeholder"]
+            range_obj = result.get("range", {})
+        elif "start" in result:
+            # Just a range, use empty placeholder
+            placeholder = ""
+            range_obj = result
+        else:
+            return None
+
+        start = range_obj.get("start", {})
+        end = range_obj.get("end", {})
+        start_pos = (start.get("line", 0) + 1, start.get("character", 0) + 1)
+        end_pos = (end.get("line", 0) + 1, end.get("character", 0) + 1)
+
+        return (placeholder, start_pos, end_pos)
+
+    def _parse_workspace_edit(self, result: Any) -> WorkspaceEdit | None:
+        """Parse LSP WorkspaceEdit response into WorkspaceEdit object."""
+        if not result:
+            return None
+
+        edits: list[TextEdit] = []
+
+        # Handle "changes" format: { uri: TextEdit[] }
+        changes = result.get("changes", {})
+        for uri, text_edits in changes.items():
+            # Parse URI to file path
+            from urllib.parse import unquote, urlparse
+
+            parsed = urlparse(uri)
+            file_path = Path(unquote(parsed.path))
+
+            for edit in text_edits:
+                range_obj = edit.get("range", {})
+                start = range_obj.get("start", {})
+                end = range_obj.get("end", {})
+                new_text = edit.get("newText", "")
+
+                edits.append(
+                    TextEdit(
+                        file=file_path,
+                        start_line=start.get("line", 0) + 1,
+                        start_column=start.get("character", 0) + 1,
+                        end_line=end.get("line", 0) + 1,
+                        end_column=end.get("character", 0) + 1,
+                        new_text=new_text,
+                    )
+                )
+
+        # Handle "documentChanges" format (more complex, includes versioning)
+        doc_changes = result.get("documentChanges", [])
+        for doc_change in doc_changes:
+            # TextDocumentEdit
+            if "textDocument" in doc_change and "edits" in doc_change:
+                uri = doc_change["textDocument"].get("uri", "")
+                from urllib.parse import unquote, urlparse
+
+                parsed = urlparse(uri)
+                file_path = Path(unquote(parsed.path))
+
+                for edit in doc_change["edits"]:
+                    range_obj = edit.get("range", {})
+                    start = range_obj.get("start", {})
+                    end = range_obj.get("end", {})
+                    new_text = edit.get("newText", "")
+
+                    edits.append(
+                        TextEdit(
+                            file=file_path,
+                            start_line=start.get("line", 0) + 1,
+                            start_column=start.get("character", 0) + 1,
+                            end_line=end.get("line", 0) + 1,
+                            end_column=end.get("character", 0) + 1,
+                            new_text=new_text,
+                        )
+                    )
+
+        if not edits:
+            return None
+
+        return WorkspaceEdit(edits=edits)
 
     def _parse_locations(self, result: Any) -> list[Location]:
         """Parse LSP location response into Location objects."""
