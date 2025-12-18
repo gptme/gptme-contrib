@@ -1,12 +1,10 @@
 """Post-save hook for automatic LSP diagnostics.
 
-Automatically runs diagnostics after saving Python or TypeScript files,
+Automatically runs diagnostics after saving files using proper LSP protocol,
 helping catch errors immediately after edits.
 """
 
 import logging
-import shutil
-import subprocess
 from collections.abc import Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,124 +14,47 @@ from gptme.message import Message
 
 if TYPE_CHECKING:
     from gptme.logmanager import Log
-    from gptme.tools.base import ToolUse
 
 logger = logging.getLogger(__name__)
 
-# Supported file extensions for auto-diagnostics
-SUPPORTED_EXTENSIONS = {".py", ".pyi", ".ts", ".tsx"}
+# Supported file extensions for auto-diagnostics (matches what LSP supports)
+SUPPORTED_EXTENSIONS = {".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs"}
 
 
-def _run_quick_diagnostics(file: Path, workspace: Path | None = None) -> str | None:
-    """Run quick diagnostics on a file. Returns formatted result or None if no issues."""
-    suffix = file.suffix.lower()
+def _get_quick_lsp_diagnostics(file: Path, workspace: Path | None = None) -> str | None:
+    """Get diagnostics using LSP protocol for quick post-save feedback.
 
-    if suffix in (".py", ".pyi"):
-        return _check_python(file, workspace)
-    elif suffix in (".ts", ".tsx"):
-        return _check_typescript(file, workspace)
+    Uses the generic LSP infrastructure which works with any language server.
+    Returns brief error summary or None if no errors.
+    """
+    # Import here to avoid circular imports at module load time
+    from ..tools.lsp_tool import _get_lsp_diagnostics
 
-    return None
+    result = _get_lsp_diagnostics(file, workspace)
 
-
-def _check_python(file: Path, workspace: Path | None = None) -> str | None:
-    """Run pyright on a Python file."""
-    try:
-        # Quick check if pyright is available (cross-platform)
-        if not shutil.which("pyright"):
-            return None  # pyright not available, skip silently
-
-        # Run pyright
-        cmd = ["pyright", "--outputjson", str(file)]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=workspace,
-            timeout=30,  # Quick timeout for post-save hook
-        )
-
-        import json
-
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return None
-
-        diagnostics = data.get("generalDiagnostics", [])
-        if not diagnostics:
-            return None  # No issues found
-
-        # Count errors only (skip warnings for post-save hook)
-        errors = [d for d in diagnostics if d.get("severity") == "error"]
-        if not errors:
-            return None  # Only warnings, skip for now
-
-        # Format brief summary
-        lines = []
-        for diag in errors[:3]:  # Limit to 3 errors
-            range_info = diag.get("range", {})
-            start = range_info.get("start", {})
-            line = start.get("line", 0) + 1
-            message = diag.get("message", "Unknown error")
-            lines.append(f"  Line {line}: {message}")
-
-        extra = f" (+{len(errors) - 3} more)" if len(errors) > 3 else ""
-        return f"❌ {len(errors)} error(s) found{extra}:\n" + "\n".join(lines)
-
-    except subprocess.TimeoutExpired:
-        return None  # Timeout, skip
-    except Exception as e:
-        logger.debug(f"Python diagnostics error: {e}")
+    if result is None:
+        # No LSP server available for this file type, skip silently
         return None
 
-
-def _check_typescript(file: Path, workspace: Path | None = None) -> str | None:
-    """Run quick TypeScript check."""
-    try:
-        # Quick type check with tsc
-        cmd = ["npx", "--yes", "tsc", "--noEmit", "--pretty", "false", str(file)]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=workspace,
-            timeout=30,
-        )
-
-        if result.returncode == 0:
-            return None  # No errors
-
-        output = (result.stdout + result.stderr).strip()
-        if not output:
-            return None
-
-        # Count errors
-        error_lines = [line for line in output.split("\n") if ": error TS" in line]
-        if not error_lines:
-            return None
-
-        # Format brief summary
-        summary_lines = []
-        for line in error_lines[:3]:
-            summary_lines.append(f"  {line}")
-
-        extra = f" (+{len(error_lines) - 3} more)" if len(error_lines) > 3 else ""
-        return f"❌ {len(error_lines)} TypeScript error(s){extra}:\n" + "\n".join(
-            summary_lines
-        )
-
-    except subprocess.TimeoutExpired:
+    # Check if there are actual errors (not just "no errors found" message)
+    if "✅" in result or "No errors" in result.lower():
         return None
-    except Exception as e:
-        logger.debug(f"TypeScript diagnostics error: {e}")
-        return None
+
+    # Return a brief version for post-save feedback
+    # Limit to first few lines to keep feedback concise
+    lines = result.strip().split("\n")
+    if len(lines) > 5:
+        return "\n".join(lines[:5]) + f"\n... ({len(lines) - 5} more lines)"
+
+    return result
 
 
 def post_save_diagnostics_hook(
-    log: "Log",
+    log: "Log | None",
     workspace: Path | None,
-    tool_use: "ToolUse",
+    path: Path,
+    content: str,
+    created: bool,
 ) -> Generator[Message, None, None]:
     """Hook that runs after file save operations.
 
@@ -141,30 +62,13 @@ def post_save_diagnostics_hook(
     Only reports errors (not warnings) to keep output focused.
 
     Args:
-        log: The conversation log
+        log: The conversation log (may be None)
         workspace: Workspace directory path
-        tool_use: The tool that just executed (save or patch)
+        path: Path to the file that was saved
+        content: Content that was saved
+        created: Whether file was newly created (vs overwritten)
     """
-    # Only trigger for save and patch tools
-    if tool_use.tool not in ("save", "patch"):
-        return
-
-    # Extract file path from tool args
-    file_path: str | None = None
-
-    if tool_use.tool == "save":
-        # save tool has path as first arg
-        if tool_use.args:
-            file_path = tool_use.args[0]
-    elif tool_use.tool == "patch":
-        # patch tool also has path as first arg
-        if tool_use.args:
-            file_path = tool_use.args[0]
-
-    if not file_path:
-        return
-
-    file = Path(file_path)
+    file = path
 
     # Only check supported file types
     if file.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -179,8 +83,8 @@ def post_save_diagnostics_hook(
 
     logger.debug(f"Running post-save diagnostics on {file}")
 
-    # Run diagnostics
-    result = _run_quick_diagnostics(file, workspace)
+    # Run diagnostics using LSP protocol
+    result = _get_quick_lsp_diagnostics(file, workspace)
 
     if result:
         yield Message(
@@ -194,12 +98,15 @@ def register() -> None:
     """Register LSP hooks with gptme."""
     logger.info("LSP plugin: Registering hooks")
 
-    # Register post-save hook
+    # Register post-save hook for FILE_POST_SAVE (covers save tool)
     register_hook(
         name="lsp.post_save_diagnostics",
-        hook_type=HookType.TOOL_POST_EXECUTE,
+        hook_type=HookType.FILE_POST_SAVE,
         func=post_save_diagnostics_hook,
         priority=0,  # Default priority
     )
+
+    # Note: FILE_POST_PATCH has a different signature, so we'd need a separate
+    # hook function for patch operations if needed. For now, focusing on saves.
 
     logger.info("LSP plugin: Hooks registered")

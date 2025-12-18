@@ -146,147 +146,13 @@ def _get_lsp_diagnostics(file: Path, workspace: Path | None = None) -> str | Non
     if info_count:
         summary.append(f"{info_count} info")
 
-    header = f"Found {', '.join(summary)}:\n\n" if summary else ""
+        header = f"Found {', '.join(summary)}:\n\n" if summary else ""
     return header + "\n".join(lines)
 
 
-def _ensure_pyright() -> bool:
-    """Check if pyright is available (fallback check)."""
-    return shutil.which("pyright") is not None
-
-
-def _run_pyright(file: Path, workspace: Path | None = None) -> str:
-    """Run pyright on a file and return diagnostics as formatted string.
-
-    This is a simpler approach than full LSP client - just call pyright CLI.
-    """
-    try:
-        cmd = ["pyright", "--outputjson", str(file)]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=workspace,
-            timeout=60,
-        )
-
-        # Parse JSON output
-        import json
-
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            # Pyright might output non-JSON on error
-            if result.returncode != 0:
-                return f"Error running pyright: {result.stderr or result.stdout}"
-            return "No diagnostics found."
-
-        diagnostics = data.get("generalDiagnostics", [])
-        if not diagnostics:
-            return "✅ No errors or warnings found."
-
-        # Format diagnostics
-        lines = []
-        error_count = 0
-        warning_count = 0
-        info_count = 0
-
-        for diag in diagnostics:
-            severity = diag.get("severity", "error")
-            file_path = diag.get("file", "unknown")
-            range_info = diag.get("range", {})
-            start = range_info.get("start", {})
-            line = start.get("line", 0) + 1  # 0-indexed to 1-indexed
-            col = start.get("character", 0) + 1
-            message = diag.get("message", "Unknown error")
-            rule = diag.get("rule", "")
-
-            # Count by severity
-            if severity == "error":
-                error_count += 1
-                sev_emoji = "❌"
-            elif severity == "warning":
-                warning_count += 1
-                sev_emoji = "⚠️"
-            else:
-                info_count += 1
-                sev_emoji = "ℹ️"
-
-            # Format location relative to workspace
-            rel_path = file_path
-            if workspace:
-                try:
-                    rel_path = Path(file_path).relative_to(workspace)
-                except ValueError:
-                    pass
-
-            rule_str = f" [{rule}]" if rule else ""
-            lines.append(f"{sev_emoji} {rel_path}:{line}:{col}: {message}{rule_str}")
-
-        # Summary
-        summary_parts = []
-        if error_count:
-            summary_parts.append(f"{error_count} error(s)")
-        if warning_count:
-            summary_parts.append(f"{warning_count} warning(s)")
-        if info_count:
-            summary_parts.append(f"{info_count} info")
-
-        summary = f"Found {', '.join(summary_parts)}" if summary_parts else "No issues"
-
-        return f"{summary}:\n\n" + "\n".join(lines)
-
-    except subprocess.TimeoutExpired:
-        return "Error: pyright timed out (>60s)"
-    except Exception as e:
-        return f"Error running pyright: {e}"
-
-
-def _run_typescript_diagnostics(file: Path, workspace: Path | None = None) -> str:
-    """Run TypeScript compiler to get diagnostics."""
-    try:
-        # Use tsc for diagnostics
-        cmd = ["npx", "tsc", "--noEmit", "--pretty", "false", str(file)]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=workspace,
-            timeout=60,
-        )
-
-        if result.returncode == 0:
-            return "✅ No TypeScript errors found."
-
-        # Parse tsc output
-        output = result.stdout + result.stderr
-        if not output.strip():
-            return "✅ No TypeScript errors found."
-
-        lines = output.strip().split("\n")
-        error_count = len([line for line in lines if ": error TS" in line])
-        warning_count = len([line for line in lines if ": warning TS" in line])
-
-        summary_parts = []
-        if error_count:
-            summary_parts.append(f"{error_count} error(s)")
-        if warning_count:
-            summary_parts.append(f"{warning_count} warning(s)")
-
-        summary = (
-            f"Found {', '.join(summary_parts)}" if summary_parts else "Issues found"
-        )
-
-        # Limit output
-        if len(lines) > 20:
-            lines = lines[:20] + [f"... and {len(lines) - 20} more"]
-
-        return f"{summary}:\n\n" + "\n".join(lines)
-
-    except subprocess.TimeoutExpired:
-        return "Error: TypeScript check timed out (>60s)"
-    except Exception as e:
-        return f"Error running TypeScript check: {e}"
+# Note: Removed hardcoded _run_pyright() and _run_typescript_diagnostics() functions.
+# The plugin now uses the generic LSP protocol via _get_lsp_diagnostics() which
+# works with any LSP-compliant server (pyright, typescript-language-server, gopls, etc.)
 
 
 def execute(
@@ -350,26 +216,28 @@ def execute(
                 ".go (Go), .rs (Rust)",
             )
 
-        # Try proper LSP first (generic, works with any language server)
+        # Use proper LSP protocol (generic, works with any language server)
         result = _get_lsp_diagnostics(file, workspace)
 
-        # Fall back to CLI methods if LSP not available
+        # If LSP server isn't available, provide helpful installation instructions
         if result is None:
-            logger.info("LSP server not available, falling back to CLI method")
-            if suffix in (".py", ".pyi"):
-                if not _ensure_pyright():
-                    return Message(
-                        "system",
-                        "Error: No Python LSP server available. Install pyright: npm install -g pyright",
-                    )
-                result = _run_pyright(file, workspace)
-            elif suffix in (".ts", ".tsx", ".js", ".jsx"):
-                result = _run_typescript_diagnostics(file, workspace)
-            else:
-                return Message(
-                    "system",
-                    f"No LSP server available for {suffix} files.",
-                )
+            install_hints = {
+                ".py": "pyright (npm install -g pyright) or pylsp (pip install python-lsp-server)",
+                ".pyi": "pyright (npm install -g pyright) or pylsp (pip install python-lsp-server)",
+                ".ts": "typescript-language-server (npm install -g typescript-language-server typescript)",
+                ".tsx": "typescript-language-server (npm install -g typescript-language-server typescript)",
+                ".js": "typescript-language-server (npm install -g typescript-language-server typescript)",
+                ".jsx": "typescript-language-server (npm install -g typescript-language-server typescript)",
+                ".go": "gopls (go install golang.org/x/tools/gopls@latest)",
+                ".rs": "rust-analyzer (rustup component add rust-analyzer)",
+            }
+            hint = install_hints.get(
+                suffix, "the appropriate LSP server for this language"
+            )
+            return Message(
+                "system",
+                f"No LSP server available for {suffix} files.\n\n" f"Install: {hint}",
+            )
 
         return Message("system", f"**Diagnostics for {file.name}**\n\n{result}")
 
@@ -409,7 +277,7 @@ def execute(
         return Message("system", "\n".join(status_lines))
 
     elif action == "check":
-        # Run diagnostics on all changed Python files
+        # Run diagnostics on all changed files (supports any language with LSP)
         if workspace is None:
             return Message("system", "Error: Could not determine workspace")
 
@@ -443,41 +311,60 @@ def execute(
             )
 
             all_files = set(changed_files + staged_files)
-            py_files = [
+
+            # Filter to supported file types
+            supported_extensions = {
+                ".py",
+                ".pyi",  # Python
+                ".ts",
+                ".tsx",
+                ".js",
+                ".jsx",  # TypeScript/JavaScript
+                ".go",  # Go
+                ".rs",  # Rust
+            }
+            lsp_files = [
                 f
                 for f in all_files
-                if f.endswith((".py", ".pyi")) and (workspace / f).exists()
+                if Path(f).suffix.lower() in supported_extensions
+                and (workspace / f).exists()
             ]
 
-            if not py_files:
-                return Message("system", "No changed Python files to check.")
-
-            # Run pyright on all files
-            if not _ensure_pyright():
-                return Message(
-                    "system",
-                    "Error: pyright not found. Install with: npm install -g pyright",
-                )
+            if not lsp_files:
+                return Message("system", "No changed files with LSP support to check.")
 
             all_results = []
-            for py_file in py_files[:10]:  # Limit to 10 files
-                full_path = Path(workspace) / py_file
-                diag_result = _run_pyright(full_path, workspace)
+            files_checked = 0
+            for lsp_file in lsp_files[:10]:  # Limit to 10 files
+                full_path = workspace / lsp_file
+                diag_result = _get_lsp_diagnostics(full_path, workspace)
+                if diag_result is None:
+                    # No LSP server available for this file type, skip
+                    continue
+                files_checked += 1
                 if (
                     "No errors" not in diag_result
                     and "No diagnostics" not in diag_result
+                    and "✅" not in diag_result
                 ):
-                    all_results.append(f"**{py_file}**\n{diag_result}")
+                    all_results.append(f"**{lsp_file}**\n{diag_result}")
+
+            if files_checked == 0:
+                return Message(
+                    "system",
+                    f"No LSP servers available for the {len(lsp_files)} changed file(s).\n\n"
+                    "Install appropriate LSP servers (pyright, typescript-language-server, gopls, rust-analyzer).",
+                )
 
             if not all_results:
                 return Message(
                     "system",
-                    f"✅ All {len(py_files)} changed Python file(s) pass diagnostics.",
+                    f"✅ All {files_checked} checked file(s) pass diagnostics.",
                 )
 
             return Message(
                 "system",
-                f"**Diagnostics for {len(py_files)} changed file(s):**\n\n"
+                f"**Diagnostics for {files_checked} changed file(s):**\n\n"
                 + "\n\n---\n\n".join(all_results),
             )
 
