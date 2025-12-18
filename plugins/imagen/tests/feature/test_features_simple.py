@@ -21,8 +21,8 @@ class TestErrorHandling:
         """Test error when Gemini dependencies not installed."""
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
 
-        # Will raise ImportError if google-generativeai not installed
-        with pytest.raises(ImportError, match="google-generativeai"):
+        # Will raise ImportError if google-genai not installed
+        with pytest.raises(ImportError, match="google-genai"):
             generate_image(prompt="Test", provider="gemini")
 
     def test_missing_api_key_dalle(self, monkeypatch):

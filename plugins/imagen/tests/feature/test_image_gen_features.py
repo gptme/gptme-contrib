@@ -16,19 +16,21 @@ from gptme_image_gen.tools.image_gen import ImageResult, generate_image
 # Fixture to provide common mocks
 @pytest.fixture
 def mock_gemini():
-    """Mock Google Gemini API."""
+    """Mock Google Gemini API (new google-genai SDK)."""
     with (
-        patch("google.generativeai.GenerativeModel") as mock_model_class,
-        patch("google.generativeai.configure"),
+        patch("google.genai.Client") as mock_client_class,
         patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}),
     ):
-        mock_model = MagicMock()
+        mock_client = MagicMock()
         mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_model_class.return_value = mock_model
+        mock_part = MagicMock()
+        mock_image = MagicMock()
+        mock_part.as_image.return_value = mock_image
+        mock_response.parts = [mock_part]
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_class.return_value = mock_client
 
-        yield mock_model
+        yield mock_client
 
 
 @pytest.fixture

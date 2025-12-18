@@ -266,10 +266,11 @@ def _generate_gemini(
 ) -> ImageResult:
     """Generate image using Google Gemini/Imagen."""
     try:
-        import google.generativeai as genai  # type: ignore[import-not-found]
+        from google import genai  # type: ignore[import-not-found]
+        from google.genai import types  # type: ignore[import-not-found]
     except ImportError:
         raise ImportError(
-            "google-generativeai not installed. Install with: pip install google-generativeai"
+            "google-genai not installed. Install with: pip install google-genai"
         )
 
     # Configure API key
@@ -277,42 +278,44 @@ def _generate_gemini(
     if not api_key:
         raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set in env or config")
 
-    genai.configure(api_key=api_key)
+    # Create client with API key
+    client = genai.Client(api_key=api_key)
 
-    # Use Imagen model
-    model = genai.GenerativeModel("gemini-3-pro-image-preview")
+    # Use gemini-3-pro-image-preview for multimodal image generation
+    # This model can generate both text and images
+    model_name = "gemini-3-pro-image-preview"
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+        ),
+    )
 
-    # Save image - handle Gemini response format
-    if response.candidates and len(response.candidates) > 0:
-        candidate = response.candidates[0]
-        if candidate.content and candidate.content.parts:
-            for part in candidate.content.parts:
-                if hasattr(part, "inline_data") and part.inline_data:
-                    # inline_data.data is already binary, not base64
-                    image_data = part.inline_data.data
-                    with open(output_path, "wb") as f:
-                        f.write(image_data)
-                    break
-            else:
-                raise ValueError("No image data found in response parts")
-        else:
-            raise ValueError("No content parts in response")
-    else:
-        raise ValueError("No candidates in response")
+    # Save image - handle new SDK response format
+    image_saved = False
+    for part in response.parts:
+        # Use the as_image() helper method from the new SDK
+        img = part.as_image()
+        if img is not None:
+            img.save(str(output_path))
+            image_saved = True
+            break
+
+    if not image_saved:
+        raise ValueError("No image data found in response")
 
     # Calculate and record cost
     cost_tracker = get_cost_tracker()
-    model = "imagen-3-fast"
     cost = cost_tracker.calculate_cost(
-        provider="gemini", quality=quality, count=1, model=model
+        provider="gemini", quality=quality, count=1, model=model_name
     )
     cost_tracker.record_generation(
         provider="gemini",
         prompt=prompt,
         cost=cost,
-        model=model,
+        model=model_name,
         size=size,
         quality=quality,
         count=1,
@@ -324,7 +327,7 @@ def _generate_gemini(
         prompt=prompt,
         image_path=output_path,
         metadata={
-            "model": model,
+            "model": model_name,
             "size": size,
             "quality": quality,
             "cost_usd": cost,
