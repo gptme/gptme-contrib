@@ -17,149 +17,113 @@ LSP (Language Server Protocol) integration plugin for gptme, providing code inte
 - **`lsp references <file:line:col>`** - Find all references to a symbol
 - **`lsp hover <file:line:col>`** - Get documentation and type information
 
-### Phase 2.2: Refactoring Tools ✅ (NEW)
+### Phase 2.2: Refactoring Tools ✅
 
 - **`lsp rename <file:line:col> <new_name>`** - Rename symbol across project
 
+### Phase 2.3: User Experience ✅ (NEW)
+
+- **Config file support** - Custom language server paths via `.gptme-lsp.toml`
+- **Better error messages** - Helpful hints when servers not found or fail
+- **Lazy initialization** - Servers start only when first needed (better performance)
+
+## Configuration
+
+### Custom Language Servers
+
+Configure custom servers in `.gptme-lsp.toml` (project root) or `~/.config/gptme/lsp.toml` (user-level):
+
+```toml
+[servers]
+# Override default server
+python = ["pyright-langserver", "--stdio"]
+
+# Use alternative server
+python = ["pylsp"]
+
+# Custom path
+go = ["/custom/path/to/gopls", "serve"]
+
+# Add new language
+ocaml = ["ocamllsp"]
+```
+
+Project config (`.gptme-lsp.toml`) overrides user config (`~/.config/gptme/lsp.toml`), which overrides built-in defaults.
+
+### Lazy Initialization
+
+By default, language servers start only when first needed:
+
+```python
+# Server starts on first command, not at LSPManager creation
+manager = LSPManager(workspace)  # No servers started yet
+manager.get_diagnostics(file)    # Python server starts now
+manager.get_definition(file2)    # Server already running, reused
+
+# Force eager initialization (previous behavior)
+manager = LSPManager(workspace, lazy=False)  # All detected servers start
+```
+
 ## Supported Languages
 
-| Language | Tool Required | Install Command |
-|----------|--------------|-----------------|
-| Python | pyright | `npm install -g pyright` |
-| TypeScript/JavaScript | typescript-language-server | `npm install -g typescript-language-server typescript` |
+| Language | Server | Install |
+|----------|--------|---------|
+| Python | pyright | `npm i -g pyright` or `pipx install pyright` |
+| TypeScript/JavaScript | typescript-language-server | `npm i -g typescript-language-server typescript` |
 | Go | gopls | `go install golang.org/x/tools/gopls@latest` |
 | Rust | rust-analyzer | `rustup component add rust-analyzer` |
+| C/C++ | clangd | System package manager |
 
 ## Installation
 
 ```bash
-# Install language servers (pick the ones you need)
-npm install -g pyright
-npm install -g typescript-language-server typescript
-go install golang.org/x/tools/gopls@latest
-rustup component add rust-analyzer
+pip install gptme-lsp
+```
 
-# Install the plugin
-pip install -e plugins/lsp
+Or install from source:
+
+```bash
+cd plugins/lsp
+pip install -e .
 ```
 
 ## Usage
 
-### Diagnostics
+The LSP tool is automatically registered when the plugin is installed. Use the `lsp` command prefix:
 
 ```bash
-# Check a file for errors
-lsp diagnostics src/myfile.py
+# Check diagnostics for current file
+gptme "lsp diagnostics src/main.py"
 
-# Check all changed files
-lsp check
+# Jump to definition
+gptme "lsp definition src/main.py:42:5"
 
-# See available language servers
-lsp status
-```
+# Find all references
+gptme "lsp references src/utils.py:15:10"
 
-### Navigation (Phase 2.1)
+# Get hover information
+gptme "lsp hover src/config.py:8:12"
 
-```bash
-# Jump to definition of symbol at line 42, column 10
-lsp definition src/myfile.py:42:10
-
-# Find all references to symbol at line 15, column 5
-lsp references src/utils.py:15:5
-
-# Get documentation/type info for symbol
-lsp hover src/config.py:8:12
-```
-
-### Refactoring (Phase 2.2)
-
-```bash
-# Rename a function across the entire project
-lsp rename src/utils.py:15:5 new_function_name
-
-# Rename a class
-lsp rename src/models.py:10:7 NewClassName
-
-# Rename a variable
-lsp rename src/config.py:5:1 NEW_CONSTANT_NAME
-```
-
-**Note:** The rename command shows all proposed changes for preview. Use the patch tool to apply the edits.
-
-### Post-Save Hook
-
-When enabled, the plugin automatically runs diagnostics after you save files:
-> User: Save this file
-> Assistant: [saves file]
-> System: ⚡ **Auto-diagnostics** for `myfile.py`:
-> ❌ 2 error(s) found:
->   Line 15: Cannot assign to "x" because it has type "str" (expected "int")
->   Line 23: Module has no attribute "foo"
-
-## Use Cases
-
-1. **Better debugging**: Get real errors before running code
-2. **Code navigation**: Find definitions without grepping
-3. **Refactoring safety**: Find all references before changes
-4. **Documentation access**: Quick hover for unfamiliar APIs
-5. **Type information**: Understand function signatures
-
-## Configuration
-
-The plugin auto-detects available language servers. To use custom servers, configure them in your `gptme.toml`:
-
-```toml
-# Enable the plugin
-[[plugins]]
-path = "~/.local/share/gptme/plugins/lsp"
-```
-
-## Future Phases
-
-### Phase 2.2: Refactoring Tools (Planned)
-- Rename symbol across project
-- Workspace-wide edits
-
-### Phase 2.3: User Experience (Planned)
-- Config file for custom language server paths
-- Better error messages
-- Performance: lazy server initialization
-
-### Phase 3: Advanced Features (Planned)
-- Auto-fix suggestions (code actions)
-- Workspace symbols search
-- Multi-language session support
-
-## Architecture
-
-```txt
-gptme_lsp/
-├── __init__.py          # Plugin entry point
-├── lsp_client.py        # LSP protocol client with full protocol support
-├── tools/
-│   ├── __init__.py
-│   └── lsp_tool.py      # LSP tool implementation
-└── hooks/
-    ├── __init__.py
-    └── post_save.py     # Post-save diagnostics hook
+# Rename a symbol across project
+gptme "lsp rename src/utils.py:15:5 new_function_name"
 ```
 
 ## Development
 
 ```bash
-# Install in development mode
-pip install -e "plugins/lsp[test]"
-
 # Run tests
-pytest plugins/lsp/tests/
+cd plugins/lsp
+make test
+
+# Type check
+make typecheck
 ```
 
-## References
+## Roadmap
 
-- [LSP Specification](https://microsoft.github.io/language-server-protocol/)
-- [OpenCode](https://opencode.ai/) - Inspiration for LSP integration patterns
-- [mcp-language-server](https://github.com/isaacphi/mcp-language-server) - MCP-based alternative
-
-## License
-
-MIT
+- [x] Phase 1: Diagnostics
+- [x] Phase 2.1: Navigation (definition, references, hover)
+- [x] Phase 2.2: Refactoring (rename)
+- [x] Phase 2.3: User Experience (config files, error messages, lazy init)
+- [ ] Phase 3: Code Actions (quick fixes, refactoring suggestions)
+- [ ] Phase 4: Workspace Symbols (project-wide search)
