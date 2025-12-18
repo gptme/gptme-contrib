@@ -50,6 +50,7 @@ class LSPServer:
     _reader_thread: Thread | None = field(default=None, init=False)
     _responses: dict[int, Any] = field(default_factory=dict, init=False)
     _initialized: bool = field(default=False, init=False)
+    _diagnostics: dict[str, list[Diagnostic]] = field(default_factory=dict, init=False)
 
     def start(self) -> bool:
         """Start the language server process."""
@@ -217,8 +218,36 @@ class LSPServer:
             # Store diagnostics for later retrieval
             params = message.get("params", {})
             uri = params.get("uri", "")
-            diagnostics = params.get("diagnostics", [])
-            logger.debug(f"Received {len(diagnostics)} diagnostics for {uri}")
+            raw_diagnostics = params.get("diagnostics", [])
+            logger.debug(f"Received {len(raw_diagnostics)} diagnostics for {uri}")
+
+            # Parse URI to file path
+            from urllib.parse import unquote, urlparse
+
+            parsed = urlparse(uri)
+            file_path = Path(unquote(parsed.path))
+
+            # Convert to Diagnostic objects
+            diagnostics: list[Diagnostic] = []
+            for diag in raw_diagnostics:
+                severity_map = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+                severity = severity_map.get(diag.get("severity", 1), "error")
+                range_info = diag.get("range", {})
+                start = range_info.get("start", {})
+                diagnostics.append(
+                    Diagnostic(
+                        file=file_path,
+                        line=start.get("line", 0) + 1,  # 0-indexed to 1-indexed
+                        column=start.get("character", 0) + 1,
+                        severity=severity,
+                        message=diag.get("message", ""),
+                        source=diag.get("source"),
+                        code=str(diag.get("code")) if diag.get("code") else None,
+                    )
+                )
+
+            # Store by URI for retrieval
+            self._diagnostics[uri] = diagnostics
 
     def get_diagnostics(self, file: Path) -> list[Diagnostic]:
         """Get diagnostics for a file by opening and requesting them.
@@ -249,15 +278,22 @@ class LSPServer:
             },
         )
 
-        # Wait a bit for diagnostics to arrive
+        # Wait for diagnostics to arrive (server sends them asynchronously)
         import time
 
-        time.sleep(0.5)
+        # Poll for diagnostics with timeout
+        timeout = 5.0  # seconds
+        poll_interval = 0.1
+        elapsed = 0.0
+        while elapsed < timeout:
+            if uri in self._diagnostics:
+                return self._diagnostics[uri]
+            time.sleep(poll_interval)
+            elapsed += poll_interval
 
-        # For pyright, we can request diagnostics explicitly
-        # This is a workaround since publishDiagnostics is async
-        # In Phase 2, we should properly handle async diagnostics
-        return []  # TODO: Return collected diagnostics
+        # Return empty if no diagnostics received (file might have no issues)
+        logger.debug(f"No diagnostics received for {uri} after {timeout}s")
+        return self._diagnostics.get(uri, [])
 
     def _guess_language_id(self, file: Path) -> str:
         """Guess the LSP language ID from file extension."""

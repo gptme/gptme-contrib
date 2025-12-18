@@ -6,10 +6,13 @@ This tool provides access to LSP features:
 - references: Find all references (Phase 2)
 - hover: Get documentation (Phase 2)
 
-Phase 1 focuses on diagnostics - the most reliable and actionable feature.
+Uses proper LSP protocol to communicate with language servers generically,
+supporting pyright (Python), typescript-language-server (JS/TS), gopls (Go),
+rust-analyzer (Rust), and any other LSP-compliant server.
 """
 
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,13 +20,15 @@ from typing import TYPE_CHECKING
 from gptme.message import Message
 from gptme.tools.base import ConfirmFunc, Parameter, ToolSpec
 
+from ..lsp_client import LSPServer, KNOWN_SERVERS
+
 if TYPE_CHECKING:
     from gptme.tools.base import ConfirmFunc  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
-# Global manager instance (initialized per workspace)
-_manager = None
+# Global server instances (per workspace/language)
+_servers: dict[str, LSPServer] = {}
 
 
 def _get_workspace() -> Path | None:
@@ -45,17 +50,109 @@ def _get_workspace() -> Path | None:
     return Path.cwd()
 
 
-def _ensure_pyright() -> bool:
-    """Check if pyright is available."""
-    try:
-        result = subprocess.run(
-            ["pyright", "--version"],
-            capture_output=True,
-            timeout=10,
+def _get_or_start_server(language: str, workspace: Path) -> LSPServer | None:
+    """Get or start an LSP server for the given language.
+
+    Uses proper LSP protocol for generic language server support.
+    """
+    global _servers
+    key = f"{workspace}:{language}"
+
+    if key in _servers:
+        server = _servers[key]
+        if server.process and server.process.poll() is None:
+            return server
+        # Server died, remove and restart
+        del _servers[key]
+
+    # Check if server command is known and available
+    if language not in KNOWN_SERVERS:
+        logger.debug(f"No known LSP server for {language}")
+        return None
+
+    command = KNOWN_SERVERS[language]
+    server_binary = command[0]
+
+    # Check if server is available
+    if not shutil.which(server_binary):
+        logger.debug(f"LSP server not found: {server_binary}")
+        return None
+
+    # Start the server
+    server = LSPServer(name=server_binary, command=command, workspace=workspace)
+    if server.start():
+        _servers[key] = server
+        return server
+    return None
+
+
+def _get_lsp_diagnostics(file: Path, workspace: Path | None = None) -> str | None:
+    """Get diagnostics using proper LSP protocol.
+
+    Works with any LSP-compliant server (pyright, typescript-language-server, etc.)
+    Returns formatted diagnostics string, or None if LSP not available.
+    """
+
+    # Determine language from file extension
+    ext_to_lang = {
+        ".py": "python",
+        ".pyi": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+    }
+
+    suffix = file.suffix.lower()
+    language = ext_to_lang.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    # Get or start server
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    # Get diagnostics
+    diagnostics = server.get_diagnostics(file)
+
+    if not diagnostics:
+        return "✅ No errors or warnings found."
+
+    # Format diagnostics
+    lines = []
+    error_count = sum(1 for d in diagnostics if d.severity == "error")
+    warning_count = sum(1 for d in diagnostics if d.severity == "warning")
+    info_count = len(diagnostics) - error_count - warning_count
+
+    for diag in diagnostics:
+        sev_emoji = {"error": "❌", "warning": "⚠️", "info": "ℹ️", "hint": "💡"}.get(
+            diag.severity, "ℹ️"
         )
-        return result.returncode == 0
-    except Exception:
-        return False
+        lines.append(f"{sev_emoji} Line {diag.line}: {diag.message}")
+        if diag.code:
+            lines[-1] += f" ({diag.code})"
+
+    summary = []
+    if error_count:
+        summary.append(f"{error_count} error(s)")
+    if warning_count:
+        summary.append(f"{warning_count} warning(s)")
+    if info_count:
+        summary.append(f"{info_count} info")
+
+    header = f"Found {', '.join(summary)}:\n\n" if summary else ""
+    return header + "\n".join(lines)
+
+
+def _ensure_pyright() -> bool:
+    """Check if pyright is available (fallback check)."""
+    return shutil.which("pyright") is not None
 
 
 def _run_pyright(file: Path, workspace: Path | None = None) -> str:
@@ -235,21 +332,44 @@ def execute(
         # Determine file type and run appropriate checker
         suffix = file.suffix.lower()
 
-        if suffix in (".py", ".pyi"):
-            if not _ensure_pyright():
-                return Message(
-                    "system",
-                    "Error: pyright not found. Install with: npm install -g pyright",
-                )
-            result = _run_pyright(file, workspace)
-        elif suffix in (".ts", ".tsx", ".js", ".jsx"):
-            result = _run_typescript_diagnostics(file, workspace)
-        else:
+        supported_extensions = {
+            ".py",
+            ".pyi",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".rs",
+        }
+        if suffix not in supported_extensions:
             return Message(
                 "system",
                 f"Unsupported file type: {suffix}\n\n"
-                "Supported: .py, .pyi (Python), .ts, .tsx, .js, .jsx (TypeScript/JavaScript)",
+                "Supported: .py, .pyi (Python), .ts, .tsx, .js, .jsx (TypeScript/JavaScript), "
+                ".go (Go), .rs (Rust)",
             )
+
+        # Try proper LSP first (generic, works with any language server)
+        result = _get_lsp_diagnostics(file, workspace)
+
+        # Fall back to CLI methods if LSP not available
+        if result is None:
+            logger.info("LSP server not available, falling back to CLI method")
+            if suffix in (".py", ".pyi"):
+                if not _ensure_pyright():
+                    return Message(
+                        "system",
+                        "Error: No Python LSP server available. Install pyright: npm install -g pyright",
+                    )
+                result = _run_pyright(file, workspace)
+            elif suffix in (".ts", ".tsx", ".js", ".jsx"):
+                result = _run_typescript_diagnostics(file, workspace)
+            else:
+                return Message(
+                    "system",
+                    f"No LSP server available for {suffix} files.",
+                )
 
         return Message("system", f"**Diagnostics for {file.name}**\n\n{result}")
 
