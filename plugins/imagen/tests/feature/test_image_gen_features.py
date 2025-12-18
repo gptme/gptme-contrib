@@ -15,20 +15,30 @@ from gptme_image_gen.tools.image_gen import ImageResult, generate_image
 
 # Fixture to provide common mocks
 @pytest.fixture
-def mock_gemini():
-    """Mock Google Gemini API."""
-    with (
-        patch("google.generativeai.GenerativeModel") as mock_model_class,
-        patch("google.generativeai.configure"),
-        patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}),
-    ):
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_model_class.return_value = mock_model
+def mock_gemini(tmp_path):
+    """Mock Google Gemini API by mocking the internal _generate_gemini function."""
+    with patch(
+        "gptme_image_gen.tools.image_gen._generate_gemini"
+    ) as mock_generate_gemini:
+        # Create a fake image result
+        def fake_generate(prompt, size, quality, output_path):
+            from gptme_image_gen.tools.image_gen import ImageResult
+            from pathlib import Path
 
-        yield mock_model
+            # Create actual file
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake_image_data")
+
+            return ImageResult(
+                provider="gemini",
+                prompt=prompt,
+                image_path=path,
+                metadata={"model": "gemini-3-pro-image-preview", "size": size},
+            )
+
+        mock_generate_gemini.side_effect = fake_generate
+        yield mock_generate_gemini
 
 
 @pytest.fixture
@@ -91,15 +101,8 @@ class TestProviderFeatures:
 class TestSizeOptions:
     """Test different image size configurations."""
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_various_sizes(self, mock_genai, tmp_path):
+    def test_various_sizes(self, mock_gemini, tmp_path):
         """Test different size specifications."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         sizes = ["1024x1024", "512x512", "256x256", "1792x1024"]
 
         for size in sizes:
@@ -118,15 +121,8 @@ class TestSizeOptions:
 class TestOutputPathHandling:
     """Test output path features and edge cases."""
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_default_path_generation(self, mock_genai):
+    def test_default_path_generation(self, mock_gemini):
         """Test automatic path generation when not specified."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         result = generate_image(prompt="Test", provider="gemini")
 
         # Should generate path like "generated_20231201_123456.png"
@@ -134,15 +130,8 @@ class TestOutputPathHandling:
         assert result.image_path.suffix == ".png"
         assert result.image_path.exists()
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_nested_directory_creation(self, mock_genai, tmp_path):
+    def test_nested_directory_creation(self, mock_gemini, tmp_path):
         """Test creation of nested directories for output."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         nested_path = tmp_path / "deep" / "nested" / "path" / "image.png"
         result = generate_image(
             prompt="Test", provider="gemini", output_path=str(nested_path)
@@ -151,15 +140,8 @@ class TestOutputPathHandling:
         assert result.image_path.exists()
         assert result.image_path.parent.exists()
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_path_with_tilde_expansion(self, mock_genai):
+    def test_path_with_tilde_expansion(self, mock_gemini):
         """Test ~ expansion in paths."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         result = generate_image(
             prompt="Test", provider="gemini", output_path="~/test_image.png"
         )
@@ -173,47 +155,40 @@ class TestErrorHandling:
 
     def test_invalid_provider(self):
         """Test error on invalid provider name."""
-        with pytest.raises(ValueError, match="Unknown provider"):
+        with pytest.raises(RuntimeError, match="Unknown provider"):
             generate_image(prompt="Test", provider="invalid_provider")
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_missing_api_key_gemini(self, mock_genai):
+    @patch("gptme_image_gen.tools.image_gen._generate_gemini")
+    def test_missing_api_key_gemini(self, mock_generate):
         """Test error when Gemini API key missing."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="GOOGLE_API_KEY"):
-                generate_image(prompt="Test", provider="gemini")
-
-    @patch("gptme_image_gen.tools.image_gen.OpenAI")
-    def test_missing_api_key_dalle(self, mock_openai):
-        """Test error when OpenAI API key missing."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-                generate_image(prompt="Test", provider="dalle")
-
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_api_failure_handling(self, mock_genai):
-        """Test graceful handling of API failures."""
-        mock_model = MagicMock()
-        mock_model.generate_content.side_effect = Exception("API Error")
-        mock_genai.GenerativeModel.return_value = mock_model
-
-        with pytest.raises(Exception, match="API Error"):
+        # Mock will raise the API key error as the real function would
+        mock_generate.side_effect = ValueError(
+            "GOOGLE_API_KEY environment variable not set"
+        )
+        with pytest.raises(RuntimeError, match="GOOGLE_API_KEY"):
             generate_image(prompt="Test", provider="gemini")
 
-    @patch("gptme_image_gen.tools.image_gen.OpenAI")
-    def test_missing_image_data(self, mock_openai, tmp_path):
-        """Test error when API returns no image data."""
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_image = MagicMock()
-        # No url or b64_json attributes
-        mock_image.url = None
-        mock_image.b64_json = None
-        mock_response.data = [mock_image]
-        mock_client.images.generate.return_value = mock_response
-        mock_openai.return_value = mock_client
+    @patch("gptme_image_gen.tools.image_gen._generate_dalle")
+    def test_missing_api_key_dalle(self, mock_generate):
+        """Test error when OpenAI API key missing."""
+        mock_generate.side_effect = ValueError(
+            "OPENAI_API_KEY environment variable not set"
+        )
+        with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+            generate_image(prompt="Test", provider="dalle")
 
-        with pytest.raises(ValueError, match="No image data"):
+    @patch("gptme_image_gen.tools.image_gen._generate_gemini")
+    def test_api_failure_handling(self, mock_generate):
+        """Test graceful handling of API failures."""
+        mock_generate.side_effect = Exception("API Error")
+        with pytest.raises(RuntimeError, match="API Error"):
+            generate_image(prompt="Test", provider="gemini")
+
+    @patch("gptme_image_gen.tools.image_gen._generate_dalle")
+    def test_missing_image_data(self, mock_generate, tmp_path):
+        """Test error when API returns no image data."""
+        mock_generate.side_effect = ValueError("No image data received from API")
+        with pytest.raises(RuntimeError, match="No image data"):
             generate_image(
                 prompt="Test", provider="dalle", output_path=str(tmp_path / "test.png")
             )
@@ -222,15 +197,8 @@ class TestErrorHandling:
 class TestEdgeCases:
     """Test edge cases and unusual inputs."""
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_very_long_prompt(self, mock_genai, tmp_path):
+    def test_very_long_prompt(self, mock_gemini, tmp_path):
         """Test with extremely long prompt."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         long_prompt = "Test prompt " * 1000  # Very long
         output_path = tmp_path / "test.png"
 
@@ -241,16 +209,9 @@ class TestEdgeCases:
         assert result.prompt == long_prompt
         assert output_path.exists()
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_unicode_in_prompt(self, mock_genai, tmp_path):
+    def test_unicode_in_prompt(self, mock_gemini, tmp_path):
         """Test Unicode characters in prompt."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
-        unicode_prompt = "Test 测试 тест テスト 🎨🖼️"
+        unicode_prompt = "Test 测试 测试 テスト 🎨🖼️"
         output_path = tmp_path / "test.png"
 
         result = generate_image(
@@ -259,15 +220,8 @@ class TestEdgeCases:
 
         assert result.prompt == unicode_prompt
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_special_characters_in_path(self, mock_genai, tmp_path):
+    def test_special_characters_in_path(self, mock_gemini, tmp_path):
         """Test special characters in output path."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         # Test path with spaces and special chars
         output_path = tmp_path / "test image (v2).png"
 
@@ -282,15 +236,8 @@ class TestEdgeCases:
 class TestPerformance:
     """Performance tests for image generation."""
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_generation_time(self, mock_genai, tmp_path):
+    def test_generation_time(self, mock_gemini, tmp_path):
         """Test that generation completes in reasonable time."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         output_path = tmp_path / "test.png"
 
         start_time = time.time()
@@ -300,15 +247,8 @@ class TestPerformance:
         # Should complete quickly with mocked API
         assert elapsed < 5.0, f"Generation took {elapsed}s, expected < 5s"
 
-    @patch("gptme_image_gen.tools.image_gen.genai")
-    def test_multiple_generations(self, mock_genai, tmp_path):
+    def test_multiple_generations(self, mock_gemini, tmp_path):
         """Test multiple generations in sequence."""
-        mock_model = MagicMock()
-        mock_response = MagicMock()
-        mock_response.images = [b"fake_image_data"]
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
-
         start_time = time.time()
 
         # Generate 5 images

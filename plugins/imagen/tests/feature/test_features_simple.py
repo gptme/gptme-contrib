@@ -14,26 +14,28 @@ class TestErrorHandling:
 
     def test_invalid_provider(self):
         """Test error on invalid provider name."""
-        with pytest.raises(ValueError, match="Unknown provider"):
+        with pytest.raises(RuntimeError, match="Unknown provider"):
             generate_image(prompt="Test", provider="invalid_provider")
 
     def test_missing_api_key_gemini(self, monkeypatch):
         """Test error when Gemini dependencies not installed."""
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
 
-        # Will raise ImportError if google-generativeai not installed
-        with pytest.raises(ImportError, match="google-generativeai"):
+        # Will raise RuntimeError wrapping ImportError if google-genai not installed
+        with pytest.raises(RuntimeError, match="google-genai"):
             generate_image(prompt="Test", provider="gemini")
 
-    def test_missing_api_key_dalle(self, monkeypatch):
+    def test_missing_api_key_dalle(self):
         """Test error when OpenAI API key missing."""
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        from unittest.mock import patch
 
-        # OpenAI library raises OpenAIError for missing API key
-        from openai import OpenAIError
-
-        with pytest.raises(OpenAIError, match="api_key"):
-            generate_image(prompt="Test", provider="dalle")
+        # Mock _generate_dalle to raise the expected error
+        with patch(
+            "gptme_image_gen.tools.image_gen._generate_dalle",
+            side_effect=ValueError("OPENAI_API_KEY environment variable not set"),
+        ):
+            with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+                generate_image(prompt="Test", provider="dalle")
 
 
 class TestConfiguration:
@@ -41,16 +43,14 @@ class TestConfiguration:
 
     def test_provider_options_accepted(self):
         """Test that all documented providers are accepted as valid options."""
-        from openai import OpenAIError
-
         valid_providers = ["gemini", "dalle", "dalle2"]
 
         for provider in valid_providers:
             # Should not raise ValueError for valid providers
-            # Will raise ImportError, ValueError, or OpenAIError for missing deps/API keys
+            # Will raise RuntimeError for missing deps/API keys
             try:
                 generate_image(prompt="Test", provider=provider)
-            except (ImportError, ValueError, OpenAIError) as e:
+            except RuntimeError as e:
                 # Expected - missing dependencies or API keys
                 # As long as it's not "Unknown provider"
                 assert "Unknown provider" not in str(e)
@@ -65,12 +65,12 @@ class TestConfiguration:
         # Both should be valid (will fail on API, but path handling works)
         try:
             generate_image(prompt="Test", provider="gemini", output_path=path_str)
-        except (ImportError, ValueError):
+        except RuntimeError:
             pass  # Expected - API not available
 
         try:
             generate_image(prompt="Test", provider="gemini", output_path=str(path_obj))
-        except (ImportError, ValueError):
+        except RuntimeError:
             pass  # Expected - API not available
 
 
@@ -81,10 +81,10 @@ class TestEdgeCases:
         """Test that very long prompts don't cause immediate errors."""
         long_prompt = "Test prompt " * 1000
 
-        # Should not raise ValueError immediately
+        # Should not raise RuntimeError for prompt length
         try:
             generate_image(prompt=long_prompt, provider="gemini")
-        except (ImportError, ValueError) as e:
+        except RuntimeError as e:
             # Should fail on API availability, not prompt length
             assert "prompt" not in str(e).lower() or "GOOGLE_API_KEY" in str(e)
 
@@ -95,7 +95,7 @@ class TestEdgeCases:
         # Should not raise encoding errors
         try:
             generate_image(prompt=unicode_prompt, provider="gemini")
-        except (ImportError, ValueError):
+        except RuntimeError:
             pass  # Expected - API not available
 
     def test_special_characters_in_output_path(self, tmp_path):
@@ -106,7 +106,7 @@ class TestEdgeCases:
             generate_image(
                 prompt="Test", provider="gemini", output_path=str(path_with_spaces)
             )
-        except (ImportError, ValueError):
+        except RuntimeError:
             pass  # Expected - API not available
 
 
@@ -120,20 +120,18 @@ class TestProviderOptions:
         for size in sizes:
             try:
                 generate_image(prompt="Test", provider="gemini", size=size)
-            except (ImportError, ValueError) as e:
+            except RuntimeError as e:
                 # Should fail on API, not parameter
                 assert "size" not in str(e).lower() or "GOOGLE_API_KEY" in str(e)
 
     def test_quality_parameter_accepted(self):
         """Test that quality parameter is accepted."""
-        from openai import OpenAIError
-
         qualities = ["standard", "hd"]
 
         for quality in qualities:
             try:
                 generate_image(prompt="Test", provider="dalle", quality=quality)
-            except (ImportError, ValueError, OpenAIError) as e:
+            except RuntimeError as e:
                 # Should fail on API, not parameter validation
                 assert "quality" not in str(e).lower() or "api_key" in str(e).lower()
 

@@ -162,7 +162,7 @@ The tool returns:
 
 Required:
 ```bash
-pip install google-generativeai  # For Gemini
+pip install google-genai  # For Gemini
 pip install openai               # For DALL-E
 pip install requests             # For image downloads
 ```
