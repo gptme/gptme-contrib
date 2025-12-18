@@ -36,6 +36,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Extension to language mapping for LSP server selection
+EXTENSION_TO_LANGUAGE: dict[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+}
+
 # Global server instances (per workspace/language)
 _servers: dict[str, LSPServer] = {}
 
@@ -103,19 +115,8 @@ def _get_lsp_diagnostics(file: Path, workspace: Path | None = None) -> str | Non
     """
 
     # Determine language from file extension
-    ext_to_lang = {
-        ".py": "python",
-        ".pyi": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".go": "go",
-        ".rs": "rust",
-    }
-
     suffix = file.suffix.lower()
-    language = ext_to_lang.get(suffix)
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
     if not language:
         return None
 
@@ -221,19 +222,8 @@ def _get_lsp_definition(
 
     Returns list of Location objects, or None if LSP not available.
     """
-    ext_to_lang = {
-        ".py": "python",
-        ".pyi": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".go": "go",
-        ".rs": "rust",
-    }
-
     suffix = file.suffix.lower()
-    language = ext_to_lang.get(suffix)
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
     if not language:
         return None
 
@@ -254,19 +244,8 @@ def _get_lsp_references(
 
     Returns list of Location objects, or None if LSP not available.
     """
-    ext_to_lang = {
-        ".py": "python",
-        ".pyi": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".go": "go",
-        ".rs": "rust",
-    }
-
     suffix = file.suffix.lower()
-    language = ext_to_lang.get(suffix)
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
     if not language:
         return None
 
@@ -287,19 +266,8 @@ def _get_lsp_hover(
 
     Returns HoverInfo object, or None if LSP not available or no info.
     """
-    ext_to_lang = {
-        ".py": "python",
-        ".pyi": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".go": "go",
-        ".rs": "rust",
-    }
-
     suffix = file.suffix.lower()
-    language = ext_to_lang.get(suffix)
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
     if not language:
         return None
 
@@ -319,20 +287,10 @@ def _get_lsp_rename(
     """Rename a symbol using LSP.
 
     Returns WorkspaceEdit containing all changes, or None if LSP not available.
+    Uses prepare_rename to validate the symbol can be renamed first.
     """
-    ext_to_lang = {
-        ".py": "python",
-        ".pyi": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".go": "go",
-        ".rs": "rust",
-    }
-
     suffix = file.suffix.lower()
-    language = ext_to_lang.get(suffix)
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
     if not language:
         return None
 
@@ -342,6 +300,16 @@ def _get_lsp_rename(
     server = _get_or_start_server(language, workspace)
     if server is None:
         return None
+
+    # Validate rename is possible using prepare_rename (optional server feature)
+    # This provides better error messages and catches non-renameable symbols early
+    prepare_result = server.prepare_rename(file, line, column)
+    if prepare_result is None:
+        logger.debug(
+            "prepare_rename returned None - symbol may not be renameable or "
+            "server doesn't support prepareRename"
+        )
+        # Continue anyway - not all servers support prepareRename
 
     return server.rename(file, line, column, new_name)
 

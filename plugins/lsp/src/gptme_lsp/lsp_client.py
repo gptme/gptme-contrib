@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Thread
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +294,6 @@ class LSPServer:
             logger.debug(f"Received {len(raw_diagnostics)} diagnostics for {uri}")
 
             # Parse URI to file path
-            from urllib.parse import unquote, urlparse
 
             parsed = urlparse(uri)
             file_path = Path(unquote(parsed.path))
@@ -569,7 +569,6 @@ class LSPServer:
         changes = result.get("changes", {})
         for uri, text_edits in changes.items():
             # Parse URI to file path
-            from urllib.parse import unquote, urlparse
 
             parsed = urlparse(uri)
             file_path = Path(unquote(parsed.path))
@@ -597,7 +596,6 @@ class LSPServer:
             # TextDocumentEdit
             if "textDocument" in doc_change and "edits" in doc_change:
                 uri = doc_change["textDocument"].get("uri", "")
-                from urllib.parse import unquote, urlparse
 
                 parsed = urlparse(uri)
                 file_path = Path(unquote(parsed.path))
@@ -628,8 +626,6 @@ class LSPServer:
         """Parse LSP location response into Location objects."""
         if result is None:
             return []
-
-        from urllib.parse import unquote, urlparse
 
         locations: list[Location] = []
 
