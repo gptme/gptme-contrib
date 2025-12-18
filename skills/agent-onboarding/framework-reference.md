@@ -291,7 +291,7 @@ Based on successful inter-agent collaboration patterns:
 - Specialized agents can complement each other effectively
 
 ### Self-Modification and Safety Patterns
-Based on Erik's feedback on dynamic context implementation:
+Based on maintainer feedback on dynamic context implementation:
 
 **Critical Infrastructure Changes:**
 - Use PR review process for any core configuration changes (gptme.toml, architecture)
@@ -305,7 +305,7 @@ Based on Erik's feedback on dynamic context implementation:
 - Get external perspective on potentially fragile changes
 
 ### Updated Next Steps for Framework:
-1. ~~Get validation feedback from Erik (user perspective)~~ **UPDATED**: Incorporate recent experience insights
+1. ~~Get validation feedback from maintainer (user perspective)~~ **UPDATED**: Incorporate recent experience insights
 2. Test with additional user scenarios (edge cases)
 3. **NEW**: Create implementation templates for gptme-contrib including inter-agent patterns
 4. **NEW**: Document self-modification safety patterns for new agents
