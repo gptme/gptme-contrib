@@ -2,7 +2,7 @@
 
 **Status:** Ready for validation feedback
 **Last Updated:** 2025-12-09
-**Based on:** Alice's onboarding experience, Bob collaboration analysis, hypothetical scenario testing
+**Based on:** Real agent onboarding experiences, peer collaboration analysis, hypothetical scenario testing
 
 ## Executive Summary
 
@@ -278,7 +278,7 @@ This framework should evolve based on:
 ## Recent Learnings Integration (December 2025)
 
 ### Inter-Agent Coordination Patterns
-Based on successful Alice-Bob collaboration (Issue #6):
+Based on successful inter-agent collaboration patterns:
 
 **Communication Protocols:**
 - Use GitHub issues for cross-agent communication, not local file systems
@@ -313,4 +313,4 @@ Based on Erik's feedback on dynamic context implementation:
 
 ---
 
-*This framework represents synthesized learning from Alice's onboarding with Erik, collaboration analysis with Bob, systematic validation against diverse user scenarios, and recent inter-agent collaboration patterns (December 2025). It provides a reusable, adaptable foundation for effective gptme agent onboarding.*
+*This framework represents synthesized learning from real agent onboarding experiences, inter-agent collaboration analysis, systematic validation against diverse user scenarios, and recent collaboration patterns (December 2025). It provides a reusable, adaptable foundation for effective gptme agent onboarding.*

@@ -22,7 +22,7 @@ This skill addresses a critical gap in gptme agent deployment: how to transition
 
 Apply this skill when:
 - Starting work with a new user for the first time
-- User seems unclear about agent capabilities or how to collaborate effectively  
+- User seems unclear about agent capabilities or how to collaborate effectively
 - Trust issues or communication mismatches are evident
 - User expects unrealistic capabilities or has inappropriate concerns
 - Onboarding conversation stalls or becomes unproductive
@@ -47,7 +47,7 @@ Before diving into capabilities, assess:
 
 **Pace Preference:**
 - **Fast**: "Show me everything, I'll figure it out"
-- **Standard**: "Introduce capabilities as we work together"  
+- **Standard**: "Introduce capabilities as we work together"
 - **Careful**: "I need time to understand each step"
 
 ### 2. Adaptive Communication Templates
@@ -132,12 +132,12 @@ Before diving into capabilities, assess:
 **Recovery:** Redirect to specific, demonstrable capabilities. "I excel at [specific domain] tasks like [examples]. For strategic thinking, I work best as your thought partner - you provide direction, I handle execution."
 
 ### User Unclear on How to Collaborate
-**Symptoms:** Vague requests, uncertainty about what agent can help with, asks "what can you do?" repeatedly  
+**Symptoms:** Vague requests, uncertainty about what agent can help with, asks "what can you do?" repeatedly
 **Recovery:** Provide specific examples in their domain. "Here are three things I can help with right now: [specific task 1], [specific task 2], [specific task 3]. Which sounds most valuable?"
 
 ### Communication Style Mismatch
 **Symptoms:** User requests different level of detail, different formality, different pace
-**Recovery:** Adapt immediately and confirm. "I'll adjust to [new style]. Is this level of detail better?" 
+**Recovery:** Adapt immediately and confirm. "I'll adjust to [new style]. Is this level of detail better?"
 
 ### Trust Issues or Over-Caution
 **Symptoms:** User hesitant to share context, asks about privacy/security repeatedly, reluctant to try capabilities
@@ -150,8 +150,8 @@ Before diving into capabilities, assess:
 ## Supporting Templates and Resources
 
 This skill incorporates patterns from:
-- Real agent deployment analysis (Alice + Erik collaboration patterns)
-- Cross-agent learning (Bob's technical focus lessons)
+- Real agent deployment analysis (agent + user collaboration patterns)
+- Cross-agent learning (technical focus lessons from peer agents)
 - User research across technical, creative, academic, and personal domains
 - Failure analysis from onboarding attempts that didn't work
 
@@ -159,7 +159,7 @@ This skill incorporates patterns from:
 
 **30-Second User Assessment:**
 1. Technical comfort: CLI mention = High, GUI preference = Medium, "make it simple" = Low
-2. Domain context: Work efficiency = Professional, Research = Academic, Projects = Creative, Life organization = Personal  
+2. Domain context: Work efficiency = Professional, Research = Academic, Projects = Creative, Life organization = Personal
 3. Communication pace: Multiple questions = Fast, Measured responses = Standard, "take your time" = Careful
 
 **Emergency Recovery Phrases:**
