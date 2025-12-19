@@ -60,6 +60,7 @@ def validate_lesson(path: Path) -> list[str]:
         errors.append(error)
         return errors
 
+    # Type narrowing: frontmatter is guaranteed non-None here since error was None
     assert frontmatter is not None
 
     # Check match.keywords exists
@@ -80,8 +81,8 @@ def validate_lesson(path: Path) -> list[str]:
                 errors.append(
                     f"Keyword at index {i} must be a string, got {type(kw).__name__}"
                 )
-            elif kw.strip() == "":
-                errors.append(f"Keyword at index {i} is empty")
+            elif not kw or not kw.strip():
+                errors.append(f"Keyword at index {i} is empty or whitespace-only")
 
     # Optional: Check for valid status if present
     if "status" in frontmatter:
@@ -134,7 +135,26 @@ def main() -> int:
             return 0
     else:
         # Filter to only lesson files (in lessons/ directory)
-        files = [Path(f) for f in args if "lessons/" in f and f.endswith(".md")]
+        # Use proper path comparison instead of string matching
+        cwd = Path.cwd()
+        lessons_dir = cwd / "lessons"
+        files = []
+        for f in args:
+            path = Path(f)
+            # Check if file is under lessons/ directory and is markdown
+            if f.endswith(".md"):
+                try:
+                    # Handle both absolute and relative paths
+                    if path.is_absolute():
+                        if path.is_relative_to(lessons_dir):
+                            files.append(path)
+                    else:
+                        abs_path = (cwd / path).resolve()
+                        if abs_path.is_relative_to(lessons_dir.resolve()):
+                            files.append(path)
+                except ValueError:
+                    # is_relative_to raises ValueError if not relative
+                    pass
         if not files:
             # No lesson files in the commit, nothing to validate
             return 0

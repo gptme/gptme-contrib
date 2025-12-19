@@ -90,7 +90,7 @@ match:
     - keyword1
     - keyword2
     - specific phrase for matching
-status: active  # Optional: active (default), draft, deprecated, archived
+status: active  # Optional: active (default), automated, draft, deprecated, archived
 ---
 ```
 
