@@ -66,5 +66,5 @@ Following this pattern enables:
 - **External collaboration**: Respond to mentions on other repos
 
 ## Related
-- GitHub Issue Engagement lesson
+- [Read Full GitHub Context](./read-full-github-context.md) - Reading GitHub issues/PRs completely
 - Bob's inter-agent communication design: https://github.com/ErikBjare/bob/blob/master/knowledge/technical-designs/inter-agent-communication.md
