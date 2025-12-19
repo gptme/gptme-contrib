@@ -84,8 +84,9 @@ repos:
   - id: validate-lesson-metadata
     name: Validate lesson metadata
     description: Ensures lesson files have proper metadata (keywords, valid YAML frontmatter).
-    entry: python3 scripts/precommit/validate_lesson_metadata.py
-    language: system
+    entry: scripts/precommit/validate_lesson_metadata.py
+    language: python
+    additional_dependencies: [pyyaml]
     types: [markdown]
     files: ^lessons/
     pass_filenames: true
