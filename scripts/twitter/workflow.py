@@ -46,6 +46,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import (
+    Any,
     Dict,
     List,
     Optional,
@@ -191,6 +192,7 @@ class TweetDraft:
         scheduled_time: Optional[datetime] = None,
         context: Optional[Dict] = None,
         reject_reason: Optional[str] = None,
+        quality_score: Optional[int] = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread
@@ -199,10 +201,11 @@ class TweetDraft:
         self.context = context or {}
         self.created_at = datetime.now()
         self.reject_reason = reject_reason
+        self.quality_score = quality_score  # 0-3 star rating (matches blog post system)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage"""
-        result = {
+        result: Dict[str, Any] = {
             "text": self.text,
             "type": self.type,
             "in_reply_to": self.in_reply_to,
@@ -215,6 +218,9 @@ class TweetDraft:
         # Only include reject_reason if it's set
         if self.reject_reason:
             result["reject_reason"] = self.reject_reason
+        # Only include quality_score if it's set
+        if self.quality_score is not None:
+            result["quality_score"] = self.quality_score
         return result
 
     @classmethod
@@ -235,6 +241,7 @@ class TweetDraft:
             ),
             context=data["context"],
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
+            quality_score=data.get("quality_score"),  # Optional, backward compatible
         )
         created_at = data["created_at"]
         if isinstance(created_at, str):
@@ -256,6 +263,37 @@ class TweetDraft:
         with path.open("r") as f:
             data = yaml.safe_load(f)
         return cls.from_dict(data)
+
+
+def compute_quality_score(review_result) -> int:
+    """
+    Compute quality score (0-3 stars) from review result.
+
+    Scoring:
+    - 3 stars: All criteria passed + approval recommendation
+    - 2 stars: Most criteria passed (≥75%)
+    - 1 star: Some criteria passed (≥50%)
+    - 0 stars: Less than half passed
+    """
+    if not review_result.criteria_results:
+        return 0
+
+    total = len(review_result.criteria_results)
+    passed = sum(1 for r in review_result.criteria_results.values() if r.passed)
+    pass_rate = passed / total if total > 0 else 0
+
+    # All passed + approval recommendation = 3 stars
+    if pass_rate == 1.0 and review_result.recommendation == "approve":
+        return 3
+    # Most passed (≥75%) = 2 stars
+    elif pass_rate >= 0.75:
+        return 2
+    # Some passed (≥50%) = 1 star
+    elif pass_rate >= 0.50:
+        return 1
+    # Less than half passed = 0 stars
+    else:
+        return 0
 
 
 def generate_draft_name(draft: TweetDraft) -> str:
@@ -806,7 +844,14 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
         # Get LLM review
         approved, review_result = verify_draft(draft.to_dict())
 
+        # Compute and save quality score
+        quality_score = compute_quality_score(review_result)
+        draft.quality_score = quality_score
+        draft.save(path)  # Persist quality_score to file
+
         # Display review results
+        stars = "★" * quality_score + "☆" * (3 - quality_score)
+        console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
         console.print("\n[bold]Review Results:[/bold]")
         for criterion, result in review_result.criteria_results.items():
             status = "✅" if result.passed else "❌"
@@ -1578,7 +1623,14 @@ def auto(
         # Get LLM review
         approved_by_llm, review_result = verify_draft(draft.to_dict())
 
+        # Compute and save quality score
+        quality_score = compute_quality_score(review_result)
+        draft.quality_score = quality_score
+        draft.save(path)  # Persist quality_score to file
+
         # Display review results
+        stars = "★" * quality_score + "☆" * (3 - quality_score)
+        console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
         console.print("\n[bold]Review Results:[/bold]")
         for criterion, result in review_result.criteria_results.items():
             status = "✅" if result.passed else "❌"
