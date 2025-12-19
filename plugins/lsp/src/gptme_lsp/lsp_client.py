@@ -703,8 +703,7 @@ class LSPServer:
             label = sig_data.get("label", "")
             doc = sig_data.get("documentation")
             if isinstance(doc, dict):
-                # Extract text from MarkupContent, avoid ugly dict repr
-                doc = doc.get("value") or doc.get("kind") or None
+                doc = doc.get("value", None)
 
             # Parse parameters
             params: list[SignatureParameter] = []
@@ -716,8 +715,7 @@ class LSPServer:
                     param_label = label[start:end]
                 param_doc = param_data.get("documentation")
                 if isinstance(param_doc, dict):
-                    # Extract text from MarkupContent, avoid ugly dict repr
-                    param_doc = param_doc.get("value") or param_doc.get("kind") or None
+                    param_doc = param_doc.get("value", None)
                 params.append(
                     SignatureParameter(label=str(param_label), documentation=param_doc)
                 )
