@@ -6,6 +6,8 @@ This tool provides access to LSP features:
 - references: Find all references (Phase 2.1)
 - hover: Get documentation (Phase 2.1)
 - rename: Rename symbols across project (Phase 2.2)
+- format: Format document using LSP (Phase 4)
+- signature: Get function signature help (Phase 4)
 
 Uses proper LSP protocol to communicate with language servers generically,
 supporting pyright (Python), typescript-language-server (JS/TS), gopls (Go),
@@ -28,6 +30,8 @@ from ..lsp_client import (
     Location,
     HoverInfo,
     WorkspaceEdit,
+    SignatureInfo,
+    TextEdit,
 )
 
 if TYPE_CHECKING:
@@ -314,6 +318,53 @@ def _get_lsp_rename(
     return server.rename(file, line, column, new_name)
 
 
+def _get_lsp_format(
+    file: Path,
+    workspace: Path | None = None,
+    tab_size: int = 4,
+    insert_spaces: bool = True,
+) -> list[TextEdit] | None:
+    """Format a document using LSP.
+
+    Returns list of TextEdit objects to apply, or None if LSP not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.format_document(file, tab_size, insert_spaces)
+
+
+def _get_lsp_signature(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> SignatureInfo | None:
+    """Get signature help for a function call using LSP.
+
+    Returns SignatureInfo object or None if LSP not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.get_signature_help(file, line, column)
+
+
 def execute(
     code: str | None,
     args: list[str] | None,
@@ -341,6 +392,8 @@ def execute(
             "  references <file:line:col> - Find all references to symbol\n"
             "  hover <file:line:col>      - Get documentation/type info\n"
             "  rename <file:line:col> <new_name> - Rename symbol across project\n"
+            "  format <file>            - Format document using LSP\n"
+            "  signature <file:line:col> - Get function signature help\n"
             "  status                   - Show available language servers\n"
             "  check                    - Run diagnostics on all changed files (git)",
         )
@@ -575,6 +628,135 @@ def execute(
 
         return Message("system", "\n".join(lines))
 
+    elif action == "format":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp format <file>")
+
+        file_path = args[1]
+        file = Path(file_path)
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        # Parse optional formatting options
+        tab_size = 4
+        insert_spaces = True
+        if len(args) >= 3:
+            try:
+                tab_size = int(args[2])
+            except ValueError:
+                pass
+        if len(args) >= 4:
+            insert_spaces = args[3].lower() != "tabs"
+
+        edits_result = _get_lsp_format(file, workspace, tab_size, insert_spaces)
+
+        if edits_result is None:
+            suffix = file.suffix.lower()
+            return Message(
+                "system",
+                f"No LSP server available for {suffix} files.\n\n"
+                "Install the appropriate language server to enable formatting.",
+            )
+
+        edits = edits_result  # Type narrowing: edits is now list[TextEdit]
+
+        if not edits:
+            return Message("system", f"✅ {file.name} is already properly formatted.")
+
+        # Format and show the edits
+        lines = [f"**Format {file.name}** - {len(edits)} edit(s)\n"]
+
+        # Group edits by line for cleaner display
+        for edit in edits[:20]:  # Limit display to 20 edits
+            if edit.start_line == edit.end_line:
+                preview = (
+                    edit.new_text[:50] + "..."
+                    if len(edit.new_text) > 50
+                    else edit.new_text
+                )
+                preview = preview.replace("\n", "\\n")
+                lines.append(f"  - Line {edit.start_line}: `{preview}`")
+            else:
+                lines.append(
+                    f"  - Lines {edit.start_line}-{edit.end_line}: {len(edit.new_text)} chars"
+                )
+
+        if len(edits) > 20:
+            lines.append(f"\n  ... and {len(edits) - 20} more edit(s)")
+
+        lines.append(
+            "\n\n⚠️ **Note:** These changes are shown for preview only. "
+            "Use the patch tool to apply the edits."
+        )
+
+        return Message("system", "\n".join(lines))
+
+    elif action == "signature":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp signature <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        sig_info = _get_lsp_signature(file, line, col, workspace)
+
+        if sig_info is None or not sig_info.signatures:
+            return Message(
+                "system",
+                f"No signature help available at {file.name}:{line}:{col}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The position is not inside a function call\n"
+                "- The language server doesn't have signature info",
+            )
+
+        # Format signature help
+        lines = [f"**Signature help at {file.name}:{line}:{col}**\n"]
+
+        for i, sig in enumerate(sig_info.signatures):
+            prefix = "→ " if i == sig_info.active_signature else "  "
+            lines.append(f"{prefix}`{sig.label}`")
+
+            if sig.documentation:
+                # Truncate long documentation
+                doc = (
+                    sig.documentation[:200] + "..."
+                    if len(sig.documentation) > 200
+                    else sig.documentation
+                )
+                lines.append(f"\n{doc}\n")
+
+            # Show parameters if available
+            if sig.parameters:
+                lines.append("\n**Parameters:**")
+                for j, param in enumerate(sig.parameters):
+                    active = "→ " if sig_info.active_parameter == j else "  "
+                    param_line = f"{active}{param.label}"
+                    if param.documentation:
+                        param_doc = (
+                            param.documentation[:100] + "..."
+                            if len(param.documentation) > 100
+                            else param.documentation
+                        )
+                        param_line += f" - {param_doc}"
+                    lines.append(param_line)
+
+        return Message("system", "\n".join(lines))
+
     elif action == "status":
         status_lines = ["**LSP Status**\n"]
 
@@ -757,6 +939,10 @@ tool = ToolSpec(
 **Refactoring** (Phase 2.2):
 - `lsp rename <file:line:col> <new_name>` - Rename symbol across project
 
+**Formatting & Assistance** (Phase 4):
+- `lsp format <file>` - Format document using LSP server
+- `lsp signature <file:line:col>` - Get function signature/parameter info
+
 **Status**:
 - `lsp status` - Show available language servers
 
@@ -782,6 +968,14 @@ hover src/utils.py:15:5
 ```lsp
 rename src/myfile.py:15:5 new_function_name
 ```
+
+```lsp
+format src/myfile.py
+```
+
+```lsp
+signature src/myfile.py:25:15
+```
 """,
     execute=execute,
     block_types=["lsp"],
@@ -789,7 +983,7 @@ rename src/myfile.py:15:5 new_function_name
         Parameter(
             name="action",
             type="string",
-            description="Action: diagnostics, definition, references, hover, rename, status, check",
+            description="Action: diagnostics, definition, references, hover, rename, format, signature, status, check",
             required=True,
         ),
         Parameter(

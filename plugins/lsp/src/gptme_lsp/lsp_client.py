@@ -113,6 +113,42 @@ class WorkspaceEdit:
 
 
 @dataclass
+class SignatureParameter:
+    """Represents a parameter in a function signature."""
+
+    label: str
+    documentation: str | None = None
+
+
+@dataclass
+class SignatureInfo:
+    """Represents signature help information from LSP."""
+
+    signatures: list["SignatureLabel"]  # List of overloads
+    active_signature: int = 0
+    active_parameter: int | None = None
+
+    def __str__(self) -> str:
+        if not self.signatures:
+            return "No signature information"
+        sig = (
+            self.signatures[self.active_signature]
+            if self.active_signature < len(self.signatures)
+            else self.signatures[0]
+        )
+        return sig.label
+
+
+@dataclass
+class SignatureLabel:
+    """Represents a single function signature."""
+
+    label: str  # Full signature string e.g., "def foo(x: int, y: str) -> bool"
+    documentation: str | None = None
+    parameters: list[SignatureParameter] = field(default_factory=list)
+
+
+@dataclass
 class LSPServer:
     """Manages a language server process."""
 
@@ -560,6 +596,140 @@ class LSPServer:
 
         return (placeholder, start_pos, end_pos)
 
+    def format_document(
+        self, file: Path, tab_size: int = 4, insert_spaces: bool = True
+    ) -> list[TextEdit] | None:
+        """Format an entire document using LSP.
+
+        Args:
+            file: The file path to format
+            tab_size: Number of spaces per tab
+            insert_spaces: Use spaces instead of tabs
+
+        Returns:
+            List of TextEdit objects to apply, or None if formatting not available.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        result = self._send_request(
+            "textDocument/formatting",
+            {
+                "textDocument": {"uri": uri},
+                "options": {
+                    "tabSize": tab_size,
+                    "insertSpaces": insert_spaces,
+                },
+            },
+        )
+
+        if not result:
+            return None
+
+        return self._parse_text_edits(file, result)
+
+    def get_signature_help(
+        self, file: Path, line: int, column: int
+    ) -> SignatureInfo | None:
+        """Get signature help for a function call.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number (should be inside function parentheses)
+
+        Returns:
+            SignatureInfo object or None if no signature help available.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/signatureHelp",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+            },
+        )
+
+        if result is None:
+            return None
+
+        return self._parse_signature_help(result)
+
+    def _parse_text_edits(self, file: Path, result: list[dict]) -> list[TextEdit]:
+        """Parse LSP TextEdit[] response into TextEdit objects."""
+        edits: list[TextEdit] = []
+        for edit in result:
+            range_obj = edit.get("range", {})
+            start = range_obj.get("start", {})
+            end = range_obj.get("end", {})
+            new_text = edit.get("newText", "")
+
+            edits.append(
+                TextEdit(
+                    file=file,
+                    start_line=start.get("line", 0) + 1,
+                    start_column=start.get("character", 0) + 1,
+                    end_line=end.get("line", 0) + 1,
+                    end_column=end.get("character", 0) + 1,
+                    new_text=new_text,
+                )
+            )
+        return edits
+
+    def _parse_signature_help(self, result: dict) -> SignatureInfo | None:
+        """Parse LSP SignatureHelp response into SignatureInfo object."""
+        if not result:
+            return None
+
+        signatures_data = result.get("signatures", [])
+        if not signatures_data:
+            return None
+
+        signatures: list[SignatureLabel] = []
+        for sig_data in signatures_data:
+            label = sig_data.get("label", "")
+            doc = sig_data.get("documentation")
+            if isinstance(doc, dict):
+                doc = doc.get("value", str(doc))
+
+            # Parse parameters
+            params: list[SignatureParameter] = []
+            for param_data in sig_data.get("parameters", []):
+                param_label = param_data.get("label", "")
+                if isinstance(param_label, list) and len(param_label) == 2:
+                    # Label is [start, end] indices into signature label
+                    start, end = param_label
+                    param_label = label[start:end]
+                param_doc = param_data.get("documentation")
+                if isinstance(param_doc, dict):
+                    param_doc = param_doc.get("value", str(param_doc))
+                params.append(
+                    SignatureParameter(label=str(param_label), documentation=param_doc)
+                )
+
+            signatures.append(
+                SignatureLabel(label=label, documentation=doc, parameters=params)
+            )
+
+        return SignatureInfo(
+            signatures=signatures,
+            active_signature=result.get("activeSignature", 0),
+            active_parameter=result.get("activeParameter"),
+        )
+
     def _parse_workspace_edit(self, result: Any) -> WorkspaceEdit | None:
         """Parse LSP WorkspaceEdit response into WorkspaceEdit object."""
         if not result:
@@ -936,6 +1106,34 @@ class LSPManager:
             return None
 
         return server.get_hover(file, line, column)
+
+    def format_document(
+        self, file: Path, tab_size: int = 4, insert_spaces: bool = True
+    ) -> list[TextEdit] | None:
+        """Format a document (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return None
+
+        server = self._ensure_server(language)
+        if server is None:
+            return None
+
+        return server.format_document(file, tab_size, insert_spaces)
+
+    def get_signature_help(
+        self, file: Path, line: int, column: int
+    ) -> SignatureInfo | None:
+        """Get signature help (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return None
+
+        server = self._ensure_server(language)
+        if server is None:
+            return None
+
+        return server.get_signature_help(file, line, column)
 
     def _file_to_language(self, file: Path) -> str | None:
         """Map file to language server."""
