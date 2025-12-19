@@ -18,6 +18,8 @@ from threading import Thread
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from .config import format_server_error, load_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -737,6 +739,8 @@ class LSPServer:
 
 # Language server configurations
 # Users can add more via config
+# Note: Default servers are now defined in config.py
+# This is kept for backward compatibility but load_config() is preferred
 KNOWN_SERVERS: dict[str, list[str]] = {
     "python": ["pyright-langserver", "--stdio"],
     "typescript": ["typescript-language-server", "--stdio"],
@@ -786,11 +790,29 @@ def _is_server_available(command: str) -> bool:
 
 
 class LSPManager:
-    """Manages multiple language servers for a workspace."""
+    """Manages multiple language servers for a workspace.
 
-    def __init__(self, workspace: Path):
+    Features:
+    - Lazy initialization: Servers start only when first needed
+    - Config-based: Custom server paths via .gptme-lsp.toml
+    - Auto-restart: Crashed servers restart on next command
+    """
+
+    def __init__(self, workspace: Path, lazy: bool = True):
+        """Initialize the LSP manager.
+
+        Args:
+            workspace: Root directory for the workspace
+            lazy: If True (default), servers start only when needed.
+                  If False, auto-detect and start servers immediately.
+        """
         self.workspace = workspace
         self.servers: dict[str, LSPServer] = {}
+        self._config = load_config(workspace)
+        self._lazy = lazy
+
+        if not lazy:
+            self.start_detected_servers()
 
     def start_detected_servers(self) -> list[str]:
         """Auto-detect and start appropriate language servers.
@@ -802,26 +824,38 @@ class LSPManager:
 
         for language, command in detected:
             if language not in self.servers:
+                # Use config command if available, otherwise use detected
+                config_cmd = self._config.get(language)
                 server = LSPServer(
                     name=language,
-                    command=command,
+                    command=config_cmd if config_cmd else command,
                     workspace=self.workspace,
                 )
                 if server.start():
                     self.servers[language] = server
                     started.append(language)
+                else:
+                    # Log helpful error message
+                    logger.warning(format_server_error(language, "start_failed"))
 
         return started
 
     def start_server(self, language: str, command: list[str] | None = None) -> bool:
         """Start a specific language server."""
         if language in self.servers:
-            return True
+            server = self.servers[language]
+            # Check if server is still alive
+            if server.process and server.process.poll() is None:
+                return True
+            # Server died, remove and restart
+            logger.info(f"Restarting crashed {language} server")
+            del self.servers[language]
 
         if command is None:
-            command = KNOWN_SERVERS.get(language)
+            # Try config first, then known servers
+            command = self._config.get(language) or KNOWN_SERVERS.get(language)
             if command is None:
-                logger.error(f"Unknown language server: {language}")
+                logger.error(format_server_error(language, "not_found"))
                 return False
 
         server = LSPServer(
@@ -832,7 +866,19 @@ class LSPManager:
         if server.start():
             self.servers[language] = server
             return True
+
+        logger.error(format_server_error(language, "start_failed"))
         return False
+
+    def _ensure_server(self, language: str) -> LSPServer | None:
+        """Ensure a server is running for the given language (lazy init).
+
+        Returns the server if available, None otherwise.
+        """
+        if language not in self.servers:
+            if not self.start_server(language):
+                return None
+        return self.servers.get(language)
 
     def stop_all(self) -> None:
         """Stop all language servers."""
@@ -841,16 +887,55 @@ class LSPManager:
         self.servers.clear()
 
     def get_diagnostics(self, file: Path) -> list[Diagnostic]:
-        """Get diagnostics for a file from the appropriate server."""
+        """Get diagnostics for a file from the appropriate server.
+
+        Lazily starts the server if not already running.
+        """
         language = self._file_to_language(file)
         if language is None:
             return []
 
-        server = self.servers.get(language)
+        server = self._ensure_server(language)
         if server is None:
             return []
 
         return server.get_diagnostics(file)
+
+    def get_definition(self, file: Path, line: int, column: int) -> list[Location]:
+        """Get definition location (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_definition(file, line, column)
+
+    def get_references(self, file: Path, line: int, column: int) -> list[Location]:
+        """Get references (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_references(file, line, column)
+
+    def get_hover(self, file: Path, line: int, column: int) -> HoverInfo | None:
+        """Get hover info (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return None
+
+        server = self._ensure_server(language)
+        if server is None:
+            return None
+
+        return server.get_hover(file, line, column)
 
     def _file_to_language(self, file: Path) -> str | None:
         """Map file to language server."""
