@@ -925,57 +925,27 @@ def _lsp_command(ctx: "CommandContext") -> Generator[Message, None, None]:
 tool = ToolSpec(
     name="lsp",
     desc="Language Server Protocol integration for code intelligence",
-    instructions="""Use LSP to get code intelligence:
+    instructions="""LSP helps you understand and modify code with IDE-level intelligence.
 
-**Diagnostics** (errors and warnings):
-- `lsp diagnostics <file>` - Get errors/warnings for a file
-- `lsp check` - Run diagnostics on all changed files (git)
+**When to use LSP:**
+- Before making changes: Run `lsp diagnostics <file>` to find existing errors
+- Understanding unfamiliar code: Use `lsp hover <file:line:col>` for types/docs, `lsp definition` to find implementations
+- Safe refactoring: Use `lsp rename <file:line:col> <new_name>` for project-wide symbol renames
+- Code cleanup: Use `lsp format <file>` to apply consistent formatting
+- Writing function calls: Use `lsp signature <file:line:col>` to see parameter info
 
-**Navigation** (Phase 2.1):
-- `lsp definition <file:line:col>` - Jump to symbol definition
-- `lsp references <file:line:col>` - Find all references to a symbol
-- `lsp hover <file:line:col>` - Get documentation/type information
+**Commands:**
+- `lsp diagnostics <file>` - Find errors/warnings before and after changes
+- `lsp check` - Check all modified files (git-aware)
+- `lsp definition <file:line:col>` - Jump to where a symbol is defined
+- `lsp references <file:line:col>` - Find all usages of a symbol
+- `lsp hover <file:line:col>` - Get type info and documentation
+- `lsp rename <file:line:col> <new_name>` - Rename symbol across entire project
+- `lsp format <file>` - Auto-format document (preview only)
+- `lsp signature <file:line:col>` - Get function signature and parameter docs
+- `lsp status` - Check which language servers are available
 
-**Refactoring** (Phase 2.2):
-- `lsp rename <file:line:col> <new_name>` - Rename symbol across project
-
-**Formatting & Assistance** (Phase 4):
-- `lsp format <file>` - Format document using LSP server
-- `lsp signature <file:line:col>` - Get function signature/parameter info
-
-**Status**:
-- `lsp status` - Show available language servers
-
-**Supported languages:**
-- Python (requires pyright: `npm install -g pyright`)
-- TypeScript/JavaScript (requires typescript-language-server)
-- Go (requires gopls)
-- Rust (requires rust-analyzer)
-
-**Example usage:**
-```lsp
-diagnostics src/myfile.py
-```
-
-```lsp
-definition src/myfile.py:42:10
-```
-
-```lsp
-hover src/utils.py:15:5
-```
-
-```lsp
-rename src/myfile.py:15:5 new_function_name
-```
-
-```lsp
-format src/myfile.py
-```
-
-```lsp
-signature src/myfile.py:25:15
-```
+**Supported:** Python (pyright), TypeScript/JS (ts-server), Go (gopls), Rust (rust-analyzer)
 """,
     execute=execute,
     block_types=["lsp"],
