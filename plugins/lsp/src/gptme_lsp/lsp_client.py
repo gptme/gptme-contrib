@@ -230,6 +230,58 @@ class SymbolInfo:
 
 
 @dataclass
+
+# Phase 6 dataclasses
+
+
+@dataclass
+class SemanticToken:
+    """Represents a semantic token for rich syntax highlighting (Phase 6)."""
+
+    line: int  # 1-indexed
+    column: int  # 1-indexed
+    length: int
+    token_type: str  # e.g., "function", "variable", "class", "parameter"
+    modifiers: list[str]  # e.g., ["declaration", "readonly"]
+
+    def __str__(self) -> str:
+        mods = f" [{', '.join(self.modifiers)}]" if self.modifiers else ""
+        return (
+            f"L{self.line}:{self.column} ({self.length} chars) {self.token_type}{mods}"
+        )
+
+
+@dataclass
+class DocumentLink:
+    """Represents a clickable link in a document (Phase 6)."""
+
+    start_line: int  # 1-indexed
+    start_column: int  # 1-indexed
+    end_line: int  # 1-indexed
+    end_column: int  # 1-indexed
+    target: str | None  # The target URI (may need resolution)
+    tooltip: str | None = None
+
+    def __str__(self) -> str:
+        loc = f"L{self.start_line}:{self.start_column}-{self.end_column}"
+        target_str = f" -> {self.target}" if self.target else " (unresolved)"
+        return f"{loc}{target_str}"
+
+
+@dataclass
+class CodeLens:
+    """Represents a code lens - actionable annotation above code (Phase 6)."""
+
+    line: int  # 1-indexed
+    column: int  # 1-indexed
+    command_title: str | None  # e.g., "5 references", "Run test"
+    command_id: str | None = None
+    command_args: list[Any] | None = None
+
+    def __str__(self) -> str:
+        title = self.command_title or "(unresolved)"
+        return f"L{self.line}: {title}"
+
 class LSPServer:
     """Manages a language server process."""
 
@@ -1000,6 +1052,92 @@ class LSPServer:
 
         return self._parse_workspace_symbols(result)
 
+
+    # Phase 6 methods
+
+    def get_semantic_tokens(
+        self, file: Path, start_line: int | None = None, end_line: int | None = None
+    ) -> list[SemanticToken]:
+        """Get semantic tokens for syntax highlighting (Phase 6).
+
+        Args:
+            file: Path to the file
+            start_line: Optional start line (1-indexed) for range request
+            end_line: Optional end line (1-indexed) for range request
+
+        Returns:
+            List of SemanticToken for the file/range.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        uri = self._ensure_file_open(file)
+        params: dict[str, Any] = {"textDocument": {"uri": uri}}
+
+        # Use range request if both start and end specified
+        if start_line is not None and end_line is not None:
+            params["range"] = {
+                "start": {"line": start_line - 1, "character": 0},
+                "end": {"line": end_line, "character": 0},
+            }
+            result = self._send_request("textDocument/semanticTokens/range", params)
+        else:
+            result = self._send_request("textDocument/semanticTokens/full", params)
+
+        if result is None:
+            return []
+
+        return self._parse_semantic_tokens(result)
+
+    def get_document_links(self, file: Path) -> list[DocumentLink]:
+        """Get clickable links in a document (Phase 6).
+
+        Returns links to files, URLs, etc. that appear in the document.
+
+        Args:
+            file: Path to the file
+
+        Returns:
+            List of DocumentLink in the file.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        uri = self._ensure_file_open(file)
+        result = self._send_request(
+            "textDocument/documentLink", {"textDocument": {"uri": uri}}
+        )
+
+        if result is None:
+            return []
+
+        return self._parse_document_links(result)
+
+    def get_code_lenses(self, file: Path) -> list[CodeLens]:
+        """Get code lenses for a document (Phase 6).
+
+        Code lenses are actionable annotations displayed above code,
+        like "5 references", "Run test", etc.
+
+        Args:
+            file: Path to the file
+
+        Returns:
+            List of CodeLens in the file.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        uri = self._ensure_file_open(file)
+        result = self._send_request(
+            "textDocument/codeLens", {"textDocument": {"uri": uri}}
+        )
+
+        if result is None:
+            return []
+
+        return self._parse_code_lenses(result)
+
     def _parse_text_edits(self, file: Path, result: list[dict]) -> list[TextEdit]:
         """Parse LSP TextEdit[] response into TextEdit objects."""
         edits: list[TextEdit] = []
@@ -1506,6 +1644,149 @@ class LSPServer:
                     )
 
         return symbols
+
+    # Phase 6 parser methods
+
+    def _parse_semantic_tokens(self, result: dict) -> list[SemanticToken]:
+        """Parse LSP semanticTokens response (Phase 6).
+
+        The data is encoded as a flat array where each token is 5 integers:
+        [deltaLine, deltaStartChar, length, tokenType, tokenModifiers]
+        """
+        tokens: list[SemanticToken] = []
+        data = result.get("data", [])
+
+        if not data:
+            return tokens
+
+        # Get token type and modifier legends from server capabilities
+        # These should have been stored during initialization
+        token_types = getattr(self, "_semantic_token_types", [])
+        token_modifiers = getattr(self, "_semantic_token_modifiers", [])
+
+        # Default legends if not available
+        if not token_types:
+            token_types = [
+                "namespace",
+                "type",
+                "class",
+                "enum",
+                "interface",
+                "struct",
+                "typeParameter",
+                "parameter",
+                "variable",
+                "property",
+                "enumMember",
+                "event",
+                "function",
+                "method",
+                "macro",
+                "keyword",
+                "modifier",
+                "comment",
+                "string",
+                "number",
+                "regexp",
+                "operator",
+            ]
+
+        current_line = 0
+        current_char = 0
+
+        # Process tokens in groups of 5
+        for i in range(0, len(data), 5):
+            if i + 4 >= len(data):
+                break
+
+            delta_line = data[i]
+            delta_char = data[i + 1]
+            length = data[i + 2]
+            token_type_idx = data[i + 3]
+            modifier_bits = data[i + 4]
+
+            # Update position
+            if delta_line > 0:
+                current_line += delta_line
+                current_char = delta_char
+            else:
+                current_char += delta_char
+
+            # Get token type name
+            token_type = (
+                token_types[token_type_idx]
+                if token_type_idx < len(token_types)
+                else f"type{token_type_idx}"
+            )
+
+            # Decode modifiers (bitmask)
+            modifiers: list[str] = []
+            for j, mod_name in enumerate(token_modifiers):
+                if modifier_bits & (1 << j):
+                    modifiers.append(mod_name)
+
+            tokens.append(
+                SemanticToken(
+                    line=current_line + 1,  # Convert to 1-indexed
+                    column=current_char + 1,
+                    length=length,
+                    token_type=token_type,
+                    modifiers=modifiers,
+                )
+            )
+
+        return tokens
+
+    def _parse_document_links(self, result: list[dict]) -> list[DocumentLink]:
+        """Parse LSP documentLink response (Phase 6)."""
+        links: list[DocumentLink] = []
+
+        for link_data in result:
+            range_obj = link_data.get("range", {})
+            start = range_obj.get("start", {})
+            end = range_obj.get("end", {})
+
+            target = link_data.get("target")
+            tooltip = link_data.get("tooltip")
+
+            links.append(
+                DocumentLink(
+                    start_line=start.get("line", 0) + 1,
+                    start_column=start.get("character", 0) + 1,
+                    end_line=end.get("line", 0) + 1,
+                    end_column=end.get("character", 0) + 1,
+                    target=target,
+                    tooltip=tooltip,
+                )
+            )
+
+        return links
+
+    def _parse_code_lenses(self, result: list[dict]) -> list[CodeLens]:
+        """Parse LSP codeLens response (Phase 6)."""
+        lenses: list[CodeLens] = []
+
+        for lens_data in result:
+            range_obj = lens_data.get("range", {})
+            start = range_obj.get("start", {})
+
+            command = lens_data.get("command")
+            command_title = command.get("title") if command else None
+            command_id = command.get("command") if command else None
+            command_args = command.get("arguments") if command else None
+
+            lenses.append(
+                CodeLens(
+                    line=start.get("line", 0) + 1,
+                    column=start.get("character", 0) + 1,
+                    command_title=command_title,
+                    command_id=command_id,
+                    command_args=command_args,
+                )
+            )
+
+        return lenses
+
 
     def _guess_language_id(self, file: Path) -> str:
         """Guess the LSP language ID from file extension."""
