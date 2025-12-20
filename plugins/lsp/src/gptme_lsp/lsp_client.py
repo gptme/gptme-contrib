@@ -806,20 +806,16 @@ class LSPServer:
 
         return self._parse_call_hierarchy_items(result)
 
-    def get_incoming_calls(self, item: CallHierarchyItem) -> list[CallHierarchyCall]:
-        """Get functions/methods that call the given item (Phase 5).
+    def _build_lsp_item_from_hierarchy_item(self, item: CallHierarchyItem) -> dict:
+        """Build LSP CallHierarchyItem dict from our CallHierarchyItem dataclass.
 
         Args:
             item: A CallHierarchyItem from prepare_call_hierarchy
 
         Returns:
-            List of CallHierarchyCall representing callers.
+            Dict representing the LSP CallHierarchyItem structure.
         """
-        if not self._initialized or self.process is None:
-            return []
-
-        # Build the LSP CallHierarchyItem from our dataclass
-        lsp_item = {
+        return {
             "name": item.name,
             "kind": self._symbol_kind_to_int(item.kind),
             "uri": item.file.as_uri(),
@@ -840,6 +836,19 @@ class LSPServer:
             **item._data,  # Include any additional LSP data
         }
 
+    def get_incoming_calls(self, item: CallHierarchyItem) -> list[CallHierarchyCall]:
+        """Get functions/methods that call the given item (Phase 5).
+
+        Args:
+            item: A CallHierarchyItem from prepare_call_hierarchy
+
+        Returns:
+            List of CallHierarchyCall representing callers.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        lsp_item = self._build_lsp_item_from_hierarchy_item(item)
         result = self._send_request("callHierarchy/incomingCalls", {"item": lsp_item})
 
         if result is None:
@@ -859,28 +868,7 @@ class LSPServer:
         if not self._initialized or self.process is None:
             return []
 
-        # Build the LSP CallHierarchyItem from our dataclass
-        lsp_item = {
-            "name": item.name,
-            "kind": self._symbol_kind_to_int(item.kind),
-            "uri": item.file.as_uri(),
-            "range": {
-                "start": {"line": item.line - 1, "character": item.column - 1},
-                "end": {
-                    "line": item.line - 1,
-                    "character": item.column - 1 + len(item.name),
-                },
-            },
-            "selectionRange": {
-                "start": {"line": item.line - 1, "character": item.column - 1},
-                "end": {
-                    "line": item.line - 1,
-                    "character": item.column - 1 + len(item.name),
-                },
-            },
-            **item._data,  # Include any additional LSP data
-        }
-
+        lsp_item = self._build_lsp_item_from_hierarchy_item(item)
         result = self._send_request("callHierarchy/outgoingCalls", {"item": lsp_item})
 
         if result is None:
