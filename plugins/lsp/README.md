@@ -88,47 +88,6 @@ manager.get_definition(file2)    # Server already running, reused
 manager = LSPManager(workspace, lazy=False)  # All detected servers start
 ```
 
-## Supported Languages
-- **Lazy initialization** - Servers start only when first needed (better performance)
-
-## Configuration
-
-### Custom Language Servers
-
-Configure custom servers in `gptme.toml` (project root) or `~/.config/gptme/config.toml` (user-level).
-
-Uses the `[plugin.lsp]` namespace to integrate with gptme's existing config system:
-
-```toml
-[plugin.lsp.servers]
-# Override default server
-python = ["pyright-langserver", "--stdio"]
-
-# Use alternative server
-python = ["pylsp"]
-
-# Custom path
-go = ["/custom/path/to/gopls", "serve"]
-
-# Add new language
-ocaml = ["ocamllsp"]
-```
-
-Project config (`gptme.toml`) overrides user config (`~/.config/gptme/config.toml`), which overrides built-in defaults.
-
-### Lazy Initialization
-
-By default, language servers start only when first needed:
-
-```python
-# Server starts on first command, not at LSPManager creation
-manager = LSPManager(workspace)  # No servers started yet
-manager.get_diagnostics(file)    # Python server starts now
-manager.get_definition(file2)    # Server already running, reused
-
-# Force eager initialization (previous behavior)
-manager = LSPManager(workspace, lazy=False)  # All detected servers start
-```
 
 ## Supported Languages
 
