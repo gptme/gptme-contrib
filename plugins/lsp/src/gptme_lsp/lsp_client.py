@@ -113,6 +113,94 @@ class WorkspaceEdit:
 
 
 @dataclass
+class SignatureParameter:
+    """Represents a parameter in a function signature."""
+
+    label: str
+    documentation: str | None = None
+
+
+@dataclass
+class SignatureInfo:
+    """Represents signature help information from LSP."""
+
+    signatures: list["SignatureLabel"]  # List of overloads
+    active_signature: int = 0
+    active_parameter: int | None = None
+
+    def __str__(self) -> str:
+        if not self.signatures:
+            return "No signature information"
+        sig = (
+            self.signatures[self.active_signature]
+            if self.active_signature < len(self.signatures)
+            else self.signatures[0]
+        )
+        return sig.label
+
+
+@dataclass
+class SignatureLabel:
+    """Represents a single function signature."""
+
+    label: str  # Full signature string e.g., "def foo(x: int, y: str) -> bool"
+    documentation: str | None = None
+    parameters: list[SignatureParameter] = field(default_factory=list)
+
+
+@dataclass
+class InlayHint:
+    """Represents an inlay hint from LSP (Phase 5).
+
+    Inlay hints are inline annotations showing parameter names, types, etc.
+    """
+
+    line: int
+    column: int
+    label: str
+    kind: str | None = None  # "type", "parameter", or None
+    padding_left: bool = False
+    padding_right: bool = False
+
+    def __str__(self) -> str:
+        kind_str = f" ({self.kind})" if self.kind else ""
+        return f"{self.line}:{self.column}: {self.label}{kind_str}"
+
+
+@dataclass
+class CallHierarchyItem:
+    """Represents an item in a call hierarchy (Phase 5).
+
+    Used for navigating call relationships in code.
+    """
+
+    name: str
+    kind: str  # "function", "method", "class", etc.
+    file: Path
+    line: int
+    column: int
+    detail: str | None = None
+    # Internal: LSP data for follow-up requests
+    _data: dict = field(default_factory=dict, repr=False)
+
+    def __str__(self) -> str:
+        detail_str = f" - {self.detail}" if self.detail else ""
+        return f"{self.name} ({self.kind}){detail_str} at {self.file.name}:{self.line}"
+
+
+@dataclass
+class CallHierarchyCall:
+    """Represents an incoming or outgoing call in hierarchy (Phase 5)."""
+
+    item: CallHierarchyItem
+    from_ranges: list[tuple[int, int]]  # List of (line, column) where call occurs
+
+    def __str__(self) -> str:
+        ranges = ", ".join(f"{line_num}:{col}" for line_num, col in self.from_ranges)
+        return f"{self.item.name} at {ranges}"
+
+
+@dataclass
 class LSPServer:
     """Manages a language server process."""
 
@@ -560,6 +648,308 @@ class LSPServer:
 
         return (placeholder, start_pos, end_pos)
 
+    def format_document(
+        self, file: Path, tab_size: int = 4, insert_spaces: bool = True
+    ) -> list[TextEdit] | None:
+        """Format an entire document using LSP.
+
+        Args:
+            file: The file path to format
+            tab_size: Number of spaces per tab
+            insert_spaces: Use spaces instead of tabs
+
+        Returns:
+            List of TextEdit objects to apply, or None if formatting not available.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        result = self._send_request(
+            "textDocument/formatting",
+            {
+                "textDocument": {"uri": uri},
+                "options": {
+                    "tabSize": tab_size,
+                    "insertSpaces": insert_spaces,
+                },
+            },
+        )
+
+        if not result:
+            return None
+
+        return self._parse_text_edits(file, result)
+
+    def get_signature_help(
+        self, file: Path, line: int, column: int
+    ) -> SignatureInfo | None:
+        """Get signature help for a function call.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number (should be inside function parentheses)
+
+        Returns:
+            SignatureInfo object or None if no signature help available.
+        """
+        if not self._initialized or self.process is None:
+            return None
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return None
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/signatureHelp",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+            },
+        )
+
+        if result is None:
+            return None
+
+        return self._parse_signature_help(result)
+
+    def get_inlay_hints(
+        self, file: Path, start_line: int = 1, end_line: int | None = None
+    ) -> list[InlayHint]:
+        """Get inlay hints for a range of lines (Phase 5).
+
+        Inlay hints show inline annotations like parameter names and type hints.
+
+        Args:
+            file: The file path
+            start_line: 1-indexed start line (default: 1)
+            end_line: 1-indexed end line (default: end of file)
+
+        Returns:
+            List of InlayHint objects.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return []
+
+        # Read file to get line count if end_line not specified
+        if end_line is None:
+            try:
+                with open(file) as f:
+                    end_line = sum(1 for _ in f)
+            except Exception:
+                end_line = 1000  # Default to large range
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/inlayHint",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": start_line - 1, "character": 0},
+                    "end": {"line": end_line - 1, "character": 999},
+                },
+            },
+        )
+
+        if result is None:
+            return []
+
+        return self._parse_inlay_hints(result)
+
+    def prepare_call_hierarchy(
+        self, file: Path, line: int, column: int
+    ) -> list[CallHierarchyItem]:
+        """Prepare call hierarchy for a symbol (Phase 5).
+
+        This is the first step in call hierarchy navigation.
+        Returns items that can be used with get_incoming_calls/get_outgoing_calls.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number
+            column: 1-indexed column number
+
+        Returns:
+            List of CallHierarchyItem objects (usually 1 item for the symbol).
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return []
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/prepareCallHierarchy",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": column - 1},
+            },
+        )
+
+        if result is None:
+            return []
+
+        return self._parse_call_hierarchy_items(result)
+
+    def get_incoming_calls(self, item: CallHierarchyItem) -> list[CallHierarchyCall]:
+        """Get functions/methods that call the given item (Phase 5).
+
+        Args:
+            item: A CallHierarchyItem from prepare_call_hierarchy
+
+        Returns:
+            List of CallHierarchyCall representing callers.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        # Build the LSP CallHierarchyItem from our dataclass
+        lsp_item = {
+            "name": item.name,
+            "kind": self._symbol_kind_to_int(item.kind),
+            "uri": item.file.as_uri(),
+            "range": {
+                "start": {"line": item.line - 1, "character": item.column - 1},
+                "end": {
+                    "line": item.line - 1,
+                    "character": item.column - 1 + len(item.name),
+                },
+            },
+            "selectionRange": {
+                "start": {"line": item.line - 1, "character": item.column - 1},
+                "end": {
+                    "line": item.line - 1,
+                    "character": item.column - 1 + len(item.name),
+                },
+            },
+            **item._data,  # Include any additional LSP data
+        }
+
+        result = self._send_request("callHierarchy/incomingCalls", {"item": lsp_item})
+
+        if result is None:
+            return []
+
+        return self._parse_call_hierarchy_calls(result, incoming=True)
+
+    def get_outgoing_calls(self, item: CallHierarchyItem) -> list[CallHierarchyCall]:
+        """Get functions/methods called by the given item (Phase 5).
+
+        Args:
+            item: A CallHierarchyItem from prepare_call_hierarchy
+
+        Returns:
+            List of CallHierarchyCall representing callees.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        # Build the LSP CallHierarchyItem from our dataclass
+        lsp_item = {
+            "name": item.name,
+            "kind": self._symbol_kind_to_int(item.kind),
+            "uri": item.file.as_uri(),
+            "range": {
+                "start": {"line": item.line - 1, "character": item.column - 1},
+                "end": {
+                    "line": item.line - 1,
+                    "character": item.column - 1 + len(item.name),
+                },
+            },
+            "selectionRange": {
+                "start": {"line": item.line - 1, "character": item.column - 1},
+                "end": {
+                    "line": item.line - 1,
+                    "character": item.column - 1 + len(item.name),
+                },
+            },
+            **item._data,  # Include any additional LSP data
+        }
+
+        result = self._send_request("callHierarchy/outgoingCalls", {"item": lsp_item})
+
+        if result is None:
+            return []
+
+        return self._parse_call_hierarchy_calls(result, incoming=False)
+
+    def _parse_text_edits(self, file: Path, result: list[dict]) -> list[TextEdit]:
+        """Parse LSP TextEdit[] response into TextEdit objects."""
+        edits: list[TextEdit] = []
+        for edit in result:
+            range_obj = edit.get("range", {})
+            start = range_obj.get("start", {})
+            end = range_obj.get("end", {})
+            new_text = edit.get("newText", "")
+
+            edits.append(
+                TextEdit(
+                    file=file,
+                    start_line=start.get("line", 0) + 1,
+                    start_column=start.get("character", 0) + 1,
+                    end_line=end.get("line", 0) + 1,
+                    end_column=end.get("character", 0) + 1,
+                    new_text=new_text,
+                )
+            )
+        return edits
+
+    def _parse_signature_help(self, result: dict) -> SignatureInfo | None:
+        """Parse LSP SignatureHelp response into SignatureInfo object."""
+        if not result:
+            return None
+
+        signatures_data = result.get("signatures", [])
+        if not signatures_data:
+            return None
+
+        signatures: list[SignatureLabel] = []
+        for sig_data in signatures_data:
+            label = sig_data.get("label", "")
+            doc = sig_data.get("documentation")
+            if isinstance(doc, dict):
+                doc = doc.get("value", None)
+
+            # Parse parameters
+            params: list[SignatureParameter] = []
+            for param_data in sig_data.get("parameters", []):
+                param_label = param_data.get("label", "")
+                if isinstance(param_label, list) and len(param_label) == 2:
+                    # Label is [start, end] indices into signature label
+                    start, end = param_label
+                    param_label = label[start:end]
+                param_doc = param_data.get("documentation")
+                if isinstance(param_doc, dict):
+                    param_doc = param_doc.get("value", None)
+                params.append(
+                    SignatureParameter(label=str(param_label), documentation=param_doc)
+                )
+
+            signatures.append(
+                SignatureLabel(label=label, documentation=doc, parameters=params)
+            )
+
+        return SignatureInfo(
+            signatures=signatures,
+            active_signature=result.get("activeSignature", 0),
+            active_parameter=result.get("activeParameter"),
+        )
+
     def _parse_workspace_edit(self, result: Any) -> WorkspaceEdit | None:
         """Parse LSP WorkspaceEdit response into WorkspaceEdit object."""
         if not result:
@@ -717,6 +1107,176 @@ class LSPServer:
             range_start=range_start,
             range_end=range_end,
         )
+
+    def _parse_inlay_hints(self, result: list[dict]) -> list[InlayHint]:
+        """Parse LSP inlayHint response into InlayHint objects (Phase 5)."""
+        hints: list[InlayHint] = []
+        for hint in result:
+            position = hint.get("position", {})
+            line = position.get("line", 0) + 1
+            column = position.get("character", 0) + 1
+
+            # Label can be string or InlayHintLabelPart[]
+            label_data = hint.get("label", "")
+            if isinstance(label_data, str):
+                label = label_data
+            elif isinstance(label_data, list):
+                # Array of parts, concatenate their values
+                label = "".join(p.get("value", "") for p in label_data)
+            else:
+                label = str(label_data)
+
+            # Kind: 1 = Type, 2 = Parameter
+            kind_map = {1: "type", 2: "parameter"}
+            hint_kind = hint.get("kind")
+            kind = kind_map.get(hint_kind) if isinstance(hint_kind, int) else None
+
+            hints.append(
+                InlayHint(
+                    line=line,
+                    column=column,
+                    label=label,
+                    kind=kind,
+                    padding_left=hint.get("paddingLeft", False),
+                    padding_right=hint.get("paddingRight", False),
+                )
+            )
+        return hints
+
+    def _parse_call_hierarchy_items(
+        self, result: list[dict]
+    ) -> list[CallHierarchyItem]:
+        """Parse LSP prepareCallHierarchy response into CallHierarchyItem objects (Phase 5)."""
+        items: list[CallHierarchyItem] = []
+        for item in result:
+            name = item.get("name", "")
+            kind_int = item.get("kind", 0)
+            kind = self._symbol_kind_from_int(kind_int)
+
+            uri = item.get("uri", "")
+            file = (
+                Path(uri.replace("file://", ""))
+                if uri.startswith("file://")
+                else Path(uri)
+            )
+
+            range_obj = item.get("selectionRange", item.get("range", {}))
+            start = range_obj.get("start", {})
+            line = start.get("line", 0) + 1
+            column = start.get("character", 0) + 1
+
+            detail = item.get("detail")
+
+            # Store full item data for follow-up requests
+            data = {
+                k: v
+                for k, v in item.items()
+                if k not in ("name", "kind", "uri", "detail")
+            }
+
+            items.append(
+                CallHierarchyItem(
+                    name=name,
+                    kind=kind,
+                    file=file,
+                    line=line,
+                    column=column,
+                    detail=detail,
+                    _data=data,
+                )
+            )
+        return items
+
+    def _parse_call_hierarchy_calls(
+        self, result: list[dict], incoming: bool = True
+    ) -> list[CallHierarchyCall]:
+        """Parse LSP callHierarchy/incomingCalls or outgoingCalls response (Phase 5)."""
+        calls: list[CallHierarchyCall] = []
+        for call in result:
+            # Key is "from" for incoming, "to" for outgoing
+            item_key = "from" if incoming else "to"
+            item_data = call.get(item_key, {})
+
+            # Parse the item
+            items = self._parse_call_hierarchy_items([item_data])
+            if not items:
+                continue
+            item = items[0]
+
+            # Parse fromRanges (locations where the call occurs)
+            from_ranges: list[tuple[int, int]] = []
+            for range_obj in call.get("fromRanges", []):
+                start = range_obj.get("start", {})
+                from_ranges.append(
+                    (start.get("line", 0) + 1, start.get("character", 0) + 1)
+                )
+
+            calls.append(CallHierarchyCall(item=item, from_ranges=from_ranges))
+        return calls
+
+    def _symbol_kind_from_int(self, kind: int) -> str:
+        """Convert LSP SymbolKind integer to string (Phase 5)."""
+        kind_map = {
+            1: "file",
+            2: "module",
+            3: "namespace",
+            4: "package",
+            5: "class",
+            6: "method",
+            7: "property",
+            8: "field",
+            9: "constructor",
+            10: "enum",
+            11: "interface",
+            12: "function",
+            13: "variable",
+            14: "constant",
+            15: "string",
+            16: "number",
+            17: "boolean",
+            18: "array",
+            19: "object",
+            20: "key",
+            21: "null",
+            22: "enummember",
+            23: "struct",
+            24: "event",
+            25: "operator",
+            26: "typeparameter",
+        }
+        return kind_map.get(kind, "unknown")
+
+    def _symbol_kind_to_int(self, kind: str) -> int:
+        """Convert symbol kind string to LSP SymbolKind integer (Phase 5)."""
+        kind_map = {
+            "file": 1,
+            "module": 2,
+            "namespace": 3,
+            "package": 4,
+            "class": 5,
+            "method": 6,
+            "property": 7,
+            "field": 8,
+            "constructor": 9,
+            "enum": 10,
+            "interface": 11,
+            "function": 12,
+            "variable": 13,
+            "constant": 14,
+            "string": 15,
+            "number": 16,
+            "boolean": 17,
+            "array": 18,
+            "object": 19,
+            "key": 20,
+            "null": 21,
+            "enummember": 22,
+            "struct": 23,
+            "event": 24,
+            "operator": 25,
+            "typeparameter": 26,
+        }
+        return kind_map.get(kind.lower(), 12)  # Default to function
 
     def _guess_language_id(self, file: Path) -> str:
         """Guess the LSP language ID from file extension."""
@@ -936,6 +1496,86 @@ class LSPManager:
             return None
 
         return server.get_hover(file, line, column)
+
+    def format_document(
+        self, file: Path, tab_size: int = 4, insert_spaces: bool = True
+    ) -> list[TextEdit] | None:
+        """Format a document (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return None
+
+        server = self._ensure_server(language)
+        if server is None:
+            return None
+
+        return server.format_document(file, tab_size, insert_spaces)
+
+    def get_signature_help(
+        self, file: Path, line: int, column: int
+    ) -> SignatureInfo | None:
+        """Get signature help (lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return None
+
+        server = self._ensure_server(language)
+        if server is None:
+            return None
+
+        return server.get_signature_help(file, line, column)
+
+    def get_inlay_hints(
+        self, file: Path, start_line: int = 1, end_line: int | None = None
+    ) -> list[InlayHint]:
+        """Get inlay hints for a file range (Phase 5, lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_inlay_hints(file, start_line, end_line)
+
+    def prepare_call_hierarchy(
+        self, file: Path, line: int, column: int
+    ) -> list[CallHierarchyItem]:
+        """Prepare call hierarchy for a symbol (Phase 5, lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.prepare_call_hierarchy(file, line, column)
+
+    def get_incoming_calls(self, item: CallHierarchyItem) -> list[CallHierarchyCall]:
+        """Get callers of a symbol (Phase 5, lazy init)."""
+        language = self._file_to_language(item.file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_incoming_calls(item)
+
+    def get_outgoing_calls(self, item: CallHierarchyItem) -> list[CallHierarchyCall]:
+        """Get callees of a symbol (Phase 5, lazy init)."""
+        language = self._file_to_language(item.file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_outgoing_calls(item)
 
     def _file_to_language(self, file: Path) -> str | None:
         """Map file to language server."""

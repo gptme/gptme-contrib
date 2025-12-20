@@ -6,6 +6,11 @@ This tool provides access to LSP features:
 - references: Find all references (Phase 2.1)
 - hover: Get documentation (Phase 2.1)
 - rename: Rename symbols across project (Phase 2.2)
+- format: Format document using LSP (Phase 4)
+- signature: Get function signature help (Phase 4)
+- hints: Get inlay hints showing parameter names and types (Phase 5)
+- callers: Find functions that call a symbol (Phase 5)
+- callees: Find functions called by a symbol (Phase 5)
 
 Uses proper LSP protocol to communicate with language servers generically,
 supporting pyright (Python), typescript-language-server (JS/TS), gopls (Go),
@@ -28,6 +33,11 @@ from ..lsp_client import (
     Location,
     HoverInfo,
     WorkspaceEdit,
+    SignatureInfo,
+    TextEdit,
+    InlayHint,
+    CallHierarchyItem,
+    CallHierarchyCall,
 )
 
 if TYPE_CHECKING:
@@ -314,6 +324,136 @@ def _get_lsp_rename(
     return server.rename(file, line, column, new_name)
 
 
+def _get_lsp_format(
+    file: Path,
+    workspace: Path | None = None,
+    tab_size: int = 4,
+    insert_spaces: bool = True,
+) -> list[TextEdit] | None:
+    """Format a document using LSP.
+
+    Returns list of TextEdit objects to apply, or None if LSP not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.format_document(file, tab_size, insert_spaces)
+
+
+def _get_lsp_signature(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> SignatureInfo | None:
+    """Get signature help for a function call using LSP.
+
+    Returns SignatureInfo object or None if LSP not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return None
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None
+
+    return server.get_signature_help(file, line, column)
+
+
+def _get_lsp_inlay_hints(
+    file: Path,
+    start_line: int = 1,
+    end_line: int | None = None,
+    workspace: Path | None = None,
+) -> list[InlayHint]:
+    """Get inlay hints for a file range using LSP (Phase 5).
+
+    Returns list of InlayHint objects or empty list if LSP not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return []
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return []
+
+    return server.get_inlay_hints(file, start_line, end_line)
+
+
+def _get_lsp_callers(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> tuple[CallHierarchyItem | None, list[CallHierarchyCall]]:
+    """Get callers of a symbol using LSP call hierarchy (Phase 5).
+
+    Returns tuple of (target item, list of callers) or (None, []) if not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return None, []
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None, []
+
+    # First, prepare the call hierarchy
+    items = server.prepare_call_hierarchy(file, line, column)
+    if not items:
+        return None, []
+
+    target = items[0]
+    callers = server.get_incoming_calls(target)
+    return target, callers
+
+
+def _get_lsp_callees(
+    file: Path, line: int, column: int, workspace: Path | None = None
+) -> tuple[CallHierarchyItem | None, list[CallHierarchyCall]]:
+    """Get callees of a symbol using LSP call hierarchy (Phase 5).
+
+    Returns tuple of (target item, list of callees) or (None, []) if not available.
+    """
+    suffix = file.suffix.lower()
+    language = EXTENSION_TO_LANGUAGE.get(suffix)
+    if not language:
+        return None, []
+
+    if workspace is None:
+        workspace = _get_workspace() or file.parent
+
+    server = _get_or_start_server(language, workspace)
+    if server is None:
+        return None, []
+
+    # First, prepare the call hierarchy
+    items = server.prepare_call_hierarchy(file, line, column)
+    if not items:
+        return None, []
+
+    target = items[0]
+    callees = server.get_outgoing_calls(target)
+    return target, callees
+
+
 def execute(
     code: str | None,
     args: list[str] | None,
@@ -341,6 +481,11 @@ def execute(
             "  references <file:line:col> - Find all references to symbol\n"
             "  hover <file:line:col>      - Get documentation/type info\n"
             "  rename <file:line:col> <new_name> - Rename symbol across project\n"
+            "  format <file>            - Format document using LSP\n"
+            "  signature <file:line:col> - Get function signature help\n"
+            "  hints <file> [start:end] - Get inlay hints (parameter names, types)\n"
+            "  callers <file:line:col>  - Find functions that call this symbol\n"
+            "  callees <file:line:col>  - Find functions called by this symbol\n"
             "  status                   - Show available language servers\n"
             "  check                    - Run diagnostics on all changed files (git)",
         )
@@ -575,6 +720,292 @@ def execute(
 
         return Message("system", "\n".join(lines))
 
+    elif action == "format":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp format <file>")
+
+        file_path = args[1]
+        file = Path(file_path)
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        # Parse optional formatting options
+        tab_size = 4
+        insert_spaces = True
+        if len(args) >= 3:
+            try:
+                tab_size = int(args[2])
+            except ValueError:
+                pass
+        if len(args) >= 4:
+            insert_spaces = args[3].lower() != "tabs"
+
+        edits_result = _get_lsp_format(file, workspace, tab_size, insert_spaces)
+
+        if edits_result is None:
+            suffix = file.suffix.lower()
+            return Message(
+                "system",
+                f"No LSP server available for {suffix} files.\n\n"
+                "Install the appropriate language server to enable formatting.",
+            )
+
+        edits = edits_result  # Type narrowing: edits is now list[TextEdit]
+
+        if not edits:
+            return Message("system", f"✅ {file.name} is already properly formatted.")
+
+        # Format and show the edits
+        lines = [f"**Format {file.name}** - {len(edits)} edit(s)\n"]
+
+        # Group edits by line for cleaner display
+        for edit in edits[:20]:  # Limit display to 20 edits
+            if edit.start_line == edit.end_line:
+                preview = (
+                    edit.new_text[:50] + "..."
+                    if len(edit.new_text) > 50
+                    else edit.new_text
+                )
+                preview = preview.replace("\n", "\\n")
+                lines.append(f"  - Line {edit.start_line}: `{preview}`")
+            else:
+                lines.append(
+                    f"  - Lines {edit.start_line}-{edit.end_line}: {len(edit.new_text)} chars"
+                )
+
+        if len(edits) > 20:
+            lines.append(f"\n  ... and {len(edits) - 20} more edit(s)")
+
+        lines.append(
+            "\n\n⚠️ **Note:** These changes are shown for preview only. "
+            "Use the patch tool to apply the edits."
+        )
+
+        return Message("system", "\n".join(lines))
+
+    elif action == "signature":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp signature <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        sig_info = _get_lsp_signature(file, line, col, workspace)
+
+        if sig_info is None or not sig_info.signatures:
+            return Message(
+                "system",
+                f"No signature help available at {file.name}:{line}:{col}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The position is not inside a function call\n"
+                "- The language server doesn't have signature info",
+            )
+
+        # Format signature help
+        lines = [f"**Signature help at {file.name}:{line}:{col}**\n"]
+
+        for i, sig in enumerate(sig_info.signatures):
+            prefix = "→ " if i == sig_info.active_signature else "  "
+            lines.append(f"{prefix}`{sig.label}`")
+
+            if sig.documentation:
+                # Truncate long documentation
+                doc = (
+                    sig.documentation[:200] + "..."
+                    if len(sig.documentation) > 200
+                    else sig.documentation
+                )
+                lines.append(f"\n{doc}\n")
+
+            # Show parameters if available
+            if sig.parameters:
+                lines.append("\n**Parameters:**")
+                for j, param in enumerate(sig.parameters):
+                    active = "→ " if sig_info.active_parameter == j else "  "
+                    param_line = f"{active}{param.label}"
+                    if param.documentation:
+                        param_doc = (
+                            param.documentation[:100] + "..."
+                            if len(param.documentation) > 100
+                            else param.documentation
+                        )
+                        param_line += f" - {param_doc}"
+                    lines.append(param_line)
+
+        return Message("system", "\n".join(lines))
+
+    elif action == "hints":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp hints <file> [start:end]")
+
+        file_path = args[1]
+        file = Path(file_path)
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        # Parse optional line range
+        start_line = 1
+        end_line = None
+        if len(args) >= 3:
+            range_str = args[2]
+            if ":" in range_str:
+                parts = range_str.split(":")
+                try:
+                    start_line = int(parts[0]) if parts[0] else 1
+                    end_line = int(parts[1]) if parts[1] else None
+                except ValueError:
+                    return Message(
+                        "system", f"Invalid range: {range_str}. Use start:end"
+                    )
+
+        hints = _get_lsp_inlay_hints(file, start_line, end_line, workspace)
+
+        if not hints:
+            return Message(
+                "system",
+                f"No inlay hints available for {file.name}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The language server doesn't support inlay hints\n"
+                "- No hints are configured in the server",
+            )
+
+        # Format hints by line
+        lines = [f"**Inlay hints for {file.name}**\n"]
+        hints_by_line: dict[int, list[InlayHint]] = {}
+        for inlay_hint in hints:
+            hints_by_line.setdefault(inlay_hint.line, []).append(inlay_hint)
+
+        for line_num in sorted(hints_by_line.keys()):
+            line_hints = hints_by_line[line_num]
+            hint_strs = [
+                f"{h.label}" + (f" ({h.kind})" if h.kind else "")
+                for h in sorted(line_hints, key=lambda h: h.column)
+            ]
+            lines.append(f"Line {line_num}: {', '.join(hint_strs)}")
+
+        return Message("system", "\n".join(lines))
+
+    elif action == "callers":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp callers <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        target, callers = _get_lsp_callers(file, line, col, workspace)
+
+        if target is None:
+            return Message(
+                "system",
+                f"No call hierarchy available at {file.name}:{line}:{col}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The position is not on a callable symbol\n"
+                "- The language server doesn't support call hierarchy",
+            )
+
+        if not callers:
+            return Message(
+                "system",
+                f"**No callers found for `{target.name}`**\n\n"
+                f"The {target.kind} `{target.name}` at {target.file.name}:{target.line} "
+                "is not called from anywhere in the workspace.",
+            )
+
+        # Format callers
+        lines = [f"**Callers of `{target.name}` ({target.kind})**\n"]
+        lines.append(f"Target: {target.file.name}:{target.line}\n")
+
+        for call in callers:
+            caller = call.item
+            call_sites = ", ".join(f"L{line_num}" for line_num, _ in call.from_ranges)
+            lines.append(
+                f"- `{caller.name}` ({caller.kind}) at {caller.file.name}:{caller.line}"
+                + (f" - calls at {call_sites}" if call.from_ranges else "")
+            )
+
+        return Message("system", "\n".join(lines))
+
+    elif action == "callees":
+        if len(args) < 2:
+            return Message("system", "Usage: lsp callees <file:line:col>")
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        target, callees = _get_lsp_callees(file, line, col, workspace)
+
+        if target is None:
+            return Message(
+                "system",
+                f"No call hierarchy available at {file.name}:{line}:{col}\n\n"
+                "This could mean:\n"
+                "- No LSP server is available\n"
+                "- The position is not on a callable symbol\n"
+                "- The language server doesn't support call hierarchy",
+            )
+
+        if not callees:
+            return Message(
+                "system",
+                f"**No callees found for `{target.name}`**\n\n"
+                f"The {target.kind} `{target.name}` at {target.file.name}:{target.line} "
+                "doesn't call any other functions.",
+            )
+
+        # Format callees
+        lines = [f"**Functions called by `{target.name}` ({target.kind})**\n"]
+        lines.append(f"Source: {target.file.name}:{target.line}\n")
+
+        for call in callees:
+            callee = call.item
+            call_sites = ", ".join(f"L{line_num}" for line_num, _ in call.from_ranges)
+            lines.append(
+                f"- `{callee.name}` ({callee.kind}) at {callee.file.name}:{callee.line}"
+                + (f" - called at {call_sites}" if call.from_ranges else "")
+            )
+
+        return Message("system", "\n".join(lines))
+
     elif action == "status":
         status_lines = ["**LSP Status**\n"]
 
@@ -743,45 +1174,27 @@ def _lsp_command(ctx: "CommandContext") -> Generator[Message, None, None]:
 tool = ToolSpec(
     name="lsp",
     desc="Language Server Protocol integration for code intelligence",
-    instructions="""Use LSP to get code intelligence:
+    instructions="""LSP helps you understand and modify code with IDE-level intelligence.
 
-**Diagnostics** (errors and warnings):
-- `lsp diagnostics <file>` - Get errors/warnings for a file
-- `lsp check` - Run diagnostics on all changed files (git)
+**When to use LSP:**
+- Before making changes: Run `lsp diagnostics <file>` to find existing errors
+- Understanding unfamiliar code: Use `lsp hover <file:line:col>` for types/docs, `lsp definition` to find implementations
+- Safe refactoring: Use `lsp rename <file:line:col> <new_name>` for project-wide symbol renames
+- Code cleanup: Use `lsp format <file>` to apply consistent formatting
+- Writing function calls: Use `lsp signature <file:line:col>` to see parameter info
 
-**Navigation** (Phase 2.1):
-- `lsp definition <file:line:col>` - Jump to symbol definition
-- `lsp references <file:line:col>` - Find all references to a symbol
-- `lsp hover <file:line:col>` - Get documentation/type information
+**Commands:**
+- `lsp diagnostics <file>` - Find errors/warnings before and after changes
+- `lsp check` - Check all modified files (git-aware)
+- `lsp definition <file:line:col>` - Jump to where a symbol is defined
+- `lsp references <file:line:col>` - Find all usages of a symbol
+- `lsp hover <file:line:col>` - Get type info and documentation
+- `lsp rename <file:line:col> <new_name>` - Rename symbol across entire project
+- `lsp format <file>` - Auto-format document (preview only)
+- `lsp signature <file:line:col>` - Get function signature and parameter docs
+- `lsp status` - Check which language servers are available
 
-**Refactoring** (Phase 2.2):
-- `lsp rename <file:line:col> <new_name>` - Rename symbol across project
-
-**Status**:
-- `lsp status` - Show available language servers
-
-**Supported languages:**
-- Python (requires pyright: `npm install -g pyright`)
-- TypeScript/JavaScript (requires typescript-language-server)
-- Go (requires gopls)
-- Rust (requires rust-analyzer)
-
-**Example usage:**
-```lsp
-diagnostics src/myfile.py
-```
-
-```lsp
-definition src/myfile.py:42:10
-```
-
-```lsp
-hover src/utils.py:15:5
-```
-
-```lsp
-rename src/myfile.py:15:5 new_function_name
-```
+**Supported:** Python (pyright), TypeScript/JS (ts-server), Go (gopls), Rust (rust-analyzer)
 """,
     execute=execute,
     block_types=["lsp"],
@@ -789,7 +1202,7 @@ rename src/myfile.py:15:5 new_function_name
         Parameter(
             name="action",
             type="string",
-            description="Action: diagnostics, definition, references, hover, rename, status, check",
+            description="Action: diagnostics, definition, references, hover, rename, format, signature, status, check",
             required=True,
         ),
         Parameter(

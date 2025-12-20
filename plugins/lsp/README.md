@@ -121,11 +121,29 @@ make test
 make typecheck
 ```
 
+### Phase 3: Advanced Features ✅
+
+- **`lsp actions <file:line:col>`** - Get code actions (quick fixes, refactoring)
+- **`lsp symbols <query>`** - Search for workspace symbols
+
+### Phase 4: Formatting & Assistance ✅
+
+- **`lsp format <file>`** - Format document using LSP
+- **`lsp signature <file:line:col>`** - Get function signature help
+
+### Phase 5: Call Hierarchy & Inlay Hints ✅ (NEW)
+
+- **`lsp hints <file> [start:end]`** - Get inlay hints (parameter names, types)
+- **`lsp callers <file:line:col>`** - Find functions that call a symbol
+- **`lsp callees <file:line:col>`** - Find functions called by a symbol
+
 ## Roadmap
 
 - [x] Phase 1: Diagnostics
 - [x] Phase 2.1: Navigation (definition, references, hover)
 - [x] Phase 2.2: Refactoring (rename)
 - [x] Phase 2.3: User Experience (config files, error messages, lazy init)
-- [ ] Phase 3: Code Actions (quick fixes, refactoring suggestions)
-- [ ] Phase 4: Workspace Symbols (project-wide search)
+- [x] Phase 3: Code Actions, Workspace Symbols
+- [x] Phase 4: Formatting, Signature Help
+- [x] Phase 5: Inlay Hints, Call Hierarchy
+- [ ] Phase 6: Future (semantic tokens, document links, code lens)
