@@ -80,3 +80,13 @@ repos:
     pass_filenames: false
     always_run: true
     types: [python]
+
+  - id: validate-lesson-metadata
+    name: Validate lesson metadata
+    description: Ensures lesson files have proper metadata (keywords, valid YAML frontmatter).
+    entry: scripts/precommit/validate_lesson_metadata.py
+    language: python
+    additional_dependencies: [pyyaml]
+    types: [markdown]
+    files: ^lessons/
+    pass_filenames: true

@@ -70,6 +70,72 @@ We aim to review PRs within a few days.
 - Handle errors gracefully
 - Document assumptions
 
+## Adding Lessons
+
+Lessons are reusable patterns that help agents (and humans) learn from common mistakes and best practices.
+
+### Lesson Structure
+
+1. Place in the [`lessons/`](./lessons) directory under the appropriate category:
+   - `lessons/patterns/` - Cross-cutting patterns
+   - `lessons/tools/` - Tool-specific guidance
+   - `lessons/workflow/` - Workflow and process lessons
+
+2. **Required metadata** (YAML frontmatter):
+
+```yaml
+---
+match:
+  keywords:
+    - keyword1
+    - keyword2
+    - specific phrase for matching
+status: active  # Optional: active (default), automated, draft, deprecated, archived
+---
+```
+
+3. **Required structure** (content must start with heading):
+
+```markdown
+# Lesson Title
+
+## Rule
+One-sentence imperative: what to do or avoid.
+
+## Context
+When this applies (trigger condition).
+
+## Detection
+Observable signals:
+- Symptom 1
+- Symptom 2
+
+## Pattern
+[Minimal correct example, 2-10 lines]
+
+## Outcome
+What happens when you follow this:
+- Benefit 1
+- Benefit 2
+
+## Related
+- Links to related lessons or documentation
+```
+
+### Pre-commit Validation
+
+Lessons are automatically validated by pre-commit hooks to ensure:
+- Valid YAML frontmatter
+- `match.keywords` field present with at least one keyword
+- Content starts with a markdown heading
+
+Run validation manually:
+```bash
+python3 scripts/precommit/validate_lesson_metadata.py --all
+```
+
+See [`lessons/workflow/git-workflow.md`](./lessons/workflow/git-workflow.md) for a complete example.
+
 ## Questions?
 
 Feel free to:
