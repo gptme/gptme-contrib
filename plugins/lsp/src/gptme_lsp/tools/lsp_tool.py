@@ -1302,7 +1302,7 @@ def execute(
 
         # Parse target: file or file:start:end
         tokens_target = args[1]
-        parts = tokens_target.split(":")
+        parts = tokens_target.rsplit(":", 2)
         tokens_file = Path(parts[0])
 
         start_line = None
