@@ -925,27 +925,25 @@ def _lsp_command(ctx: "CommandContext") -> Generator[Message, None, None]:
 tool = ToolSpec(
     name="lsp",
     desc="Language Server Protocol integration for code intelligence",
-    instructions="""LSP helps you understand and modify code with IDE-level intelligence.
+    instructions="""Use LSP to provide accurate, IDE-level code intelligence when assisting users with codebases.
 
-**When to use LSP:**
-- Before making changes: Run `lsp diagnostics <file>` to find existing errors
-- Understanding unfamiliar code: Use `lsp hover <file:line:col>` for types/docs, `lsp definition` to find implementations
-- Safe refactoring: Use `lsp rename <file:line:col> <new_name>` for project-wide symbol renames
-- Code cleanup: Use `lsp format <file>` to apply consistent formatting
-- Writing function calls: Use `lsp signature <file:line:col>` to see parameter info
+**Key capabilities for assisting users:**
+- **Catch errors early**: Run `lsp diagnostics <file>` before suggesting changes to identify existing issues
+- **Navigate confidently**: Use `lsp definition` and `lsp references` to understand code structure before modifying it
+- **Safe refactoring**: Use `lsp rename` for project-wide symbol renames without breaking references
+- **Understand types**: Use `lsp hover` to get accurate type information when explaining code to users
+- **Function signatures**: Use `lsp signature` when helping users write function calls correctly
 
-**Commands:**
-- `lsp diagnostics <file>` - Find errors/warnings before and after changes
-- `lsp check` - Check all modified files (git-aware)
-- `lsp definition <file:line:col>` - Jump to where a symbol is defined
-- `lsp references <file:line:col>` - Find all usages of a symbol
-- `lsp hover <file:line:col>` - Get type info and documentation
-- `lsp rename <file:line:col> <new_name>` - Rename symbol across entire project
-- `lsp format <file>` - Auto-format document (preview only)
-- `lsp signature <file:line:col>` - Get function signature and parameter docs
-- `lsp status` - Check which language servers are available
+**Quick reference:**
+- `lsp diagnostics <file>` - Check for errors before/after changes
+- `lsp check` - Validate all modified files (git-aware)
+- `lsp definition|references|hover <file:line:col>` - Navigate and understand code
+- `lsp rename <file:line:col> <new_name>` - Safe project-wide renames
+- `lsp format <file>` - Preview formatting changes
+- `lsp signature <file:line:col>` - Get parameter documentation
+- `lsp status` - Verify language server availability
 
-**Supported:** Python (pyright), TypeScript/JS (ts-server), Go (gopls), Rust (rust-analyzer)
+**Supported languages:** Python, TypeScript/JavaScript, Go, Rust
 """,
     execute=execute,
     block_types=["lsp"],
