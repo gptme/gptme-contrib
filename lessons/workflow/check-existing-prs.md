@@ -5,7 +5,8 @@ match:
   - gh pr create
   - git checkout -b fix-
   - gh pr list --search
-  - duplicate PR
+  - issue has been open for a while
+  - duplicate PR risk
 ---
 
 # Check for Existing PRs Before Creating
@@ -47,3 +48,4 @@ Time saved: Finding existing PR takes 30 seconds vs hours of duplicate work.
 
 ## Related
 - [Read Full GitHub Context](./read-full-github-context.md) - Complete PR reading
+- [GitHub Issue Engagement](../social/github-issue-engagement.md) - Issue workflow

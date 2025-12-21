@@ -54,6 +54,11 @@ Following this pattern results in:
 - **Atomicity**: Operations complete together or fail together
 - **Clarity**: Complete operation visible at once
 
+Benefits:
+- No variable scoping issues
+- Reduced tool execution overhead
+- Clear logical grouping
+
 ## Related
 - [Python Invocation](./python-invocation.md) - Python command execution
 - [Shell Path Quoting](./shell-path-quoting.md) - Proper path handling

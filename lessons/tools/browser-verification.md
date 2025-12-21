@@ -25,7 +25,7 @@ Observable signals that you need browser verification:
 - Deployment completed but not verified
 - Assuming fix worked without seeing it run
 
-Common failure patterns:
+Common failure patterns (from logs):
 - Fixed JS reference → didn't load page → errors still present
 - Updated HTML → didn't check console → missing elements broke functionality
 - Deployed changes → assumed worked → users found issues
@@ -57,6 +57,6 @@ Following this pattern results in:
 - **Professional workflow**: Demonstrates thorough testing
 - **User confidence**: No production surprises
 
-Example:
+Example (from real incident):
 - Without verification: "Fixed!" → still broken → second fix needed
 - With verification: Caught missing elements → fixed first time
