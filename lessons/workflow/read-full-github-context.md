@@ -3,9 +3,10 @@ match:
   keywords:
   - gh issue view
   - gh pr view
-  - github context
-  - PR review
-  - issue comments
+  - missing critical discussions in comments
+  - duplicate work coordination
+  - responding without full context
+  - only seeing initial description
 ---
 
 # Read Full GitHub Context
@@ -53,3 +54,6 @@ Benefits in autonomous runs:
 - No missing critical feedback
 - Better decision-making with full context
 - Proper coordination with other contributors
+
+## Related
+- [GitHub Issue Engagement](../social/github-issue-engagement.md) - Issue handling best practices
