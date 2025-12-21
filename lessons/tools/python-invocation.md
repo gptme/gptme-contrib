@@ -1,7 +1,7 @@
 ---
 match:
   keywords:
-  - python command
+  - python
   - python3
   - command not found
   - python invocation
@@ -51,6 +51,13 @@ Following this pattern results in:
 - **Consistency**: Same command works across all environments
 - **PEP 394 compliance**: Follows Python's official recommendation
 
+Benefits:
+- Prevents "command not found" errors
+- Works on systems without `python` symlink
+- Explicit about Python version used
+- Compatible with CI/CD workflows
+
 ## Related
 - [Python File Execution](./python-file-execution.md) - Context-aware execution methods
 - [Shell Command Chaining](./shell-command-chaining.md) - Combining commands
+- [PEP 394](https://peps.python.org/pep-0394/) - Python version specification
