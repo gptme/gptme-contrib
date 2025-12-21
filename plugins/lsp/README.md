@@ -21,11 +21,33 @@ LSP (Language Server Protocol) integration plugin for gptme, providing code inte
 
 - **`lsp rename <file:line:col> <new_name>`** - Rename symbol across project
 
-### Phase 2.3: User Experience ✅ (NEW)
+### Phase 2.3: User Experience ✅
 
 - **Config file support** - Custom language server paths via `gptme.toml`
 - **Better error messages** - Helpful hints when servers not found or fail
-- **Lazy initialization** - Servers start only when first needed (better performance)
+- **Lazy initialization** - Servers start only when first needed
+
+### Phase 3: Advanced Features ✅
+
+- **`lsp actions <file:line:col>`** - Get available code actions
+- **`lsp symbols [query]`** - Search workspace symbols
+
+### Phase 4: Formatting & Assistance ✅
+
+- **`lsp format <file>`** - Format document using LSP
+- **`lsp signature <file:line:col>`** - Get function signature help
+
+### Phase 5: Inlay Hints & Call Hierarchy ✅
+
+- **`lsp hints <file> [start:end]`** - Get inlay hints (parameter names, types)
+- **`lsp callers <file:line:col>`** - Find functions that call a symbol
+- **`lsp callees <file:line:col>`** - Find functions called by a symbol
+
+### Phase 6: Advanced Analysis ✅ (NEW)
+
+- **`lsp tokens <file> [start:end]`** - Get semantic tokens for syntax highlighting info
+- **`lsp links <file>`** - Find document links (URLs, file paths)
+- **`lsp lens <file>`** - Get code lenses (actionable annotations like "5 references")
 
 ## Configuration
 
@@ -65,6 +87,7 @@ manager.get_definition(file2)    # Server already running, reused
 # Force eager initialization (previous behavior)
 manager = LSPManager(workspace, lazy=False)  # All detected servers start
 ```
+
 
 ## Supported Languages
 
@@ -121,22 +144,6 @@ make test
 make typecheck
 ```
 
-### Phase 3: Advanced Features ✅
-
-- **`lsp actions <file:line:col>`** - Get code actions (quick fixes, refactoring)
-- **`lsp symbols <query>`** - Search for workspace symbols
-
-### Phase 4: Formatting & Assistance ✅
-
-- **`lsp format <file>`** - Format document using LSP
-- **`lsp signature <file:line:col>`** - Get function signature help
-
-### Phase 5: Call Hierarchy & Inlay Hints ✅ (NEW)
-
-- **`lsp hints <file> [start:end]`** - Get inlay hints (parameter names, types)
-- **`lsp callers <file:line:col>`** - Find functions that call a symbol
-- **`lsp callees <file:line:col>`** - Find functions called by a symbol
-
 ## Roadmap
 
 - [x] Phase 1: Diagnostics
@@ -146,4 +153,4 @@ make typecheck
 - [x] Phase 3: Code Actions, Workspace Symbols
 - [x] Phase 4: Formatting, Signature Help
 - [x] Phase 5: Inlay Hints, Call Hierarchy
-- [ ] Phase 6: Future (semantic tokens, document links, code lens)
+- [x] Phase 6: Semantic Tokens, Document Links, Code Lens

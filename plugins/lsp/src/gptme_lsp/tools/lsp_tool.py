@@ -13,6 +13,9 @@ This tool provides access to LSP features:
 - hints: Get inlay hints showing parameter names and types (Phase 5)
 - callers: Find functions that call a symbol (Phase 5)
 - callees: Find functions called by a symbol (Phase 5)
+- tokens: Get semantic tokens for syntax highlighting (Phase 6)
+- links: Get document links (URLs, file paths) (Phase 6)
+- lens: Get code lenses (actionable annotations) (Phase 6)
 
 Uses proper LSP protocol to communicate with language servers generically,
 supporting pyright (Python), typescript-language-server (JS/TS), gopls (Go),
@@ -31,6 +34,7 @@ from gptme.tools.base import ConfirmFunc, Parameter, ToolSpec
 
 from ..lsp_client import (
     LSPServer,
+    LSPManager,
     KNOWN_SERVERS,
     Location,
     HoverInfo,
@@ -41,6 +45,7 @@ from ..lsp_client import (
     CallHierarchyItem,
     CallHierarchyCall,
     SymbolInfo,
+    SemanticToken,
 )
 
 if TYPE_CHECKING:
@@ -1290,11 +1295,143 @@ def execute(
         except Exception as e:
             return Message("system", f"Error checking files: {e}")
 
+    elif action == "tokens":
+        # Phase 6: Get semantic tokens for syntax highlighting
+        if len(args) < 2:
+            return Message("system", "Usage: lsp tokens <file> [start:end]")
+
+        # Parse target: file or file:start:end
+        tokens_target = args[1]
+        parts = tokens_target.rsplit(":", 2)
+        tokens_file = Path(parts[0])
+
+        start_line = None
+        end_line = None
+        if len(parts) >= 3:
+            try:
+                start_line = int(parts[1])
+                end_line = int(parts[2])
+            except ValueError:
+                return Message(
+                    "system", "Invalid line range. Usage: lsp tokens <file> [start:end]"
+                )
+
+        if not tokens_file.is_absolute():
+            if workspace:
+                tokens_file = workspace / tokens_file
+            else:
+                tokens_file = Path.cwd() / tokens_file
+
+        if not tokens_file.exists():
+            return Message("system", f"File not found: {tokens_file}")
+
+        manager = LSPManager(workspace or tokens_file.parent)
+        tokens = manager.get_semantic_tokens(tokens_file, start_line, end_line)
+
+        if not tokens:
+            return Message("system", f"No semantic tokens found for {tokens_file.name}")
+
+        # Group by line for readability
+        lines_dict: dict[int, list[SemanticToken]] = {}
+        for token in tokens:
+            if token.line not in lines_dict:
+                lines_dict[token.line] = []
+            lines_dict[token.line].append(token)
+
+        result_lines = [f"**Semantic tokens for {tokens_file.name}**\n"]
+
+        # Limit output to avoid overwhelming response
+        shown_lines = sorted(lines_dict.keys())[:30]
+        for line_num in shown_lines:
+            line_tokens = lines_dict[line_num]
+            token_strs = [
+                f"`{t.token_type}`"
+                + (f"[{','.join(t.modifiers)}]" if t.modifiers else "")
+                for t in line_tokens
+            ]
+            result_lines.append(f"L{line_num}: {', '.join(token_strs)}")
+
+        if len(lines_dict) > 30:
+            result_lines.append(f"\n... and {len(lines_dict) - 30} more lines")
+
+        result_lines.append(f"\n**Total:** {len(tokens)} tokens")
+
+        return Message("system", "\n".join(result_lines))
+
+    elif action == "links":
+        # Phase 6: Get document links (URLs, file paths, etc.)
+        if len(args) < 2:
+            return Message("system", "Usage: lsp links <file>")
+
+        links_target = args[1]
+        links_file = Path(links_target.split(":")[0])
+        if not links_file.is_absolute():
+            if workspace:
+                links_file = workspace / links_file
+            else:
+                links_file = Path.cwd() / links_file
+
+        if not links_file.exists():
+            return Message("system", f"File not found: {links_file}")
+
+        manager = LSPManager(workspace or links_file.parent)
+        links = manager.get_document_links(links_file)
+
+        if not links:
+            return Message("system", f"No document links found in {links_file.name}")
+
+        result_lines = [f"**Document links in {links_file.name}**\n"]
+
+        for link in links[:50]:  # Limit output
+            link_loc = f"L{link.start_line}:{link.start_column}"
+            link_target = link.target or "(needs resolution)"
+            tooltip = f" ({link.tooltip})" if link.tooltip else ""
+            result_lines.append(f"- {link_loc}: {link_target}{tooltip}")
+
+        if len(links) > 50:
+            result_lines.append(f"\n... and {len(links) - 50} more links")
+
+        return Message("system", "\n".join(result_lines))
+
+    elif action == "lens":
+        # Phase 6: Get code lenses (actionable annotations)
+        if len(args) < 2:
+            return Message("system", "Usage: lsp lens <file>")
+
+        lens_target = args[1]
+        lens_file = Path(lens_target.split(":")[0])
+        if not lens_file.is_absolute():
+            if workspace:
+                lens_file = workspace / lens_file
+            else:
+                lens_file = Path.cwd() / lens_file
+
+        if not lens_file.exists():
+            return Message("system", f"File not found: {lens_file}")
+
+        manager = LSPManager(workspace or lens_file.parent)
+        lenses = manager.get_code_lenses(lens_file)
+
+        if not lenses:
+            return Message("system", f"No code lenses found in {lens_file.name}")
+
+        result_lines = [f"**Code lenses in {lens_file.name}**\n"]
+
+        for lens in lenses[:50]:  # Limit output
+            title = lens.command_title or "(unresolved)"
+            result_lines.append(f"- L{lens.line}: {title}")
+
+        if len(lenses) > 50:
+            result_lines.append(f"\n... and {len(lenses) - 50} more lenses")
+
+        return Message("system", "\n".join(result_lines))
+
     else:
         return Message(
             "system",
             f"Unknown action: {action}\n\n"
-            "Available actions: diagnostics, definition, references, hover, rename, status, check",
+            "Available actions: diagnostics, definition, references, hover, rename, "
+            "format, signature, hints, callers, callees, tokens, links, lens, status, check",
         )
 
 
@@ -1328,27 +1465,31 @@ def _lsp_command(ctx: "CommandContext") -> Generator[Message, None, None]:
 tool = ToolSpec(
     name="lsp",
     desc="Language Server Protocol integration for code intelligence",
-    instructions="""LSP helps you understand and modify code with IDE-level intelligence.
+    instructions="""Use LSP to provide accurate, IDE-level code intelligence when assisting users with codebases.
 
-**When to use LSP:**
-- Before making changes: Run `lsp diagnostics <file>` to find existing errors
-- Understanding unfamiliar code: Use `lsp hover <file:line:col>` for types/docs, `lsp definition` to find implementations
-- Safe refactoring: Use `lsp rename <file:line:col> <new_name>` for project-wide symbol renames
-- Code cleanup: Use `lsp format <file>` to apply consistent formatting
-- Writing function calls: Use `lsp signature <file:line:col>` to see parameter info
+**Key capabilities for assisting users:**
+- **Catch errors early**: Run `lsp diagnostics <file>` before suggesting changes
+- **Navigate confidently**: Use `lsp definition` and `lsp references` to understand code
+- **Safe refactoring**: Use `lsp rename` for project-wide symbol renames
+- **Understand types**: Use `lsp hover` for type information when explaining code
+- **Function signatures**: Use `lsp signature` when helping users write function calls
+- **Code analysis**: Use `lsp tokens` for semantic token info, `lsp lens` for annotations
 
-**Commands:**
-- `lsp diagnostics <file>` - Find errors/warnings before and after changes
-- `lsp check` - Check all modified files (git-aware)
-- `lsp definition <file:line:col>` - Jump to where a symbol is defined
-- `lsp references <file:line:col>` - Find all usages of a symbol
-- `lsp hover <file:line:col>` - Get type info and documentation
-- `lsp rename <file:line:col> <new_name>` - Rename symbol across entire project
-- `lsp format <file>` - Auto-format document (preview only)
-- `lsp signature <file:line:col>` - Get function signature and parameter docs
-- `lsp status` - Check which language servers are available
+**Quick reference:**
+- `lsp diagnostics <file>` - Check for errors before/after changes
+- `lsp check` - Validate all modified files (git-aware)
+- `lsp definition|references|hover <file:line:col>` - Navigate and understand code
+- `lsp rename <file:line:col> <new_name>` - Safe project-wide renames
+- `lsp format <file>` - Preview formatting changes
+- `lsp signature <file:line:col>` - Get parameter documentation
+- `lsp hints <file> [start:end]` - Get inlay hints
+- `lsp callers|callees <file:line:col>` - Call hierarchy analysis
+- `lsp tokens <file> [start:end]` - Semantic tokens for syntax info
+- `lsp links <file>` - Find document links (URLs, paths)
+- `lsp lens <file>` - Get code lenses (annotations)
+- `lsp status` - Verify language server availability
 
-**Supported:** Python (pyright), TypeScript/JS (ts-server), Go (gopls), Rust (rust-analyzer)
+**Supported languages:** Python, TypeScript/JavaScript, Go, Rust
 """,
     execute=execute,
     block_types=["lsp"],
@@ -1356,7 +1497,7 @@ tool = ToolSpec(
         Parameter(
             name="action",
             type="string",
-            description="Action: diagnostics, definition, references, hover, rename, format, signature, status, check",
+            description="Action: diagnostics, definition, references, hover, rename, format, signature, hints, callers, callees, tokens, links, lens, status, check",
             required=True,
         ),
         Parameter(
