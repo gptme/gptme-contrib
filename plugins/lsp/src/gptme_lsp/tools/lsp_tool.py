@@ -6,6 +6,8 @@ This tool provides access to LSP features:
 - references: Find all references (Phase 2.1)
 - hover: Get documentation (Phase 2.1)
 - rename: Rename symbols across project (Phase 2.2)
+- actions: Get code actions/quick fixes (Phase 3)
+- symbols: Search for symbols across workspace (Phase 3)
 - format: Format document using LSP (Phase 4)
 - signature: Get function signature help (Phase 4)
 - hints: Get inlay hints showing parameter names and types (Phase 5)
@@ -38,6 +40,7 @@ from ..lsp_client import (
     InlayHint,
     CallHierarchyItem,
     CallHierarchyCall,
+    SymbolInfo,
 )
 
 if TYPE_CHECKING:
@@ -481,6 +484,8 @@ def execute(
             "  references <file:line:col> - Find all references to symbol\n"
             "  hover <file:line:col>      - Get documentation/type info\n"
             "  rename <file:line:col> <new_name> - Rename symbol across project\n"
+            "  actions <file:line:col>  - Get code actions/quick fixes\n"
+            "  symbols <query>          - Search for symbols across workspace\n"
             "  format <file>            - Format document using LSP\n"
             "  signature <file:line:col> - Get function signature help\n"
             "  hints <file> [start:end] - Get inlay hints (parameter names, types)\n"
@@ -1005,6 +1010,155 @@ def execute(
             )
 
         return Message("system", "\n".join(lines))
+
+    elif action == "actions":
+        # Get code actions for a location
+        if len(args) < 2:
+            return Message(
+                "system",
+                "Usage: lsp actions <file:line:col> [end_line:end_col]\n\n"
+                "Examples:\n"
+                "  lsp actions src/main.py:10:5\n"
+                "  lsp actions src/main.py:10:5 15:10  (for a range)",
+            )
+
+        try:
+            file, line, col = _parse_position(args[1])
+        except ValueError as e:
+            return Message("system", f"Error: {e}")
+
+        # Make absolute if relative
+        if not file.is_absolute() and workspace:
+            file = workspace / file
+
+        if not file.exists():
+            return Message("system", f"Error: File not found: {file}")
+
+        # Parse optional end position
+        end_line = line
+        end_col = col
+        if len(args) > 2:
+            end_parts = args[2].split(":")
+            if len(end_parts) >= 2:
+                try:
+                    end_line = int(end_parts[0])
+                    end_col = int(end_parts[1])
+                except ValueError:
+                    pass
+
+        # Get language and server
+        suffix = file.suffix.lower()
+        language = EXTENSION_TO_LANGUAGE.get(suffix)
+        if not language:
+            return Message(
+                "system",
+                f"Unsupported file type: {suffix}\n\n"
+                "Supported: Python (.py), TypeScript/JS (.ts, .js), Go (.go), Rust (.rs)",
+            )
+
+        server = _get_or_start_server(language, workspace or file.parent)
+        if not server:
+            return Message(
+                "system",
+                f"No LSP server available for {language}.\n\n"
+                f"Install the appropriate server (e.g., pyright for Python).",
+            )
+
+        # Get code actions
+        code_actions = server.get_code_actions(file, line, col, end_line, end_col)
+
+        if not code_actions:
+            return Message(
+                "system",
+                f"No code actions available at {file.name}:{line}:{col}",
+            )
+
+        # Format results
+        result_lines = [f"**Code Actions at {file.name}:{line}:{col}**\n"]
+        for i, ca in enumerate(code_actions, 1):
+            preferred = " ⭐" if ca.is_preferred else ""
+            kind = f"[{ca.kind}] " if ca.kind else ""
+            result_lines.append(f"{i}. {kind}{ca.title}{preferred}")
+
+            if ca.edit:
+                result_lines.append(
+                    f"   → {ca.edit.edit_count} edit(s) in {ca.edit.file_count} file(s)"
+                )
+
+        return Message("system", "\n".join(result_lines))
+
+    elif action == "symbols":
+        # Search for symbols across workspace
+        if len(args) < 2:
+            return Message(
+                "system",
+                "Usage: lsp symbols <query>\n\n"
+                "Examples:\n"
+                "  lsp symbols User          (find symbols containing 'User')\n"
+                "  lsp symbols process_      (find symbols starting with 'process_')\n"
+                '  lsp symbols ""            (list all symbols - may be slow)',
+            )
+
+        query = args[1]
+
+        if workspace is None:
+            return Message("system", "Error: Could not determine workspace")
+
+        # Try each available language server
+        all_symbols: list[SymbolInfo] = []
+        servers_tried = []
+
+        for language in ["python", "typescript", "go", "rust"]:
+            server = _get_or_start_server(language, workspace)
+            if server:
+                servers_tried.append(language)
+                symbols = server.get_workspace_symbols(query)
+                all_symbols.extend(symbols)
+
+        if not servers_tried:
+            return Message(
+                "system",
+                "No LSP servers available.\n\n"
+                "Install appropriate servers (pyright, typescript-language-server, gopls, rust-analyzer).",
+            )
+
+        if not all_symbols:
+            return Message(
+                "system",
+                f"No symbols found matching '{query}'\n\n"
+                f"Servers queried: {', '.join(servers_tried)}",
+            )
+
+        # Group by kind for cleaner output
+        symbols_by_kind: dict[str, list[SymbolInfo]] = {}
+        for sym in all_symbols:
+            if sym.kind not in symbols_by_kind:
+                symbols_by_kind[sym.kind] = []
+            symbols_by_kind[sym.kind].append(sym)
+
+        # Format results (limit to 50 to avoid overwhelming output)
+        result_lines = [f"**Workspace Symbols matching '{query}'**\n"]
+        total_shown = 0
+        max_symbols = 50
+
+        for kind in sorted(symbols_by_kind.keys()):
+            if total_shown >= max_symbols:
+                break
+
+            symbols = symbols_by_kind[kind]
+            result_lines.append(f"\n### {kind.title()}s ({len(symbols)})")
+
+            for sym in symbols[: max_symbols - total_shown]:
+                container = f" in {sym.container_name}" if sym.container_name else ""
+                result_lines.append(f"- `{sym.name}`{container} ({sym.location})")
+                total_shown += 1
+
+        if len(all_symbols) > max_symbols:
+            result_lines.append(
+                f"\n*Showing {max_symbols} of {len(all_symbols)} symbols*"
+            )
+
+        return Message("system", "\n".join(result_lines))
 
     elif action == "status":
         status_lines = ["**LSP Status**\n"]
