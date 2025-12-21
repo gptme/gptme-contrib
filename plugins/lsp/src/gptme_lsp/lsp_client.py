@@ -201,6 +201,35 @@ class CallHierarchyCall:
 
 
 @dataclass
+class CodeAction:
+    """Represents an LSP code action (quick fix, refactoring, etc.)."""
+
+    title: str
+    kind: str | None = None  # e.g., "quickfix", "refactor", "source.organizeImports"
+    edit: WorkspaceEdit | None = None
+    diagnostics: list[Diagnostic] | None = None
+    is_preferred: bool = False
+
+    def __str__(self) -> str:
+        kind_str = f"[{self.kind}]" if self.kind else ""
+        return f"{kind_str} {self.title}"
+
+
+@dataclass
+class SymbolInfo:
+    """Represents a workspace symbol."""
+
+    name: str
+    kind: str  # e.g., "class", "function", "variable", "method"
+    location: Location
+    container_name: str | None = None  # Parent class/module name
+
+    def __str__(self) -> str:
+        container = f" ({self.container_name})" if self.container_name else ""
+        return f"[{self.kind}] {self.name}{container} at {self.location}"
+
+
+@dataclass
 class LSPServer:
     """Manages a language server process."""
 
@@ -876,6 +905,101 @@ class LSPServer:
 
         return self._parse_call_hierarchy_calls(result, incoming=False)
 
+    def get_code_actions(
+        self,
+        file: Path,
+        line: int,
+        column: int,
+        end_line: int | None = None,
+        end_column: int | None = None,
+    ) -> list[CodeAction]:
+        """Get available code actions for a range.
+
+        Args:
+            file: The file path
+            line: 1-indexed line number (start)
+            column: 1-indexed column number (start)
+            end_line: 1-indexed end line (optional, defaults to start line)
+            end_column: 1-indexed end column (optional, defaults to start column)
+
+        Returns:
+            List of CodeAction objects available at the location.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        try:
+            uri = self._ensure_file_open(file)
+        except Exception:
+            return []
+
+        # Default end position to start position
+        if end_line is None:
+            end_line = line
+        if end_column is None:
+            end_column = column
+
+        # Get diagnostics for context (code actions often depend on diagnostics)
+        diagnostics = self.get_diagnostics(file)
+        diag_params = []
+        for diag in diagnostics:
+            if diag.line >= line and diag.line <= end_line:
+                # Include diagnostic in the request
+                diag_params.append(
+                    {
+                        "range": {
+                            "start": {
+                                "line": diag.line - 1,
+                                "character": diag.column - 1,
+                            },
+                            "end": {"line": diag.line - 1, "character": diag.column},
+                        },
+                        "message": diag.message,
+                        "severity": {
+                            "error": 1,
+                            "warning": 2,
+                            "info": 3,
+                            "hint": 4,
+                        }.get(diag.severity, 1),
+                        "source": diag.source,
+                        "code": diag.code,
+                    }
+                )
+
+        # LSP uses 0-indexed positions
+        result = self._send_request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": line - 1, "character": column - 1},
+                    "end": {"line": end_line - 1, "character": end_column - 1},
+                },
+                "context": {
+                    "diagnostics": diag_params,
+                    "triggerKind": 1,  # Invoked by user
+                },
+            },
+        )
+
+        return self._parse_code_actions(result, diagnostics)
+
+    def get_workspace_symbols(self, query: str) -> list[SymbolInfo]:
+        """Search for symbols across the workspace.
+
+        Args:
+            query: Search query (empty string returns all symbols)
+
+        Returns:
+            List of SymbolInfo objects matching the query.
+        """
+        if not self._initialized or self.process is None:
+            return []
+
+        result = self._send_request("workspace/symbol", {"query": query})
+
+        return self._parse_workspace_symbols(result)
+
     def _parse_text_edits(self, file: Path, result: list[dict]) -> list[TextEdit]:
         """Parse LSP TextEdit[] response into TextEdit objects."""
         edits: list[TextEdit] = []
@@ -1265,6 +1389,123 @@ class LSPServer:
             "typeparameter": 26,
         }
         return kind_map.get(kind.lower(), 12)  # Default to function
+
+    def _parse_code_actions(
+        self, result: Any, diagnostics: list[Diagnostic]
+    ) -> list[CodeAction]:
+        """Parse LSP codeAction response into CodeAction objects."""
+        if not result:
+            return []
+
+        actions = []
+        for action in result:
+            if isinstance(action, dict):
+                title = action.get("title", "Unknown action")
+                kind = action.get("kind")
+                is_preferred = action.get("isPreferred", False)
+
+                # Parse edit if present
+                edit = None
+                if "edit" in action:
+                    edit = self._parse_workspace_edit(action["edit"])
+
+                # Parse associated diagnostics
+                action_diags = None
+                if "diagnostics" in action:
+                    action_diags = [
+                        d
+                        for d in diagnostics
+                        if any(
+                            ad.get("message") == d.message
+                            for ad in action.get("diagnostics", [])
+                        )
+                    ]
+
+                actions.append(
+                    CodeAction(
+                        title=title,
+                        kind=kind,
+                        edit=edit,
+                        diagnostics=action_diags,
+                        is_preferred=is_preferred,
+                    )
+                )
+
+        return actions
+
+    def _parse_workspace_symbols(self, result: Any) -> list[SymbolInfo]:
+        """Parse LSP workspace/symbol response into SymbolInfo objects."""
+        if not result:
+            return []
+
+        # Symbol kind mapping from LSP spec
+        symbol_kinds = {
+            1: "file",
+            2: "module",
+            3: "namespace",
+            4: "package",
+            5: "class",
+            6: "method",
+            7: "property",
+            8: "field",
+            9: "constructor",
+            10: "enum",
+            11: "interface",
+            12: "function",
+            13: "variable",
+            14: "constant",
+            15: "string",
+            16: "number",
+            17: "boolean",
+            18: "array",
+            19: "object",
+            20: "key",
+            21: "null",
+            22: "enum_member",
+            23: "struct",
+            24: "event",
+            25: "operator",
+            26: "type_parameter",
+        }
+
+        symbols = []
+        for sym in result:
+            if isinstance(sym, dict):
+                name = sym.get("name", "")
+                kind_num = sym.get("kind", 0)
+                kind = symbol_kinds.get(kind_num, "unknown")
+                container = sym.get("containerName")
+
+                # Parse location
+                location_data = sym.get("location", {})
+                uri = location_data.get("uri", "")
+                range_obj = location_data.get("range", {})
+
+                if uri:
+                    parsed = urlparse(uri)
+                    file_path = Path(unquote(parsed.path))
+
+                    start = range_obj.get("start", {})
+                    end = range_obj.get("end", {})
+
+                    location = Location(
+                        file=file_path,
+                        line=start.get("line", 0) + 1,
+                        column=start.get("character", 0) + 1,
+                        end_line=end.get("line", 0) + 1,
+                        end_column=end.get("character", 0) + 1,
+                    )
+
+                    symbols.append(
+                        SymbolInfo(
+                            name=name,
+                            kind=kind,
+                            location=location,
+                            container_name=container,
+                        )
+                    )
+
+        return symbols
 
     def _guess_language_id(self, file: Path) -> str:
         """Guess the LSP language ID from file extension."""
