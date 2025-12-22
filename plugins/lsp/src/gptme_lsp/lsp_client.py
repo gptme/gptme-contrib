@@ -229,7 +229,6 @@ class SymbolInfo:
         return f"[{self.kind}] {self.name}{container} at {self.location}"
 
 
-@dataclass
 # Phase 6 dataclasses
 
 
