@@ -230,7 +230,6 @@ class SymbolInfo:
 
 
 @dataclass
-
 # Phase 6 dataclasses
 
 
@@ -282,6 +281,8 @@ class CodeLens:
         title = self.command_title or "(unresolved)"
         return f"L{self.line}: {title}"
 
+
+@dataclass
 class LSPServer:
     """Manages a language server process."""
 
@@ -1052,7 +1053,6 @@ class LSPServer:
 
         return self._parse_workspace_symbols(result)
 
-
     # Phase 6 methods
 
     def get_semantic_tokens(
@@ -1787,7 +1787,6 @@ class LSPServer:
 
         return lenses
 
-
     def _guess_language_id(self, file: Path) -> str:
         """Guess the LSP language ID from file extension."""
         ext_map = {
@@ -2086,6 +2085,44 @@ class LSPManager:
             return []
 
         return server.get_outgoing_calls(item)
+
+    def get_semantic_tokens(
+        self, file: Path, start_line: int | None = None, end_line: int | None = None
+    ) -> list[SemanticToken]:
+        """Get semantic tokens for syntax highlighting (Phase 6, lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_semantic_tokens(file, start_line, end_line)
+
+    def get_document_links(self, file: Path) -> list[DocumentLink]:
+        """Get clickable links in a document (Phase 6, lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_document_links(file)
+
+    def get_code_lenses(self, file: Path) -> list[CodeLens]:
+        """Get code lenses for a document (Phase 6, lazy init)."""
+        language = self._file_to_language(file)
+        if language is None:
+            return []
+
+        server = self._ensure_server(language)
+        if server is None:
+            return []
+
+        return server.get_code_lenses(file)
 
     def _file_to_language(self, file: Path) -> str | None:
         """Map file to language server."""
