@@ -588,6 +588,177 @@ def generate_variation(
     return results[0] if count == 1 else results
 
 
+def modify_image(
+    image_path: str,
+    prompt: str,
+    provider: Provider = "gemini",
+    output_path: str | None = None,
+    view: bool = False,
+    show_progress: bool = True,
+) -> ImageResult:
+    """
+    Modify an existing image using a text prompt.
+
+    Takes an input image and a text description of the desired changes,
+    returning a modified version of the image.
+
+    Args:
+        image_path: Path to the input image to modify
+        prompt: Text description of desired modifications (e.g., "make the background blue",
+                "add glasses", "change hair color to blonde")
+        provider: Image generation provider (currently only "gemini" supported for modification)
+        output_path: Where to save modified image (optional, defaults to modified-{timestamp}.png)
+        view: Whether to display the modified image to LLM (default: False)
+        show_progress: Show progress indicators during modification (default: True)
+
+    Returns:
+        ImageResult with path to modified image and metadata
+
+    Example:
+        # Change background color
+        result = modify_image(
+            image_path="portrait.png",
+            prompt="change the background to a sunset beach scene",
+            view=True
+        )
+
+        # Add accessories to image
+        result = modify_image(
+            image_path="avatar.png",
+            prompt="add round glasses and a blue hat",
+            output_path="avatar_with_accessories.png"
+        )
+
+    Note:
+        Currently only Gemini supports image modification with text prompts.
+        For DALL-E, use generate_variation() for variations without text guidance,
+        or generate_image() with a detailed prompt describing the full desired output.
+    """
+    if provider != "gemini":
+        raise ValueError(
+            f"Image modification only supported for gemini, got {provider}. "
+            "For DALL-E, use generate_variation() for variations without text guidance, "
+            "or generate_image() with a detailed prompt."
+        )
+
+    # Validate image exists
+    image_file = Path(image_path)
+    if not image_file.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    # Determine output path
+    if output_path is None:
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"modified_{timestamp}.png"
+
+    current_path = Path(output_path).expanduser().resolve()
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if show_progress:
+        print(f"🎨 Modifying image with {provider}...")
+
+    result = _modify_gemini(image_file, prompt, current_path)
+
+    if show_progress:
+        print(f"✅ Image modified: {current_path}")
+
+    # Handle view parameter
+    if view:
+        from gptme.tools.vision import view_image
+
+        view_image(result.image_path)
+
+    return result
+
+
+def _modify_gemini(
+    image_path: Path,
+    prompt: str,
+    output_path: Path,
+) -> ImageResult:
+    """Modify image using Google Gemini's multimodal capabilities."""
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        raise ImportError(
+            "google-genai not installed. Install with: pip install google-genai"
+        )
+
+    # Load input image
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError("PIL not installed. Install with: pip install Pillow")
+
+    input_image = Image.open(image_path)
+
+    # Configure API key
+    api_key = _get_api_key("GOOGLE_API_KEY") or _get_api_key("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set in env or config")
+
+    # Create client with API key
+    client = genai.Client(api_key=api_key)
+
+    # Use gemini-3-pro-image-preview for multimodal image generation/modification
+    model_name = "gemini-3-pro-image-preview"
+
+    # Pass both the modification prompt and the image
+    response = client.models.generate_content(
+        model=model_name,
+        contents=[prompt, input_image],
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+        ),
+    )
+
+    # Save modified image - handle new SDK response format
+    image_saved = False
+    for part in response.parts:
+        # Use the as_image() helper method from the new SDK
+        img = part.as_image()
+        if img is not None:
+            img.save(str(output_path))
+            image_saved = True
+            break
+
+    if not image_saved:
+        raise ValueError(
+            "No image data found in response. The model may not support this modification."
+        )
+
+    # Calculate and record cost
+    cost_tracker = get_cost_tracker()
+    cost = cost_tracker.calculate_cost(
+        provider="gemini", quality="standard", count=1, model=model_name
+    )
+    cost_tracker.record_generation(
+        provider="gemini",
+        prompt=f"modify: {prompt} (input: {image_path.name})",
+        cost=cost,
+        model=model_name,
+        size="N/A",
+        quality="standard",
+        count=1,
+        output_path=str(output_path),
+    )
+
+    return ImageResult(
+        provider="gemini",
+        prompt=prompt,
+        image_path=output_path,
+        metadata={
+            "model": model_name,
+            "type": "modification",
+            "input_image": str(image_path),
+            "cost_usd": cost,
+        },
+    )
+
+
 def batch_generate(
     prompts: list[str],
     provider: Provider = "gemini",
@@ -1034,7 +1205,40 @@ generate_variation(
 > → Variation 3/4... ✓
 > → Variation 4/4... ✓
 > ✓ Images displayed to assistant for review
+
+### Image modification (image + text)
+
+> User: Change the background of my avatar to a sunset beach
+> Assistant: I'll modify the image using Gemini's image editing capability.
+```image_gen
+modify_image(
+    image_path="avatar.png",
+    prompt="change the background to a beautiful sunset beach scene with palm trees",
+    view=True
+)
+```
+> System: 🎨 Modifying image with gemini...
+> ✅ Image modified: modified_20241224_080500.png
+> ✓ Image displayed to assistant for review
+
+> User: Add glasses and a hat to this portrait
+> Assistant: I'll modify the portrait to add accessories.
+```image_gen
+modify_image(
+    image_path="portrait.png",
+    prompt="add round glasses and a blue baseball cap",
+    output_path="portrait_with_accessories.png"
+)
+```
+> System: 🎨 Modifying image with gemini...
+> ✅ Image modified: portrait_with_accessories.png
     """,
-    functions=[generate_image, generate_variation, batch_generate, compare_providers],
+    functions=[
+        generate_image,
+        generate_variation,
+        modify_image,
+        batch_generate,
+        compare_providers,
+    ],
     block_types=["image_gen"],
 )
