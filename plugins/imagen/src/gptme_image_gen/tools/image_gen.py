@@ -80,12 +80,13 @@ def generate_image(
     style: Style | None = None,
     enhance: bool = False,
     show_progress: bool = True,
+    images: list[str] | str | None = None,
 ) -> ImageResult | list[ImageResult]:
     """
-    Generate an image from a text prompt.
+    Generate an image from a text prompt, optionally using reference images.
 
     Args:
-        prompt: Text description of image to generate
+        prompt: Text description of image to generate or modifications to apply
         provider: Image generation provider (gemini, dalle, dalle2)
         size: Image size (provider-specific formats)
         quality: Image quality level (standard, hd)
@@ -95,14 +96,57 @@ def generate_image(
         style: Apply style preset to enhance prompt (optional)
         enhance: Use LLM to enhance prompt for better results (optional, default: False)
         show_progress: Show progress indicators during generation (default: True)
+        images: Input image(s) for multimodal generation (optional). Can be:
+            - A single image path (str) for modification/editing
+            - A list of image paths for multi-reference generation
+            Examples: character references, style references, images to modify,
+            scene elements to combine. Currently only supported by Gemini.
 
     Returns:
         ImageResult with path and metadata (if count=1)
         List of ImageResults (if count>1)
+
+    Examples:
+        # Generate from text only
+        result = generate_image("a sunset over mountains")
+
+        # Modify a single image
+        result = generate_image(
+            prompt="change the background to a beach",
+            images="portrait.png"
+        )
+
+        # Multi-reference generation (character + style)
+        result = generate_image(
+            prompt="create a portrait in this style with this character",
+            images=["character_ref.png", "style_ref.png"]
+        )
     """
     # Validate count
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
+
+    # Normalize and validate images parameter
+    image_paths: list[Path] | None = None
+    if images is not None:
+        # Normalize to list
+        if isinstance(images, str):
+            images = [images]
+
+        # Only Gemini supports multimodal generation with images
+        if provider != "gemini":
+            raise ValueError(
+                f"Image references only supported for gemini provider, got {provider}. "
+                "For DALL-E, use generate_variation() for variations without text guidance."
+            )
+
+        # Validate all images exist
+        image_paths = []
+        for img_path in images:
+            path = Path(img_path).expanduser().resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"Image not found: {img_path}")
+            image_paths.append(path)
 
     # Enhance prompt BEFORE applying style preset
     # This ensures enhancement works on user's original prompt
@@ -156,7 +200,9 @@ def generate_image(
         # Generate single image
         try:
             if provider == "gemini":
-                result = _generate_gemini(prompt, size, quality, current_path)
+                result = _generate_gemini(
+                    prompt, size, quality, current_path, image_paths
+                )
             elif provider == "dalle":
                 result = _generate_dalle(
                     prompt, size, quality, current_path, model="dall-e-3"
@@ -263,8 +309,18 @@ def _generate_gemini(
     size: str,
     quality: str,
     output_path: Path,
+    images: list[Path] | None = None,
 ) -> ImageResult:
-    """Generate image using Google Gemini/Imagen."""
+    """Generate image using Google Gemini/Imagen.
+
+    Args:
+        prompt: Text prompt for generation or modification
+        size: Image size (not currently used by Gemini API)
+        quality: Image quality level
+        output_path: Where to save the generated image
+        images: Optional validated input image paths for multimodal generation.
+            Already validated by generate_image() caller.
+    """
     try:
         from google import genai  # type: ignore[import-not-found]
         from google.genai import types  # type: ignore[import-not-found]
@@ -285,9 +341,22 @@ def _generate_gemini(
     # This model can generate both text and images
     model_name = "gemini-3-pro-image-preview"
 
+    # Build contents list with prompt and optional images
+    contents: list = [prompt]
+
+    if images:
+        try:
+            from PIL import Image
+        except ImportError:
+            raise ImportError("PIL not installed. Install with: pip install Pillow")
+
+        # Load and add each validated image (paths already validated by caller)
+        for img_path in images:
+            contents.append(Image.open(img_path))
+
     response = client.models.generate_content(
         model=model_name,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
         ),
@@ -420,6 +489,7 @@ def _execute_generate_image(
     style: Style | None = None,
     enhance: bool = False,
     show_progress: bool = True,
+    images: list[str] | str | None = None,
 ) -> str:
     """Execute image generation and format results."""
     result = generate_image(
@@ -433,6 +503,7 @@ def _execute_generate_image(
         style,
         enhance,
         show_progress,
+        images,
     )
 
     # Handle single or multiple results
@@ -1005,6 +1076,10 @@ Arguments:
 - style: Apply style preset (optional, choices: photo, illustration, sketch, technical-diagram, flat-design, cyberpunk, watercolor, oil-painting)
 - enhance: Auto-enhance prompt for better results (optional, default: False)
 - show_progress: Show progress indicators during generation (optional, default: True)
+- images: Input image(s) for multimodal generation (optional, Gemini only). Can be:
+    - A single image path (str) for modification/editing
+    - A list of image paths for multi-reference generation
+    Examples: character references, style references, images to modify, scene elements to combine.
 
 Phase 1 Features:
 - Multiple options: Use count=3 to generate 3 variations for comparison
