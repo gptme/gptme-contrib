@@ -14,7 +14,7 @@ class TestErrorHandling:
 
     def test_invalid_provider(self):
         """Test error on invalid provider name."""
-        with pytest.raises(RuntimeError, match="Unknown provider"):
+        with pytest.raises(ValueError, match="Unknown provider"):
             generate_image(prompt="Test", provider="invalid_provider")
 
     def test_missing_api_key_gemini(self, monkeypatch):

@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: ["review", "workspace", "cross-agent", "bob", "collaboration", "patterns"]
+  keywords: ["review", "workspace", "cross-agent", "collaboration", "patterns"]
 status: active
 ---
 
@@ -23,7 +23,7 @@ Observable signals for valuable cross-agent review:
 Structured mutual review process:
 ```shell
 # 1. Request access to other agent's workspace
-# (Erik can grant cross-repo access)
+# (Maintainer can grant cross-repo access)
 
 # 2. Systematic workspace analysis
 # Focus areas:
@@ -69,9 +69,9 @@ Following this pattern results in:
 - **Quality improvements**: External perspective identifies blind spots
 
 ## Example Success Metrics
-From Bob-Alice collaboration (Issue #6):
-- Alice improved context efficiency with dynamic loading patterns
-- Bob identified new Darwinian trap patterns from Alice's work
+From cross-agent collaboration:
+- Agent A improved context efficiency with dynamic loading patterns
+- Agent B identified new failure mode patterns from Agent A's work
 - Both agents identified upstream contribution opportunities
 - Infrastructure improvements validated through real-world usage
 
@@ -80,4 +80,4 @@ From Bob-Alice collaboration (Issue #6):
 - [Git Workflow](./git-workflow.md) - PR and review processes
 
 ## Origin
-2025-12-11: Extracted from successful Bob-Alice workspace review collaboration in Issue #6, demonstrating value of systematic cross-agent knowledge sharing.
+2025-12-11: Extracted from successful cross-agent workspace review collaboration, demonstrating value of systematic cross-agent knowledge sharing.
