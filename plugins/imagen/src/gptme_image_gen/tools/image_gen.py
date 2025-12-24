@@ -126,6 +126,13 @@ def generate_image(
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
 
+    # Validate provider early
+    valid_providers = ("gemini", "dalle", "dalle2")
+    if provider not in valid_providers:
+        raise ValueError(
+            f"Unknown provider: {provider}. Must be one of: {valid_providers}"
+        )
+
     # Normalize and validate images parameter
     image_paths: list[Path] | None = None
     if images is not None:
@@ -227,7 +234,7 @@ def generate_image(
 
             # Add detailed error context
             error_msg = f"Failed to generate image {i + 1}/{count} with {provider}"
-            if "API key" in str(e).lower():
+            if "api key" in str(e).lower():
                 env_var = PROVIDER_ENV_VAR.get(provider, f"{provider.upper()}_API_KEY")
                 error_msg += f": Missing or invalid API key. Check your {env_var} environment variable."
             elif "quota" in str(e).lower() or "rate limit" in str(e).lower():

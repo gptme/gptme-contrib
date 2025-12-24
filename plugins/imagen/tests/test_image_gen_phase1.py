@@ -67,7 +67,7 @@ class TestMultipleImageGeneration:
             # Capture the paths passed to mock
             paths_used = []
 
-            def capture_path(prompt, size, quality, output_path):
+            def capture_path(prompt, size, quality, output_path, images=None):
                 paths_used.append(output_path)
                 return ImageResult(
                     provider="gemini",

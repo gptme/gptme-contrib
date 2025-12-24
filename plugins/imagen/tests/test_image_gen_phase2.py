@@ -21,7 +21,7 @@ class TestStylePresets:
             # Capture the actual prompt passed to generator
             captured_prompt = None
 
-            def capture_prompt(prompt, size, quality, output_path):
+            def capture_prompt(prompt, size, quality, output_path, images=None):
                 nonlocal captured_prompt
                 captured_prompt = prompt
                 return ImageResult(
@@ -66,7 +66,7 @@ class TestStylePresets:
         with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
             captured_prompt = None
 
-            def capture_prompt(prompt, size, quality, output_path):
+            def capture_prompt(prompt, size, quality, output_path, images=None):
                 nonlocal captured_prompt
                 captured_prompt = prompt
                 return ImageResult(
@@ -126,7 +126,7 @@ class TestPromptEnhancement:
         with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
             captured_prompt = None
 
-            def capture_prompt(prompt, size, quality, output_path):
+            def capture_prompt(prompt, size, quality, output_path, images=None):
                 nonlocal captured_prompt
                 captured_prompt = prompt
                 return ImageResult(
@@ -270,7 +270,7 @@ class TestEnhancedErrorMessages:
 
             error_message = str(exc_info.value)
             assert "Missing or invalid API key" in error_message
-            assert "GEMINI_API_KEY" in error_message
+            assert "GOOGLE_API_KEY" in error_message
 
     def test_quota_error_message(self, tmp_path):
         """Test that quota errors get helpful messages."""
@@ -313,7 +313,7 @@ class TestCombinedPhase2Features:
         with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
             captured_prompt = None
 
-            def capture_prompt(prompt, size, quality, output_path):
+            def capture_prompt(prompt, size, quality, output_path, images=None):
                 nonlocal captured_prompt
                 captured_prompt = prompt
                 return ImageResult(
@@ -344,7 +344,7 @@ class TestCombinedPhase2Features:
     def test_all_phase2_features_with_phase1_features(self, tmp_path):
         """Test Phase 2 features work with Phase 1 count and view."""
         with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
-            with patch("gptme_image_gen.tools.image_gen.view_image") as mock_view:
+            with patch("gptme.tools.vision.view_image") as mock_view:
                 mock_gen.side_effect = [
                     ImageResult(
                         provider="gemini",

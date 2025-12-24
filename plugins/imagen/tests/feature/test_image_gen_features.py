@@ -21,9 +21,10 @@ def mock_gemini(tmp_path):
         "gptme_image_gen.tools.image_gen._generate_gemini"
     ) as mock_generate_gemini:
         # Create a fake image result
-        def fake_generate(prompt, size, quality, output_path):
-            from gptme_image_gen.tools.image_gen import ImageResult
+        def fake_generate(prompt, size, quality, output_path, images=None):
             from pathlib import Path
+
+            from gptme_image_gen.tools.image_gen import ImageResult
 
             # Create actual file
             path = Path(output_path)
@@ -34,7 +35,11 @@ def mock_gemini(tmp_path):
                 provider="gemini",
                 prompt=prompt,
                 image_path=path,
-                metadata={"model": "gemini-3-pro-image-preview", "size": size},
+                metadata={
+                    "model": "gemini-3-pro-image-preview",
+                    "size": size,
+                    "images": [str(p) for p in images] if images else None,
+                },
             )
 
         mock_generate_gemini.side_effect = fake_generate
@@ -155,7 +160,7 @@ class TestErrorHandling:
 
     def test_invalid_provider(self):
         """Test error on invalid provider name."""
-        with pytest.raises(RuntimeError, match="Unknown provider"):
+        with pytest.raises(ValueError, match="Unknown provider"):
             generate_image(prompt="Test", provider="invalid_provider")
 
     @patch("gptme_image_gen.tools.image_gen._generate_gemini")
