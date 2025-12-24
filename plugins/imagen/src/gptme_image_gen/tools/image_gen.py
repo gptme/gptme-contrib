@@ -731,9 +731,12 @@ def _modify_gemini(
         )
 
     # Calculate and record cost
+    # Note: Using imagen-3-fast for cost calculation since gemini-3-pro-image-preview
+    # isn't in PROVIDER_COSTS - the actual API model is used for generation,
+    # but cost tracking uses the closest imagen model for pricing
     cost_tracker = get_cost_tracker()
     cost = cost_tracker.calculate_cost(
-        provider="gemini", quality="standard", count=1, model=model_name
+        provider="gemini", quality="standard", count=1, model="imagen-3-fast"
     )
     cost_tracker.record_generation(
         provider="gemini",
