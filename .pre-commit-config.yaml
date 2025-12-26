@@ -34,6 +34,7 @@ repos:
       exa_py,
       types-Markdown,
       pytest,
+      tomli,
     ]
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
