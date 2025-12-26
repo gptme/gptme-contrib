@@ -36,7 +36,7 @@ Get an API key at [morphllm.com/dashboard](https://morphllm.com/dashboard).
 
 ### In gptme
 
-Add to your `gptme.toml` (usually `~/.config/gptme/gptme.toml`):
+Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
 
 ```toml
 [plugins]

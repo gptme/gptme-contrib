@@ -23,12 +23,12 @@ The image generation plugin provides a unified interface for generating images f
 
 ## Installation
 
-Add to your `gptme.toml`:
+Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
 
 ```toml
 [plugins]
 paths = ["path/to/plugins"]
-enabled = ["gptme_image_gen"]
+enabled = ["gptme_image_gen"]  # Optional: limit which plugins load
 ```
 
 Set up API keys:

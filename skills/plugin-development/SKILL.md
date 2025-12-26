@@ -250,16 +250,15 @@ def test_my_stats(tmp_path):
 
 ## Installation & Configuration
 
-### In gptme.toml
+Configure plugins in `gptme.toml` at user-level (`~/.config/gptme/config.toml`) or project-level (`gptme.toml` in workspace root):
 
 ```toml
 [plugins]
-paths = [
-    "~/.config/gptme/plugins",
-    "/path/to/gptme-contrib/plugins",
-]
+paths = ["~/.config/gptme/plugins", "/path/to/plugins"]
 enabled = ["my_plugin"]  # Optional: limit which plugins load
 ```
+
+See [gptme Plugin Docs](https://gptme.org/docs/plugins.html#configuration) for full configuration details.
 
 ### For Development
 

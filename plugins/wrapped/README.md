@@ -18,7 +18,7 @@ pip install -e plugins/wrapped
 
 ## Configuration
 
-Add to your `gptme.toml` (usually `~/.config/gptme/gptme.toml`):
+Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
 
 ```toml
 [plugins]

@@ -25,12 +25,12 @@ The consortium plugin orchestrates multiple LLMs to provide diverse perspectives
 
 ## Installation
 
-The plugin is automatically discovered when placed in a configured plugin path. Add to your `gptme.toml`:
+The plugin is automatically discovered when placed in a configured plugin path. Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
 
 ```toml
 [plugins]
 paths = ["path/to/plugins"]
-enabled = ["gptme_consortium"]
+enabled = ["gptme_consortium"]  # Optional: limit which plugins load
 ```
 
 ## Usage

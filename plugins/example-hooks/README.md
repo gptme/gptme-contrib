@@ -90,10 +90,9 @@ uv tool install gptme --with /path/to/example-hooks
 
 ## Usage
 
-Once installed, gptme automatically discovers and loads the plugin:
+Once installed, gptme automatically discovers and loads the plugin. Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
 
 ```toml
-# ~/.config/gptme/gptme.toml
 [plugins]
 paths = ["/path/to/gptme-contrib/plugins"]
 enabled = ["gptme_example_hooks"]  # Optional: limit which plugins load
