@@ -16,7 +16,32 @@ Year-end analytics for your gptme usage - inspired by Spotify Wrapped.
 pip install -e plugins/wrapped
 ```
 
-## Usage
+## Standalone Usage (without loading into gptme)
+
+Run directly from the command line:
+
+```bash
+# Show your wrapped report
+python -m gptme_wrapped
+
+# Show activity heatmap
+python -m gptme_wrapped heatmap
+
+# Show stats for a specific year
+python -m gptme_wrapped report 2024
+
+# Get raw stats as JSON
+python -m gptme_wrapped stats
+
+# Export to HTML
+python -m gptme_wrapped export --format html > wrapped.html
+
+# From the workspace with uv
+cd /path/to/gptme-contrib
+uv run python -m gptme_wrapped
+```
+
+## Usage in gptme
 
 Once installed, the wrapped tool is available in gptme:
 
