@@ -16,6 +16,16 @@ Year-end analytics for your gptme usage - inspired by Spotify Wrapped.
 pip install -e plugins/wrapped
 ```
 
+## Configuration
+
+Add to your `gptme.toml` (usually `~/.config/gptme/gptme.toml`):
+
+```toml
+[plugins]
+paths = ["path/to/gptme-contrib/plugins"]
+enabled = ["gptme_wrapped"]  # Optional: limit which plugins load
+```
+
 ## Standalone Usage (without loading into gptme)
 
 Run directly from the command line:

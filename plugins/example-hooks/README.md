@@ -92,12 +92,14 @@ uv tool install gptme --with /path/to/example-hooks
 
 Once installed, gptme automatically discovers and loads the plugin:
 
-```bash
-# Enable plugin in gptme.toml
-[gptme]
-plugins = ["gptme_example_hooks"]
-plugin_paths = ["/path/to/gptme-contrib/plugins"]
+```toml
+# ~/.config/gptme/gptme.toml
+[plugins]
+paths = ["/path/to/gptme-contrib/plugins"]
+enabled = ["gptme_example_hooks"]  # Optional: limit which plugins load
+```
 
+```bash
 # Run gptme - hooks will execute automatically
 gptme "hello"
 ```

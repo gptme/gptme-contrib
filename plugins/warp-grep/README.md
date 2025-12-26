@@ -36,12 +36,12 @@ Get an API key at [morphllm.com/dashboard](https://morphllm.com/dashboard).
 
 ### In gptme
 
-Add the tool to your gptme configuration:
+Add to your `gptme.toml` (usually `~/.config/gptme/gptme.toml`):
 
 ```toml
-# ~/.config/gptme/config.toml
-[tools]
-modules = ["gptme_warp_grep"]
+[plugins]
+paths = ["path/to/gptme-contrib/plugins"]
+enabled = ["gptme_warp_grep"]  # Optional: limit which plugins load
 ```
 
 Then use in conversations:
