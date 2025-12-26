@@ -265,7 +265,7 @@ class InputSourcesConfig(BaseModel):
         try:
             import tomllib
         except ImportError:
-            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+            import tomli as tomllib  # type: ignore[no-redef]
 
         with open(config_path, "rb") as f:
             config_dict = tomllib.load(f)

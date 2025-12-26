@@ -4,7 +4,7 @@ CLI for gptme-wrapped - run analytics without loading into gptme.
 
 Usage:
     python -m gptme_wrapped [command] [options]
-    
+
 Commands:
     report      Show the wrapped report (default)
     stats       Show raw statistics as JSON
@@ -14,7 +14,6 @@ Commands:
 
 import argparse
 import json
-import sys
 
 
 def main():
@@ -45,17 +44,18 @@ Examples:
         help="Year to analyze (default: current year)",
     )
     parser.add_argument(
-        "--format", "-f",
+        "--format",
+        "-f",
         choices=["json", "csv", "html"],
         default="json",
         help="Export format (for export command)",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Import here to avoid slow startup for --help
     from .tools import wrapped_stats, wrapped_report, wrapped_heatmap, wrapped_export
-    
+
     if args.command == "report":
         print(wrapped_report(args.year))
     elif args.command == "heatmap":

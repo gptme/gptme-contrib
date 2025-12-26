@@ -3,9 +3,13 @@
 import json
 from pathlib import Path
 
-import pytest
 
-from gptme_wrapped.tools import wrapped_stats, wrapped_report, wrapped_heatmap, wrapped_export
+from gptme_wrapped.tools import (
+    wrapped_stats,
+    wrapped_report,
+    wrapped_heatmap,
+    wrapped_export,
+)
 
 
 def create_test_conversation(conv_dir: Path, messages: list[dict]) -> None:
@@ -50,7 +54,7 @@ class TestWrappedStats:
             },
         ]
         create_test_conversation(conv_dir, messages)
-        
+
         stats = wrapped_stats(2025, logs_dir=tmp_path)
         assert stats["conversations"] == 1
         assert stats["messages"] == 2
@@ -64,19 +68,25 @@ class TestWrappedStats:
         """Test that conversations are filtered by year."""
         # 2024 conversation
         conv_2024 = tmp_path / "2024-12-25-old-conv"
-        create_test_conversation(conv_2024, [
-            {"role": "user", "content": "Old", "timestamp": "2024-12-25T10:00:00"},
-        ])
-        
+        create_test_conversation(
+            conv_2024,
+            [
+                {"role": "user", "content": "Old", "timestamp": "2024-12-25T10:00:00"},
+            ],
+        )
+
         # 2025 conversation
         conv_2025 = tmp_path / "2025-01-01-new-conv"
-        create_test_conversation(conv_2025, [
-            {"role": "user", "content": "New", "timestamp": "2025-01-01T10:00:00"},
-        ])
-        
+        create_test_conversation(
+            conv_2025,
+            [
+                {"role": "user", "content": "New", "timestamp": "2025-01-01T10:00:00"},
+            ],
+        )
+
         stats_2025 = wrapped_stats(2025, logs_dir=tmp_path)
         assert stats_2025["conversations"] == 1
-        
+
         stats_2024 = wrapped_stats(2024, logs_dir=tmp_path)
         assert stats_2024["conversations"] == 1
 
@@ -101,7 +111,7 @@ class TestWrappedReport:
             },
         ]
         create_test_conversation(conv_dir, messages)
-        
+
         report = wrapped_report(2025, logs_dir=tmp_path)
         assert "gptme Wrapped 2025" in report
         assert "conversations" in report.lower()
@@ -122,7 +132,7 @@ class TestWrappedHeatmap:
             },
         ]
         create_test_conversation(conv_dir, messages)
-        
+
         heatmap = wrapped_heatmap(2025, logs_dir=tmp_path)
         assert "Activity Heatmap 2025" in heatmap
         assert "Mon" in heatmap

@@ -38,7 +38,7 @@ repos:
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
     pass_filenames: true
-    exclude: ^packages/(lessons|run_loops|tasks)/
+    exclude: ^(packages/(lessons|run_loops|tasks)/|plugins/)
 - repo: local
   hooks:
   - id: check-markdown-links
