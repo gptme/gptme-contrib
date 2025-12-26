@@ -48,20 +48,22 @@ def execute_cc_analyze(
     }
 
     try:
-        # Execute the code in the namespace
-        exec(code, namespace)
-
-        # Check if there's a result to return
-        if "_result" in namespace:
-            result = namespace["_result"]
-        elif "result" in namespace:
-            result = namespace["result"]
-        else:
-            # Try to evaluate the last expression for a result
-            try:
-                result = eval(code, namespace)
-            except SyntaxError:
-                # Code was statements, not an expression - execution was successful
+        # Check if code is a simple expression (can be eval'd) or statements
+        # Try eval first for simple expressions like: analyze("prompt")
+        try:
+            # compile() in 'eval' mode only accepts expressions
+            compile(code, "<cc_analyze>", "eval")
+            # It's an expression - evaluate it directly to capture return value
+            result = eval(code, namespace)
+        except SyntaxError:
+            # Code contains statements - use exec and look for explicit result
+            exec(code, namespace)
+            if "_result" in namespace:
+                result = namespace["_result"]
+            elif "result" in namespace:
+                result = namespace["result"]
+            else:
+                # Statements executed successfully, no explicit result
                 return Message("system", "cc_analyze block executed successfully")
 
         # Format the result
