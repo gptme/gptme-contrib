@@ -8,4 +8,4 @@ test:  ## Run tests for this package
 	fi
 
 typecheck:  ## Run mypy for this package
-	uv run --with mypy --with types-PyYAML --with tomli mypy -p lib
+	uv run --with mypy --with types-PyYAML --with tomli mypy -p lib --disable-error-code=unused-ignore

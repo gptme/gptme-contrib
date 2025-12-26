@@ -15,7 +15,7 @@ repos:
   rev: v1.12.0
   hooks:
   - id: mypy
-    language_version: python3.10
+    language_version: python3.11
     additional_dependencies: [
       "gptme @ git+https://github.com/gptme/gptme.git",
       rich,
@@ -34,6 +34,7 @@ repos:
       exa_py,
       types-Markdown,
       pytest,
+      tomli,
     ]
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
