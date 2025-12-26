@@ -78,11 +78,11 @@ from gptme.tools.base import ToolSpec, ToolUse
 def my_function(arg1: str, arg2: int = 10) -> str:
     """
     Do something useful.
-    
+
     Args:
         arg1: Description of arg1
         arg2: Description of arg2 (default: 10)
-    
+
     Returns:
         Result description
     """
@@ -307,7 +307,7 @@ uv run pytest tests/ -v
 ## Examples in gptme-contrib
 
 - **wrapped**: Analytics tool with tests
-- **imagen**: Multi-provider image generation  
+- **imagen**: Multi-provider image generation
 - **lsp**: Language server integration
 - **consortium**: Multi-model consensus
 - **example-hooks**: Hook registration patterns
