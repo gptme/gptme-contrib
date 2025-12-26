@@ -8,6 +8,8 @@ Useful for security audits, code reviews, test coverage analysis, etc.
 from __future__ import annotations
 
 import logging
+import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -84,15 +86,7 @@ def analyze(
 
 def _check_claude_available() -> bool:
     """Check if claude CLI is available."""
-    try:
-        result = subprocess.run(
-            ["which", "claude"],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    return shutil.which("claude") is not None
 
 
 def _run_sync(
@@ -156,11 +150,8 @@ def _run_background(
 
     session_id = f"cc_analyze_{uuid.uuid4().hex[:8]}"
 
-    # Escape prompt for shell
-    escaped_prompt = prompt.replace("'", "'\"'\"'")
-
-    # Create tmux session with the command
-    cmd = f"cd '{work_dir}' && timeout {timeout} claude -p '{escaped_prompt}'"
+    # Create tmux session with the command (using shlex.quote for safety)
+    cmd = f"cd {shlex.quote(str(work_dir))} && timeout {timeout} claude -p {shlex.quote(prompt)}"
 
     try:
         subprocess.run(
