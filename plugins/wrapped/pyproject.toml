@@ -1,0 +1,23 @@
+[project]
+name = "gptme-wrapped"
+version = "0.1.0"
+description = "gptme Wrapped - Year-end analytics for your gptme usage"
+requires-python = ">=3.10"
+dependencies = [
+    "gptme>=0.27.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+]
+
+[project.entry-points."gptme.plugins"]
+wrapped = "gptme_wrapped:plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_wrapped"]
