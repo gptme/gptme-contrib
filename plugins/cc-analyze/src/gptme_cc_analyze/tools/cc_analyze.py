@@ -15,9 +15,66 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from gptme.tools.base import ToolSpec
+from gptme.message import Message
+from gptme.tools.base import ConfirmFunc, ToolSpec
+from gptme.util.ask_execute import print_preview
 
 logger = logging.getLogger(__name__)
+
+
+def execute_cc_analyze(
+    code: str | None,
+    args: list[str] | None,
+    kwargs: dict[str, str] | None,
+    confirm: ConfirmFunc,
+) -> Message:
+    """Execute a cc_analyze code block."""
+    if code is None:
+        return Message("system", "Error: No code to execute")
+
+    code = code.strip()
+    if not code:
+        return Message("system", "Error: Empty code block")
+
+    print_preview(code, "python")
+    if not confirm("Execute this Claude Code analysis?"):
+        return Message("system", "Execution cancelled by user")
+
+    # Create namespace with available functions
+    namespace = {
+        "analyze": analyze,
+        "check_session": check_session,
+        "kill_session": kill_session,
+    }
+
+    try:
+        # Execute the code in the namespace
+        exec(code, namespace)
+
+        # Check if there's a result to return
+        if "_result" in namespace:
+            result = namespace["_result"]
+        elif "result" in namespace:
+            result = namespace["result"]
+        else:
+            # Try to evaluate the last expression for a result
+            try:
+                result = eval(code, namespace)
+            except SyntaxError:
+                # Code was statements, not an expression - execution was successful
+                return Message("system", "cc_analyze block executed successfully")
+
+        # Format the result
+        if isinstance(result, AnalysisResult):
+            output = f"=== Analysis Complete ({result.duration_seconds:.1f}s) ===\n\n{result.output}"
+            return Message("system", output)
+        elif isinstance(result, str):
+            return Message("system", result)
+        else:
+            return Message("system", str(result))
+
+    except Exception as e:
+        return Message("system", f"Error executing cc_analyze: {e}")
 
 
 @dataclass
@@ -305,4 +362,5 @@ check_session("cc_analyze_a1b2c3d4")
     """,
     functions=[analyze, check_session, kill_session],
     block_types=["cc_analyze"],
+    execute=execute_cc_analyze,
 )
