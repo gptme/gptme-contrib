@@ -285,6 +285,96 @@ def wrapped_report(year: int | None = None, logs_dir: Path | None = None) -> str
     return "\n".join(lines)
 
 
+def wrapped_heatmap(year: int | None = None, logs_dir: Path | None = None) -> str:
+    """
+    Generate a GitHub-style calendar heatmap of gptme activity.
+    
+    Args:
+        year: Year to display (default: current year)
+        logs_dir: Override logs directory (for testing)
+    
+    Returns:
+        ASCII calendar heatmap
+    """
+    from datetime import timedelta
+    
+    if year is None:
+        year = datetime.now().year
+    
+    stats = wrapped_stats(year, logs_dir=logs_dir)
+    by_day = stats.get("by_day", {})
+    
+    # Find max activity for scaling
+    max_activity = max((d.get("conversations", 0) for d in by_day.values()), default=1)
+    
+    # Intensity characters (empty to full)
+    chars = " ░▒▓█"
+    
+    def get_char(count: int) -> str:
+        if count == 0:
+            return chars[0]
+        # Scale to 1-4 range
+        level = min(4, max(1, int((count / max_activity) * 4)))
+        return chars[level]
+    
+    # Find first day of year and calculate weeks
+    jan1 = datetime(year, 1, 1)
+    dec31 = datetime(year, 12, 31)
+    
+    # Adjust to start from first Sunday (GitHub style) or Monday
+    start_date = jan1 - timedelta(days=jan1.weekday())  # Start from Monday
+    
+    # Build week columns
+    weeks: list[list[str]] = []
+    current_date = start_date
+    
+    while current_date <= dec31:
+        week = []
+        for _ in range(7):  # Mon-Sun
+            if current_date.year == year:
+                day_key = current_date.strftime("%Y-%m-%d")
+                count = by_day.get(day_key, {}).get("conversations", 0)
+                week.append(get_char(count))
+            else:
+                week.append(" ")  # Outside year
+            current_date += timedelta(days=1)
+        weeks.append(week)
+    
+    # Build month labels
+    month_labels = "     "
+    current_week_start = start_date
+    for i, _ in enumerate(weeks):
+        week_mid = current_week_start + timedelta(days=3)
+        if week_mid.day <= 7 and week_mid.year == year:
+            month_labels += week_mid.strftime("%b")[0]
+        else:
+            month_labels += " "
+        current_week_start += timedelta(days=7)
+    
+    lines = [
+        f"📅 Activity Heatmap {year}",
+        "",
+        month_labels,
+    ]
+    
+    # Build rows (7 days)
+    day_names = ["Mon", "   ", "Wed", "   ", "Fri", "   ", "Sun"]
+    for dow in range(7):
+        row = f"{day_names[dow]} "
+        for week in weeks:
+            row += week[dow]
+        lines.append(row)
+    
+    # Legend and stats
+    lines.extend([
+        "",
+        f"Legend: {chars[0]}=0  {chars[1]}=low  {chars[2]}=med  {chars[3]}=high  {chars[4]}=max",
+        f"Total: {stats['conversations']:,} conversations | Max day: {max_activity}",
+    ])
+    
+    return "\n".join(lines)
+
+
 def wrapped_export(year: int | None = None, format: str = "json", logs_dir: Path | None = None) -> str:
     """
     Export wrapped statistics in various formats.
@@ -359,7 +449,7 @@ tool = ToolSpec(
     name="wrapped",
     desc="Year-end analytics for gptme usage - token counts, costs, model preferences",
     examples=examples,
-    functions=[wrapped_stats, wrapped_report, wrapped_export],
+    functions=[wrapped_stats, wrapped_report, wrapped_heatmap, wrapped_export],
 )
 
 __doc__ = tool.get_doc(__doc__)

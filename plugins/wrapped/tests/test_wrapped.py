@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from gptme_wrapped.tools import wrapped_stats, wrapped_report, wrapped_export
+from gptme_wrapped.tools import wrapped_stats, wrapped_report, wrapped_heatmap, wrapped_export
 
 
 def create_test_conversation(conv_dir: Path, messages: list[dict]) -> None:
@@ -106,6 +106,29 @@ class TestWrappedReport:
         assert "gptme Wrapped 2025" in report
         assert "conversations" in report.lower()
         assert "tokens" in report.lower()
+
+
+class TestWrappedHeatmap:
+    """Tests for wrapped_heatmap function."""
+
+    def test_heatmap_format(self, tmp_path: Path):
+        """Test that heatmap is properly formatted."""
+        conv_dir = tmp_path / "2025-06-15-test"
+        messages = [
+            {
+                "role": "user",
+                "content": "Test",
+                "timestamp": "2025-06-15T14:30:00",
+            },
+        ]
+        create_test_conversation(conv_dir, messages)
+        
+        heatmap = wrapped_heatmap(2025, logs_dir=tmp_path)
+        assert "Activity Heatmap 2025" in heatmap
+        assert "Mon" in heatmap
+        assert "Wed" in heatmap
+        assert "Fri" in heatmap
+        assert "Legend:" in heatmap
 
 
 class TestWrappedExport:
