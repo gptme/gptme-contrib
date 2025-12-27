@@ -232,32 +232,32 @@ cost-effective for parallel analysis tasks vs API calls.
 **Examples:**
 
 Quick security scan:
-```cc_analyze
+```ipython
 analyze("Review this codebase for security vulnerabilities. Focus on: injection attacks, auth issues, data exposure. List findings by severity (Critical/High/Medium/Low) with file locations.")
 ```
 
 Code review:
-```cc_analyze
+```ipython
 analyze("Review changes in the last commit for: code quality, potential bugs, performance issues, missing tests. Provide specific line-level feedback.")
 ```
 
 Test coverage analysis:
-```cc_analyze
+```ipython
 analyze("Analyze test coverage. Identify: critical untested paths, missing edge cases, integration test gaps. Prioritize by risk.")
 ```
 
 Architecture documentation:
-```cc_analyze
+```ipython
 analyze("Document the architecture of this project. Include: component diagram, data flow, key abstractions, external dependencies.")
 ```
 
 Background analysis (for long tasks):
-```cc_analyze
+```ipython
 analyze("Comprehensive security audit of entire codebase", background=True, timeout=1800)
 ```
 
 Check background task:
-```cc_analyze
+```ipython
 check_session("cc_analyze_abc12345")
 ```
     """,
@@ -266,7 +266,7 @@ check_session("cc_analyze_abc12345")
 
 > User: Check this code for security issues
 > Assistant: I'll run a focused security analysis with Claude Code.
-```cc_analyze
+```ipython
 analyze("Review this codebase for security vulnerabilities. List findings by severity with file locations and remediation suggestions.")
 ```
 > System: === Analysis Complete (45.2s) ===
@@ -280,7 +280,7 @@ analyze("Review this codebase for security vulnerabilities. List findings by sev
 
 > User: Review the last few commits
 > Assistant: Let me analyze recent changes for quality issues.
-```cc_analyze
+```ipython
 analyze("Review the last 3 commits for code quality, potential bugs, and style issues. Provide specific feedback.")
 ```
 
@@ -288,7 +288,7 @@ analyze("Review the last 3 commits for code quality, potential bugs, and style i
 
 > User: Do a comprehensive security audit (this might take a while)
 > Assistant: I'll start a background analysis since this could take 15+ minutes.
-```cc_analyze
+```ipython
 analyze("Comprehensive security audit covering OWASP Top 10, dependency vulnerabilities, auth/authz issues, and data handling", background=True, timeout=1800)
 ```
 > System: Background analysis started in session: cc_analyze_a1b2c3d4
@@ -299,10 +299,9 @@ analyze("Comprehensive security audit covering OWASP Top 10, dependency vulnerab
 
 > User: How's that security audit going?
 > Assistant: Let me check the progress.
-```cc_analyze
+```ipython
 check_session("cc_analyze_a1b2c3d4")
 ```
     """,
     functions=[analyze, check_session, kill_session],
-    block_types=["cc_analyze"],
 )
