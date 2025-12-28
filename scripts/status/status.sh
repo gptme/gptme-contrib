@@ -1,7 +1,7 @@
 #!/bin/bash
 # Status overview script for agent infrastructure
 # Generalized version from Bob's workspace
-set -e
+set -euo pipefail
 
 # Configuration
 AGENT_NAME="${AGENT_NAME:-$(basename "$(pwd)")}"

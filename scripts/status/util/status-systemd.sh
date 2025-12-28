@@ -2,7 +2,7 @@
 # Show systemd service status for agent services
 # Generalized version from Bob's workspace
 # Usage: ./scripts/status/util/status-systemd.sh [--no-header] [--no-color]
-set -e
+set -euo pipefail
 
 # Configuration
 AGENT_NAME="${AGENT_NAME:-$(basename "$(dirname "$(dirname "$(dirname "$0")")")")}"
