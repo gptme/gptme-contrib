@@ -1,12 +1,10 @@
 ---
 match:
   keywords:
-  - shell
-  - output
-  - tokens
-  - grep
-  - filter
-  - large output
+  - filter output with grep head tail
+  - command dumped 10k+ tokens
+  - large output 1000+ lines
+  - token efficiency shell
 ---
 
 # Shell Output Filtering for Token Efficiency
