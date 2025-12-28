@@ -1,11 +1,13 @@
 ---
 match:
   keywords:
+  # Exact error (high precision)
   - "bash: python: command not found"
-  - "use python3 explicitly"
-  - "python symlink missing"
-  - "#!/usr/bin/env python3 shebang"
-  - "Ubuntu has no python command"
+  # Problem context (medium specificity)
+  - "python command not found"
+  - "use python3 instead of python"
+  - "python vs python3"
+  - "python symlink not available"
 status: active
 ---
 

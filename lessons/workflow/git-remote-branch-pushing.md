@@ -1,11 +1,14 @@
 ---
 match:
   keywords:
-  - "git push to wrong branch"
-  - "push to master instead of feature branch"
-  - "git push origin branch:branch syntax"
-  - "explicitly specify remote branch destination"
-  - "silently pushes to wrong destination"
+  # Error signals
+  - "pushed to wrong branch"
+  - "push went to master instead"
+  # Problem context (medium specificity)
+  - "git push explicit destination"
+  - "specify remote branch name"
+  - "git push origin branch:branch"
+  - "push to feature branch"
 lesson_id: workflow_git-remote-branch-pushing_aa405aaf
 version: 1.0.0
 usage_count: 1

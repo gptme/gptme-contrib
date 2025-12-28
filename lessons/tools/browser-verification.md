@@ -1,11 +1,14 @@
 ---
 match:
   keywords:
-  - "claiming Fixed without loading page"
-  - "JavaScript errors unchecked"
-  - "verify web changes before commit"
-  - "check console for errors after deploy"
-  - "deployment not verified"
+  # Anti-pattern detection (high precision)
+  - "Fixed! but page not loaded"
+  - "claiming fixed without testing"
+  # Problem context (medium specificity)
+  - "verify web changes in browser"
+  - "check browser console errors"
+  - "deployment verification"
+  - "test web changes before commit"
 status: active
 ---
 

@@ -1,11 +1,14 @@
 ---
 match:
   keywords:
+  # Specific timeout signals (high precision)
   - "process killed at 120 seconds"
-  - "shell tool 120 second timeout"
-  - "command expected to run 5+ minutes"
-  - "process timed out in shell"
-  - "benchmark suite exceeds shell timeout"
+  - "shell timeout exceeded"
+  # Problem context (medium specificity)
+  - "long-running command in shell"
+  - "tmux for long-running process"
+  - "command timed out"
+  - "process runs longer than 2 minutes"
 status: active
 ---
 

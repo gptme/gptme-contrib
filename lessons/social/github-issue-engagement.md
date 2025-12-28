@@ -1,11 +1,14 @@
 ---
 match:
   keywords:
-  - "search before creating issue"
-  - "check if someone already working on it"
-  - "update PR after completing work"
-  - "about to create duplicate issue"
-  - "read issue comments before engaging"
+  # Problem signals
+  - "about to create new issue"
+  - "duplicate issue prevention"
+  # Action context (medium specificity)
+  - "search existing issues first"
+  - "check for similar issues"
+  - "update issue after work"
+  - "read issue comments"
 status: active
 ---
 

@@ -1,10 +1,14 @@
 ---
 match:
   keywords:
-  - "command chaining && operator"
-  - "multiple shell blocks lose context"
+  # Specific problem signals
   - "environment variable lost between blocks"
-  - "chain related commands"
+  - "shell blocks lose context"
+  # Problem context (medium specificity)
+  - "chain shell commands"
+  - "command chaining with &&"
+  - "split shell commands"
+  - "variable not found in second block"
 status: active
 ---
 

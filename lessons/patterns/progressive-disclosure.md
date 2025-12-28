@@ -1,11 +1,14 @@
 ---
 match:
   keywords:
-  - "documentation file > 500 lines"
-  - "context budget consumed by rarely-needed docs"
-  - "always-included file too large"
-  - "10+ sections in single doc file"
-  - "split monolithic documentation"
+  # Problem detection
+  - "documentation too large"
+  - "context budget consumed"
+  # Action context (medium specificity)
+  - "split large documentation"
+  - "monolithic documentation file"
+  - "slim index with details"
+  - "too many sections in one file"
 status: active
 ---
 
