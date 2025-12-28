@@ -48,7 +48,7 @@ cd ~/thomas
 ### With explicit configuration
 ```bash
 # Show status for specific agent
-AGENT_NAME=alice WORKSPACE=/home/alice/alice ./scripts/status/status.sh
+AGENT_NAME=myagent WORKSPACE=/home/myagent/myagent ./scripts/status/status.sh
 ```
 
 ### Individual utilities
