@@ -1,6 +1,7 @@
 """Project monitoring run loop implementation."""
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ class WorkItem:
     """Represents a discovered work item."""
 
     repo: str
-    item_type: str  # "pr_update", "ci_failure", "assigned_issue"
+    item_type: str  # "pr_update", "ci_failure", "assigned_issue", "notification"
     number: int
     title: str
     url: str
@@ -598,6 +599,96 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         return work_items
 
+    def check_notifications(self) -> list[WorkItem]:
+        """Check GitHub notifications for mentions and assignments.
+
+        Returns:
+            List of WorkItem for relevant notifications
+        """
+        work_items = []
+        state_file = self.state_dir / "notifications.state"
+
+        try:
+            # Get unread notifications
+            result = subprocess.run(
+                ["gh", "api", "notifications"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+
+            notifications = json.loads(result.stdout)
+
+            # Filter for relevant notification reasons
+            relevant_reasons = {"mention", "assign", "review_requested", "team_mention"}
+            relevant_notifications = [
+                n
+                for n in notifications
+                if n.get("reason") in relevant_reasons and n.get("unread", False)
+            ]
+
+            # Read previous notifications
+            prev_notifications = set()
+            if state_file.exists():
+                prev_notifications = set(state_file.read_text().strip().split("\n"))
+
+            current_notifications = set()
+
+            for notif in relevant_notifications:
+                notif_id = notif["id"]
+                current_notifications.add(notif_id)
+
+                # Skip if already processed
+                if notif_id in prev_notifications:
+                    continue
+
+                repo = notif["repository"]["full_name"]
+                subject = notif["subject"]
+                title = subject.get("title", "")
+                subject_type = subject.get("type", "")
+                subject_url = subject.get("url", "")
+                reason = notif.get("reason", "")
+
+                # Extract number from URL if it's a PR or Issue
+                number = None
+                if subject_url and subject_type in ["PullRequest", "Issue"]:
+                    # URL format: https://api.github.com/repos/owner/repo/pulls/123
+                    # or https://api.github.com/repos/owner/repo/issues/123
+                    match = re.search(r"/(pulls|issues)/(\d+)$", subject_url)
+                    if match:
+                        number = int(match.group(2))
+
+                if not number:
+                    # Skip notifications without a PR/issue number
+                    continue
+
+                # Create HTML URL for the item
+                html_url = f"https://github.com/{repo}/{'pull' if subject_type == 'PullRequest' else 'issues'}/{number}"
+
+                details = f"Notification reason: {reason}\nType: {subject_type}"
+
+                work_items.append(
+                    WorkItem(
+                        repo=repo,
+                        item_type="notification",
+                        number=number,
+                        title=title,
+                        url=html_url,
+                        details=details,
+                    )
+                )
+
+            # Save current notifications
+            state_file.write_text("\n".join(current_notifications))
+
+        except Exception as e:
+            self.logger.error(f"Error checking notifications: {e}")
+
+        return work_items
+
     def discover_work(self) -> list[WorkItem]:
         """Discover all work items across repositories.
 
@@ -605,6 +696,11 @@ class ProjectMonitoringRun(BaseRunLoop):
             List of all discovered work items
         """
         all_work = []
+
+        # Check notifications (global, not per-repo)
+        self.logger.info("Checking notifications...")
+        notification_work = self.check_notifications()
+        all_work.extend(notification_work)
 
         repos = self.discover_repositories()
 
