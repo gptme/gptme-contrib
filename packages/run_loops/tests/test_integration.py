@@ -89,12 +89,12 @@ class TestCLIIntegration:
 
         # Test that ProjectMonitoringRun can be instantiated
         run = ProjectMonitoringRun(
-            test_workspace, target_org="test-org", author="test-author"
+            test_workspace, target_orgs=["test-org"], author="test-author"
         )
 
         # Verify basic properties
         assert run.workspace == test_workspace
-        assert run.target_org == "test-org"
+        assert run.target_orgs == ["test-org"]
         assert run.author == "test-author"
         # ProjectMonitoringRun successfully instantiated
 

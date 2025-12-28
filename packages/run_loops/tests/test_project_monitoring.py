@@ -29,7 +29,8 @@ def test_project_monitoring_init(workspace):
     assert run.run_type == "project-monitoring"
     assert run.timeout == 1800  # 30 minutes
     assert run.lock_wait is False
-    assert run.target_org == "gptme"
+    assert run.target_orgs == []  # Default is empty list
+    assert run.target_repos == []  # Default is empty list
     assert run.author == ""  # No default author
     assert run.agent_name == "Agent"  # Default agent name
     assert run.state_dir.exists()
@@ -38,10 +39,10 @@ def test_project_monitoring_init(workspace):
 def test_project_monitoring_custom_org(workspace):
     """Test ProjectMonitoringRun with custom organization."""
     run = ProjectMonitoringRun(
-        workspace, target_org="custom-org", author="custom-author"
+        workspace, target_orgs=["custom-org"], author="custom-author"
     )
 
-    assert run.target_org == "custom-org"
+    assert run.target_orgs == ["custom-org"]
     assert run.author == "custom-author"
 
 
@@ -55,7 +56,8 @@ def test_discover_repositories_success(mock_run, workspace):
         stderr="",
     )
 
-    run = ProjectMonitoringRun(workspace)
+    # Must specify target_orgs since default is empty
+    run = ProjectMonitoringRun(workspace, target_orgs=["gptme"])
     repos = run.discover_repositories()
 
     assert len(repos) == 3
