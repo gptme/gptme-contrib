@@ -1,6 +1,6 @@
 #!/bin/bash
 # Show systemd service status for agent services
-# Generalized version from Bob's workspace
+# For use with gptme agents
 # Usage: ./scripts/status/util/status-systemd.sh [--no-header] [--no-color]
 set -euo pipefail
 

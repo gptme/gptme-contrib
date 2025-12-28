@@ -1,6 +1,6 @@
 #!/bin/bash
 # Status overview script for agent infrastructure
-# Generalized version from Bob's workspace
+# For use with gptme agents
 set -euo pipefail
 
 # Configuration

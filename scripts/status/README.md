@@ -9,7 +9,7 @@ These scripts provide a quick overview of your agent's infrastructure health:
 - **Lock status**: Active locks and recent history (optional)
 - **Recent activity**: Quick access to logs and history
 
-Generalized from Bob's workspace to work with any agent.
+Works with any gptme agent workspace.
 
 ## Quick Start
 
@@ -48,7 +48,7 @@ cd ~/thomas
 ### With explicit configuration
 ```bash
 # Show status for specific agent
-AGENT_NAME=bob WORKSPACE=/home/bob/bob ./scripts/status/status.sh
+AGENT_NAME=alice WORKSPACE=/home/alice/alice ./scripts/status/status.sh
 ```
 
 ### Individual utilities
@@ -66,10 +66,10 @@ AGENT_NAME=bob WORKSPACE=/home/bob/bob ./scripts/status/status.sh
 ## Expected Output
 
 ```text
-=== Bob's Infrastructure Status ===
+=== Your-Agent's Infrastructure Status ===
 
 Services:
-Systemd Services (bob):
+Systemd Services (your-agent):
   ● autonomous: inactive (exit 0) (next: 1h)
   ● discord: active
   ○ email: inactive
@@ -78,5 +78,5 @@ Locks:
   (none)
 
 More: ./scripts/status/util/lock-status.sh (for detailed lock info)
-Logs: journalctl --user -u bob-<name>.service -o cat --since '1h ago'
+Logs: journalctl --user -u your-agent-<name>.service -o cat --since '1h ago'
 ```
