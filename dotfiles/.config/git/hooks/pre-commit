@@ -114,10 +114,16 @@ fi
 echo -e "${GREEN}Running pre-commit checks...${NC}"
 
 # Run pre-commit checks on staged files only
-if pre-commit run; then
+# Capture output to avoid spamming context with passed/skipped hooks
+PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
+PRECOMMIT_EXIT=$?
+
+if [ $PRECOMMIT_EXIT -eq 0 ]; then
     echo -e "${GREEN}✓ All pre-commit checks passed${NC}"
     exit 0
 else
+    # Show output only on failure
+    echo "$PRECOMMIT_OUTPUT"
     echo -e "${YELLOW}Pre-commit modified files, checking for auto-staging...${NC}"
 
     # Check if any files were actually modified
@@ -133,10 +139,14 @@ else
     echo -e "${GREEN}Auto-staged modified files. Re-running pre-commit...${NC}"
 
     # Re-run pre-commit on staged files
-    if pre-commit run; then
+    PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
+    PRECOMMIT_EXIT=$?
+
+    if [ $PRECOMMIT_EXIT -eq 0 ]; then
         echo -e "${GREEN}✓ All pre-commit checks passed after auto-staging${NC}"
         exit 0
     else
+        echo "$PRECOMMIT_OUTPUT"
         echo -e "${RED}✗ Pre-commit still failing after auto-staging${NC}"
         exit 1
     fi
