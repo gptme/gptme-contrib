@@ -78,6 +78,20 @@ def analyze(
 
     work_dir = Path(workspace) if workspace else Path.cwd()
 
+    # Warn about blocking calls that exceed prompt cache window
+    if not background and timeout > 240:
+        if timeout >= 300:
+            raise ValueError(
+                f"cc_analyze: sync call with timeout={timeout}s would block for >=5 minutes, "
+                f"destroying prompt cache and stalling autonomous runs. "
+                f"Use background=True for tasks expected to take this long."
+            )
+        logger.warning(
+            f"cc_analyze: sync call with timeout={timeout}s may block autonomous runs "
+            f"and destroy prompt cache (expires at 5min). "
+            f"Consider using background=True for long tasks."
+        )
+
     if background:
         return _run_background(prompt, work_dir, timeout)
     else:
@@ -228,6 +242,11 @@ Useful for security audits, code reviews, test coverage analysis, etc.
 
 **Cost efficiency**: Claude Code uses a $200/mo subscription, making it
 cost-effective for parallel analysis tasks vs API calls.
+
+**IMPORTANT: Async patterns for long tasks:**
+- For tasks expected to take >4 minutes, use `background=True`
+- Prompt cache expires at 5 minutes, so sync calls >240s destroy cache
+- If waiting for results (can't handle in follow-up session), check every 4 min to keep cache warm
 
 **Examples:**
 
