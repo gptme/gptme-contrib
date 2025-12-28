@@ -56,7 +56,6 @@ def email(workspace: Path):
     "--org",
     "orgs",
     multiple=True,
-    default=["gptme"],
     help="GitHub organization(s) to monitor (can be specified multiple times)",
 )
 @click.option(
