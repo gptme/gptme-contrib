@@ -1,10 +1,12 @@
 ---
 match:
   keywords:
-  - python
-  - python3
-  - command not found
-  - python invocation
+  - "bash: python: command not found"
+  - "use python3 explicitly"
+  - "python symlink missing"
+  - "#!/usr/bin/env python3 shebang"
+  - "Ubuntu has no python command"
+status: active
 ---
 
 # Python Invocation

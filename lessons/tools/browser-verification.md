@@ -1,12 +1,12 @@
 ---
 match:
   keywords:
-  - browser
-  - verification
-  - console
-  - playwright
-  - web
-  - deployment
+  - "claiming Fixed without loading page"
+  - "JavaScript errors unchecked"
+  - "verify web changes before commit"
+  - "check console for errors after deploy"
+  - "deployment not verified"
+status: active
 ---
 
 # Browser Verification for Web Changes

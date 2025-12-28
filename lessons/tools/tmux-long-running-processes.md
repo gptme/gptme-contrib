@@ -1,11 +1,12 @@
 ---
 match:
   keywords:
-  - tmux
-  - long-running
-  - shell timeout
-  - benchmark
-  - timeout
+  - "process killed at 120 seconds"
+  - "shell tool 120 second timeout"
+  - "command expected to run 5+ minutes"
+  - "process timed out in shell"
+  - "benchmark suite exceeds shell timeout"
+status: active
 ---
 
 # Tmux for Long-Running Processes

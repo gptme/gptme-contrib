@@ -1,6 +1,11 @@
 ---
 match:
-  keywords: [documentation, token, context, large file, auto-include]
+  keywords:
+  - "documentation file > 500 lines"
+  - "context budget consumed by rarely-needed docs"
+  - "always-included file too large"
+  - "10+ sections in single doc file"
+  - "split monolithic documentation"
 status: active
 ---
 

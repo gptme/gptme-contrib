@@ -1,13 +1,12 @@
 ---
 match:
   keywords:
-  - git
-  - worktree
-  - PR
-  - external
-  - checkout
-  - branch
-  - pull request
+  - "branch from origin/master not local master"
+  - "accidentally including uncommitted changes"
+  - "working on external repo PRs"
+  - "gh pr checkout tracking"
+  - "multiple features simultaneously"
+  - "git worktree add for PR work"
 lesson_id: workflow_git-worktree-workflow_15082b29
 version: 1.0.0
 usage_count: 1

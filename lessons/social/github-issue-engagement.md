@@ -1,12 +1,12 @@
 ---
 match:
   keywords:
-  - github
-  - issue
-  - pr
-  - pull request
-  - engagement
-  - community
+  - "search before creating issue"
+  - "check if someone already working on it"
+  - "update PR after completing work"
+  - "about to create duplicate issue"
+  - "read issue comments before engaging"
+status: active
 ---
 
 # GitHub Issue and PR Engagement

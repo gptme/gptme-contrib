@@ -1,10 +1,11 @@
 ---
 match:
   keywords:
-  - command chaining
-  - shell
-  - sequential execution
-  - operator
+  - "command chaining && operator"
+  - "multiple shell blocks lose context"
+  - "environment variable lost between blocks"
+  - "chain related commands"
+status: active
 ---
 
 # Shell Command Chaining
