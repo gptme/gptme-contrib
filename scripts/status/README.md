@@ -64,3 +64,19 @@ AGENT_NAME=bob WORKSPACE=/home/bob/bob ./scripts/status/status.sh
 ```
 
 ## Expected Output
+
+```text
+=== Bob's Infrastructure Status ===
+
+Services:
+Systemd Services (bob):
+  ● autonomous: inactive (exit 0) (next: 1h)
+  ● discord: active
+  ○ email: inactive
+
+Locks:
+  (none)
+
+More: ./scripts/status/util/lock-status.sh (for detailed lock info)
+Logs: journalctl --user -u bob-<name>.service -o cat --since '1h ago'
+```

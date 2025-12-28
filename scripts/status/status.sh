@@ -7,9 +7,7 @@ set -e
 AGENT_NAME="${AGENT_NAME:-$(basename "$(pwd)")}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
+# Colors (only define what's used in this script)
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 DIM='\033[2m'
@@ -28,7 +26,7 @@ if [ -f "$SCRIPT_DIR/util/lock-status.sh" ]; then
     lock_output=$("$SCRIPT_DIR/util/lock-status.sh" 2>/dev/null || echo "")
     if [ -n "$lock_output" ]; then
         echo "$lock_output" | grep -E "(LOCKED|STALE)" | sed 's/^/  /' || echo "  (none)"
-        
+
         # Show recent history (last 3)
         echo ""
         echo -e "  ${DIM}Recent:${NC}"
@@ -40,5 +38,5 @@ if [ -f "$SCRIPT_DIR/util/lock-status.sh" ]; then
     fi
 fi
 
-echo -e "${DIM}More: $SCRIPT_DIR/util/lock-history.sh 20 (if available)${NC}"
+echo -e "${DIM}More: $SCRIPT_DIR/util/lock-status.sh (for detailed lock info)${NC}"
 echo -e "${DIM}Logs: journalctl --user -u ${AGENT_NAME}-<name>.service -o cat --since '1h ago'${NC}"

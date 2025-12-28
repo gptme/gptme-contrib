@@ -2,20 +2,26 @@
 # Show systemd service status for agent services
 # Generalized version from Bob's workspace
 # Usage: ./scripts/status/util/status-systemd.sh [--no-header] [--no-color]
+set -e
 
 # Configuration
 AGENT_NAME="${AGENT_NAME:-$(basename "$(dirname "$(dirname "$(dirname "$0")")")")}"
 
 # Colors (can be disabled)
 if [[ "$*" == *"--no-color"* ]]; then
-    GREEN='' RED='' YELLOW='' CYAN='' DIM='' NC=''
+    GREEN='' RED='' CYAN='' DIM='' NC=''
 else
-    GREEN='\033[0;32m' RED='\033[0;31m' YELLOW='\033[1;33m'
+    GREEN='\033[0;32m' RED='\033[0;31m'
     CYAN='\033[0;36m' DIM='\033[2m' NC='\033[0m'
 fi
 
 SHOW_HEADER=true
 [[ "$*" == *"--no-header"* ]] && SHOW_HEADER=false
+
+# Show header if enabled
+if [[ "$SHOW_HEADER" == true ]]; then
+    echo -e "${CYAN}Systemd Services (${AGENT_NAME}):${NC}"
+fi
 
 # Get timer data
 timer_json=$(systemctl list-timers --user --no-pager --all --output=json 2>/dev/null)
@@ -35,22 +41,22 @@ done < <(systemctl --user show "${AGENT_NAME}-*.service" --property=Id,ExecMainS
 # Get all agent services and their states
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    
+
     # Parse service name and state
     service_name=$(echo "$line" | awk '{print $1}')
     state=$(echo "$line" | awk '{print $2}')
-    
+
     # Skip if not our agent's service
     [[ ! "$service_name" =~ ^${AGENT_NAME}- ]] && continue
-    
+
     # Extract short name (remove agent prefix and .service suffix)
     short_name="${service_name#${AGENT_NAME}-}"
     short_name="${short_name%.service}"
-    
+
     # Get exit code
     exit_code="${exit_codes[$service_name]}"
     [[ -z "$exit_code" ]] && exit_code="0"
-    
+
     # Determine status icon and color
     if [[ "$state" == "active" ]]; then
         status_icon="${GREEN}●${NC}"
@@ -70,7 +76,7 @@ while IFS= read -r line; do
         status_icon="?"
         status_text="$state"
     fi
-    
+
     # Check for timer
     timer_name="${service_name%.service}.timer"
     timer_info=""
@@ -82,7 +88,7 @@ while IFS= read -r line; do
             next_epoch=$(date -d "$next_trigger" +%s 2>/dev/null || echo "0")
             now_epoch=$(date +%s)
             seconds_until=$((next_epoch - now_epoch))
-            
+
             if [ $seconds_until -lt 60 ]; then
                 timer_info=" ${DIM}(next: ${seconds_until}s)${NC}"
             elif [ $seconds_until -lt 3600 ]; then
@@ -92,9 +98,9 @@ while IFS= read -r line; do
             fi
         fi
     fi
-    
+
     echo -e "  $status_icon $short_name: $status_text$timer_info"
-    
+
 done < <(systemctl --user list-units "${AGENT_NAME}-*.service" --all --no-legend --no-pager 2>/dev/null)
 
 # If no services found
