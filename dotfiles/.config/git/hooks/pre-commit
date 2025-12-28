@@ -17,27 +17,29 @@ NC='\033[0m' # No Color
 
 # --- Part 1: Prevent master commits (allowlist approach) ---
 # By default, master/main commits are blocked in ALL repos.
-# Only repos matching ALLOWED_PATTERNS or detected as agent workspaces are allowed.
+# Only repos matching allowlist or detected as agent workspaces are allowed.
+#
+# Configuration (in order of precedence):
+#   1. COMMIT_MASTER_ALLOWLIST env var (colon-separated patterns)
+#   2. Agent workspace auto-detection (gptme.toml with [agent] section)
+#   3. Template repo detection
 BRANCH=$(git branch --show-current 2>/dev/null)
 if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
     REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 
-    # Repos where master/main commits ARE allowed
-    # Add patterns for repos where you have push access to master
-    ALLOWED_PATTERNS=(
-        # Example: "your-org/your-repo"
-        # The agent's own repo is auto-detected below
-    )
-
     is_allowed=false
 
-    # Check 1: Explicit allowlist patterns
-    for pattern in "${ALLOWED_PATTERNS[@]}"; do
-        if [ -n "$pattern" ] && [[ "$REMOTE_URL" == *"$pattern"* ]]; then
-            is_allowed=true
-            break
-        fi
-    done
+    # Check 1: Environment variable allowlist (COMMIT_MASTER_ALLOWLIST)
+    # Format: "owner/repo1:owner/repo2:owner/repo3"
+    if [ -n "$COMMIT_MASTER_ALLOWLIST" ]; then
+        IFS=':' read -ra ENV_PATTERNS <<< "$COMMIT_MASTER_ALLOWLIST"
+        for pattern in "${ENV_PATTERNS[@]}"; do
+            if [ -n "$pattern" ] && [[ "$REMOTE_URL" == *"$pattern"* ]]; then
+                is_allowed=true
+                break
+            fi
+        done
+    fi
 
     # Check 2: Auto-detect agent workspace (has gptme.toml with [agent] section)
     if [ "$is_allowed" = false ] && [ -f "gptme.toml" ]; then
@@ -61,8 +63,8 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
         echo "   Please create a feature branch instead:"
         echo "   git checkout -b feature-name origin/$BRANCH"
         echo ""
-        echo "   To allow a specific repo, add it to ALLOWED_PATTERNS in:"
-        echo "   ~/.config/git/hooks/pre-commit"
+        echo "   To allow a specific repo, set COMMIT_MASTER_ALLOWLIST env var:"
+        echo "   export COMMIT_MASTER_ALLOWLIST=\"owner/repo1:owner/repo2\""
         echo ""
         exit 1
     fi
