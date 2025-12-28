@@ -54,8 +54,15 @@ def email(workspace: Path):
 )
 @click.option(
     "--org",
-    default="gptme",
-    help="GitHub organization to monitor",
+    "orgs",
+    multiple=True,
+    help="GitHub organization(s) to monitor (can be specified multiple times)",
+)
+@click.option(
+    "--repo",
+    "repos",
+    multiple=True,
+    help="Specific repository to monitor in owner/repo format (can be specified multiple times)",
 )
 @click.option(
     "--author",
@@ -67,10 +74,20 @@ def email(workspace: Path):
     default=os.environ.get("AGENT_NAME", "Agent"),
     help="Agent name for prompts (default: $AGENT_NAME env var or 'Agent')",
 )
-def monitoring(workspace: Path, org: str, author: str, agent_name: str):
+def monitoring(
+    workspace: Path,
+    orgs: tuple[str, ...],
+    repos: tuple[str, ...],
+    author: str,
+    agent_name: str,
+):
     """Run project monitoring loop."""
     run = ProjectMonitoringRun(
-        workspace, target_org=org, author=author, agent_name=agent_name
+        workspace,
+        target_orgs=list(orgs) if orgs else None,
+        target_repos=list(repos) if repos else None,
+        author=author,
+        agent_name=agent_name,
     )
     exit_code = run.run()
     sys.exit(exit_code)

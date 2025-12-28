@@ -8,10 +8,7 @@ from pathlib import Path
 
 from run_loops.base import BaseRunLoop
 from run_loops.utils.execution import ExecutionResult
-from run_loops.utils.github import (
-    CommentLoopDetector,
-    has_unresolved_bot_reviews,
-)
+from run_loops.utils.github import CommentLoopDetector, has_unresolved_bot_reviews
 
 
 @dataclass
@@ -40,7 +37,8 @@ class ProjectMonitoringRun(BaseRunLoop):
     def __init__(
         self,
         workspace: Path,
-        target_org: str = "gptme",
+        target_orgs: list[str] | None = None,
+        target_repos: list[str] | None = None,
         author: str = "",
         agent_name: str = "Agent",
     ):
@@ -48,7 +46,8 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         Args:
             workspace: Path to workspace directory
-            target_org: GitHub organization to monitor
+            target_orgs: GitHub organizations to monitor
+            target_repos: Specific repositories to monitor (owner/repo format)
             author: GitHub username for filtering (GitHub handle)
             agent_name: Name of the agent for prompts
         """
@@ -59,7 +58,8 @@ class ProjectMonitoringRun(BaseRunLoop):
             lock_wait=False,  # Don't wait for lock
         )
 
-        self.target_org = target_org
+        self.target_orgs = target_orgs or []
+        self.target_repos = target_repos or []
         self.author = author
         self.agent_name = agent_name
         self.state_dir = workspace / "logs/.project-monitoring-state"
@@ -105,47 +105,59 @@ class ProjectMonitoringRun(BaseRunLoop):
         return True
 
     def discover_repositories(self) -> list[str]:
-        """Discover repositories in organization.
+        """Discover repositories from organizations and explicit repo list.
 
         Returns:
             List of repository names (owner/repo format)
         """
-        self.logger.info(f"Discovering repositories in {self.target_org}...")
+        repos: set[str] = set()
 
-        try:
-            result = subprocess.run(
-                [
-                    "gh",
-                    "repo",
-                    "list",
-                    self.target_org,
-                    "--limit",
-                    "100",
-                    "--json",
-                    "nameWithOwner",
-                    "-q",
-                    ".[].nameWithOwner",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+        # Add explicitly specified repositories
+        if self.target_repos:
+            self.logger.info(f"Adding {len(self.target_repos)} explicit repositories")
+            repos.update(self.target_repos)
 
-            if result.returncode != 0:
-                self.logger.error(f"Failed to discover repositories: {result.stderr}")
-                return []
+        # Discover repositories from each organization
+        for org in self.target_orgs:
+            self.logger.info(f"Discovering repositories in {org}...")
+            try:
+                result = subprocess.run(
+                    [
+                        "gh",
+                        "repo",
+                        "list",
+                        org,
+                        "--limit",
+                        "100",
+                        "--json",
+                        "nameWithOwner",
+                        "-q",
+                        ".[].nameWithOwner",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
 
-            repos = [
-                line.strip()
-                for line in result.stdout.strip().split("\n")
-                if line.strip()
-            ]
-            self.logger.info(f"Found {len(repos)} repositories")
-            return repos
+                if result.returncode != 0:
+                    self.logger.error(
+                        f"Failed to discover repositories in {org}: {result.stderr}"
+                    )
+                    continue
 
-        except Exception as e:
-            self.logger.error(f"Error discovering repositories: {e}")
-            return []
+                org_repos = [
+                    line.strip()
+                    for line in result.stdout.strip().split("\n")
+                    if line.strip()
+                ]
+                self.logger.info(f"Found {len(org_repos)} repositories in {org}")
+                repos.update(org_repos)
+
+            except Exception as e:
+                self.logger.error(f"Error discovering repositories in {org}: {e}")
+
+        self.logger.info(f"Total repositories to monitor: {len(repos)}")
+        return list(repos)
 
     def check_pr_updates(self, repo: str) -> list[WorkItem]:
         """Check for updated PRs using state tracking.
