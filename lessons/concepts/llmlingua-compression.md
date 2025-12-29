@@ -1,3 +1,16 @@
+---
+category: concepts
+match:
+  keywords:
+    - compression
+    - llmlingua
+    - token pruning
+    - prompt compression
+    - text compression
+    - llm compression
+status: active
+---
+
 # LLMLingua (Compression Technique)
 
 ## Term

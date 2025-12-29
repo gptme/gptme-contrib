@@ -1,3 +1,16 @@
+---
+category: concepts
+match:
+  keywords:
+    - gepa
+    - genetic algorithms
+    - pareto optimization
+    - prompt optimization
+    - evolutionary algorithms
+    - multi-objective optimization
+status: active
+---
+
 # GEPA (Genetic-Pareto)
 
 ## Term
