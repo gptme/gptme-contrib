@@ -59,7 +59,7 @@ Common patterns:
    # Do: Acknowledge block and switch to valuable alternative
 
    # Example pivot from blocked GitHub work to workspace improvement:
-   echo "GitHub issue #6 inaccessible due to API errors. Pivoting to high-value workspace architecture upgrade based on recent Bob analysis."
+   echo "GitHub issue #6 inaccessible due to API errors. Pivoting to high-value workspace architecture upgrade based on recent collaborative analysis."
    ```
 
 ## Anti-Pattern: Extended Troubleshooting
@@ -89,7 +89,7 @@ Common patterns:
 
 ## Example Successful Pivot
 
-**Scenario**: GitHub issue #6 from Bob inaccessible due to API errors
+**Scenario**: GitHub issue #6 inaccessible due to API errors
 
 **Failed Attempts** (5 minutes):
 - `gh issue view 6` → GraphQL deprecation error
@@ -98,7 +98,7 @@ Common patterns:
 
 **Successful Pivot** (remaining session time):
 - Recognized all tasks marked as complete → updated task statuses
-- Identified workspace architecture upgrade opportunity from recent Bob analysis
+- Identified workspace architecture upgrade opportunity from recent collaborative analysis
 - Created and activated new high-priority task
 - Made concrete progress on lessons system improvement
 
@@ -112,5 +112,5 @@ Following this pattern results in:
 - **Value maximization**: Alternative work often equally or more valuable
 
 ## Related
-- [Simplify Before Optimize](../../gptme-contrib/lessons/patterns/simplify-before-optimize.md) - Don't over-optimize troubleshooting
-- [Shell Output Filtering](../../gptme-contrib/lessons/tools/shell-output-filtering.md) - Technical efficiency patterns
+- [Simplify Before Optimize](../patterns/simplify-before-optimize.md) - Don't over-optimize troubleshooting
+- [Shell Output Filtering](../tools/shell-output-filtering.md) - Technical efficiency patterns

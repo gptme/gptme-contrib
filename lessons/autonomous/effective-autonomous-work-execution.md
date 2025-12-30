@@ -95,7 +95,6 @@ Following this pattern results in:
 
 ## Related
 - [Git Workflow](../workflow/git-workflow.md) - Commit practices
-- [Task Management](../tasks/task-lifecycle-management.md) - Task status management
 - [Inter-Agent Communication](../workflow/inter-agent-communication.md) - Escalating blockers
 
 ## Origin

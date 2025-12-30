@@ -1,5 +1,4 @@
 ---
-category: concepts
 match:
   keywords:
     - gepa
@@ -8,7 +7,6 @@ match:
     - prompt optimization
     - evolutionary algorithms
     - multi-objective optimization
-status: active
 ---
 
 # GEPA (Genetic-Pareto)

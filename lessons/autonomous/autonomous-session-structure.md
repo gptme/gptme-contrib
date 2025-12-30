@@ -53,13 +53,10 @@ echo "Recent work ↑ - Verify all communication loops closed"
 
 # Check for broken communication loops in recent work
 grep -r "TODO.*respond\|NEED.*RESPOND\|pending.*response" journal/ tasks/ || echo "✅ No pending responses found"
-echo "Recent work ↑ - Verify all communication loops closed"
 
-# Check for broken communication loops in recent work
-grep -r "TODO.*respond\|NEED.*RESPOND\|pending.*response" journal/ tasks/ || echo "✅ No pending responses found"
 
 # Check recent context
-ls -la journal/ | tail-5
+ls -la journal/ | tail -5
 head -20 journal/most-recent-entry.md
 ```
 
