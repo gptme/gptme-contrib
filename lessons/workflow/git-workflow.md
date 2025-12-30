@@ -3,12 +3,12 @@ match:
   keywords:
   - git workflow
   - branch management
-  - PR creation
+  - pr creation
   - git add
   - git restore
   - master branch
   - feature branch
-  - Conventional Commits
+  - conventional commits
   - submodule update
   - secret protection
   - git status
