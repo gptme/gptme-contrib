@@ -1,0 +1,1432 @@
+"""Core library for the email-based message system.
+
+This module provides the AgentEmail class which handles all email operations for
+AI agent communication, including:
+- Composing, sending, and receiving emails
+- Managing email folders (inbox, sent, archive, drafts)
+- Tracking conversation threads and reply states
+- Syncing with external maildir sources (Gmail via mbsync)
+- Rate limiting and duplicate detection
+- Converting between markdown and MIME formats
+
+The email system uses markdown files for storage, making emails version-controllable
+and human-readable while supporting full MIME features including HTML rendering.
+
+Example:
+    Initialize and send an email::
+
+        from gptmail.lib import AgentEmail
+
+        agent = AgentEmail("/path/to/workspace", "agent@example.com")
+        msg_id = agent.compose(
+            to="user@example.com",
+            subject="Test",
+            content="Hello world!"
+        )
+        agent.send(msg_id)
+
+    Check for unreplied emails::
+
+        unreplied = agent.get_unreplied_emails()
+        for msg_id, subject, sender in unreplied:
+            print(f"Need to reply to: {subject} from {sender}")
+"""
+
+import logging
+from typing import Dict, Tuple
+import os
+import re
+import subprocess
+import uuid
+from datetime import datetime, timezone
+from email import message_from_bytes
+from email.message import EmailMessage, Message
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.policy import default
+from email.utils import format_datetime, parsedate_to_datetime
+from pathlib import Path
+from typing import Optional
+
+import markdown
+
+from gptmail.communication_utils.rate_limiting.limiters import RateLimiter
+from gptmail.communication_utils.state.locks import FileLock, LockError
+from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
+
+logger = logging.getLogger(__name__)
+
+
+def fix_list_spacing(markdown_text: str) -> str:
+    """
+    Add blank lines before lists if missing.
+
+    This ensures the markdown library recognizes lists properly.
+    Only adds blank line before the first item of each list.
+
+    Args:
+        markdown_text: The markdown text to process
+
+    Returns:
+        The markdown text with proper list spacing
+    """
+    lines = markdown_text.split("\n")
+    result = []
+    prev_was_list = False
+
+    for i, line in enumerate(lines):
+        # Check if this line is a list item
+        is_list_item = bool(
+            re.match(r"^\s*[-*+]\s+", line)  # Unordered list
+            or re.match(r"^\s*\d+\.\s+", line)
+        )  # Numbered list
+
+        # Check if previous line is blank
+        prev_is_blank = i == 0 or (i > 0 and lines[i - 1].strip() == "")
+
+        # If this is a list item, previous line is not blank,
+        # and we're not continuing a list, add blank line
+        if is_list_item and not prev_is_blank and not prev_was_list and i > 0:
+            result.append("")  # Add blank line before first list item
+
+        result.append(line)
+        prev_was_list = is_list_item
+
+    return "\n".join(result)
+
+
+class AgentEmail:
+    """Handles email operations for agent communication.
+
+    This class provides a complete email management system for AI agents, with support
+    for composing, sending, receiving, and organizing emails. It uses a markdown-based
+    storage format for easy version control and human readability.
+
+    Attributes:
+        workspace (Path): Path to the workspace directory.
+        email_dir (Path): Path to the email storage directory (workspace/email).
+        own_email (str): The agent's own email address (used to filter self-replies).
+        external_maildir_inbox (Path): Path to external inbox maildir (for syncing).
+        external_maildir_sent (Path): Path to external sent maildir (for syncing).
+        processed_state_file (Path): File tracking processed email IDs.
+        locks_dir (Path): Directory for lock files (prevents concurrent processing).
+        rate_limiter (RateLimiter): Rate limiter for email sending operations.
+        tracker (ConversationTracker): Tracks reply states and conversation threads.
+
+    Example:
+        >>> agent = AgentEmail("/home/user", "agent@example.com")
+        >>> msg_id = agent.compose("user@example.com", "Hello", "Test message")
+        >>> agent.send(msg_id)
+    """
+
+    def __init__(self, workspace_dir: str | Path, own_email: str | None = None):
+        """Initialize with workspace directory.
+
+        Args:
+            workspace_dir: Path to the workspace directory
+            own_email: The agent's own email address (used to avoid replying to self).
+                      If None, will use AGENT_EMAIL environment variable (required)
+        """
+        # Clear message index cache at start of sync
+        # This ensures we rebuild the index with current state
+        self._message_index_cache = {}
+
+        self.workspace = Path(workspace_dir)
+        self.email_dir = self.workspace / "email"
+        # Ensure own_email is always a string - require AGENT_EMAIL env var if not provided
+        self.own_email: str = own_email if own_email is not None else os.getenv("AGENT_EMAIL", "")
+        if not self.own_email:
+            raise ValueError(
+                "own_email must be provided or AGENT_EMAIL environment variable must be set"
+            )
+
+        # External maildir paths (from mbsync)
+        # Use environment variables with fallback to defaults for backward compatibility
+        self.external_maildir_inbox = Path(
+            os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/INBOX"))
+        )
+        self.external_maildir_sent = Path(
+            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Sent"))
+        )
+
+        # State files for tracking
+        self.processed_state_file = self.email_dir / "processed_state.txt"
+        self.locks_dir = self.email_dir / "locks"
+
+        # Rate limiting for email sending (1 request per second)
+        self.rate_limiter = RateLimiter.for_platform("email")
+
+        # Initialize conversation tracker for reply state management
+        self.tracker = ConversationTracker(self.locks_dir)
+
+        self._validate_structure()
+        self._ensure_processed_state()
+
+    def _validate_structure(self) -> None:
+        """Ensure email directory structure exists.
+
+        Raises:
+            RuntimeError: If required directories (inbox, sent, archive, drafts, filters) are missing.
+        """
+        # Main folders for markdown messages
+        required_dirs = ["inbox", "sent", "archive", "drafts", "filters"]
+        for dir_name in required_dirs:
+            dir_path = self.email_dir / dir_name
+            if not dir_path.exists():
+                raise RuntimeError(f"Required directory missing: {dir_path}")
+
+    def _ensure_processed_state(self) -> None:
+        """Ensure processed state file exists (tracker handles reply state)."""
+        # Create locks directory (also used by ConversationTracker)
+        self.locks_dir.mkdir(exist_ok=True)
+
+        # Initialize processed state file if it doesn't exist
+        if not self.processed_state_file.exists():
+            self.processed_state_file.write_text("")
+
+    def _is_replied(self, message_id: str) -> bool:
+        """Check if we've already replied to this message.
+
+        Args:
+            message_id: The message ID to check (with or without angle brackets).
+
+        Returns:
+            True if the message has been replied to, False otherwise.
+        """
+        # Normalize message ID format
+        normalized_id = message_id.strip("<>")
+        conversation_id = "email"  # Single conversation for all emails
+
+        msg_info = self.tracker.get_message_state(conversation_id, normalized_id)
+        return msg_info is not None and msg_info.state == MessageState.COMPLETED
+
+    def _mark_replied(self, original_message_id: str, reply_message_id: str) -> None:
+        """Mark a message as replied to.
+
+        Args:
+            original_message_id: The message ID of the original message.
+            reply_message_id: The message ID of the reply message.
+        """
+        # Normalize message ID format
+        normalized_id = original_message_id.strip("<>")
+        conversation_id = "email"  # Single conversation for all emails
+
+        # Set state to COMPLETED with reply info
+        self.tracker.set_message_state(
+            conversation_id=conversation_id,
+            message_id=normalized_id,
+            state=MessageState.COMPLETED,
+        )
+
+    def _mark_no_reply_needed(self, message_id: str, reason: str = "no reply needed") -> None:
+        """Mark a message as processed but no reply needed.
+
+        Args:
+            message_id: The message ID to mark.
+            reason: Optional reason for not replying (default: "no reply needed").
+        """
+        # Normalize message ID format
+        normalized_id = message_id.strip("<>")
+        conversation_id = "email"  # Single conversation for all emails
+
+        # Set state to NO_REPLY_NEEDED
+        self.tracker.set_message_state(
+            conversation_id=conversation_id,
+            message_id=normalized_id,
+            state=MessageState.NO_REPLY_NEEDED,
+        )
+
+    def _is_completed(self, message_id: str) -> bool:
+        """Check if message has been completed (replied or marked as no reply needed).
+
+        Args:
+            message_id: The message ID to check.
+
+        Returns:
+            True if the message is completed (replied or no reply needed), False otherwise.
+        """
+        # Normalize message ID format
+        normalized_id = message_id.strip("<>")
+        conversation_id = "email"  # Single conversation for all emails
+
+        msg_info = self.tracker.get_message_state(conversation_id, normalized_id)
+        return msg_info is not None and msg_info.state in (
+            MessageState.COMPLETED,
+            MessageState.NO_REPLY_NEEDED,
+        )
+
+    # TODO: this should probably return some list[Message] or list[EmailMessage] type instead of a list of tuples
+    # TODO: this should probably sort the emails by timestamp in some suitable order (or make it easy for consumers to sort by using an Message type)
+    def get_unreplied_emails(self) -> list[tuple[str, str, str]]:
+        """Get list of emails that haven't been replied to.
+
+        Returns:
+            List of (message_id, subject, sender) tuples for unreplied emails
+        """
+        unreplied = []
+
+        # Scan inbox for emails from allowlisted senders
+        inbox_dir = self.email_dir / "inbox"
+        for email_file in inbox_dir.glob("*.md"):
+            try:
+                content = email_file.read_text()
+
+                # Extract message details
+                message_id_match = re.search(r"Message-ID: (<[^>]+>)", content)
+                subject_match = re.search(r"Subject: (.+)", content)
+                from_match = re.search(r"From: (.+)", content)
+
+                if not (message_id_match and subject_match and from_match):
+                    continue
+
+                message_id = message_id_match.group(1)
+                subject = subject_match.group(1)
+                from_line = from_match.group(1)
+
+                # Extract email from "Name <email>" format
+                sender = from_line
+                if "<" in from_line and ">" in from_line:
+                    start = from_line.find("<")
+                    end = from_line.find(">", start)
+                    if start != -1 and end != -1:
+                        sender = from_line[start + 1 : end].strip()
+
+                # Skip if already completed (replied or marked as no reply needed)
+                if self._is_completed(message_id):
+                    continue
+
+                # Skip if not from allowlisted sender
+                if not self._is_allowlisted_sender(sender):
+                    continue
+
+                # Skip notification-type emails that don't need replies
+                if self._is_notification_email(subject, content):
+                    continue
+
+                # Skip if we already replied to this email
+                # (check sent folder for In-Reply-To pointing to this message)
+                sent_dir = self.email_dir / "sent"
+                already_replied = False
+                for sent_file in sent_dir.glob("*.md"):
+                    try:
+                        sent_content = sent_file.read_text()
+                        if f"In-Reply-To: {message_id}" in sent_content:
+                            already_replied = True
+                            break
+                    except Exception:
+                        continue
+                if already_replied:
+                    continue
+
+                unreplied.append((message_id, subject, sender))
+
+            except Exception as e:
+                print(f"Error processing {email_file}: {e}")
+                continue
+
+        return unreplied
+
+    def _is_allowlisted_sender(self, sender: str) -> bool:
+        """Check if sender is allowlisted for auto-responses.
+
+        Normalizes email addresses by removing +tags and checks against
+        a hardcoded allowlist. Self-emails are automatically excluded.
+
+        Args:
+            sender: The email address to check.
+
+        Returns:
+            True if the sender is allowlisted and not self, False otherwise.
+        """
+        # TODO: set in config or env variable
+        allowlisted = [
+            "erik@bjareho.lt",
+            "erik.bjareholt@gmail.com",
+            "filip.harald@gmail.com",
+            # Agent-specific allowlist entries configured via AGENT_EMAIL
+            "rickard.edic@gmail.com",
+        ]
+
+        # Remove +tag from email address for comparison
+        clean_sender = sender.lower()
+        if "+" in clean_sender and "@" in clean_sender:
+            local, domain = clean_sender.split("@", 1)
+            if "+" in local:
+                local = local.split("+")[0]
+                clean_sender = f"{local}@{domain}"
+
+        # Don't reply to emails from ourselves
+        clean_own_email = self.own_email.lower()
+        if "+" in clean_own_email and "@" in clean_own_email:
+            local, domain = clean_own_email.split("@", 1)
+            if "+" in local:
+                local = local.split("+")[0]
+                clean_own_email = f"{local}@{domain}"
+
+        if clean_sender == clean_own_email:
+            return False
+
+        return clean_sender in [s.lower() for s in allowlisted]
+
+    def _is_notification_email(self, subject: str, content: str) -> bool:
+        """Check if email is a notification that doesn't need a reply.
+
+        Matches against common notification patterns like security alerts,
+        verification codes, GitHub notifications, etc.
+
+        Args:
+            subject: The email subject line.
+            content: The full email content.
+
+        Returns:
+            True if the email matches notification patterns, False otherwise.
+        """
+        notification_patterns = [
+            r"New login to",
+            r"security alert",
+            r"verification code",
+            r"password reset",
+            r"account activity",
+            r"github.*notification",
+            r"accepted your.*invite",
+            r"no-?reply",
+            r"automated.*message",
+        ]
+
+        subject_lower = subject.lower()
+        content_lower = content.lower()
+
+        for pattern in notification_patterns:
+            if re.search(pattern, subject_lower) or re.search(pattern, content_lower):
+                return True
+
+        return False
+
+    def process_unreplied_emails(self, callback_func) -> int:
+        """Process unreplied emails with locking to prevent duplicates.
+
+        Args:
+            callback_func: Function to call for each unreplied email,
+                          should accept (message_id, subject, sender)
+
+        Returns:
+            Number of emails processed
+        """
+        unreplied = self.get_unreplied_emails()
+        processed_count = 0
+
+        for message_id, subject, sender in unreplied:
+            # Try to acquire lock (non-blocking with timeout=0)
+            lock_file = self.locks_dir / f"{self._format_filename(message_id)}.lock"
+            try:
+                with FileLock(lock_file, timeout=0):
+                    print(f"Processing unreplied email from {sender}: {subject}")
+                    callback_func(message_id, subject, sender)
+                    processed_count += 1
+            except LockError:
+                print(f"Skipping {message_id} (already being processed)")
+            except Exception as e:
+                print(f"Error processing {message_id}: {e}")
+
+        return processed_count
+
+    def _generate_message_id(self) -> str:
+        """Generate a unique message ID.
+
+        Returns:
+            A unique message ID in the format <uuid>.
+        """
+        unique_id = str(uuid.uuid4())
+        return f"<{unique_id}>"
+
+    def _format_filename(self, message_id: str) -> str:
+        """Convert message ID to filename.
+
+        Strips angle brackets and replaces problematic characters
+        to create a filesystem-safe filename.
+
+        Args:
+            message_id: The message ID to convert (with or without angle brackets).
+
+        Returns:
+            A filesystem-safe filename with .md extension.
+        """
+        # Strip < > and replace problematic characters
+        filename = message_id.strip("<>").replace("@", "_at_").replace("/", "_")
+        return f"{filename}.md"
+
+    def compose(
+        self,
+        to: str,
+        subject: str,
+        content: str,
+        from_address: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        references: Optional[list[str]] = None,
+    ) -> str:
+        """Create new email in drafts directory.
+
+        Args:
+            to: Recipient email address
+            subject: Email subject
+            content: Message content in Markdown
+            from_address: Optional custom sender address (uses AGENT_EMAIL env var)
+            reply_to: Optional message ID being replied to
+            references: Optional list of referenced message IDs
+
+        Returns:
+            Message ID of the created draft
+
+        Raises:
+            ValueError: If content is empty or invalid
+        """
+        if not content or not content.strip():
+            raise ValueError("Message content cannot be empty")
+
+        message_id = self._generate_message_id()
+        now = datetime.now(timezone.utc)
+
+        # Use custom from_address or default
+        sender = from_address or self.own_email
+
+        # Build headers
+        headers = [
+            "MIME-Version: 1.0",
+            f"From: {sender}",
+            f"To: {to}",
+            f"Date: {format_datetime(now)}",
+            f"Subject: {subject}",
+            f"Message-ID: {message_id}",
+            "Content-Type: text/html; charset=utf-8",
+        ]
+
+        # Add threading headers if needed
+        if reply_to:
+            # Ensure reply_to has angle brackets
+            reply_to_formatted = reply_to if reply_to.startswith("<") else f"<{reply_to}>"
+            headers.append(f"In-Reply-To: {reply_to_formatted}")
+        if references:
+            # Ensure each reference has angle brackets
+            formatted_refs = []
+            for ref in references:
+                ref_formatted = ref if ref.startswith("<") else f"<{ref}>"
+                formatted_refs.append(ref_formatted)
+            headers.append(f"References: {' '.join(formatted_refs)}")
+
+        # Ensure content has no leading/trailing whitespace
+        content = content.strip()
+
+        # Combine headers and content with proper separators
+        message = "\n".join(headers) + "\n\n" + content + "\n"
+
+        # Validate format
+        try:
+            # Test that we can parse it back
+            test_headers, test_body = self._markdown_to_email(message)
+            if not test_headers or not test_body:
+                raise ValueError("Failed to validate message format")
+        except Exception as e:
+            raise ValueError(f"Invalid message format: {e}")
+
+        # Save to drafts
+        filename = self._format_filename(message_id)
+        draft_path = self.email_dir / "drafts" / filename
+        draft_path.write_text(message)
+
+        return message_id
+
+    def send(self, message_id: str) -> None:
+        """Send email (move from drafts to sent and deliver).
+
+        Args:
+            message_id: ID of message to send
+        """
+        filename = self._format_filename(message_id)
+        draft_path = self.email_dir / "drafts" / filename
+        sent_path = self.email_dir / "sent" / filename
+
+        if not draft_path.exists():
+            raise ValueError(f"Draft not found: {message_id}")
+
+        # Read content before moving
+        content = draft_path.read_text()
+
+        # Actually send via msmtp first
+        try:
+            # Validate msmtp is available
+            if not self._validate_msmtp_config():
+                raise RuntimeError("msmtp is not properly installed or configured")
+
+            # Extract headers and body for sending
+            headers, body = self._markdown_to_email(content)
+            recipient = headers.get("To", "")
+            sender = headers.get("From") or self.own_email
+
+            if not recipient:
+                raise ValueError("No recipient found in email headers")
+
+            # Create proper MIME multipart message
+
+            # Create multipart message
+            msg = MIMEMultipart("alternative")
+
+            # Set headers from extracted metadata
+            msg["From"] = headers.get("From") or sender
+            msg["To"] = recipient
+            msg["Subject"] = headers.get("Subject", "")
+            msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
+            msg["Message-ID"] = headers.get("Message-ID", "")
+            if "In-Reply-To" in headers:
+                msg["In-Reply-To"] = headers["In-Reply-To"]
+            if "References" in headers:
+                msg["References"] = headers["References"]
+
+            # Add plain text version (markdown as fallback)
+            plain_text = body
+            msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+
+            # Add HTML version (converted markdown)
+            # Use sane_lists extension for better nested list handling
+            # Note: Removed nl2br extension as it breaks proper list formatting
+            # by converting single newlines to <br> tags, which prevents proper
+            # paragraph and list rendering in HTML
+            html_body = markdown.markdown(
+                fix_list_spacing(body),
+                extensions=["extra", "codehilite", "sane_lists"],
+            )
+            msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+            # Get appropriate msmtp account
+            account = self._get_msmtp_account_for_address(sender)
+
+            # Build msmtp command
+            msmtp_cmd = ["msmtp"]
+            if account:
+                msmtp_cmd.extend(["-a", account])
+            msmtp_cmd.append(recipient)
+
+            # Check rate limit before sending
+            if not self.rate_limiter.can_proceed():
+                wait_time = self.rate_limiter.time_until_ready()
+                print(f"Rate limit reached. Waiting {wait_time:.1f}s...")
+                if not self.rate_limiter.wait_if_needed(max_wait=60):
+                    raise RuntimeError("Rate limit timeout - could not send within 60s")
+
+            # Send MIME message via msmtp
+            subprocess.run(
+                msmtp_cmd,
+                input=msg.as_string().encode("utf-8"),
+                capture_output=True,
+                check=True,
+                timeout=30,
+            )
+            print(f"Email delivered via SMTP to {recipient} (from {sender}) as HTML")
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            print(f"Failed to send {message_id}: {error_msg}")
+            raise
+        except subprocess.TimeoutExpired:
+            print(f"Timeout sending {message_id}: SMTP server took too long to respond")
+            raise
+        except Exception as e:
+            print(f"Error sending {message_id}: {e}")
+            raise
+
+        # Move markdown file to sent folder (only after successful sending)
+        draft_path.rename(sent_path)
+
+        # If this is a reply, mark the original message as replied to
+        headers, _ = self._markdown_to_email(content)
+        in_reply_to = headers.get("In-Reply-To")
+        if in_reply_to:
+            try:
+                self._mark_replied(in_reply_to, message_id)
+                print(f"Marked original message {in_reply_to} as replied to by {message_id}")
+            except Exception as e:
+                print(f"Warning: Failed to mark original message as replied: {e}")
+
+        print(f"Message {message_id} sent successfully and archived")
+
+    def receive(self, message_data: str) -> str:
+        """Process received email to inbox.
+
+        Args:
+            message_data: Full email message content
+
+        Returns:
+            Message ID of received message
+        """
+        # Extract message ID from headers
+        match = re.search(r"Message-ID: (<[^>]+>)", message_data)
+        if not match:
+            raise ValueError("Message-ID header missing")
+        message_id = match.group(1)
+
+        # Save markdown version to inbox
+        filename = self._format_filename(message_id)
+        inbox_path = self.email_dir / "inbox" / filename
+        inbox_path.write_text(message_data)
+
+        return message_id
+
+    def archive(self, message_id: str) -> None:
+        """Move message to archive.
+
+        Args:
+            message_id: ID of message to archive
+        """
+        filename = self._format_filename(message_id)
+
+        # Check inbox, sent, and drafts folders
+        source_paths = [
+            self.email_dir / "inbox" / filename,
+            self.email_dir / "sent" / filename,
+            self.email_dir / "drafts" / filename,
+        ]
+
+        for source_path in source_paths:
+            if source_path.exists():
+                archive_path = self.email_dir / "archive" / filename
+                source_path.rename(archive_path)
+                print(f"Message {message_id} archived")
+                return
+
+        raise ValueError(f"Message not found: {message_id}")
+
+    def list_messages(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
+        """List messages in specified folder.
+
+        Args:
+            folder: Folder to list (inbox, sent, archive, drafts)
+
+        Returns:
+            List of (message_id, subject, date) tuples
+        """
+        folder_path = self.email_dir / folder
+        if not folder_path.exists():
+            raise ValueError(f"Invalid folder: {folder}")
+
+        messages = []
+        for file_path in folder_path.glob("*.md"):
+            content = file_path.read_text()
+
+            # Extract headers
+            subject_match = re.search(r"Subject: (.+)", content)
+            date_match = re.search(r"Date: (.+)", content)
+            id_match = re.search(r"Message-ID: (<[^>]+>)", content)
+
+            if subject_match and date_match and id_match:
+                # Parse date, looks like: Fri, 07 Feb 2025 16:14:03 -0800
+                date = self._parse_email_date(date_match.group(1))
+                messages.append((id_match.group(1), subject_match.group(1), date))
+
+        return sorted(messages, key=lambda m: m[2])  # Sort by date
+
+    def read_message(self, message_id: str, include_thread: bool = False) -> str:
+        """Read message content.
+
+        Args:
+            message_id: ID of message to read
+            include_thread: If True, include full conversation thread
+
+        Returns:
+            Full message content, optionally with thread context
+        """
+        filename = self._format_filename(message_id)
+
+        # Check all folders - all received emails are now in inbox
+        folders = ["inbox", "sent", "archive", "drafts"]
+        message_content = None
+        for folder in folders:
+            path = self.email_dir / folder / filename
+            if path.exists():
+                message_content = path.read_text()
+                break
+
+        if not message_content:
+            raise ValueError(f"Message not found: {message_id}")
+
+        if not include_thread:
+            return message_content
+
+        # Build and display the full thread
+        return self._format_thread_display(message_id)
+
+    def get_thread_messages(self, message_id: str) -> list[dict]:
+        """Get all messages in the same thread as the given message.
+
+        Args:
+            message_id: Any message ID in the thread
+
+        Returns:
+            List of message dicts with id, headers, body, timestamp, and folder
+        """
+        # Find the root of the thread by following In-Reply-To chains backward
+        thread_root = self._find_thread_root(message_id)
+
+        # Collect all messages in the thread
+        thread_messages: list[dict] = []
+        self._collect_thread_messages(thread_root, thread_messages, set())
+
+        # Sort by timestamp
+        thread_messages.sort(key=lambda m: m["timestamp"])
+
+        return thread_messages
+
+    def _find_thread_root(self, message_id: str) -> str:
+        """Find the root message of a thread by following In-Reply-To chains."""
+        current_id = message_id
+        last_valid_id = message_id  # Keep track of last valid message
+        seen_ids = set()
+
+        while current_id and current_id not in seen_ids:
+            seen_ids.add(current_id)
+
+            try:
+                content = self.read_message(current_id)
+                headers, _ = self._markdown_to_email(content)
+
+                # Update last valid ID since we successfully read this message
+                last_valid_id = current_id
+
+                # If there's an In-Reply-To, follow it backward
+                in_reply_to = headers.get("In-Reply-To")
+                if in_reply_to:
+                    # Clean up the message ID format
+                    in_reply_to = in_reply_to.strip().strip("<>")
+                    if not in_reply_to.startswith("<"):
+                        in_reply_to = f"<{in_reply_to}>"
+                    current_id = in_reply_to
+                else:
+                    # No parent found, this is the root
+                    break
+
+            except ValueError:
+                # Message not found, return last valid message we found
+                break
+
+        return last_valid_id
+
+    def _collect_thread_messages(
+        self, message_id: str, collected: list[dict], seen: set[str]
+    ) -> None:
+        """Recursively collect all messages in a thread."""
+        if message_id in seen:
+            return
+
+        seen.add(message_id)
+
+        try:
+            content = self.read_message(message_id)
+            headers, body = self._markdown_to_email(content)
+
+            # Parse timestamp for sorting
+            timestamp = self._parse_email_date(headers.get("Date", ""))
+
+            # Find which folder this message is in
+            folder = self._find_message_folder(message_id)
+
+            message_info = {
+                "id": message_id,
+                "headers": headers,
+                "body": body,
+                "timestamp": timestamp,
+                "folder": folder,
+                "content": content,
+            }
+            collected.append(message_info)
+
+            # Find all replies to this message
+            replies = self._find_replies_to(message_id)
+            for reply_id in replies:
+                self._collect_thread_messages(reply_id, collected, seen)
+
+        except ValueError:
+            # Message not found, skip
+            pass
+
+    def _find_replies_to(self, message_id: str) -> list[str]:
+        """Find all messages that reply to the given message ID."""
+        replies = []
+
+        # Search all folders for messages with In-Reply-To pointing to message_id
+        folders = ["inbox", "sent", "archive", "drafts"]
+        for folder in folders:
+            folder_path = self.email_dir / folder
+            if not folder_path.exists():
+                continue
+
+            for email_file in folder_path.glob("*.md"):
+                try:
+                    content = email_file.read_text()
+                    headers, _ = self._markdown_to_email(content)
+
+                    in_reply_to = headers.get("In-Reply-To", "").strip().strip("<>")
+                    clean_message_id = message_id.strip("<>")
+
+                    if in_reply_to == clean_message_id:
+                        reply_id = headers.get("Message-ID", "")
+                        if reply_id:
+                            replies.append(reply_id)
+
+                except Exception:
+                    logger.warning(f"Error processing {email_file} for replies")
+                    continue
+
+        return replies
+
+    def _find_message_folder(self, message_id: str) -> str:
+        """Find which folder a message is stored in."""
+        filename = self._format_filename(message_id)
+        folders = ["inbox", "sent", "archive", "drafts"]
+
+        for folder in folders:
+            path = self.email_dir / folder / filename
+            if path.exists():
+                return folder
+
+        return "unknown"
+
+    def _parse_email_date(self, date_str: str) -> datetime:
+        """Parse email date string to datetime object."""
+        if not date_str:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        try:
+            # Try parsing RFC 2822 format
+
+            return parsedate_to_datetime(date_str)
+        except Exception:
+            # Fallback to current time if parsing fails
+            return datetime.now(timezone.utc)
+
+    def _format_thread_display(self, message_id: str) -> str:
+        """Format a complete thread for display."""
+        thread_messages = self.get_thread_messages(message_id)
+
+        if not thread_messages:
+            return self.read_message(message_id)
+
+        output = []
+        output.append("=" * 80)
+        output.append(f"CONVERSATION THREAD ({len(thread_messages)} messages)")
+        output.append("=" * 80)
+        output.append("")
+
+        for i, msg in enumerate(thread_messages):
+            # Header for each message
+            headers = msg["headers"]
+            is_current = msg["id"] == message_id
+
+            marker = ">>> CURRENT MESSAGE <<<" if is_current else ""
+            output.append(f"[{i + 1}/{len(thread_messages)}] {marker}")
+            output.append(f"From: {headers.get('From', 'Unknown')}")
+            output.append(f"To: {headers.get('To', 'Unknown')}")
+            output.append(f"Date: {headers.get('Date', 'Unknown')}")
+            output.append(f"Subject: {headers.get('Subject', 'No Subject')}")
+            output.append(f"Folder: {msg['folder']}")
+            output.append("-" * 60)
+
+            # Message body
+            body = msg["body"].strip()
+            if body:
+                output.append(body)
+            else:
+                output.append("(Empty message)")
+
+            output.append("")
+            output.append("=" * 60)
+            output.append("")
+
+        return "\n".join(output)
+
+    def _markdown_to_email(self, content: str) -> tuple[dict[str, str], str]:
+        """Convert markdown format to email headers and body.
+
+        Args:
+            content: Full markdown message content
+
+        Returns:
+            Tuple of (headers dict, body string)
+
+        Raises:
+            ValueError: If message format is invalid
+        """
+        if not content or not content.strip():
+            raise ValueError("Empty message")
+
+        # Split headers and body
+        parts = content.split("\n\n", 1)
+        if len(parts) != 2:
+            print(f"Warning: Message missing body separator, content: {content[:100]}...")
+            # Try to handle messages with just headers
+            if "\n" in content:
+                return self._parse_headers(content), ""
+            raise ValueError("Invalid message format")
+
+        headers_text, body = parts
+        return self._parse_headers(headers_text), body
+
+    def _parse_headers(self, headers_text: str) -> dict[str, str]:
+        """Parse email headers from text.
+
+        Args:
+            headers_text: Raw header text
+
+        Returns:
+            Dict of parsed headers
+        """
+        headers = {}
+        current_key = None
+        current_value = []
+
+        for line in headers_text.split("\n"):
+            if not line:
+                continue
+
+            # Handle header continuation
+            if line[0].isspace():
+                if current_key:
+                    current_value.append(line.strip())
+                continue
+
+            # Save previous header if any
+            if current_key and current_value:
+                headers[current_key] = " ".join(current_value)
+                current_value = []
+
+            # Parse new header
+            if ": " in line:
+                current_key, value = line.split(": ", 1)
+                current_value = [value]
+            else:
+                print(f"Warning: Invalid header line: {line}")
+
+        # Save last header
+        if current_key and current_value:
+            headers[current_key] = " ".join(current_value)
+
+        return headers
+
+    def _validate_msmtp_config(self) -> bool:
+        """Check if msmtp is properly configured and available.
+
+        Returns:
+            True if msmtp is available and configured, False otherwise
+        """
+        try:
+            # Check if msmtp is installed
+            subprocess.run(["msmtp", "--version"], capture_output=True, check=True, timeout=10)
+            return True
+        except (
+            subprocess.CalledProcessError,
+            FileNotFoundError,
+            subprocess.TimeoutExpired,
+        ):
+            return False
+
+    def _get_msmtp_account_for_address(self, from_address: str) -> Optional[str]:
+        """Get the appropriate msmtp account for a given from address.
+
+        Args:
+            from_address: The sender email address
+
+        Returns:
+            The msmtp account name to use, or None for default account
+        """
+        # For now, use simple domain-based mapping
+        # This could be enhanced to read msmtp config file
+        if "gmail.com" in from_address:
+            return "gmail"
+        return None  # Use default account
+
+    def _build_message_index(self, folder: str) -> Dict[str, Dict]:
+        """Build an index of existing messages for fast duplicate detection.
+
+        This eliminates the O(n²) problem by reading all existing messages once
+        and building an in-memory index for O(1) lookups.
+
+        Args:
+            folder: The folder to index (inbox or sent)
+
+        Returns:
+            Dict mapping message keys to metadata for comparison
+        """
+        index = {}
+        folder_path = self.email_dir / folder
+
+        for existing_file in folder_path.glob("*.md"):
+            try:
+                content = existing_file.read_text()
+                headers, existing_body = self._markdown_to_email(content)
+
+                # Extract key metadata for comparison
+                in_reply_to = headers.get("In-Reply-To", "").strip().strip("<>")
+                references = headers.get("References", "").strip()
+                subject = headers.get("Subject", "").strip()
+                to_addr = headers.get("To", "").strip()
+                from_addr = headers.get("From", "").strip()
+                date_str = headers.get("Date", "").strip()
+
+                # Parse date
+                try:
+                    msg_date = self._parse_email_date(date_str)
+                except Exception:
+                    msg_date = None
+
+                # Get body snippet (first 200 chars, normalized)
+                body_snippet = "".join(existing_body[:200].split()) if existing_body else ""
+
+                # Create composite key from strong identifiers
+                # Use In-Reply-To + Subject as primary key (most reliable for matching)
+                key = f"{in_reply_to}|{subject}|{to_addr}"
+
+                # Store metadata for comparison
+                index[key] = {
+                    "in_reply_to": in_reply_to,
+                    "references": references,
+                    "subject": subject,
+                    "to": to_addr,
+                    "from": from_addr,
+                    "date": msg_date,
+                    "body_snippet": body_snippet,
+                    "file": existing_file,
+                }
+
+                # Also index by subject+from for inbox messages
+                if folder == "inbox":
+                    alt_key = f"{subject}|{from_addr}"
+                    if alt_key not in index:  # Don't overwrite if exists
+                        index[alt_key] = index[key]
+
+            except Exception as e:
+                logger.debug(f"Error indexing {existing_file}: {e}")
+                continue
+
+        logger.debug(f"Built message index for {folder}: {len(index)} entries")
+        return index
+
+    def _get_message_key(self, email_msg: EmailMessage, folder: str) -> Tuple[str, str]:
+        """Get indexing keys for a message.
+
+        Args:
+            email_msg: The message to get keys for
+            folder: The folder context (inbox or sent)
+
+        Returns:
+            Tuple of (primary_key, alt_key)
+        """
+        in_reply_to = email_msg.get("In-Reply-To", "").strip().strip("<>")
+        subject = email_msg.get("Subject", "").strip()
+        to_addr = email_msg.get("To", "").strip()
+        from_addr = email_msg.get("From", "").strip()
+
+        primary_key = f"{in_reply_to}|{subject}|{to_addr}"
+        alt_key = f"{subject}|{from_addr}" if folder == "inbox" else None
+        return primary_key, alt_key
+
+    def _is_duplicate_message(self, email_msg: EmailMessage, folder: str) -> bool:
+        """Check if a message is a duplicate based on content/metadata.
+
+        This prevents duplicates when Gmail assigns a different Message-ID to sent emails.
+
+        Args:
+            email_msg: The email message to check
+            folder: The folder to check in (inbox or sent)
+
+        Returns:
+            True if a duplicate is found, False otherwise
+        """
+        # Build index if not already built (happens once per sync)
+        if not hasattr(self, "_message_index_cache"):
+            self._message_index_cache = {}
+
+        if folder not in self._message_index_cache:
+            self._message_index_cache[folder] = self._build_message_index(folder)
+
+        index = self._message_index_cache[folder]
+
+        # Extract key metadata for comparison
+        in_reply_to = email_msg.get("In-Reply-To", "").strip().strip("<>")
+        references = email_msg.get("References", "").strip()
+        subject = email_msg.get("Subject", "").strip()
+        to_addr = email_msg.get("To", "").strip()
+        from_addr = email_msg.get("From", "").strip()
+        date_str = email_msg.get("Date", "").strip()
+
+        # Parse date for comparison (allow 2 minute window for clock differences)
+        try:
+            msg_date = self._parse_email_date(date_str)
+        except Exception:
+            msg_date = None
+
+        # Get message body for content comparison
+        if email_msg.is_multipart():
+            body = ""
+            for part in email_msg.walk():
+                if part.get_content_type() == "text/plain":
+                    content = (
+                        part.get_content()
+                        if isinstance(part, EmailMessage)
+                        else part.get_payload(decode=True)
+                    )
+                    if isinstance(content, bytes):
+                        content = content.decode("utf-8", errors="replace")
+                    body = content
+                    break
+        else:
+            body = (
+                email_msg.get_content()
+                if isinstance(email_msg, EmailMessage)
+                else email_msg.get_payload(decode=True)
+            )
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+
+        # Get first 200 chars of body for comparison (ignore whitespace differences)
+        body_snippet = "".join(body[:200].split()) if body else ""
+
+        # Check index for potential duplicates using keys
+        primary_key, alt_key = self._get_message_key(email_msg, folder)
+
+        candidates = []
+        if primary_key in index:
+            candidates.append(index[primary_key])
+        if alt_key and alt_key in index:
+            candidates.append(index[alt_key])
+
+        # Check each candidate for actual duplicate
+        for existing in candidates:
+            # Compare key fields
+            matches = []
+
+            # For sent emails, In-Reply-To and References are strong indicators
+            if in_reply_to and existing["in_reply_to"] == in_reply_to:
+                matches.append("in_reply_to")
+
+            if references and existing["references"] == references:
+                matches.append("references")
+
+            # Subject match (exact)
+            if subject and existing["subject"] == subject:
+                matches.append("subject")
+
+            # To/From match (normalize by removing quotes and extra whitespace)
+            def normalize_addr(addr):
+                """Normalize email address by removing quotes and extra whitespace."""
+                return addr.strip().strip('"').strip()
+
+            if to_addr and normalize_addr(existing["to"]) == normalize_addr(to_addr):
+                matches.append("to")
+
+            if from_addr and normalize_addr(existing["from"]) == normalize_addr(from_addr):
+                matches.append("from")
+
+            # Date match (within 2 minutes)
+            if msg_date and existing["date"]:
+                time_diff = abs((msg_date - existing["date"]).total_seconds())
+                if time_diff < 120:  # 2 minutes
+                    matches.append("date")
+
+            # Body content match (first 200 chars, normalized)
+            if (
+                body_snippet
+                and existing["body_snippet"]
+                and body_snippet == existing["body_snippet"]
+            ):
+                matches.append("body")
+
+            # Consider it a duplicate if we have strong matches
+            # For sent emails: In-Reply-To + Subject + To + Date is very strong indicator
+            #                  (body may differ due to Gmail processing)
+            # For inbox emails: need stricter matching including body
+            if folder == "sent":
+                # Strong match: In-Reply-To + Date + (Subject or Body)
+                if (
+                    "in_reply_to" in matches
+                    and "date" in matches
+                    and ("subject" in matches or "body" in matches)
+                ):
+                    return True
+                # Alternative: Subject + To + Date (for emails without In-Reply-To)
+                if "subject" in matches and "to" in matches and "date" in matches:
+                    return True
+            else:  # inbox
+                if "in_reply_to" in matches and "body" in matches:
+                    return True
+                if (
+                    "subject" in matches
+                    and "from" in matches
+                    and "body" in matches
+                    and "date" in matches
+                ):
+                    return True
+
+        return False
+
+    def sync_from_maildir(self, folder: str) -> None:
+        """Sync messages from external maildir to markdown format.
+
+        This imports emails from the external maildir (e.g., Gmail via mbsync)
+        into the workspace storage as markdown files.
+
+        Args:
+            folder: Folder to sync - supports "inbox" and "sent" (configure via MAILDIR_INBOX/MAILDIR_SENT env vars)
+        """
+
+        # Choose appropriate external maildir
+        if folder == "inbox":
+            maildir_folder = self.external_maildir_inbox
+        elif folder == "sent":
+            maildir_folder = self.external_maildir_sent
+        else:
+            raise ValueError(
+                f"sync_from_maildir supports 'inbox' and 'sent' folders, got: {folder}"
+            )
+
+        if not maildir_folder.exists():
+            print(f"Warning: Maildir folder does not exist: {maildir_folder}")
+            return
+
+        success = 0
+        failed = 0
+        skipped = 0
+
+        # Process messages in both cur/ (read) and new/ (unread) directories
+        for subdir in ["cur", "new"]:
+            subdir_path = maildir_folder / subdir
+            if not subdir_path.exists():
+                continue
+
+            for msg_path in subdir_path.glob("*"):
+                if msg_path.name == ".gitkeep":
+                    continue
+
+                try:
+                    # Parse flags from filename (only relevant for cur/)
+                    flags = ""
+                    if subdir == "cur" and ":" in msg_path.name:
+                        _, flags = msg_path.name.split(":", 1)
+
+                    # Read message with proper policy
+                    msg_bytes = msg_path.read_bytes()
+                    email_msg = message_from_bytes(msg_bytes, policy=default)
+
+                    # Get Message-ID
+                    message_id = email_msg["Message-ID"]
+                    if not message_id:
+                        print(f"Warning: No Message-ID in {msg_path}")
+                        failed += 1
+                        continue
+
+                    # Check if we already have this message in any folder
+                    filename = self._format_filename(message_id)
+                    filename = filename.replace("/", "_")
+
+                    # For sent emails, check if it already exists in sent folder
+                    # For inbox emails, check if it already exists in inbox folder
+                    save_dir = self.email_dir / folder
+                    md_path = save_dir / filename
+
+                    if md_path.exists():
+                        skipped += 1
+                        continue
+
+                    # Check for duplicates by content/metadata (prevents Gmail Message-ID reassignment duplicates)
+                    if self._is_duplicate_message(email_msg, folder):
+                        skipped += 1
+                        print(
+                            f"Skipping duplicate message (different Message-ID): {message_id[:50]}..."
+                        )
+                        continue
+
+                    # Convert to markdown format
+                    headers = []
+                    for key in [
+                        "MIME-Version",
+                        "From",
+                        "To",
+                        "Date",
+                        "Subject",
+                        "Message-ID",
+                        "In-Reply-To",
+                        "References",
+                        "Content-Type",
+                    ]:
+                        if key in email_msg:
+                            headers.append(f"{key}: {email_msg[key]}")
+
+                    # Handle multipart messages
+                    if email_msg.is_multipart():
+                        # Try to find text/plain part first
+                        text_part: Message | None = None
+                        for part in email_msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                text_part = part
+                                break
+
+                        # If no text/plain, try text/html
+                        if not text_part:
+                            for part in email_msg.walk():
+                                if part.get_content_type() == "text/html":
+                                    text_part = part
+                                    break
+
+                        if text_part:
+                            if isinstance(text_part, EmailMessage):
+                                body = text_part.get_content()
+                            else:
+                                body = text_part.get_payload(decode=True)
+                                if isinstance(body, bytes):
+                                    body = body.decode("utf-8", errors="replace")
+                        else:
+                            print(f"Warning: No text content found in {message_id}")
+                            body = ""
+                    else:
+                        # Single part message
+                        if isinstance(email_msg, EmailMessage):
+                            body = email_msg.get_content()
+                        else:
+                            body = email_msg.get_payload(decode=True)
+                            if isinstance(body, bytes):
+                                body = body.decode("utf-8", errors="replace")
+
+                    # Ensure body is a string
+                    if isinstance(body, bytes):
+                        body = body.decode("utf-8", errors="replace")
+                    elif not isinstance(body, str):
+                        body = str(body)
+
+                    # Remove null bytes and normalize newlines
+                    body = body.replace("\0", "").replace("\r\n", "\n")
+
+                    # Combine into markdown format
+                    content = "\n".join(headers) + "\n\n" + body
+
+                    # Ensure the directory exists
+                    save_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Save the file
+                    md_path = save_dir / filename
+                    md_path.write_text(content)
+                    success += 1
+
+                    # Store flags for future use
+                    if flags:
+                        print(f"Found flags for {message_id}: {flags}")
+
+                    # For sent emails, extract In-Reply-To to mark original as replied
+                    if folder == "sent" and "In-Reply-To" in email_msg:
+                        in_reply_to = email_msg["In-Reply-To"]
+                        if in_reply_to:
+                            self._mark_replied(in_reply_to, message_id)
+                            print(f"Marked {in_reply_to} as replied by {message_id}")
+
+                except Exception as e:
+                    print(f"Error processing {msg_path}: {e}")
+                    failed += 1
+                    continue
+
+        print(
+            f"Synced {folder}: {success} succeeded, {failed} failed, {skipped} skipped (already exist)"
+        )
