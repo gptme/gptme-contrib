@@ -43,7 +43,7 @@ git status
 git add specific-files && git commit -m "descriptive message"
 
 # MEMORY FAILURE PREVENTION CHECK (CRITICAL)
-# See: knowledge/processes/session-startup-recent-actions-review.md
+# Check for incomplete communication loops from previous sessions
 echo "=== MEMORY FAILURE PREVENTION CHECK ==="
 gh issue list --author @me --limit 5 --json number,title,url
 echo "Recent issues created ↑ - Check if any need follow-up responses"
@@ -89,7 +89,6 @@ gh issue list --assignee @me --state open
 ### Phase 4: Commit and Complete (2-3 minutes)
 ```shell
 # COMMUNICATION LOOP CLOSURE CHECK (CRITICAL)
-# See: knowledge/processes/communication-loop-closure-patterns.md
 # If you completed any actions requested in issues/PRs, verify you responded back
 echo "=== COMMUNICATION LOOP CLOSURE CHECK ==="
 echo "Did I complete any requested actions that need follow-up responses? Check recent work:"
@@ -192,7 +191,4 @@ Following this pattern results in:
 ## Related
 - [Autonomous Session Pivot Strategies](./autonomous-session-pivot-strategies.md) - Handling technical blocks
 - [Git Workflow](../workflow/git-workflow.md) - Proper commit and push practices
-- [Memory Failure Prevention](../workflow/memory-failure-prevention.md) - Comprehensive prevention protocols
-- [Session Startup Recent Actions Review](../../knowledge/processes/session-startup-recent-actions-review.md) - Detailed startup checklist
-- [Communication Loop Closure Patterns](../../knowledge/processes/communication-loop-closure-patterns.md) - Ensuring complete follow-through
-- [Pre-Issue Creation Checklist](../../knowledge/processes/pre-issue-creation-checklist.md) - Preventing duplicate work
+- [Inter-Agent Communication](../workflow/inter-agent-communication.md) - Coordination and escalation
