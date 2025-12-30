@@ -225,8 +225,18 @@ class QueueGenerator:
         Source: GitHub issues in current repository
         Filter: label=priority:high/urgent AND state=open
         Boost: +1 score if assigned to configured username
+
+        Note: Skipped when --user filter is active, since GitHub uses
+        a different assignment model (GitHub usernames via assignees)
+        than local tasks (role-based assigned_to field).
         """
         tasks: List[Task] = []
+
+        # Skip GitHub issues when filtering by user
+        # GitHub issues use assignees (GitHub usernames) which don't map
+        # to the role-based assigned_to field used in local tasks
+        if self.user:
+            return tasks
 
         try:
             # Get current repository name
