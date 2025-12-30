@@ -35,10 +35,10 @@ logging.basicConfig(
 
 
 def run_mbsync():
-    """Fetch new emails from external provider (both Bob and Bob/sent labels)."""
+    """Fetch new emails from external provider (inbox and sent folders)."""
     success = True
 
-    for label in ["gmail-Bob", "gmail-Bob-sent"]:
+    for label in ["gmail-INBOX", "gmail-Sent"]:
         try:
             logging.info(f"Running mbsync for {label}...")
             result = subprocess.run(["mbsync", label], capture_output=True, text=True, timeout=60)

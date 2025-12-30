@@ -10,7 +10,7 @@ gptmail provides email automation capabilities including:
 - Shared communication utilities (auth, rate limiting, monitoring, state)
 - Integration with Gmail via IMAP/SMTP
 
-This package was originally developed in Bob's workspace (github.com/ErikBjare/bob)
+This package was originally developed as part of an agent workspace and upstreamed to gptme-contrib
 and upstreamed to gptme-contrib for use by all gptme agents.
 
 ## Installation

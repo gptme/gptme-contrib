@@ -17,7 +17,7 @@ Example:
 
         from gptmail.lib import AgentEmail
 
-        agent = AgentEmail("/path/to/workspace", "bob@example.com")
+        agent = AgentEmail("/path/to/workspace", "agent@example.com")
         msg_id = agent.compose(
             to="user@example.com",
             subject="Test",
@@ -106,7 +106,7 @@ class AgentEmail:
         workspace (Path): Path to the workspace directory.
         email_dir (Path): Path to the email storage directory (workspace/email).
         own_email (str): The agent's own email address (used to filter self-replies).
-        external_maildir_bob (Path): Path to external inbox maildir (for syncing).
+        external_maildir_inbox (Path): Path to external inbox maildir (for syncing).
         external_maildir_sent (Path): Path to external sent maildir (for syncing).
         processed_state_file (Path): File tracking processed email IDs.
         locks_dir (Path): Directory for lock files (prevents concurrent processing).
@@ -114,7 +114,7 @@ class AgentEmail:
         tracker (ConversationTracker): Tracks reply states and conversation threads.
 
     Example:
-        >>> agent = AgentEmail("/home/bob", "bob@example.com")
+        >>> agent = AgentEmail("/home/user", "agent@example.com")
         >>> msg_id = agent.compose("user@example.com", "Hello", "Test message")
         >>> agent.send(msg_id)
     """
@@ -125,7 +125,7 @@ class AgentEmail:
         Args:
             workspace_dir: Path to the workspace directory
             own_email: The agent's own email address (used to avoid replying to self).
-                      If None, will use AGENT_EMAIL environment variable or default to "bob@superuserlabs.org"
+                      If None, will use AGENT_EMAIL environment variable (required)
         """
         # Clear message index cache at start of sync
         # This ensures we rebuild the index with current state
@@ -133,20 +133,20 @@ class AgentEmail:
 
         self.workspace = Path(workspace_dir)
         self.email_dir = self.workspace / "email"
-        # Ensure own_email is always a string (never None due to fallback)
-        self.own_email = (
-            own_email
-            if own_email is not None
-            else os.getenv("AGENT_EMAIL", "bob@superuserlabs.org")
-        )
+        # Ensure own_email is always a string - require AGENT_EMAIL env var if not provided
+        self.own_email: str = own_email if own_email is not None else os.getenv("AGENT_EMAIL", "")
+        if not self.own_email:
+            raise ValueError(
+                "own_email must be provided or AGENT_EMAIL environment variable must be set"
+            )
 
         # External maildir paths (from mbsync)
         # Use environment variables with fallback to defaults for backward compatibility
-        self.external_maildir_bob = Path(
-            os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/Bob"))
+        self.external_maildir_inbox = Path(
+            os.getenv("MAILDIR_INBOX", str(Path.home() / ".local/share/mail/gmail/INBOX"))
         )
         self.external_maildir_sent = Path(
-            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Bob/Sent"))
+            os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Sent"))
         )
 
         # State files for tracking
@@ -343,8 +343,7 @@ class AgentEmail:
             "erik@bjareho.lt",
             "erik.bjareholt@gmail.com",
             "filip.harald@gmail.com",
-            "bob@superuserlabs.org",
-            "alice@superuserlabs.org",
+            # Agent-specific allowlist entries configured via AGENT_EMAIL
             "rickard.edic@gmail.com",
         ]
 
@@ -471,7 +470,7 @@ class AgentEmail:
             to: Recipient email address
             subject: Email subject
             content: Message content in Markdown
-            from_address: Optional custom sender address (defaults to bob@superuserlabs.org)
+            from_address: Optional custom sender address (uses AGENT_EMAIL env var)
             reply_to: Optional message ID being replied to
             references: Optional list of referenced message IDs
 
@@ -1037,7 +1036,7 @@ class AgentEmail:
         """
         # For now, use simple domain-based mapping
         # This could be enhanced to read msmtp config file
-        if "gmail.com" in from_address or "+bob@gmail.com" in from_address:
+        if "gmail.com" in from_address:
             return "gmail"
         return None  # Use default account
 
@@ -1272,12 +1271,12 @@ class AgentEmail:
         into the workspace storage as markdown files.
 
         Args:
-            folder: Folder to sync - supports "inbox" (Bob label) and "sent" (Bob-sent label)
+            folder: Folder to sync - supports "inbox" and "sent" (configure via MAILDIR_INBOX/MAILDIR_SENT env vars)
         """
 
         # Choose appropriate external maildir
         if folder == "inbox":
-            maildir_folder = self.external_maildir_bob
+            maildir_folder = self.external_maildir_inbox
         elif folder == "sent":
             maildir_folder = self.external_maildir_sent
         else:

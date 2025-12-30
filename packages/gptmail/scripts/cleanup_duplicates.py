@@ -3,7 +3,7 @@
 
 This script finds duplicate sent emails that were created before the
 duplicate detection fix was implemented. It identifies pairs of files
-where one has Bob's UUID Message-ID and another has Gmail's Message-ID,
+where one has the agent's UUID Message-ID and another has Gmail's Message-ID,
 but they represent the same email.
 """
 
@@ -106,7 +106,7 @@ def main():
     parser.add_argument(
         "--sent-dir",
         type=Path,
-        default=Path.home() / "bob" / "email" / "sent",
+        default=Path.home() / "workspace" / "email" / "sent",
         help="Path to sent email directory",
     )
 

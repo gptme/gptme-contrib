@@ -3,7 +3,7 @@ name = "gptmail"
 version = "0.1.0"
 description = "Email automation for gptme agents with shared communication utilities"
 authors = [
-    {name = "Bob", email = "bob@superuserlabs.org"}
+    {name = "gptme contributors", email = "gptme@superuserlabs.org"}
 ]
 readme = "README.md"
 requires-python = ">=3.10"

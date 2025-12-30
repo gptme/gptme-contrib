@@ -19,7 +19,7 @@ This package provides common patterns and utilities for building communication s
 ```python
 # Add communication_utils to Python path
 import sys
-sys.path.insert(0, "/path/to/gptme-bob")
+sys.path.insert(0, "/path/to/workspace")
 
 from communication_utils import ...
 ```

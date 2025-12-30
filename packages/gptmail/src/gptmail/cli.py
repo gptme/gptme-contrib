@@ -83,7 +83,7 @@ def cli() -> None:
 @click.option(
     "--from",
     "from_address",
-    help="Custom sender address (defaults to bob@superuserlabs.org)",
+    help="Custom sender address (uses AGENT_EMAIL env var if not specified)",
 )
 def compose(
     to: str, subject: str, content: str | None = None, from_address: str | None = None
@@ -189,7 +189,7 @@ def read(message_id: str, thread: bool = False, thread_only: bool = False) -> No
 @click.option(
     "--from",
     "from_address",
-    help="Custom sender address (defaults to bob@superuserlabs.org)",
+    help="Custom sender address (uses AGENT_EMAIL env var if not specified)",
 )
 def reply(message_id: str, content: str | None = None, from_address: str | None = None) -> None:
     """Reply to message.
