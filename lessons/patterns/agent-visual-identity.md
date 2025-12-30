@@ -1,3 +1,14 @@
+---
+match:
+  keywords:
+    - visual identity
+    - avatar
+    - brand identity
+    - agent branding
+    - visual representation
+    - agent design
+---
+
 # Agent Visual Identity Establishment
 
 ## Rule
@@ -62,7 +73,7 @@ Following this pattern results in:
 - **Organized assets** ready for immediate implementation
 
 ## Implementation Example
-Based on successful Alice visual identity establishment (2025-12-22):
+Based on successful Alice visual identity establishment:
 
 1. **Brand Guidelines Created**: 200+ line comprehensive framework
 2. **Complete Visual System**: Color palette, typography, design principles
@@ -76,4 +87,4 @@ Based on successful Alice visual identity establishment (2025-12-22):
 - Brand consistency frameworks
 
 ## Origin
-Extracted from successful Alice visual identity establishment (2025-12-22) demonstrating complete framework development from concept to implementation-ready assets.
+Extracted from successful Alice visual identity establishment demonstrating complete framework development from concept to implementation-ready assets.
