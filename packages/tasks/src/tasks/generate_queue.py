@@ -121,13 +121,20 @@ class QueueGenerator:
         journal_dir: str = "journal",
         tasks_dir: str = "tasks",
         state_dir: str = "state",
+        user: Optional[str] = None,
     ):
         self.workspace = workspace_path
         self.github_username = github_username
         self.tasks_dir = self.workspace / tasks_dir
         self.state_dir = self.workspace / state_dir
         self.journal_dir = self.workspace / journal_dir
-        self.work_queue_file = self.state_dir / "queue-generated.md"
+        self.user = user  # Filter tasks by assigned_to field
+
+        # Output filename includes user if specified
+        if user:
+            self.work_queue_file = self.state_dir / f"queue-generated-{user}.md"
+        else:
+            self.work_queue_file = self.state_dir / "queue-generated.md"
 
     def run_command(self, args: List[str]) -> str:
         """Run command and return output."""
@@ -153,6 +160,7 @@ class QueueGenerator:
 
         Source: Local task files in tasks/ directory
         Filter: priority=high/urgent AND state=new/active
+        Optional: Filter by assigned_to if --user is specified
         """
         tasks: List[Task] = []
 
@@ -173,9 +181,17 @@ class QueueGenerator:
                 if state not in ("new", "active"):
                     continue
 
-                # Filter by priority (high or urgent only)
+                # Filter by assigned_to if --user is specified
+                if self.user:
+                    assigned_to = post.metadata.get("assigned_to", "agent")
+                    # Include if assigned to specified user or "both"
+                    if assigned_to != self.user and assigned_to != "both":
+                        continue
+
+                # Filter by priority (high or urgent only) - skip if filtering by user
+                # When filtering by user, include all priorities to show their full queue
                 priority = post.metadata.get("priority", "medium")
-                if priority not in ("high", "urgent"):
+                if not self.user and priority not in ("high", "urgent"):
                     continue
 
                 # Extract title from content (first heading)
@@ -401,6 +417,10 @@ def main():
         help="GitHub username for assignee filtering (default: from gh CLI)",
     )
     parser.add_argument(
+        "--user",
+        help="Filter tasks by assigned_to field (e.g., 'human', 'agent', 'both')",
+    )
+    parser.add_argument(
         "--journal-dir",
         default="journal",
         help="Journal directory name (default: journal)",
@@ -430,6 +450,7 @@ def main():
         journal_dir=args.journal_dir,
         tasks_dir=args.tasks_dir,
         state_dir=args.state_dir,
+        user=args.user,
     )
 
     generator.generate()
