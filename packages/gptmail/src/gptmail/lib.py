@@ -40,6 +40,7 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 from email import message_from_bytes
+from email.header import Header
 from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -571,9 +572,13 @@ class AgentEmail:
             msg = MIMEMultipart("alternative")
 
             # Set headers from extracted metadata
-            msg["From"] = headers.get("From") or sender
+            # RFC 2047 encode From and Subject for proper non-ASCII handling
+            from_header = headers.get("From") or sender
+            msg["From"] = Header(from_header, "utf-8").encode()
             msg["To"] = recipient
-            msg["Subject"] = headers.get("Subject", "")
+            # RFC 2047 encode Subject to handle non-ASCII characters (åäö etc)
+            subject = headers.get("Subject", "")
+            msg["Subject"] = Header(subject, "utf-8").encode()
             msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
             msg["Message-ID"] = headers.get("Message-ID", "")
             if "In-Reply-To" in headers:
