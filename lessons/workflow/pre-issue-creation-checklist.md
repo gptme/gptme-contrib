@@ -86,6 +86,6 @@ This checklist is integrated into:
 - Improved cross-agent coordination
 
 ## Related
-- [Memory Failure Prevention](../../lessons/workflow/memory-failure-prevention.md)
-- [Inter-Agent Communication](../../lessons/workflow/inter-agent-communication.md)
-- [Task Lifecycle Management](../../lessons/tasks/task-lifecycle-management.md)
+- [Memory Failure Prevention](./memory-failure-prevention.md)
+- [Inter-Agent Communication](../workflow/inter-agent-communication.md)
+- [Session Startup Recent Actions Review](./session-startup-recent-actions-review.md)

@@ -147,10 +147,9 @@ Following this enhanced Phase 1 provides:
 ## Related Components
 
 This integrates with:
-- [Autonomous Session Structure](../../lessons/autonomous/autonomous-session-structure.md)
-- [Pending Responses Tracking](./pending-responses-tracking.md)
 - [Pre-Issue Creation Checklist](./pre-issue-creation-checklist.md)
-- [Memory Failure Prevention](../../lessons/workflow/memory-failure-prevention.md)
+- [Memory Failure Prevention](./memory-failure-prevention.md)
+- [Communication Loop Closure Patterns](./communication-loop-closure-patterns.md)
 
 ## Implementation Notes
 

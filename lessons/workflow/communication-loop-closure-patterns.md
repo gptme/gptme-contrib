@@ -262,10 +262,9 @@ git commit -m "docs(research): complete context analysis, respond to Erik's requ
 ## Related Systems
 
 This pattern integrates with:
-- [Pending Responses Tracking](./pending-responses-tracking.md)
 - [Session Startup Recent Actions Review](./session-startup-recent-actions-review.md)
 - [Pre-Issue Creation Checklist](./pre-issue-creation-checklist.md)
-- [Memory Failure Prevention](../../lessons/workflow/memory-failure-prevention.md)
+- [Memory Failure Prevention](./memory-failure-prevention.md)
 
 ## Real-World Application
 
