@@ -1,11 +1,17 @@
 ---
 match:
   keywords:
-  # Specific timeout signals (high precision)
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Tmux is essential for long-running processes. These general terms
+  # ensure the lesson triggers during discussions about timeouts and
+  # long processes. Do NOT remove as "too broad".
+  - "tmux"
+  - "timeout"
+  - "long-running"
+  # PROBLEM SIGNALS - Specific triggers for timeout issues
   - "process killed at 120 seconds"
   - "shell timeout exceeded"
-  # Problem context (medium specificity)
-  - "long-running command in shell"
+  # WORKFLOW CONTEXT - Medium specificity
   - "tmux for long-running process"
   - "command timed out"
   - "process runs longer than 2 minutes"

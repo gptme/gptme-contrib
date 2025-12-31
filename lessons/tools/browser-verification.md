@@ -1,14 +1,19 @@
 ---
 match:
   keywords:
-  # Anti-pattern detection (high precision)
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Browser verification is essential for web work. These ensure
+  # the lesson triggers during web development discussions.
+  - "browser"
+  - "verification"
+  - "web changes"
+  # ANTI-PATTERN SIGNALS - High precision for mistakes
   - "Fixed! but page not loaded"
   - "claiming fixed without testing"
-  # Problem context (medium specificity)
+  # WORKFLOW CONTEXT - Medium specificity
   - "verify web changes in browser"
   - "check browser console errors"
   - "deployment verification"
-  - "test web changes before commit"
 status: active
 ---
 

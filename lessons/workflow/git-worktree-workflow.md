@@ -1,15 +1,22 @@
 ---
 match:
   keywords:
-  # Problem signals
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # These ensure the lesson triggers during common git/PR workflows.
+  # Do NOT remove thinking they're "too broad" - they're intentionally
+  # general to catch workflows where users SHOULD learn this pattern.
+  - "git"
+  - "worktree"
+  - "PR"
+  - "external"
+  - "branch"
+  # PROBLEM SIGNALS - Specific triggers for when problems occur
   - "branch from origin/master"
   - "included uncommitted changes"
-  # Problem context (medium specificity)
+  # WORKFLOW CONTEXT - Medium specificity for discussions
   - "git worktree for PR"
   - "external repository PR"
   - "multiple branches simultaneously"
-  - "worktree checkout"
-  - "pr-NUMBER branch naming"
 lesson_id: workflow_git-worktree-workflow_15082b29
 version: 1.0.0
 usage_count: 1

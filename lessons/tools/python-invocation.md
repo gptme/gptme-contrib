@@ -1,13 +1,18 @@
 ---
 match:
   keywords:
-  # Exact error (high precision)
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Python invocation is extremely common. These general terms
+  # ensure the lesson triggers when users discuss Python execution.
+  # Do NOT remove as "too broad" - this is a fundamental lesson.
+  - "python"
+  - "python3"
+  # ERROR SIGNALS - Exact errors (high precision)
   - "bash: python: command not found"
-  # Problem context (medium specificity)
   - "python command not found"
+  # WORKFLOW CONTEXT - Medium specificity
   - "use python3 instead of python"
   - "python vs python3"
-  - "python symlink not available"
 status: active
 ---
 

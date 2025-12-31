@@ -1,13 +1,20 @@
 ---
 match:
   keywords:
-  # Error signals
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Git pushing is a common operation - this lesson should trigger
+  # whenever users are pushing to remotes for PRs. Do NOT remove
+  # thinking they're "too broad" - they catch learning opportunities.
+  - "git"
+  - "push"
+  - "branch"
+  - "PR"
+  # ERROR SIGNALS - Specific triggers for when mistakes occur
   - "pushed to wrong branch"
   - "push went to master instead"
-  # Problem context (medium specificity)
+  # WORKFLOW CONTEXT - Medium specificity for discussions
   - "git push explicit destination"
   - "specify remote branch name"
-  - "git push origin branch:branch"
   - "push to feature branch"
 lesson_id: workflow_git-remote-branch-pushing_aa405aaf
 version: 1.0.0
