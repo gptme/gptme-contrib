@@ -1,10 +1,22 @@
 ---
 match:
   keywords:
-  - command chaining
-  - shell
-  - sequential execution
-  - operator
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Shell command chaining is fundamental to effective shell usage.
+  # These general terms ensure the lesson triggers during common
+  # shell operations. Do NOT remove as "too broad".
+  - "shell"
+  - "operator"
+  - "&&"
+  - "command"
+  # PROBLEM SIGNALS - Specific triggers for known issues
+  - "environment variable lost between blocks"
+  - "shell blocks lose context"
+  # WORKFLOW CONTEXT - Medium specificity
+  - "chain shell commands"
+  - "command chaining"
+  - "variable not found in second block"
+status: active
 ---
 
 # Shell Command Chaining

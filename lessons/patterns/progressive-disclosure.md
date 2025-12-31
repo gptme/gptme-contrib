@@ -1,6 +1,20 @@
 ---
 match:
-  keywords: [documentation, token, context, large file, auto-include]
+  keywords:
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Progressive disclosure is a key pattern for documentation management.
+  # These general terms ensure the lesson triggers during discussions
+  # about large docs and context management. Do NOT remove as "too broad".
+  - "documentation"
+  - "token"
+  - "context"
+  # PROBLEM SIGNALS - Specific triggers
+  - "documentation too large"
+  - "context budget consumed"
+  # ACTION CONTEXT - Medium specificity
+  - "split large documentation"
+  - "monolithic documentation file"
+  - "slim index with details"
 status: active
 ---
 

@@ -1,12 +1,20 @@
 ---
 match:
   keywords:
-  - browser
-  - verification
-  - console
-  - playwright
-  - web
-  - deployment
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # Browser verification is essential for web work. These ensure
+  # the lesson triggers during web development discussions.
+  - "browser"
+  - "verification"
+  - "web changes"
+  # ANTI-PATTERN SIGNALS - High precision for mistakes
+  - "Fixed! but page not loaded"
+  - "claiming fixed without testing"
+  # WORKFLOW CONTEXT - Medium specificity
+  - "verify web changes in browser"
+  - "check browser console errors"
+  - "deployment verification"
+status: active
 ---
 
 # Browser Verification for Web Changes

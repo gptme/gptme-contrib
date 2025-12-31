@@ -1,12 +1,21 @@
 ---
 match:
   keywords:
-  - github
-  - issue
-  - pr
-  - pull request
-  - engagement
-  - community
+  # FOUNDATIONAL KEYWORDS - Keep these general terms!
+  # GitHub issue engagement is fundamental to collaboration. These
+  # general terms ensure the lesson triggers during any GitHub
+  # interaction. Do NOT remove as "too broad".
+  - "github"
+  - "issue"
+  - "pr"
+  # PROBLEM SIGNALS - Specific triggers
+  - "about to create new issue"
+  - "duplicate issue prevention"
+  # ACTION CONTEXT - Medium specificity
+  - "search existing issues first"
+  - "check for similar issues"
+  - "update issue after work"
+status: active
 ---
 
 # GitHub Issue and PR Engagement
