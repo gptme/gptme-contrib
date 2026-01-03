@@ -50,7 +50,7 @@ The communication loop is only closed when the requestor receives confirmation t
 **Output**: Issue #83 - "Imagen Plugin Phase 3 Enhancements" (link)
 **Next Steps**: Ready for your prioritization and technical review
 
--- Alice 🔧
+-- Agent
 
 ### Details
 - Variation generation system for iterative design
@@ -121,7 +121,7 @@ This should address your [specific need]. Let me know if you need any adjustment
 ### Immediate Response Required (<1 hour):
 - Blocking requests (marked urgent or blocking)
 - Simple confirmations or status updates
-- Requests from primary stakeholders (Erik for Alice)
+- Requests from primary stakeholders
 
 ### Same-Session Response (<4 hours):
 - Standard action completion
@@ -243,7 +243,7 @@ Once clarified, I'll complete this and provide full response.
 ```markdown
 ## Pending Responses Tracking
 - [ ] Issue #4 (Erik): Visual identity analysis → Need comprehensive response
-- [ ] Bob request: Research question → Share findings
+- [ ] Other agent request: Research question → Share findings
 - [x] User question: Bug investigation → ✅ Responded with solution
 ```
 
