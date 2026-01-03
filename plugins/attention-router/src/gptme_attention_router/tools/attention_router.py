@@ -10,20 +10,23 @@ Features:
 - Decay: Attention scores decay each turn when not activated
 - Co-activation: Related files can boost each other's scores
 - Keywords: Files activate to HOT tier when keywords match
+- Cache-aware: Batches updates and flushes on cache invalidation
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gptme.message import Message
 from gptme.tools.base import ToolSpec
 
 if TYPE_CHECKING:
-    pass
+    from gptme.logmanager import LogManager
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,7 @@ WARM_THRESHOLD = 0.25
 DEFAULT_DECAY_RATE = 0.75
 COACTIVATION_BOOST = 0.35
 DEFAULT_MAX_WARM_LINES = 30
+DEFAULT_BATCH_SIZE = 10  # Flush after N turns if no cache invalidation
 
 # State file location
 STATE_FILE = Path(".gptme/attention_state.json")
@@ -48,6 +52,9 @@ class AttentionState:
     decay_rates: dict[str, float] = field(default_factory=dict)
     pinned: set[str] = field(default_factory=set)
     turn_count: int = 0
+    # Batched update tracking
+    pending_turns: int = 0  # Turns since last flush
+    pending_keyword_matches: list[str] = field(default_factory=list)  # Paths matched
 
     def to_dict(self) -> dict:
         """Convert to serializable dict."""
@@ -58,6 +65,8 @@ class AttentionState:
             "decay_rates": self.decay_rates,
             "pinned": list(self.pinned),
             "turn_count": self.turn_count,
+            "pending_turns": self.pending_turns,
+            "pending_keyword_matches": self.pending_keyword_matches,
         }
 
     @classmethod
@@ -70,6 +79,8 @@ class AttentionState:
             decay_rates=data.get("decay_rates", {}),
             pinned=set(data.get("pinned", [])),
             turn_count=data.get("turn_count", 0),
+            pending_turns=data.get("pending_turns", 0),
+            pending_keyword_matches=data.get("pending_keyword_matches", []),
         )
 
 
@@ -175,34 +186,29 @@ def unregister_file(path: str) -> str:
     return f"Removed '{path}' from tracking" if removed else f"'{path}' was not tracked"
 
 
-def process_turn(message: str) -> dict:
+def _apply_batch_update() -> dict:
     """
-    Process a conversation turn - apply decay and activate by keywords.
+    Apply all pending updates (decay + keyword activations).
 
-    This should be called once per turn to update attention scores.
-
-    Args:
-        message: The user message text to check for keyword matches
+    Called when cache is invalidated or batch threshold reached.
 
     Returns:
-        Dict with activated files, decayed files, and tier assignments
-
-    Example:
-        result = process_turn("How do I commit changes with git?")
-        # Files with "git" or "commit" keywords will activate to HOT
+        Dict with update details
     """
     state = _get_state()
-    state.turn_count += 1
+
+    if state.pending_turns == 0:
+        return {"status": "no_pending_updates"}
 
     activated = []
     decayed = []
-    message_lower = message.lower()
 
-    # Step 1: Decay all scores
+    # Step 1: Apply decay for all pending turns
     for path in list(state.scores.keys()):
         old_score = state.scores[path]
         decay_rate = state.decay_rates.get(path, DEFAULT_DECAY_RATE)
-        new_score = old_score * decay_rate
+        # Apply decay for all pending turns at once
+        new_score = old_score * (decay_rate**state.pending_turns)
 
         # Pinned files never go below WARM
         if path in state.pinned:
@@ -214,13 +220,13 @@ def process_turn(message: str) -> dict:
                 {"path": path, "old": round(old_score, 3), "new": round(new_score, 3)}
             )
 
-    # Step 2: Activate by keywords
-    for path, keywords in state.keywords.items():
-        if any(kw.lower() in message_lower for kw in keywords):
-            state.scores[path] = 1.0
-            activated.append(path)
+    # Step 2: Activate by recorded keyword matches (most recent wins)
+    unique_matches = list(set(state.pending_keyword_matches))
+    for path in unique_matches:
+        state.scores[path] = 1.0
+        activated.append(path)
 
-    # Step 3: Apply co-activation
+    # Step 3: Apply co-activation for activated files
     for path in activated:
         if path in state.coactivation:
             for related_path in state.coactivation[path]:
@@ -228,17 +234,79 @@ def process_turn(message: str) -> dict:
                     boosted = min(1.0, state.scores[related_path] + COACTIVATION_BOOST)
                     state.scores[related_path] = boosted
 
+    # Clear pending state
+    turns_processed = state.pending_turns
+    state.pending_turns = 0
+    state.pending_keyword_matches = []
+
     _save_state()
 
-    # Get tier assignments
     tiers = get_tiers()
 
     return {
-        "turn": state.turn_count,
+        "status": "flushed",
+        "turns_processed": turns_processed,
         "activated": activated,
         "decayed_count": len(decayed),
         "tiers": tiers,
     }
+
+
+def process_turn(message: str, apply_now: bool = False) -> dict:
+    """
+    Process a conversation turn - track keyword matches for batched update.
+
+    By default, updates are deferred until cache invalidation or batch threshold.
+    Use apply_now=True to immediately apply updates (useful for testing).
+
+    Args:
+        message: The user message text to check for keyword matches
+        apply_now: If True, immediately apply updates instead of deferring
+
+    Returns:
+        Dict with activated files, decayed files, and tier assignments
+
+    Example:
+        result = process_turn("How do I commit changes with git?")
+        # Files with "git" or "commit" keywords will be queued for activation
+    """
+    state = _get_state()
+    state.turn_count += 1
+    state.pending_turns += 1
+
+    message_lower = message.lower()
+
+    # Track keyword matches (don't apply yet)
+    for path, keywords in state.keywords.items():
+        if any(kw.lower() in message_lower for kw in keywords):
+            state.pending_keyword_matches.append(path)
+
+    _save_state()
+
+    # Check if we should flush (batch threshold or explicit request)
+    if apply_now or state.pending_turns >= DEFAULT_BATCH_SIZE:
+        return _apply_batch_update()
+
+    # Return deferred status
+    return {
+        "status": "deferred",
+        "turn": state.turn_count,
+        "pending_turns": state.pending_turns,
+        "pending_matches": list(set(state.pending_keyword_matches)),
+    }
+
+
+def flush_pending_updates() -> dict:
+    """
+    Flush all pending updates immediately.
+
+    Called by the CACHE_INVALIDATED hook to apply batched updates
+    at the optimal time (when cache invalidation happens anyway).
+
+    Returns:
+        Dict with update details
+    """
+    return _apply_batch_update()
 
 
 def get_tiers() -> dict:
@@ -386,6 +454,8 @@ def get_status() -> dict:
         "turn_count": state.turn_count,
         "total_tracked": len(state.scores),
         "pinned_count": len(state.pinned),
+        "pending_turns": state.pending_turns,
+        "pending_matches": list(set(state.pending_keyword_matches)),
         "tier_counts": {
             "HOT": len(tiers["HOT"]),
             "WARM": len(tiers["WARM"]),
@@ -396,6 +466,7 @@ def get_status() -> dict:
             "WARM": WARM_THRESHOLD,
         },
         "default_decay_rate": DEFAULT_DECAY_RATE,
+        "batch_size": DEFAULT_BATCH_SIZE,
     }
 
 
@@ -410,6 +481,74 @@ def reset_state() -> str:
     _state = AttentionState()
     _save_state()
     return "Attention state reset"
+
+
+# CACHE_INVALIDATED hook implementation
+def cache_invalidated_hook(
+    manager: "LogManager",
+    reason: str,
+    tokens_before: int | None = None,
+    tokens_after: int | None = None,
+) -> Generator[Message, None, None]:
+    """
+    Hook called when prompt cache is invalidated.
+
+    This is the optimal time to flush batched attention updates since
+    the cache will be regenerated anyway. No extra cache invalidation cost.
+
+    Args:
+        manager: Conversation manager with log and workspace
+        reason: Reason for cache invalidation (e.g., "compact")
+        tokens_before: Token count before operation
+        tokens_after: Token count after operation
+    """
+    state = _get_state()
+
+    # Only flush if there are pending updates
+    if state.pending_turns == 0:
+        return
+
+    logger.info(
+        f"Attention router: flushing {state.pending_turns} pending turns "
+        f"on cache invalidation (reason: {reason})"
+    )
+
+    result = flush_pending_updates()
+
+    # Log the tier changes if significant
+    if result.get("activated"):
+        logger.info(f"Attention router: activated {result['activated']}")
+
+    # Optionally yield a hidden message with tier update info
+    # This can be useful for debugging but is hidden from the conversation
+    if result.get("status") == "flushed":
+        yield Message(
+            "system",
+            f"🎯 Attention router updated ({result['turns_processed']} turns): "
+            f"{len(result.get('activated', []))} activated, "
+            f"{result.get('decayed_count', 0)} decayed. "
+            f"Tiers: HOT={len(result['tiers']['HOT'])}, "
+            f"WARM={len(result['tiers']['WARM'])}, "
+            f"COLD={len(result['tiers']['COLD'])}",
+            hide=True,
+        )
+
+
+# Try to register the hook if gptme.hooks is available
+try:
+    from gptme.hooks import HookType, register_hook
+
+    register_hook(
+        name="attention_router_cache_invalidated",
+        hook_type=HookType.CACHE_INVALIDATED,
+        func=cache_invalidated_hook,
+        priority=50,  # Run before other cache-related hooks
+    )
+    logger.info("Registered attention_router CACHE_INVALIDATED hook")
+except ImportError:
+    logger.debug("gptme.hooks not available, CACHE_INVALIDATED hook not registered")
+except Exception as e:
+    logger.warning(f"Failed to register CACHE_INVALIDATED hook: {e}")
 
 
 # Tool specification for gptme
@@ -429,6 +568,12 @@ Use this tool to manage dynamic context loading based on attention scores.
 - **Keyword Activation**: Files activate to HOT when keywords match
 - **Co-activation**: Related files can boost each other's scores
 - **Pinning**: Critical files can be pinned to never fall below WARM
+- **Cache-aware batching**: Updates are batched and applied on cache invalidation
+
+**Cache Integration:**
+Updates are now batched and applied when the prompt cache is invalidated
+(e.g., during auto-compaction). This avoids unnecessary cache invalidation
+while still maintaining fresh tier assignments.
 
 **Usage Pattern:**
 
@@ -441,13 +586,18 @@ register_file(
 )
 ```
 
-2. Process each turn to update scores:
+2. Process each turn to track keyword matches (deferred by default):
 ```python
 result = process_turn("How do I commit with git?")
-# Files with "git" keyword activate to HOT
+# result["status"] == "deferred" - updates queued for later
 ```
 
-3. Get context recommendations:
+3. Updates automatically flush on cache invalidation, or manually:
+```python
+flush_pending_updates()  # Apply all pending updates now
+```
+
+4. Get context recommendations:
 ```python
 rec = get_context_recommendation()
 # rec["include_full"] = HOT files to load completely
@@ -473,14 +623,23 @@ register_file(
 )
 ```
 
-### Process a Turn
+### Process a Turn (Batched)
 
 > User: How do I check my git status?
 > Assistant: Let me process this turn to update attention scores.
 ```ipython
 result = process_turn("How do I check my git status?")
 ```
-> System: {"turn": 5, "activated": ["lessons/workflow/git-workflow.md"], "decayed_count": 12, "tiers": {"HOT": [...], "WARM": [...], "COLD": [...]}}
+> System: {"status": "deferred", "turn": 5, "pending_turns": 1, "pending_matches": ["lessons/workflow/git-workflow.md"]}
+
+### Manually Flush Updates
+
+> User: Apply all pending attention updates now
+> Assistant: I'll flush the pending updates.
+```ipython
+result = flush_pending_updates()
+```
+> System: {"status": "flushed", "turns_processed": 3, "activated": [...], "decayed_count": 12, "tiers": {...}}
 
 ### Get Current Tiers
 
@@ -504,6 +663,7 @@ rec = get_context_recommendation(max_hot=5, max_warm=10)
         register_file,
         unregister_file,
         process_turn,
+        flush_pending_updates,
         get_tiers,
         get_score,
         set_score,
