@@ -1,3 +1,14 @@
+---
+match:
+  keywords:
+    - "session startup"
+    - "recent actions"
+    - "memory failure"
+    - "autonomous session"
+    - "context review"
+    - "phase 1"
+---
+
 # Session Startup Recent Actions Review
 
 ## Purpose
