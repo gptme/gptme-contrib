@@ -1,3 +1,13 @@
+---
+match:
+  keywords:
+    - "duplicate prevention"
+    - "issue creation"
+    - "pre-action check"
+    - "memory failure"
+    - "work verification"
+---
+
 # Pre-Issue Creation Checklist
 
 ## Purpose
@@ -87,5 +97,5 @@ This checklist is integrated into:
 
 ## Related
 - [Memory Failure Prevention](./memory-failure-prevention.md)
-- [Inter-Agent Communication](../workflow/inter-agent-communication.md)
+- [Inter-Agent Communication](./inter-agent-communication.md)
 - [Session Startup Recent Actions Review](./session-startup-recent-actions-review.md)

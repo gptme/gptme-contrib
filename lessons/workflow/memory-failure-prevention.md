@@ -93,7 +93,7 @@ gh pr list --author @me --limit 5
 grep -r "TODO.*respond" . || echo "No pending responses"
 ```
 
-### 5. Advanced Work Queue Integration
+### 4. Advanced Work Queue Integration
 Maintain detailed tracking with pending responses section:
 ```markdown
 ## Pending Responses (CHECK EVERY SESSION START)
@@ -111,7 +111,7 @@ Maintain detailed tracking with pending responses section:
 - [Track other incidents here for pattern analysis]
 ```
 
-### 6. Autonomous Session Integration
+### 5. Autonomous Session Integration
 **Phase 1 (Status Check) Enhancement:**
 ```shell
 # Add memory failure prevention to standard status check
