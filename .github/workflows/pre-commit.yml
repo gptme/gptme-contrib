@@ -23,5 +23,8 @@ jobs:
       - name: Install pre-commit
         run: |
           pipx install pre-commit
+      - name: Create virtual environment
+        run: |
+          uv sync --all-packages
       - name: Run pre-commit
         run: pre-commit run --all-files
