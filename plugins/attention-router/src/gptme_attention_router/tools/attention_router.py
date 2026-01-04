@@ -259,6 +259,9 @@ def process_turn(message: str, apply_now: bool = False) -> dict:
     By default, updates are deferred until cache invalidation or batch threshold.
     Use apply_now=True to immediately apply updates (useful for testing).
 
+    When cache_awareness module is available, uses its turn tracking for more
+    accurate batching decisions synchronized with actual cache state.
+
     Args:
         message: The user message text to check for keyword matches
         apply_now: If True, immediately apply updates instead of deferring
@@ -283,8 +286,24 @@ def process_turn(message: str, apply_now: bool = False) -> dict:
 
     _save_state()
 
-    # Check if we should flush (batch threshold or explicit request)
-    if apply_now or state.pending_turns >= DEFAULT_BATCH_SIZE:
+    # Check if we should flush
+    should_flush = apply_now
+
+    if not should_flush:
+        # Try to use cache_awareness for smarter batching decisions
+        if _cache_awareness_available:
+            try:
+                turns = get_turns_since_invalidation()
+                # Flush at batch threshold based on actual turns since cache invalidation
+                should_flush = turns >= DEFAULT_BATCH_SIZE
+            except Exception:
+                # Fall back to internal counter
+                should_flush = state.pending_turns >= DEFAULT_BATCH_SIZE
+        else:
+            # No cache_awareness, use internal counter
+            should_flush = state.pending_turns >= DEFAULT_BATCH_SIZE
+
+    if should_flush:
         return _apply_batch_update()
 
     # Return deferred status
@@ -534,21 +553,64 @@ def cache_invalidated_hook(
         )
 
 
-# Try to register the hook if gptme.hooks is available
-try:
-    from gptme.hooks import HookType, register_hook
+# Try to register with cache_awareness module (gptme PR #1074)
+# Falls back to direct CACHE_INVALIDATED hook registration if not available
+_cache_awareness_available = False
 
-    register_hook(
-        name="attention_router_cache_invalidated",
-        hook_type=HookType.CACHE_INVALIDATED,
-        func=cache_invalidated_hook,
-        priority=50,  # Run before other cache-related hooks
+try:
+    from gptme.hooks.cache_awareness import (
+        on_cache_change,
+        get_turns_since_invalidation,
     )
-    logger.info("Registered attention_router CACHE_INVALIDATED hook")
+
+    def _on_cache_invalidated(state) -> None:
+        """Callback when cache is invalidated via cache_awareness module."""
+        global _state
+        current = _get_state()
+
+        # Only flush if there are pending updates
+        if current.pending_turns == 0:
+            return
+
+        logger.info(
+            f"Attention router: flushing {current.pending_turns} pending turns "
+            f"on cache invalidation via cache_awareness"
+        )
+
+        result = flush_pending_updates()
+
+        # Log the tier changes if significant
+        if result.get("activated"):
+            logger.info(f"Attention router: activated {result['activated']}")
+
+    # Register callback with cache_awareness module
+    _unsubscribe = on_cache_change(_on_cache_invalidated)
+    _cache_awareness_available = True
+    logger.info("Registered attention_router with cache_awareness module")
+
 except ImportError:
-    logger.debug("gptme.hooks not available, CACHE_INVALIDATED hook not registered")
+    logger.debug(
+        "cache_awareness module not available, trying direct hook registration"
+    )
+
+    # Fallback: Try direct CACHE_INVALIDATED hook registration
+    try:
+        from gptme.hooks import HookType, register_hook
+
+        register_hook(
+            name="attention_router_cache_invalidated",
+            hook_type=HookType.CACHE_INVALIDATED,
+            func=cache_invalidated_hook,
+            priority=50,  # Run before other cache-related hooks
+        )
+        logger.info("Registered attention_router CACHE_INVALIDATED hook (fallback)")
+    except ImportError:
+        logger.debug("gptme.hooks not available, no cache hook registered")
+    except Exception as e:
+        logger.warning(f"Failed to register CACHE_INVALIDATED hook: {e}")
+
 except Exception as e:
-    logger.warning(f"Failed to register CACHE_INVALIDATED hook: {e}")
+    logger.warning(f"Failed to register with cache_awareness: {e}")
 
 
 # Tool specification for gptme
