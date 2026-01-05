@@ -442,7 +442,7 @@ def extract_header(path: str, max_lines: int = DEFAULT_MAX_WARM_LINES) -> str | 
         if not file_path.exists():
             return None
 
-        with open(file_path) as f:
+        with open(file_path, encoding='utf-8') as f:
             lines = []
             for i, line in enumerate(f):
                 if i >= max_lines:
@@ -563,9 +563,8 @@ try:
         get_turns_since_invalidation,
     )
 
-    def _on_cache_invalidated(state) -> None:
+    def _on_cache_invalidated(cache_state) -> None:
         """Callback when cache is invalidated via cache_awareness module."""
-        global _state
         current = _get_state()
 
         # Only flush if there are pending updates
