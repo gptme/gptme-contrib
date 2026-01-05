@@ -442,7 +442,7 @@ def extract_header(path: str, max_lines: int = DEFAULT_MAX_WARM_LINES) -> str | 
         if not file_path.exists():
             return None
 
-        with open(file_path, encoding='utf-8') as f:
+        with open(file_path, encoding="utf-8") as f:
             lines = []
             for i, line in enumerate(f):
                 if i >= max_lines:
