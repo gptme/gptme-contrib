@@ -21,26 +21,26 @@ USAGE:
 
 MODES:
     template    Check template has no instance names (bob, alice)
-    fork        Check fork has no 'gptme-agent-template' references in code  
+    fork        Check fork has no 'gptme-agent-template' references in code
     auto        Auto-detect from git remote (default)
 
 DESCRIPTION:
     Validates naming patterns in template and fork repositories.
-    
+
     Template mode ensures the template stays clean for forking by catching
     any instance-specific names (bob, alice) that should remain generic.
-    
+
     Fork mode ensures forked agents have replaced template references while
     allowing documentation to reference the template for context.
 
 EXAMPLES:
     # Let script auto-detect mode
     check-names.sh
-    
+
     # Explicit template validation
     check-names.sh template
-    
-    # Explicit fork validation  
+
+    # Explicit fork validation
     check-names.sh fork
 
 PRE-COMMIT INTEGRATION:
@@ -82,7 +82,7 @@ fi
 case "$MODE" in
     template)
         echo "Checking template mode: no instance names allowed..."
-        
+
         # Template validation: catch any bob/alice references
         # Exclude dotfiles/install.sh which legitimately uses these for env detection
         if git grep -i "bob\|alice" -- $EXCLUDES ':!dotfiles/install.sh' 2>/dev/null; then
@@ -90,13 +90,13 @@ case "$MODE" in
             echo "   These should remain as generic placeholders like 'agent'"
             exit 1
         fi
-        
+
         echo "✓ Template validation passed"
         ;;
-    
+
     fork)
         echo "Checking fork mode: no template references in code..."
-        
+
         # Fork validation: ensure template name replaced in code
         # Auto-exclude documentation areas where template references provide context
         FORK_EXCLUDES="$EXCLUDES"
@@ -104,16 +104,16 @@ case "$MODE" in
         FORK_EXCLUDES="$FORK_EXCLUDES :!*.md"  # Markdown docs can reference template
         FORK_EXCLUDES="$FORK_EXCLUDES :!dotfiles/.config/git/hooks/"
         FORK_EXCLUDES="$FORK_EXCLUDES :!scripts/github/"  # Monitoring scripts may track template
-        
+
         if git grep -i "gptme-agent-template" -- $FORK_EXCLUDES 2>/dev/null; then
             echo "❌ Found 'gptme-agent-template' references in code"
             echo "   These should be replaced with your agent's name"
             exit 1
         fi
-        
+
         echo "✓ Fork validation passed"
         ;;
-    
+
     *)
         echo "Error: Invalid mode '$MODE'"
         echo ""

@@ -32,6 +32,7 @@ check-names:
 	@# Exclusions:
 	@#   - Makefile, fork.sh, fork.py: forking scripts need agent names
 	@#   - analyze-lesson-usage.py: needs configurable agent name list
+	@#   - check-names.sh: validation script documents the names it checks
 	@if [ "$(shell basename $(CURDIR))" = "gptme-contrib" ]; then \
-		! git grep -i "bob\|alice\|erik@|@gmail" -- ':!Makefile' ':!fork.sh' ':!scripts/fork.py' ':!packages/lessons/src/lessons/analyze-lesson-usage.py'; \
+		! git grep -i "bob\|alice\|erik@|@gmail" -- ':!Makefile' ':!fork.sh' ':!scripts/fork.py' ':!packages/lessons/src/lessons/analyze-lesson-usage.py' ':!scripts/precommit/check-names.sh'; \
 	fi
