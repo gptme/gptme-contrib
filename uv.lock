@@ -11,6 +11,8 @@ resolution-markers = [
 [manifest]
 members = [
     "gptmail",
+    "gptme-attention-history",
+    "gptme-attention-router",
     "gptme-cc-analyze",
     "gptme-consortium",
     "gptme-contrib-workspace",
@@ -648,6 +650,50 @@ sdist = { url = "https://files.pythonhosted.org/packages/cf/48/95c9aa7ab0c6144de
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cd/14/8da70aa8ed9b937d4a01dfa875450b7b857a691c58b75ebe3ebba42482e8/gptme-0.30.0-py3-none-any.whl", hash = "sha256:bd414e431a6de6a31159ae7bbc2f7ac3ecb07091bdc64e572666b3d3c874236a", size = 407955, upload-time = "2025-11-18T11:26:28.414Z" },
 ]
+
+[[package]]
+name = "gptme-attention-history"
+version = "0.1.0"
+source = { editable = "plugins/attention-history" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", specifier = ">=0.27.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
+    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
+]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-attention-router"
+version = "0.1.0"
+source = { editable = "plugins/attention-router" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", specifier = ">=0.27.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
+    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "gptme-cc-analyze"
