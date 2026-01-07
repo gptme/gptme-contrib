@@ -15,6 +15,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Get the hooks directory for sourcing config
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # --- Part 1: Prevent master commits (allowlist approach) ---
 # By default, master/main commits are blocked in ALL repos.
 # Only repos matching ALLOWED_PATTERNS or detected as agent workspaces are allowed.
@@ -22,12 +25,9 @@ BRANCH=$(git branch --show-current 2>/dev/null)
 if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
     REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 
-    # Repos where master/main commits ARE allowed
-    # Add patterns for repos where you have push access to master
-    ALLOWED_PATTERNS=(
-        # Example: "your-org/your-repo"
-        # The agent's own repo is auto-detected below
-    )
+    # Source allowed repos from config file (shared with pre-push hook)
+    # Falls back to empty array if config doesn't exist (backwards compatible)
+    source "$HOOK_DIR/../allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
 
     is_allowed=false
 
@@ -62,14 +62,13 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
         echo "   git checkout -b feature-name origin/$BRANCH"
         echo ""
         echo "   To allow a specific repo, add it to ALLOWED_PATTERNS in:"
-        echo "   ~/.config/git/hooks/pre-commit"
+        echo "   ~/.config/git/allowed-repos.conf"
         echo ""
         exit 1
     fi
 fi
 
 # --- Part 2: Branch base validation (warning only) ---
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -x "$HOOK_DIR/validate-branch-base.sh" ]; then
     # Run validation but don't fail on warnings
     "$HOOK_DIR/validate-branch-base.sh" || true
