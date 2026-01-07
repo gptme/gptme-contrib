@@ -1,3 +1,43 @@
 #!/bin/bash
-# Pre-push hook: calls worktree tracking validation
-exec "$(dirname "$0")/validate-worktree-tracking.sh" "$@"
+# Pre-push hook: blocks direct pushes to master/main and validates worktree tracking
+#
+# Install globally:
+#   git config --global core.hooksPath <agent-workspace>/dotfiles/.config/git/hooks
+
+SCRIPT_DIR="$(dirname "$0")"
+
+# --- Master/Main Push Protection ---
+# Allow patterns (agent workspaces where master commits are expected)
+# These should match the ALLOWED_PATTERNS in pre-commit
+source "$SCRIPT_DIR/../allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
+
+REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+
+# Check if repo is in allowed patterns
+is_allowed=false
+for pattern in "${ALLOWED_PATTERNS[@]}"; do
+    if [[ "$REPO_NAME" == *"$pattern"* ]]; then
+        is_allowed=true
+        break
+    fi
+done
+
+# If not allowed, check for master/main pushes
+if [ "$is_allowed" = false ]; then
+    while read local_ref local_sha remote_ref remote_sha; do
+        if [[ "$remote_ref" == "refs/heads/master" || "$remote_ref" == "refs/heads/main" ]]; then
+            echo "🚫 ERROR: Direct push to $remote_ref blocked!"
+            echo ""
+            echo "This prevents accidental pushes that bypass PR review."
+            echo ""
+            echo "If intentional, use: git push --no-verify"
+            echo "Otherwise, create a branch:"
+            echo "  git checkout -b feature-branch"
+            echo "  git push -u origin feature-branch"
+            exit 1
+        fi
+    done
+fi
+
+# --- Worktree Tracking Validation ---
+exec "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
