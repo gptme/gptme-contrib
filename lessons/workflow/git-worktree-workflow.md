@@ -35,6 +35,35 @@ last_used: '2025-11-04T18:24:16.449224Z'
 When creating new work, always `git fetch origin master` first, then create branch from `origin/master`.
 This prevents accidentally including uncommitted/unmerged changes.
 
+## Quick Start: Single-Command Workflow
+
+**For existing PRs** (checkout and resume work):
+```shell
+# Run from repo root (e.g., ~/gptme)
+PR=123 && \
+BRANCH=$(gh pr view $PR --json headRefName -q .headRefName) && \
+git fetch origin && \
+(git worktree list | grep -q "worktree/$BRANCH" || git worktree add "worktree/$BRANCH") && \
+cd "worktree/$BRANCH" && \
+gh pr checkout $PR
+```
+
+**For new work** (create branch and worktree):
+```shell
+# Run from repo root
+BRANCH="feature-name" && \
+git fetch origin && \
+(git worktree list | grep -q "worktree/$BRANCH" || git worktree add "worktree/$BRANCH" -b "$BRANCH" origin/master) && \
+cd "worktree/$BRANCH" && \
+git branch --unset-upstream && \
+git push -u origin "$BRANCH"
+```
+
+**Key points**:
+- `gh pr checkout` handles branch tracking automatically for existing PRs
+- The `grep -q` check reuses existing worktrees instead of failing
+- For new branches, `--unset-upstream` prevents accidental push to master
+
 ## Context
 When making changes to repositories you don't own (gptme, gptme-contrib, etc.) where you need to create PRs.
 
