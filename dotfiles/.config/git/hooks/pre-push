@@ -24,7 +24,7 @@ done
 
 # If not allowed, check for master/main pushes
 if [ "$is_allowed" = false ]; then
-    while read local_ref local_sha remote_ref remote_sha; do
+    while read _local_ref _local_sha remote_ref _remote_sha; do
         if [[ "$remote_ref" == "refs/heads/master" || "$remote_ref" == "refs/heads/main" ]]; then
             echo "🚫 ERROR: Direct push to $remote_ref blocked!"
             echo ""
