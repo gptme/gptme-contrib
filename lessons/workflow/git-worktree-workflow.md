@@ -153,27 +153,15 @@ git branch --unset-upstream
 git push -u origin feature
 ```
 
-**Pre-push hook safeguard**:
-
-The dotfiles in this repository include a pre-push hook that blocks direct pushes to
-master/main in external repositories. Install globally with:
-
-```shell
-git config --global core.hooksPath <agent-workspace>/dotfiles/.config/git/hooks
-```
-
-The hook can be customized via `dotfiles/.config/git/allowed-repos.conf` to allow
-direct master commits in your agent's workspace.
-
 ## Outcome
 Following this pattern results in:
 - **Parallel work**: Multiple features simultaneously
 - **Clean separation**: Each feature has own directory
 - **No duplicates**: Checking first avoids duplicates
 - **Safe base**: origin/master prevents accidental commits
-- **Protected master**: Pre-push hook blocks accidental direct pushes
 
 ## Related
 - [Git Workflow](./git-workflow.md) - Commit practices and branch verification (read together!)
 - [When to Rebase PRs](./when-to-rebase-prs.md) - Rebase workflow
 - [Git Remote Branch Pushing](./git-remote-branch-pushing.md) - Pushing to upstream branches
+- [dotfiles/README.md](../../dotfiles/README.md) - Global git hooks setup (pre-commit, pre-push protection)
