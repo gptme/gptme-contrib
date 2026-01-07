@@ -43,7 +43,7 @@ This prevents accidentally including uncommitted/unmerged changes.
 PR=123 && \
 BRANCH=$(gh pr view $PR --json headRefName -q .headRefName) && \
 git fetch origin && \
-(git worktree list | grep -q "worktree/$BRANCH" || git worktree add "worktree/$BRANCH") && \
+(git worktree list | grep -q "worktree/$BRANCH" || git worktree add "worktree/$BRANCH" -b "$BRANCH") && \
 cd "worktree/$BRANCH" && \
 gh pr checkout $PR
 ```
