@@ -165,7 +165,15 @@ git push -u origin feature
 **Historical incidents**:
 - Session 1295 (2025-11-24): Image Gen Phase 3.1 pushed to master
 - Session 1296 (2025-11-24): Image Gen Phase 3.2 pushed to master
+- 2026-01-07: CI caching improvements pushed directly to gptme-infra master (Issue #228)
 - Root cause: Used `git worktree add -b name origin/master` without unsetting upstream
+
+**Pre-push hook safeguard**:
+A global pre-push hook is now installed at `~/bob/scripts/git-hooks/pre-push` that blocks
+direct pushes to master/main in external repositories. Configure with:
+```shell
+git config --global core.hooksPath ~/bob/scripts/git-hooks
+```
 
 **Before implementing new features - Check existing capabilities**:
 ```shell
