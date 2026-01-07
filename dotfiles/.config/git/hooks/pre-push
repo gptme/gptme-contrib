@@ -1,3 +1,55 @@
 #!/bin/bash
-# Pre-push hook: calls worktree tracking validation
-exec "$(dirname "$0")/validate-worktree-tracking.sh" "$@"
+# Pre-push hook: blocks direct pushes to master/main and validates worktree tracking
+#
+# Install globally:
+#   git config --global core.hooksPath ~/.config/git/hooks
+
+SCRIPT_DIR="$(dirname "$0")"
+
+# --- Master/Main Push Protection ---
+# Source allowed repos from config file (shared with pre-commit hook)
+# Falls back to empty array if config doesn't exist (backwards compatible)
+source "$SCRIPT_DIR/../allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
+
+REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
+
+# Check if repo is in allowed patterns (matches against REMOTE_URL like pre-commit)
+is_allowed=false
+for pattern in "${ALLOWED_PATTERNS[@]}"; do
+    if [ -n "$pattern" ] && [[ "$REMOTE_URL" == *"$pattern"* ]]; then
+        is_allowed=true
+        break
+    fi
+done
+
+# Auto-detect agent workspace (has gptme.toml with [agent] section)
+if [ "$is_allowed" = false ] && [ -f "gptme.toml" ]; then
+    if grep -q '\[agent\]' "gptme.toml" 2>/dev/null; then
+        is_allowed=true
+    fi
+fi
+
+# Template repo itself (for development)
+if [ "$is_allowed" = false ] && [[ "$REMOTE_URL" == *"gptme-agent-template"* ]]; then
+    is_allowed=true
+fi
+
+# If not allowed, check for master/main pushes
+if [ "$is_allowed" = false ]; then
+    while read _local_ref _local_sha remote_ref _remote_sha; do
+        if [[ "$remote_ref" == "refs/heads/master" || "$remote_ref" == "refs/heads/main" ]]; then
+            echo "🚫 ERROR: Direct push to $remote_ref blocked!"
+            echo ""
+            echo "This prevents accidental pushes that bypass PR review."
+            echo ""
+            echo "If intentional, use: git push --no-verify"
+            echo "Otherwise, create a branch:"
+            echo "  git checkout -b feature-branch"
+            echo "  git push -u origin feature-branch"
+            exit 1
+        fi
+    done
+fi
+
+# --- Worktree Tracking Validation ---
+exec "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"

@@ -21,6 +21,7 @@ The dotfiles install global git hooks that apply to ALL repositories:
 - **Pre-commit integration**: Auto-stages files modified by formatters
 
 #### pre-push
+- **Master push protection**: Blocks direct pushes to master/main in external repos
 - **Worktree tracking**: Validates upstream tracking before push
 - Prevents pushing to wrong branches
 
@@ -32,7 +33,7 @@ The dotfiles install global git hooks that apply to ALL repositories:
 
 ### Adding Allowed Repos
 
-Edit `.config/git/hooks/pre-commit` and add patterns to `ALLOWED_PATTERNS` (repos where master commits are permitted):
+Edit `.config/git/allowed-repos.conf` to add repos where direct master/main commits and pushes are permitted:
 
 ```bash
 ALLOWED_PATTERNS=(
@@ -42,15 +43,18 @@ ALLOWED_PATTERNS=(
 )
 ```
 
+This file is sourced by both `pre-commit` and `pre-push` hooks.
+
 ## Structure
 
 ```txt
 dotfiles/
 ├── .config/
 │   └── git/
+│       ├── allowed-repos.conf           # Repos where master commits/pushes allowed
 │       └── hooks/
 │           ├── pre-commit               # Main pre-commit hook
-│           ├── pre-push                 # Pre-push validation
+│           ├── pre-push                 # Pre-push protection + validation
 │           ├── post-checkout            # Post-checkout warnings
 │           ├── validate-branch-base.sh  # Branch base checking
 │           └── validate-worktree-tracking.sh  # Worktree validation

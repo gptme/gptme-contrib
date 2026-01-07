@@ -45,15 +45,6 @@ Observable signals that you need worktrees:
 - Multiple agents/runs could conflict on same branch
 - Working on external repo where you need to create PR
 
-- About to implement a feature that might already exist in the codebase
-- Received request to "add" or "extend" functionality without verifying current capabilities
-- Resuming multi-phase task where main task file shows phase completion but lacks implementation details
-- Need to understand what was actually implemented vs. what was skipped in previous sessions
-- Resuming multi-phase task where main task file shows phase completion but lacks implementation details
-- Need to understand what was actually implemented vs. what was skipped in previous sessions
-- Spent 15-20+ minutes on same problem without progress
-- Multiple failed attempts (2-3+) at solving an issue
-- Unclear how to proceed with a technical challenge
 ## Pattern
 Core workflow using ORIGINAL upstream branch names:
 ```shell
@@ -162,74 +153,6 @@ git branch --unset-upstream
 git push -u origin feature
 ```
 
-**Historical incidents**:
-- Session 1295 (2025-11-24): Image Gen Phase 3.1 pushed to master
-- Session 1296 (2025-11-24): Image Gen Phase 3.2 pushed to master
-- Root cause: Used `git worktree add -b name origin/master` without unsetting upstream
-
-**Before implementing new features - Check existing capabilities**:
-```shell
-# 1. Check imports for relevant libraries (yaml, json, etc.)
-cat tool.py | head -100
-grep "^import\|^from" tool.py
-
-# 2. Check main() or CLI for existing flags
-grep "def main" tool.py -A 50
-grep "argparse\|--config\|--" tool.py
-
-# 3. Search for implementation patterns
-grep "if config:\|load.*yaml\|parse.*config" tool.py
-
-# 4. Check for partial implementations
-grep -n "TODO\|FIXME\|NotImplemented" tool.py
-```
-
-**Result**: Often reveals feature already exists, reducing work from "implement feature" to "use existing feature" or "add one config entry".
-
-**Checking phase status documents**:
-```shell
-# When resuming multi-phase tasks, check for detailed status files
-ls knowledge/*-phase*-status.md
-
-# Example: Main task shows "Phase 2.2 complete" but unclear what that means
-cat knowledge/implement-unified-message-system-phase2-status.md
-
-# Look for:
-# - Session-by-session progress (Session 789, 790, etc.)
-# - Implementation decisions ("decided to SKIP rate limiting")
-# - Actual completion details beyond main task file
-# - What was implemented vs. what was deferred
-```
-
-**Why phase status files matter**:
-- Main task files show high-level phase completion
-- Status files contain session-specific decisions and context
-- Critical details like "SKIP X" or "defer Y" often only in status files
-- Reveals actual implementation state for resuming work
-
-## When Stuck: Research Before Extended Stumbling
-
-If you encounter problems during worktree workflow:
-
-```shell
-# After 15-20 minutes stuck OR 2-3 failed attempts:
-# 1. Stop and research the specific issue
-#    Use Perplexity or other research tools
-#    Example queries:
-#    - "git worktree branch tracking not working"
-#    - "gh pr checkout sets upstream automatically"
-#    - "git push fatal: no upstream branch"
-
-# 2. Apply solution found through research
-# 3. Document what worked in commit message or notes
-```
-
-**Why this matters**:
-- Prevents 20+ minute stumbling sessions
-- Leverages existing knowledge from community
-- Research can resolve issues in ~2 minutes vs extended trial-and-error
-- Accelerates learning by understanding root cause
-
 ## Outcome
 Following this pattern results in:
 - **Parallel work**: Multiple features simultaneously
@@ -237,14 +160,8 @@ Following this pattern results in:
 - **No duplicates**: Checking first avoids duplicates
 - **Safe base**: origin/master prevents accidental commits
 
-- **Avoid duplicate work**: Discover existing implementations before building
-- **Faster completion**: Use existing features instead of reimplementing
-- **Better code quality**: Leverage tested, existing functionality
-- **Better context**: Session-specific decisions and implementation details
-- **Avoid rework**: Understand what was skipped vs. completed
-- **Faster problem resolution**: Research resolves blocks in ~2 minutes vs 20+ minutes of stumbling
-- **Reduced frustration**: Avoid repeated failed attempts on same issue
 ## Related
 - [Git Workflow](./git-workflow.md) - Commit practices and branch verification (read together!)
 - [When to Rebase PRs](./when-to-rebase-prs.md) - Rebase workflow
 - [Git Remote Branch Pushing](./git-remote-branch-pushing.md) - Pushing to upstream branches
+- [dotfiles/README.md](../../dotfiles/README.md) - Global git hooks setup (pre-commit, pre-push protection)
