@@ -6,6 +6,11 @@
 
 SCRIPT_DIR="$(dirname "$0")"
 
+# Store stdin for reuse (git provides: local_ref local_sha remote_ref remote_sha)
+# This is needed because we may read stdin in the master/main check
+# and need it again for worktree tracking validation
+STDIN_CONTENT=$(cat)
+
 # --- Master/Main Push Protection ---
 # Source allowed repos from config file (shared with pre-commit hook)
 # Falls back to empty array if config doesn't exist (backwards compatible)
@@ -48,8 +53,9 @@ if [ "$is_allowed" = false ]; then
             echo "  git push -u origin feature-branch"
             exit 1
         fi
-    done
+    done <<< "$STDIN_CONTENT"
 fi
 
 # --- Worktree Tracking Validation ---
-exec "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
+# Pass stored stdin to validation script
+echo "$STDIN_CONTENT" | "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
