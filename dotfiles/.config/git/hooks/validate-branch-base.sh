@@ -15,6 +15,15 @@ if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
     exit 0
 fi
 
+# Skip check if branch already tracks a remote on origin (it's a PR branch)
+# These branches are intentionally not rebased until merge time
+upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+if [[ "$upstream" =~ ^origin/ ]]; then
+    # Branch is tracking origin - it's already pushed/in a PR
+    # Don't warn about being behind master; rebasing PRs during review is usually undesirable
+    exit 0
+fi
+
 # Get merge base with origin/master (try both master and main)
 merge_base=""
 for remote_branch in origin/master origin/main; do
