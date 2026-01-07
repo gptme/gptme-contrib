@@ -7,7 +7,7 @@ test: test-packages test-integration  ## Run all tests
 
 test-integration:  ## Run integration tests (git hooks, etc.)
 	@echo "Running integration tests..."
-	python3 -m pytest tests/integration/ -v
+	uv run --with pytest pytest tests/integration/ -v
 
 typecheck: typecheck-packages  ## Run all type checks
 
