@@ -104,6 +104,7 @@ case "$MODE" in
         FORK_EXCLUDES="$FORK_EXCLUDES :!*.md"  # Markdown docs can reference template
         FORK_EXCLUDES="$FORK_EXCLUDES :!dotfiles/.config/git/hooks/"
         FORK_EXCLUDES="$FORK_EXCLUDES :!scripts/github/"  # Monitoring scripts may track template
+        FORK_EXCLUDES="$FORK_EXCLUDES :!tests/"  # Tests may reference template for validation
 
         if git grep -i "gptme-agent-template" -- $FORK_EXCLUDES 2>/dev/null; then
             echo "❌ Found 'gptme-agent-template' references in code"

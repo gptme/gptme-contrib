@@ -3,7 +3,11 @@
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-test: test-packages  ## Run all tests
+test: test-packages test-integration  ## Run all tests
+
+test-integration:  ## Run integration tests (git hooks, etc.)
+	@echo "Running integration tests..."
+	python3 -m pytest tests/integration/ -v
 
 typecheck: typecheck-packages  ## Run all type checks
 
