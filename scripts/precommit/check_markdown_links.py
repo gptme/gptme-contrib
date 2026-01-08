@@ -26,7 +26,7 @@ LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 SKIP_PROTOCOLS = ("http://", "https://", "ftp://", "mailto:", "#")
 
 # Directories to skip
-SKIP_DIRS = {"worktree", ".git", "node_modules", "__pycache__", ".venv"}
+SKIP_DIRS = {"worktree", ".git", "node_modules", "__pycache__", ".venv", "templates"}
 
 
 def get_repo_root() -> Path:
