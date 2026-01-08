@@ -67,7 +67,7 @@ if [ "$MODE" = "--help" ] || [ "$MODE" = "-h" ]; then
 fi
 
 # Exclusions common to both modes (exclude validation scripts themselves)
-EXCLUDES=":!scripts/precommit/check-names.sh :!Makefile :!fork.sh :!scripts/fork.py"
+EXCLUDES=":!scripts/precommit/check-names.sh :!Makefile :!fork.sh :!scripts/fork.sh :!scripts/fork.py"
 
 # Auto-detect mode from git remote if not specified
 if [ "$MODE" = "auto" ]; then
