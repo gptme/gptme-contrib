@@ -43,15 +43,23 @@ get_service_name() {
 # Defaults
 counter=0
 max_runs=-1  # -1 means infinite
+COOLDOWN=10  # seconds between runs
 SERVICE_NAME=""
 
 # Parse command line arguments
-while getopts "n:s:h" opt; do
+while getopts "n:s:c:h" opt; do
     case $opt in
         n)
             max_runs=$OPTARG
             if ! [[ "$max_runs" =~ ^[0-9]+$ ]] || [ "$max_runs" -lt 1 ]; then
                 echo "Error: -n parameter must be a positive integer"
+                exit 1
+            fi
+            ;;
+        c)
+            COOLDOWN=$OPTARG
+            if ! [[ "$COOLDOWN" =~ ^[0-9]+$ ]] || [ "$COOLDOWN" -lt 0 ]; then
+                echo "Error: -c parameter must be a non-negative integer (seconds)"
                 exit 1
             fi
             ;;
@@ -62,10 +70,11 @@ while getopts "n:s:h" opt; do
             ;;
         h)
             detected=$(get_service_name)
-            echo "Usage: $0 [-n number_of_runs] [-s service_name]"
+            echo "Usage: $0 [-n number_of_runs] [-c cooldown_seconds] [-s service_name]"
             echo ""
             echo "Options:"
             echo "  -n: Number of runs (default: infinite)"
+            echo "  -c: Cooldown seconds between runs (default: 10)"
             echo "  -s: Service name (default: derived from AGENT_NAME or gptme.toml)"
             echo ""
             echo "Service name resolution order:"
@@ -81,7 +90,7 @@ while getopts "n:s:h" opt; do
             exit 0
             ;;
         \?)
-            echo "Usage: $0 [-n number_of_runs] [-s service_name]"
+            echo "Usage: $0 [-n number_of_runs] [-c cooldown_seconds] [-s service_name]"
             exit 1
             ;;
     esac
@@ -112,6 +121,7 @@ if [ "$max_runs" -eq -1 ]; then
 else
     echo "Running $max_runs time(s)"
 fi
+echo "Cooldown: ${COOLDOWN}s between runs"
 echo "Press Ctrl+C to stop manually"
 echo ""
 
@@ -149,6 +159,9 @@ while true; do
     echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
     echo ""
 
-    # Short delay between runs to avoid rapid-fire execution
-    sleep 10
+    # Cooldown between runs
+    if [ "$COOLDOWN" -gt 0 ]; then
+        echo "Cooling down for ${COOLDOWN}s..."
+        sleep "$COOLDOWN"
+    fi
 done
