@@ -211,6 +211,11 @@ def list_(sort, active_only, context, output_json, output_jsonl):
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
+        if output_json:
+            print(json.dumps({"tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            return  # Empty output for JSONL
         console.print("[red]No tasks found[/]")
         return
 
@@ -1212,6 +1217,11 @@ def ready(state, output_json, output_jsonl, use_cache):
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
+        if output_json:
+            print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
         return
 
@@ -1472,6 +1482,8 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
         if output_json:
             print(json.dumps({"stale_tasks": [], "count": 0}, indent=2))
             return
+        if output_jsonl:
+            return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
         return
 
