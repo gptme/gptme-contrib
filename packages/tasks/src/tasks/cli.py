@@ -898,9 +898,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},
         "waiting_for": {"type": "string"},
+        "parent": {"type": "string"},  # Parent task ID (for subtasks)
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
-        "depends": {"type": "list"},
+        "depends": {"type": "list"},  # Deprecated, use blocks instead
+        "blocks": {"type": "list"},  # Blocking dependencies (canonical)
+        "related": {"type": "list"},  # Related items (informational)
+        "discovered-from": {"type": "list"},  # Tasks this was discovered from
         "output_types": {"type": "list"},
     }
 
