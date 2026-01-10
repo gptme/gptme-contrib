@@ -1897,6 +1897,15 @@ def stale(days: int, state: str, output_json: bool):
         tasks.py stale --json             # Machine-readable output
     """
     console = Console()
+
+    # Validate days parameter
+    if days <= 0:
+        if output_json:
+            print(json.dumps({"error": "--days must be a positive integer"}, indent=2))
+            raise SystemExit(1)
+        console.print("[red]Error: --days must be a positive integer[/]")
+        raise SystemExit(1)
+
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
