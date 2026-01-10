@@ -29,6 +29,9 @@ Observable signals that structured approach is needed:
 - Jumping directly to work without context gathering
 - Sessions ending abruptly without proper completion
 - Spending too much time on setup vs. actual progress
+- Treating "waiting for response" as "blocked" (they're different!)
+- Claiming "all blocked" when TERTIARY work exists
+- Not using `tasks.py ready` to find available work
 
 ## Pattern
 
@@ -65,25 +68,33 @@ head -20 journal/most-recent-entry.md
 **CRITICAL RULE**: If ANY incomplete communication loops are found → **FIX THEM IMMEDIATELY** before starting new work. This prevents cascade failures where memory gaps compound across sessions.
 
 ### Phase 2: Task Selection (3-5 minutes)
+
+**CASCADE Task Selection** - Check sources in order, proceed when work is found:
+
+**PRIMARY**: Check work queue
 ```shell
-# Check external commitments (SECONDARY in CASCADE)
-gh issue list --assignee @me --state open
+# Check queue for planned work
+cat state/queue-manual.md | head -50  # "Planned Next" section
+```
 
-# Check ready tasks - tasks with no blockers (TERTIARY in CASCADE)
-# Use --json for machine-readable output in automated workflows
-./scripts/tasks.py ready --json | jq '.ready_tasks[] | "\(.priority): \(.name)"'
+**SECONDARY**: Check notifications for direct requests
+```shell
+# Check for mentions, assignments, updates
+gh api notifications --jq '.[] | {reason, subject: .subject.title}'
+```
 
-# Get recommended next task with reasoning
-./scripts/tasks.py next --json | jq '.next_task'
+**TERTIARY**: Check workspace tasks for ready work
+```shell
+# Find tasks ready for work (no unmet dependencies)
+./scripts/tasks.py ready --json | jq '.ready_tasks[:3]'
 
-# Full status for context (human-readable overview)
+# Or use compact status view
 ./scripts/tasks.py status --compact
 ```
 
-**CASCADE Priority Order**:
-1. **PRIMARY**: Work queue (state/queue-manual.md) - planned next items
-2. **SECONDARY**: Direct requests - GitHub assignments, notifications, mentions
-3. **TERTIARY**: Ready workspace tasks - `tasks.py ready` shows unblocked work
+**CRITICAL - Waiting vs Blocked**:
+- **Blocked**: Cannot proceed - hard dependency not met
+- **Waiting**: Awaiting response - CAN proceed with other work
 
 **About the Work Queue (PRIMARY)**:
 The work queue (`state/queue-manual.md`) is the agent's **primary planning document** for tracking priorities across sessions.
@@ -136,7 +147,20 @@ cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
-**Purpose**: Identify highest-value work to focus session time on
+**Opening an issue ≠ blocked**. Creating an issue for a collaborator is an async handoff:
+1. Open issue with clear question/request
+2. Set `waiting_for` in task metadata (see command below)
+3. Move immediately to SECONDARY/TERTIARY work
+4. Response will surface later via notifications
+
+```shell
+# When task is waiting (not blocked), update metadata using tasks.py:
+./scripts/tasks.py edit <task-name> --set waiting_for "Response on PR #123"
+./scripts/tasks.py edit <task-name> --set waiting_since 2025-01-10
+# Then proceed to next ready work
+```
+
+**Purpose**: Identify highest-value work, distinguish blocked vs waiting, keep momentum
 
 ### Phase 3: Work Execution (15-25 minutes)
 - Make concrete progress on selected task
