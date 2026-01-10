@@ -13,11 +13,18 @@ All functionality lives in packages/tasks - this just forwards calls.
 
 import subprocess
 import sys
+from pathlib import Path
+
+# Get the directory containing this script
+SCRIPT_DIR = Path(__file__).parent.absolute()
+# packages/tasks is relative to the gptme-contrib root
+TASKS_PKG_DIR = SCRIPT_DIR.parent / "packages" / "tasks"
 
 if __name__ == "__main__":
     # Forward all arguments to the tasks package module
+    # Run from packages/tasks directory so uv can find the module
     result = subprocess.run(
         ["uv", "run", "python3", "-m", "tasks"] + sys.argv[1:],
-        cwd=None,  # Use current directory
+        cwd=str(TASKS_PKG_DIR),
     )
     sys.exit(result.returncode)
