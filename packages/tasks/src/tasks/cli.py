@@ -2042,12 +2042,23 @@ def sync(update, output_json):
         console.print("[yellow]No tasks found![/]")
         return
 
-    # Find tasks with tracking_issue field
+    # Find tasks with tracking field (support both new 'tracking' list and legacy 'tracking_issue')
     tasks_with_tracking = []
     for task in all_tasks:
-        tracking = task.metadata.get("tracking_issue")
+        # Try new 'tracking' field first (list of URLs)
+        tracking = task.metadata.get("tracking")
         if tracking:
-            tasks_with_tracking.append((task, tracking))
+            if isinstance(tracking, list):
+                # Add task once per tracked URL
+                for track_url in tracking:
+                    tasks_with_tracking.append((task, track_url))
+            else:
+                tasks_with_tracking.append((task, tracking))
+        else:
+            # Fall back to legacy 'tracking_issue' field
+            tracking_issue = task.metadata.get("tracking_issue")
+            if tracking_issue:
+                tasks_with_tracking.append((task, tracking_issue))
 
     if not tasks_with_tracking:
         if output_json:
@@ -2056,15 +2067,15 @@ def sync(update, output_json):
                     {
                         "synced_tasks": [],
                         "count": 0,
-                        "message": "No tasks with tracking_issue found",
+                        "message": "No tasks with tracking field found",
                     },
                     indent=2,
                 )
             )
             return
-        console.print("[yellow]No tasks with tracking_issue field found![/]")
+        console.print("[yellow]No tasks with tracking field found![/]")
         console.print(
-            "\n[dim]Add tracking_issue to frontmatter: tracking_issue: 'owner/repo#123'[/]"
+            "\n[dim]Add tracking to frontmatter: tracking: ['https://github.com/owner/repo/issues/123'][/]"
         )
         return
 
@@ -2531,9 +2542,17 @@ def import_issues(source, repo, team, state, label, assignee, limit, dry_run, ou
     existing_tasks = load_tasks(tasks_dir)
     existing_tracking = set()
     for task in existing_tasks:
-        tracking = task.metadata.get("tracking_issue")
+        # Support both new 'tracking' (list) and legacy 'tracking_issue' (string)
+        tracking = task.metadata.get("tracking")
         if tracking:
-            existing_tracking.add(tracking)
+            if isinstance(tracking, list):
+                existing_tracking.update(tracking)
+            else:
+                existing_tracking.add(tracking)
+        # Legacy support
+        tracking_issue = task.metadata.get("tracking_issue")
+        if tracking_issue:
+            existing_tracking.add(tracking_issue)
 
     # Fetch issues based on source
     if source == "github":
@@ -2680,7 +2699,7 @@ def fetch_github_issues(repo: str, state: str, labels: List[str], assignee: Opti
                 "labels": [l["name"] for l in issue.get("labels", [])],
                 "url": issue["url"],
                 "body": issue.get("body", "")[:500] if issue.get("body") else "",
-                "tracking_ref": f"{repo}#{issue['number']}",
+                "tracking_ref": issue["url"],  # Use full URL, same as Linear
                 "source": "github",
             })
         return issues
@@ -2805,7 +2824,7 @@ def generate_task_content(issue: Dict[str, Any], source: str, priority: Optional
         "---",
         f"state: {task_state}",
         f"created: {datetime.now().strftime('%Y-%m-%d')}",
-        f"tracking_issue: '{issue['tracking_ref']}'",
+        f"tracking: ['{issue['tracking_ref']}']",  # List format, full URL
     ]
 
     if priority:
