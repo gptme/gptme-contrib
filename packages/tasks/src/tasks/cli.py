@@ -2259,5 +2259,188 @@ def update_task_state(task_path: Path, new_state: str) -> bool:
         return False
 
 
+@cli.command()
+@click.argument("task_id")
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def plan(task_id: str, output_json: bool):
+    """Show the impact of completing a task.
+
+    Analyzes what tasks would be unblocked if the specified task is completed.
+    Useful for prioritizing work based on impact.
+
+    The TASK_ID can be the numeric ID or task name.
+
+    Examples:
+        tasks.py plan 5                   # Impact analysis for task #5
+        tasks.py plan my-task-name        # By task name
+        tasks.py plan 5 --json            # Machine-readable output
+    """
+    console = Console()
+
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print(json.dumps({"error": "No tasks found"}, indent=2))
+            raise SystemExit(1)
+        console.print("[red]No tasks found![/]")
+        raise SystemExit(1)
+
+    # Create stable enumerated ID mapping
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+    enum_id_to_task = {i: task for i, task in enumerate(tasks_by_date, 1)}
+
+    # Resolve task_id to actual task
+    target_task = None
+
+    # Try as numeric ID first
+    try:
+        numeric_id = int(task_id)
+        if numeric_id in enum_id_to_task:
+            target_task = enum_id_to_task[numeric_id]
+    except ValueError:
+        pass
+
+    # Try as task name
+    if target_task is None:
+        for task in all_tasks:
+            if task.name == task_id or task.name == task_id.replace("-", "_"):
+                target_task = task
+                break
+
+    if target_task is None:
+        if output_json:
+            print(json.dumps({"error": f"Task '{task_id}' not found"}, indent=2))
+            raise SystemExit(1)
+        console.print(f"[red]Task '{task_id}' not found![/]")
+        raise SystemExit(1)
+
+    # Find all tasks that depend on this task (reverse dependency lookup)
+    dependent_tasks = []
+    for task in all_tasks:
+        if target_task.name in task.depends:
+            dependent_tasks.append(task)
+
+    # Calculate impact score
+    # Scoring:
+    # - Base: 1 point per dependent task
+    # - Priority bonus: high=3, medium=2, low=1
+    # - State bonus: active=2, new=1 (these would benefit most from unblocking)
+    impact_score = 0.0
+    priority_weights = {"high": 3, "medium": 2, "low": 1}
+    state_weights = {"active": 2, "new": 1}
+
+    impact_details = []
+    for dep_task in dependent_tasks:
+        task_impact = 1.0  # Base score
+        task_impact += priority_weights.get(dep_task.priority or "", 0)
+        task_impact += state_weights.get(dep_task.state or "", 0)
+        impact_score += task_impact
+        impact_details.append(
+            {
+                "task": dep_task.name,
+                "state": dep_task.state or "unknown",
+                "priority": dep_task.priority or "none",
+                "impact_contribution": task_impact,
+            }
+        )
+
+    # Check if this task has unmet dependencies itself
+    unmet_dependencies = []
+    for dep_name in target_task.depends:
+        for task in all_tasks:
+            if task.name == dep_name and task.state not in ["done", "cancelled"]:
+                unmet_dependencies.append(
+                    {"task": task.name, "state": task.state or "unknown"}
+                )
+                break
+
+    # JSON output
+    if output_json:
+        result = {
+            "task": target_task.name,
+            "task_id": name_to_enum_id[target_task.name],
+            "state": target_task.state or "unknown",
+            "priority": target_task.priority or "none",
+            "impact_analysis": {
+                "score": round(impact_score, 1),
+                "would_unblock": len(dependent_tasks),
+                "dependent_tasks": impact_details,
+            },
+            "blockers": {
+                "has_unmet_dependencies": len(unmet_dependencies) > 0,
+                "unmet_dependencies": unmet_dependencies,
+            },
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Rich console output
+    target_id = name_to_enum_id[target_task.name]
+    state_emoji = STATE_EMOJIS.get(target_task.state or "untracked", "•")
+
+    console.print(f"\n[bold cyan]Impact Analysis: {target_task.name}[/] (#{target_id})")
+    console.print(f"State: {state_emoji} {target_task.state or 'unknown'}")
+    console.print(f"Priority: {target_task.priority or 'none'}")
+
+    # Show unmet dependencies (blockers for this task)
+    if unmet_dependencies:
+        console.print(
+            f"\n[bold red]⚠ Blocked by {len(unmet_dependencies)} unmet dependencies:[/]"
+        )
+        for dep in unmet_dependencies:
+            dep_emoji = STATE_EMOJIS.get(dep["state"], "•")
+            console.print(f"  - {dep_emoji} {dep['task']} ({dep['state']})")
+
+    # Show what would be unblocked
+    console.print(f"\n[bold green]Impact Score: {impact_score:.1f}[/]")
+
+    if dependent_tasks:
+        console.print(
+            f"\n[bold]Completing this task would unblock {len(dependent_tasks)} task(s):[/]"
+        )
+
+        table = Table()
+        table.add_column("Task", style="white")
+        table.add_column("State", style="blue")
+        table.add_column("Priority", style="yellow")
+        table.add_column("Impact", style="green", justify="right")
+
+        for detail in impact_details:
+            task_emoji = STATE_EMOJIS.get(str(detail["state"]), "•")
+            table.add_row(
+                str(detail["task"]),
+                f"{task_emoji} {detail['state']}",
+                str(detail["priority"]),
+                f"+{detail['impact_contribution']:.1f}",
+            )
+
+        console.print(table)
+    else:
+        console.print("\n[dim]No tasks depend on this task (leaf node).[/]")
+
+    # Summary recommendation
+    console.print()
+    if impact_score >= 5:
+        console.print(
+            "[bold green]High impact![/] Completing this task will significantly unblock progress."
+        )
+    elif impact_score >= 2:
+        console.print(
+            "[yellow]Moderate impact.[/] Consider prioritizing if other high-impact tasks are blocked."
+        )
+    else:
+        console.print("[dim]Low impact.[/] This is a leaf task or has few dependents.")
+
+
 if __name__ == "__main__":
     cli()
