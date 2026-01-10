@@ -127,6 +127,13 @@ cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 
 *If no queue exists*: Skip PRIMARY and proceed to SECONDARY. Create queue when you have clear multi-session priorities.
 
+*Git policy*: **Commit the queue** - provides audit trail of agent planning and enables coordination across sessions/agents. Queue changes should be committed with journal entries to track planning evolution.
+
+*Useful tasks.py commands*:
+- `tasks.py sync --json` - Compare task/issue states, find out-of-sync items
+- `tasks.py stale --days 30` - Surface neglected tasks for review
+- `tasks.py plan <task>` - Show task impact analysis before starting work
+
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
 **Purpose**: Identify highest-value work to focus session time on
