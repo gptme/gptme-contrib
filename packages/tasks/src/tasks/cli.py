@@ -1176,6 +1176,7 @@ def check(fix: bool, task_files: list[str]):
 
 # Add priority ranking to the top of the file, after imports
 PRIORITY_RANK: dict[str | None, int] = {
+    "urgent": 4,
     "high": 3,
     "medium": 2,
     "low": 1,
@@ -1727,7 +1728,7 @@ def ready(state, output_json):
     # Sort by priority (high to low) and then by creation date (oldest first)
     ready_tasks.sort(
         key=lambda t: (
-            -PRIORITY_RANK.get(t.priority or "", 0),
+            -t.priority_rank,
             t.created,
         )
     )
@@ -1836,7 +1837,7 @@ def next_(output_json):
     # Sort tasks by priority (high to low) and then by creation date (oldest first)
     ready_tasks.sort(
         key=lambda t: (
-            -PRIORITY_RANK.get(t.priority or "", 0),
+            -t.priority_rank,
             t.created,
         )
     )
