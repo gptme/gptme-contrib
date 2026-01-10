@@ -2007,5 +2007,257 @@ def stale(days: int, state: str, output_json: bool):
     console.print("[dim]Run [bold]tasks.py show <id>[/] to inspect a task's details[/]")
 
 
+@cli.command("sync")
+@click.option(
+    "--update",
+    is_flag=True,
+    help="Update task states to match GitHub issue states",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def sync(update, output_json):
+    """Sync task states with linked GitHub issues.
+
+    Finds tasks with tracking_issue field in frontmatter and compares
+    their state with the linked GitHub issue state.
+
+    Use --update to automatically update task states to match issue states.
+    Use --json for machine-readable output.
+
+    GitHub state mapping:
+    - OPEN issue -> task should be active/new
+    - CLOSED issue -> task should be done
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Find tasks with tracking_issue field
+    tasks_with_tracking = []
+    for task in all_tasks:
+        tracking = task.metadata.get("tracking_issue")
+        if tracking:
+            tasks_with_tracking.append((task, tracking))
+
+    if not tasks_with_tracking:
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "synced_tasks": [],
+                        "count": 0,
+                        "message": "No tasks with tracking_issue found",
+                    },
+                    indent=2,
+                )
+            )
+            return
+        console.print("[yellow]No tasks with tracking_issue field found![/]")
+        console.print(
+            "\n[dim]Add tracking_issue to frontmatter: tracking_issue: 'owner/repo#123'[/]"
+        )
+        return
+
+    # Check each task against GitHub
+    results = []
+    for task, tracking_ref in tasks_with_tracking:
+        # Parse tracking reference (supports owner/repo#123 or full URL)
+        issue_info = parse_tracking_ref(tracking_ref)
+        if not issue_info:
+            results.append(
+                {
+                    "task": task.name,
+                    "tracking": tracking_ref,
+                    "error": "Could not parse tracking reference",
+                    "task_state": task.state,
+                    "issue_state": None,
+                    "in_sync": False,
+                }
+            )
+            continue
+
+        # Fetch GitHub issue state
+        issue_state = fetch_github_issue_state(issue_info["repo"], issue_info["number"])
+        if issue_state is None:
+            results.append(
+                {
+                    "task": task.name,
+                    "tracking": tracking_ref,
+                    "error": "Could not fetch issue state from GitHub",
+                    "task_state": task.state,
+                    "issue_state": None,
+                    "in_sync": False,
+                }
+            )
+            continue
+
+        # Determine expected task state based on issue state
+        expected_state = "done" if issue_state == "CLOSED" else (task.state or "active")
+        if issue_state == "OPEN" and task.state == "done":
+            expected_state = "active"  # Reopened issue
+
+        in_sync = (issue_state == "CLOSED" and task.state == "done") or (
+            issue_state == "OPEN" and task.state in ["new", "active", "paused"]
+        )
+
+        result = {
+            "task": task.name,
+            "tracking": tracking_ref,
+            "task_state": task.state,
+            "issue_state": issue_state,
+            "expected_state": expected_state,
+            "in_sync": in_sync,
+        }
+
+        # Update task if requested and out of sync
+        if update and not in_sync:
+            if update_task_state(task.path, expected_state):
+                result["updated"] = True
+                result["new_state"] = expected_state
+            else:
+                result["error"] = "Failed to update task file"
+
+        results.append(result)
+
+    # Output results
+    if output_json:
+        output = {
+            "synced_tasks": results,
+            "count": len(results),
+            "in_sync": sum(1 for r in results if r.get("in_sync", False)),
+            "out_of_sync": sum(1 for r in results if not r.get("in_sync", False)),
+        }
+        if update:
+            output["updated"] = sum(1 for r in results if r.get("updated", False))
+        print(json.dumps(output, indent=2))
+        return
+
+    # Rich table output
+    table = Table(title=f"[bold]Task-Issue Sync Status[/] ({len(results)} tracked)")
+    table.add_column("Task", style="cyan")
+    table.add_column("Issue", style="blue")
+    table.add_column("Task State", style="yellow")
+    table.add_column("Issue State", style="green")
+    table.add_column("Status", style="white")
+
+    for result in results:
+        if result.get("error"):
+            status = f"[red]Error: {result['error']}[/]"
+        elif result.get("in_sync"):
+            status = "[green]✓ In sync[/]"
+        elif result.get("updated"):
+            status = f"[blue]→ Updated to {result['new_state']}[/]"
+        else:
+            status = f"[yellow]⚠ Out of sync (expected: {result.get('expected_state', 'unknown')})[/]"
+
+        table.add_row(
+            result["task"][:30],
+            result.get("tracking", "")[:25],
+            result.get("task_state", ""),
+            result.get("issue_state", "N/A"),
+            status,
+        )
+
+    console.print(table)
+
+    out_of_sync = sum(
+        1 for r in results if not r.get("in_sync", False) and not r.get("error")
+    )
+    if out_of_sync > 0 and not update:
+        console.print(
+            f"\n[dim]Run with --update to sync {out_of_sync} out-of-sync tasks[/]"
+        )
+
+
+def parse_tracking_ref(ref: str) -> Optional[Dict[str, str]]:
+    """Parse tracking reference to extract repo and issue number.
+
+    Supports formats:
+    - owner/repo#123
+    - https://github.com/owner/repo/issues/123
+    - https://github.com/owner/repo/pull/123
+    """
+    # Full URL format
+    url_match = re.match(r"https://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)", ref)
+    if url_match:
+        return {"repo": url_match.group(1), "number": url_match.group(3)}
+
+    # Short format: owner/repo#123
+    short_match = re.match(r"([^/]+/[^#]+)#(\d+)", ref)
+    if short_match:
+        return {"repo": short_match.group(1), "number": short_match.group(2)}
+
+    return None
+
+
+def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
+    """Fetch GitHub issue/PR state using gh CLI."""
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "view",
+                number,
+                "--repo",
+                repo,
+                "--json",
+                "state",
+                "-q",
+                ".state",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        # Try as PR if issue fails
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                number,
+                "--repo",
+                repo,
+                "--json",
+                "state",
+                "-q",
+                ".state",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+    return None
+
+
+def update_task_state(task_path: Path, new_state: str) -> bool:
+    """Update task frontmatter state field."""
+    try:
+        post = frontmatter.load(task_path)
+        post["state"] = new_state
+        with open(task_path, "w") as f:
+            f.write(frontmatter.dumps(post))
+        return True
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     cli()
