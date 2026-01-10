@@ -62,22 +62,22 @@ class DirectoryConfig:
 # Deprecated state aliases - these map to their canonical state
 # Used by normalize_state() to provide backward compatibility
 DEPRECATED_STATE_ALIASES: dict[str, str] = {
-    "new": "backlog",      # new → backlog (untriaged work)
+    "new": "backlog",  # new → backlog (untriaged work)
     "someday": "backlog",  # someday → backlog (deferred work)
-    "paused": "backlog",   # paused → backlog (intentionally deferred)
+    "paused": "backlog",  # paused → backlog (intentionally deferred)
 }
 
 
 def normalize_state(state: str, warn: bool = True) -> str:
     """Normalize deprecated state aliases to their canonical form.
-    
+
     Args:
         state: The state string to normalize
         warn: If True, emit deprecation warning for deprecated states
-        
+
     Returns:
         The canonical state (or original if already canonical/unknown)
-        
+
     Examples:
         >>> normalize_state("new")
         'backlog'
@@ -85,7 +85,7 @@ def normalize_state(state: str, warn: bool = True) -> str:
         'active'
     """
     import warnings
-    
+
     if state in DEPRECATED_STATE_ALIASES:
         canonical = DEPRECATED_STATE_ALIASES[state]
         if warn:
@@ -93,7 +93,7 @@ def normalize_state(state: str, warn: bool = True) -> str:
                 f"State '{state}' is deprecated, use '{canonical}' instead. "
                 f"Deprecated states will be removed in a future version.",
                 DeprecationWarning,
-                stacklevel=2
+                stacklevel=2,
             )
         return canonical
     return state
@@ -115,9 +115,18 @@ CONFIGS = {
         # - done: completed
         # - cancelled: won't do
         # Also accepts deprecated aliases: new, someday, paused (with warnings)
-        states=["backlog", "todo", "active", "waiting", "done", "cancelled",
-                # Deprecated aliases accepted for backward compatibility
-                "new", "someday", "paused"],
+        states=[
+            "backlog",
+            "todo",
+            "active",
+            "waiting",
+            "done",
+            "cancelled",
+            # Deprecated aliases accepted for backward compatibility
+            "new",
+            "someday",
+            "paused",
+        ],
         special_files=["README.md", "templates", "video-scripts"],
         emoji="📋",
     ),
@@ -546,7 +555,7 @@ def load_tasks(
             blocks_list = metadata.get("blocks", [])
             # Merge depends into blocks (blocks takes precedence if both exist)
             effective_blocks = blocks_list if blocks_list else depends_list
-            
+
             task = TaskInfo(
                 path=file,
                 name=file.stem,
@@ -626,7 +635,7 @@ def is_task_ready(
     - It has no blocking dependencies, OR
     - All its blocking dependencies are in "done" or "cancelled" state
     - All URL-based blocks are CLOSED (if cache provided)
-    
+
     Uses task.blocks (canonical) which includes both explicit blocks
     and deprecated depends entries.
 
@@ -642,7 +651,7 @@ def is_task_ready(
     blocks = task.blocks
     if not blocks:
         return True
-    
+
     # Separate URL-based and task-based blocks
     url_blocks = []
     task_blocks = []
@@ -651,7 +660,7 @@ def is_task_ready(
             url_blocks.append(block)
         else:
             task_blocks.append(block)
-    
+
     # Check task-based blocking dependencies
     for dep_name in task_blocks:
         dep_task = all_tasks.get(dep_name)
@@ -906,7 +915,7 @@ def fetch_linear_issue_state(identifier: str) -> Optional[str]:
 
 def update_task_state(task_path: Path, new_state: str) -> bool:
     """Update task frontmatter state field.
-    
+
     If new_state is a deprecated alias (new, someday, paused),
     it will be normalized to the canonical state (backlog) with a warning.
     """
