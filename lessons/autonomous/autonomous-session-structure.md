@@ -66,15 +66,26 @@ head -20 journal/most-recent-entry.md
 
 ### Phase 2: Task Selection (3-5 minutes)
 ```shell
-# Check external commitments
+# Check external commitments (SECONDARY in CASCADE)
 gh issue list --assignee @me --state open
 
-# Review local task status
-./scripts/tasks.py status --compact
+# Check ready tasks - tasks with no blockers (TERTIARY in CASCADE)
+# Use --json for machine-readable output in automated workflows
+./scripts/tasks.py ready --json | jq '.ready_tasks[] | "\(.priority): \(.name)"'
 
-# Select work that makes forward progress
-# Priority: GitHub issues > active tasks > new opportunities
+# Get recommended next task with reasoning
+./scripts/tasks.py next --json | jq '.next_task'
+
+# Full status for context (human-readable overview)
+./scripts/tasks.py status --compact
 ```
+
+**CASCADE Priority Order**:
+1. **PRIMARY**: Work queue (state/queue-manual.md) - planned next items
+2. **SECONDARY**: Direct requests - GitHub assignments, notifications, mentions
+3. **TERTIARY**: Ready workspace tasks - `tasks.py ready` shows unblocked work
+
+**Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
 **Purpose**: Identify highest-value work to focus session time on
 
@@ -164,9 +175,10 @@ git push origin master
 - Check recent journal entries → understand recent work context
 
 **Phase 2** (4 min):
-- `gh issue list --assignee @me` → found GitHub issue from collaborator
-- `./scripts/tasks.py status` → 2 tasks marked active but appear complete
-- Decision: Update task statuses, create new task based on recent insights
+- `gh issue list --assignee @me` → found GitHub issue from collaborator (SECONDARY)
+- `./scripts/tasks.py ready --json` → 4 ready tasks, highest priority: agent-hosting-patterns
+- `./scripts/tasks.py next --json` → recommends agent-hosting-patterns with reasoning
+- Decision: Work on GitHub issue (SECONDARY takes priority over TERTIARY)
 
 **Phase 3** (22 min):
 - Updated 2 task statuses from active → done
