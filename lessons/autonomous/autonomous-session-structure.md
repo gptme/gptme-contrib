@@ -248,9 +248,10 @@ git push origin master
 - Check recent journal entries → understand recent work context
 
 **Phase 2** (4 min):
-- `gh issue list --assignee @me` → found GitHub issue from collaborator
-- `./scripts/tasks.py status` → 2 tasks marked active but appear complete
-- Decision: Update task statuses, create new task based on recent insights
+- `gh issue list --assignee @me` → found GitHub issue from collaborator (SECONDARY)
+- `./scripts/tasks.py ready --json` → 4 ready tasks, highest priority: agent-hosting-patterns
+- `./scripts/tasks.py next --json` → recommends agent-hosting-patterns with reasoning
+- Decision: Work on GitHub issue (SECONDARY takes priority over TERTIARY)
 
 **Phase 3** (22 min):
 - Updated 2 task statuses from active → done
