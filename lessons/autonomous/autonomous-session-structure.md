@@ -85,6 +85,55 @@ gh issue list --assignee @me --state open
 2. **SECONDARY**: Direct requests - GitHub assignments, notifications, mentions
 3. **TERTIARY**: Ready workspace tasks - `tasks.py ready` shows unblocked work
 
+**About the Work Queue (PRIMARY)**:
+The work queue (`state/queue-manual.md`) is the agent's **primary planning document** for tracking priorities across sessions.
+
+*Agent maintains the queue*:
+- **Create** it when you have clear priorities to track
+- **Update** after each session (add new priorities, mark progress)
+- **Evict** completed items and outdated state
+- **Enrich** with links to issues, PRs, and related docs
+
+*Reading the queue*:
+```shell
+# Always read full queue (important context for updates later)
+cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
+```
+
+*Queue format best practices*:
+```markdown
+# Work Queue
+
+**Last Updated**: YYYY-MM-DD HH:MM UTC
+
+## Planned Next
+
+### Priority 1: [Task Name]
+**Tracking**: [Link to GitHub issue/PR]
+**Next Action**: [Specific next step - what to do immediately]
+**Context**: [Key links, related docs, dependencies]
+
+---
+
+### Priority 2: [Task Name]
+...
+```
+
+**Format guidance**:
+- **Avoid state fields** like "OPEN/CLOSED" - they get outdated; use `tasks.py sync` to check external state
+- **Rich in links** - issue URLs, PR links, documentation references
+- **Actionable next steps** - not "work on X" but "implement the foo function in bar.py"
+- **Evict completed items** - remove priorities after completion to keep queue focused
+
+*If no queue exists*: Skip PRIMARY and proceed to SECONDARY. Create queue when you have clear multi-session priorities.
+
+*Git policy*: **Commit the queue** - provides audit trail of agent planning and enables coordination across sessions/agents. Queue changes should be committed with journal entries to track planning evolution.
+
+*Useful tasks.py commands*:
+- `tasks.py sync --json` - Compare task/issue states, find out-of-sync items
+- `tasks.py stale --days 30` - Surface neglected tasks for review
+- `tasks.py plan <task>` - Show task impact analysis before starting work
+
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
 **Purpose**: Identify highest-value work to focus session time on
