@@ -100,14 +100,9 @@ gh pr comment $PR_NUMBER --repo $REPO --body "## ✅ All Review Comments Address
 
 Replied to all review threads individually. See thread replies for details.
 
-| Comment | Status |
-|---------|--------|
-| Issue A | ✅ Fixed in abc123 |
-| Issue B | ⚠️ Not addressing (rationale) |
-"
+- Issue A: Fixed in abc123
+- Issue B: Not addressing (rationale)"
 ```
-
-**Why same shell block?** Review comment thread replies have poor visibility - they're collapsed by default. The summary comment ensures the reviewer sees that you've addressed everything. Keeping them in one toolcall prevents partial completion.
 
 ## Anti-Patterns
 
@@ -140,29 +135,34 @@ gh pr comment 134 --body "All done"
 
 **✅ CORRECT: Read → Act → Reply workflow**
 
-The workflow has three phases:
-1. **Read**: Get all comments with compact jq output
-2. **Act**: Fix the issues mentioned (may take multiple commits!)
-3. **Reply**: Batch replies to threads + summary comment in one shell block
+The workflow has three distinct phases (NOT a single command sequence):
 
+### Phase 1: Read ALL comments
 ```shell
-# Phase 1: Read ALL comments with compact output
 gh api repos/$REPO/pulls/$PR_NUMBER/comments \
   --jq '.[] | {id, path, user: .user.login, body: (.body | split("\n")[0])}'
+```
 
-# Phase 2: (In between) Actually fix the issues in code, commit changes
+### Phase 2: Act on the feedback
+This happens OUTSIDE the shell - you exit, fix code, commit changes.
+May take multiple commits across multiple files.
 
-# Phase 3: Reply to EACH thread (after fixing!) + summary in one block
+### Phase 3: Reply to threads + post summary
+Only AFTER fixing issues, batch replies and summary in one block:
+```shell
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id1>/replies -f body="✅ Fixed in abc123" --jq '.id' &
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id2>/replies -f body="✅ Fixed in abc123" --jq '.id' &
 wait
+
+# Summary comment (plain text, not markdown table)
 gh pr comment $PR_NUMBER --body "## All Review Comments Addressed
 
-| Comment | Resolution |
-|---------|------------|
-| Issue 1 | ✅ Fixed in abc123 |
-| Issue 2 | ✅ Fixed in abc123 |"
+- Issue 1: Fixed in abc123
+- Issue 2: Fixed in abc123
+- Issue 3: Not addressing (rationale)"
 ```
+
+**Why batch replies + summary?** Review comment thread replies have poor visibility - they're collapsed by default. The summary comment ensures the reviewer sees everything addressed. Keep Phase 3 in one toolcall to prevent partial completion.
 
 ## jq Quick Reference for PR Reviews
 
