@@ -57,14 +57,28 @@ class DirectoryConfig:
     states: list[str]
     special_files: list[str]
     emoji: str  # Emoji for visual distinction
+    # Optional: deprecated state aliases that map to current states
+    deprecated_aliases: dict[str, str] | None = None
+
+
+# Deprecated state aliases - these map old state names to new canonical names
+# Used for backward compatibility with deprecation warnings
+TASK_STATE_ALIASES: dict[str, str] = {
+    "new": "backlog",  # 'new' is deprecated, use 'backlog'
+    "someday": "backlog",  # 'someday' is deprecated, use 'backlog'
+    "paused": "backlog",  # 'paused' is deprecated, use 'backlog'
+}
 
 
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",
-        states=["new", "active", "paused", "done", "cancelled", "someday"],
+        # New state model: backlog (not triaged), todo (ready), active (working),
+        # waiting (blocked on external), done, cancelled
+        states=["backlog", "todo", "active", "waiting", "done", "cancelled"],
         special_files=["README.md", "templates", "video-scripts"],
         emoji="📋",
+        deprecated_aliases=TASK_STATE_ALIASES,
     ),
     "tweets": DirectoryConfig(
         type_name="tweets",
@@ -90,12 +104,17 @@ PRIORITY_RANK: dict[str | None, int] = {
 
 # State-specific styling
 STATE_STYLES = {
-    # Tasks
-    "new": ("yellow", "new"),
+    # Tasks - new states
+    "backlog": ("dim", "backlog"),
+    "todo": ("yellow", "todo"),
     "active": ("blue", "active"),
-    "paused": ("cyan", "paused"),
+    "waiting": ("cyan", "waiting"),
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
+    # Deprecated task states (aliased to new states for display)
+    "new": ("dim", "backlog"),  # deprecated → backlog
+    "paused": ("dim", "backlog"),  # deprecated → backlog
+    "someday": ("dim", "backlog"),  # deprecated → backlog
     # Tweets
     "queued": ("yellow", "queued"),
     "approved": ("blue", "approved"),
@@ -112,11 +131,18 @@ STATE_STYLES = {
 
 # State emojis for consistent use
 STATE_EMOJIS = {
-    "new": "🆕",
+    # Task states - new model
+    "backlog": "📥",
+    "todo": "📋",
     "active": "🏃",
-    "paused": "⚪",
+    "waiting": "⏳",
     "done": "✅",
     "cancelled": "❌",
+    # Deprecated states (aliased for backward compatibility)
+    "new": "📥",  # deprecated → backlog
+    "paused": "📥",  # deprecated → backlog
+    "someday": "📥",  # deprecated → backlog
+    # System states
     "issues": "⚠️",
     "untracked": "❓",
     # priorities
@@ -124,6 +150,54 @@ STATE_EMOJIS = {
     "medium": "🟡",
     "low": "🟢",
 }
+
+
+def normalize_task_state(
+    state: str,
+    warn: bool = True,
+    logger: logging.Logger | None = None,
+) -> tuple[str, bool]:
+    """Normalize a task state, handling deprecated aliases.
+
+    Args:
+        state: The state value to normalize
+        warn: Whether to emit deprecation warnings
+        logger: Optional logger for warnings (defaults to module logger)
+
+    Returns:
+        Tuple of (normalized_state, was_deprecated)
+        - normalized_state: The canonical state name
+        - was_deprecated: True if the input was a deprecated alias
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    # Check if state is a deprecated alias
+    if state in TASK_STATE_ALIASES:
+        canonical = TASK_STATE_ALIASES[state]
+        if warn:
+            logger.warning(
+                f"State '{state}' is deprecated. Use '{canonical}' instead. "
+                f"This will become an error in a future version."
+            )
+        return canonical, True
+
+    return state, False
+
+
+def get_valid_task_states(include_deprecated: bool = True) -> list[str]:
+    """Get list of valid task states.
+
+    Args:
+        include_deprecated: If True, include deprecated aliases in the list
+
+    Returns:
+        List of valid state names
+    """
+    states = list(CONFIGS["tasks"].states)
+    if include_deprecated:
+        states.extend(TASK_STATE_ALIASES.keys())
+    return states
 
 
 # =============================================================================

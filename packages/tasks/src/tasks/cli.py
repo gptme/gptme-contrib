@@ -49,6 +49,7 @@ from tasks.utils import (
     CONFIGS,
     STATE_STYLES,
     STATE_EMOJIS,
+    TASK_STATE_ALIASES,
     # Core utilities
     find_repo_root,
     load_tasks,
@@ -56,6 +57,7 @@ from tasks.utils import (
     is_task_ready,
     resolve_tasks,
     StateChecker,
+    get_valid_task_states,
     # Tracking and state
     parse_tracking_ref,
     fetch_github_issue_state,
@@ -886,9 +888,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
     changes: list[tuple[str, str, str | None]] = []
 
     # Define valid fields and their validation rules
+    # Include deprecated state aliases for backward compatibility
     VALID_FIELDS: dict[str, dict[str, object]] = {
-        # Required fields
-        "state": {"type": "enum", "values": CONFIGS["tasks"].states},
+        # Required fields - include deprecated aliases with warnings
+        "state": {
+            "type": "enum",
+            "values": get_valid_task_states(include_deprecated=True),
+        },
         "created": {"type": "date"},
         # Optional fields with validation
         "priority": {"type": "enum", "values": ["high", "medium", "low", "none"]},
@@ -935,6 +941,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     f"[red]Invalid {field}: {value}. Valid values: {valid}[/]"
                 )
                 return
+            # Normalize deprecated state aliases with warning
+            if field == "state" and value in TASK_STATE_ALIASES:
+                canonical = TASK_STATE_ALIASES[value]
+                console.print(
+                    f"[yellow]⚠️  State '{value}' is deprecated. "
+                    f"Use '{canonical}' instead.[/]"
+                )
+                value = canonical
         elif field_spec["type"] == "date":
             try:
                 # Parse and validate the date format
