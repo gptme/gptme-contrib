@@ -46,16 +46,12 @@ git commit -m "fix: address review feedback"
 git push
 ```
 
-### Step 3: Reply to threads in parallel + resolve (single toolcall!)
+### Step 3: Reply to threads + resolve (single toolcall!)
 ```shell
-# Batch all replies with --jq to suppress verbose output
-gh api repos/owner/repo/pulls/123/comments/<id1>/replies \
-  -f body="✅ Fixed in commit abc123" --jq '.id' &
-gh api repos/owner/repo/pulls/123/comments/<id2>/replies \
-  -f body="✅ Fixed in commit abc123" --jq '.id' &
-gh api repos/owner/repo/pulls/123/comments/<id3>/replies \
-  -f body="⚠️ Not addressing: low priority" --jq '.id' &
-wait
+# Reply to threads using the extension (cleaner than gh api)
+gh pr-review comments reply <pr> --thread-id "PRRT_thread1" --body "✅ Fixed in commit abc123"
+gh pr-review comments reply <pr> --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
+gh pr-review comments reply <pr> --thread-id "PRRT_thread3" --body "⚠️ Not addressing: low priority"
 
 # Then resolve all threads
 gh pr-review threads resolve <pr> --thread-id "PRRT_thread1"
@@ -67,42 +63,36 @@ gh pr-review threads list <pr> --unresolved
 # Should return empty []
 ```
 
-**Why `--jq '.id'`?** Raw `gh api` POST responses include ~30 fields. The jq filter returns only the comment ID, reducing context usage by ~90%.
-
-**Why parallel with `&` and `wait`?** Posting replies sequentially wastes time. Parallel execution is faster and keeps all replies in one toolcall.
+**Why use `gh pr-review comments reply`?** Cleaner than raw `gh api` - the extension handles GraphQL thread IDs natively and produces minimal output.
 
 **Key commands:**
 - `threads list [pr] [--unresolved] [--mine]` - List review threads
 - `threads resolve [pr] --thread-id <id>` - Mark thread as resolved
 - `threads unresolve [pr] --thread-id <id>` - Reopen a thread
+- `comments reply [pr] --thread-id <id> --body <text>` - Reply to a review thread
 
 ## Anti-Patterns
 **Don't resolve without addressing:**
 ```shell
 # ❌ WRONG: Resolve without fix or reply
-gh pr-review threads resolve ... --thread-id "PRRT_xyz"
+gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"
 
-# ❌ WRONG: Verbose API output polluting context
-gh api .../comments/<id>/replies -f body="Fixed"  # Returns ~30 fields!
-
-# ❌ WRONG: Sequential replies (slow, multiple toolcalls)
-gh api .../comments/<id1>/replies -f body="Fixed"
-gh api .../comments/<id2>/replies -f body="Fixed"  # Separate toolcall
+# ❌ WRONG: Using verbose gh api instead of extension
+gh api repos/owner/repo/pulls/123/comments/<id>/replies -f body="Fixed"
+# Returns ~30 fields of verbose output!
 ```
 
 **Do this instead:**
 ```shell
-# ✅ CORRECT: Fix, reply in parallel with jq, then resolve
+# ✅ CORRECT: Fix, reply using extension, then resolve
 git commit -m "fix: address review feedback"
 git push
 
-# Batch parallel replies with suppressed output
-gh api .../comments/<id1>/replies -f body="✅ Fixed" --jq '.id' &
-gh api .../comments/<id2>/replies -f body="✅ Fixed" --jq '.id' &
-wait
+# Reply using the extension (cleaner, minimal output)
+gh pr-review comments reply <pr> --thread-id "PRRT_xyz" --body "✅ Fixed"
 
 # Then resolve
-gh pr-review threads resolve ... --thread-id "PRRT_xyz"
+gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"
 ```
 
 ## Outcome
@@ -117,4 +107,4 @@ Following this pattern results in:
 - Blog post: https://agyn.io/blog/gh-pr-review-cli-agent-workflows
 
 ## Origin
-2026-01-10 Issue #242: Erik introduced the gh-pr-review extension for resolving review comments/threads programmatically.
+2026-01-10 ErikBjare/bob#242: Erik introduced the gh-pr-review extension for resolving review comments/threads programmatically.
