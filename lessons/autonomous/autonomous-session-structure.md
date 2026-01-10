@@ -86,19 +86,25 @@ gh issue list --assignee @me --state open
 3. **TERTIARY**: Ready workspace tasks - `tasks.py ready` shows unblocked work
 
 **About the Work Queue (PRIMARY)**:
-The work queue is a workspace-specific file that tracks planned work priorities.
+The work queue (`state/queue-manual.md`) is the agent's **primary planning document** for tracking priorities across sessions.
 
-*Creating and maintaining the queue*:
+*Agent maintains the queue*:
+- **Create** it when you have clear priorities to track
+- **Update** after each session (add new priorities, mark progress)
+- **Evict** completed items and outdated state
+- **Enrich** with links to issues, PRs, and related docs
+
+*Reading the queue*:
 ```shell
 # Check if queue exists
 if [ -f state/queue-manual.md ]; then
-    cat state/queue-manual.md | head -50  # Read planned work
+    head -50 state/queue-manual.md  # Read planned priorities
 else
-    echo "No work queue found - continue to SECONDARY"
+    echo "No work queue - continue to SECONDARY"
 fi
 ```
 
-*Queue format* (see your workspace's `state/queue-manual.md` for examples):
+*Queue format best practices*:
 ```markdown
 # Work Queue
 
@@ -107,9 +113,9 @@ fi
 ## Planned Next
 
 ### Priority 1: [Task Name]
-**STATUS**: Active / Blocked / Waiting
-**Issue**: [Link to tracking issue]
-**Actionable**: [Next concrete step]
+**Tracking**: [Link to GitHub issue/PR]
+**Next Action**: [Specific next step - what to do immediately]
+**Context**: [Key links, related docs, dependencies]
 
 ---
 
@@ -117,7 +123,13 @@ fi
 ...
 ```
 
-*If no queue exists*: Skip PRIMARY and proceed to SECONDARY. Agents can create a queue by adding `state/queue-manual.md` when they have clear priorities to track.
+**Format guidance**:
+- **Avoid state fields** like "OPEN/CLOSED" - they get outdated; use `tasks.py sync` to check external state
+- **Rich in links** - issue URLs, PR links, documentation references
+- **Actionable next steps** - not "work on X" but "implement the foo function in bar.py"
+- **Evict completed items** - remove priorities after completion to keep queue focused
+
+*If no queue exists*: Skip PRIMARY and proceed to SECONDARY. Create queue when you have clear multi-session priorities.
 
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
