@@ -26,7 +26,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
     Any,
@@ -1214,25 +1214,43 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     }
 
 
-def is_task_ready(task: TaskInfo, all_tasks: Dict[str, TaskInfo]) -> bool:
+def is_task_ready(
+    task: TaskInfo,
+    all_tasks: Dict[str, TaskInfo],
+    issue_cache: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Check if a task is ready (unblocked) to work on.
 
     A task is ready if:
     - It has no dependencies, OR
     - All its dependencies are in "done" or "cancelled" state
+    - All URL-based blocks are CLOSED (if cache provided)
 
     Args:
         task: Task to check
         all_tasks: Dictionary mapping task names to TaskInfo objects
+        issue_cache: Optional cache of issue states for URL-based blocks
 
     Returns:
         True if task is ready, False if blocked
     """
     if not task.depends:
-        # No dependencies = always ready
+        # Check URL-based blocks if cache provided
+        if issue_cache:
+            blocks = task.metadata.get("blocks", [])
+            if isinstance(blocks, str):
+                blocks = [blocks]
+            for block in blocks:
+                if isinstance(block, str) and block.startswith("http"):
+                    cached = issue_cache.get(block)
+                    if cached:
+                        # If URL is OPEN, task is blocked
+                        if cached.get("state") == "OPEN":
+                            return False
+                    # If not in cache, we can't determine - assume not blocked
         return True
 
-    # Check if all dependencies are completed
+    # Check if all task-based dependencies are completed
     for dep_name in task.depends:
         dep_task = all_tasks.get(dep_name)
         if dep_task is None:
@@ -1241,6 +1259,20 @@ def is_task_ready(task: TaskInfo, all_tasks: Dict[str, TaskInfo]) -> bool:
         if dep_task.state not in ["done", "cancelled"]:
             # Dependency not completed = blocked
             return False
+
+    # Check URL-based blocks if cache provided
+    if issue_cache:
+        blocks = task.metadata.get("blocks", [])
+        if isinstance(blocks, str):
+            blocks = [blocks]
+        for block in blocks:
+            if isinstance(block, str) and block.startswith("http"):
+                cached = issue_cache.get(block)
+                if cached:
+                    # If URL is OPEN, task is blocked
+                    if cached.get("state") == "OPEN":
+                        return False
+                # If not in cache, we can't determine - assume not blocked
 
     # All dependencies completed = ready
     return True
@@ -1683,13 +1715,20 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
     is_flag=True,
     help="Output as JSON for machine consumption",
 )
-def ready(state, output_json):
+@click.option(
+    "--use-cache",
+    "use_cache",
+    is_flag=True,
+    help="Check URL-based blocks against cached states (run 'fetch' first)",
+)
+def ready(state, output_json, use_cache):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
     Inspired by beads' `bd ready` command for finding work to do.
 
     Use --json for machine-readable output in autonomous workflows.
+    Use --use-cache to also check URL-based 'blocks' against cached issue states.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -1704,6 +1743,16 @@ def ready(state, output_json):
     # Create task lookup dictionary
     tasks_dict = {task.name: task for task in all_tasks}
 
+    # Load cache if requested
+    issue_cache: Optional[Dict[str, Any]] = None
+    if use_cache:
+        cache_path = get_cache_path(repo_root)
+        issue_cache = load_cache(cache_path)
+        if not issue_cache:
+            console.print(
+                "[yellow]Warning: Cache empty. Run 'tasks.py fetch' first.[/]"
+            )
+
     # Filter by state first
     if state == "new":
         filtered_tasks = [task for task in all_tasks if task.state == "new"]
@@ -1713,7 +1762,9 @@ def ready(state, output_json):
         filtered_tasks = [task for task in all_tasks if task.state in ["new", "active"]]
 
     # Filter for ready (unblocked) tasks
-    ready_tasks = [task for task in filtered_tasks if is_task_ready(task, tasks_dict)]
+    ready_tasks = [
+        task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)
+    ]
 
     if not ready_tasks:
         if output_json:
@@ -1785,13 +1836,20 @@ def ready(state, output_json):
     is_flag=True,
     help="Output as JSON for machine consumption",
 )
-def next_(output_json):
+@click.option(
+    "--use-cache",
+    "use_cache",
+    is_flag=True,
+    help="Check URL-based blocks against cached states (run 'fetch' first)",
+)
+def next_(output_json, use_cache):
     """Show the highest priority ready (unblocked) task.
 
     Picks from new or active tasks that have no dependencies
     or whose dependencies are all completed.
 
     Use --json for machine-readable output in autonomous workflows.
+    Use --use-cache to also check URL-based 'blocks' against cached issue states.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -1806,6 +1864,12 @@ def next_(output_json):
     # Create task lookup dictionary
     tasks_dict = {task.name: task for task in all_tasks}
 
+    # Load cache if requested
+    issue_cache: Optional[Dict[str, Any]] = None
+    if use_cache:
+        cache_path = get_cache_path(repo_root)
+        issue_cache = load_cache(cache_path)
+
     # Filter for new or active tasks
     workable_tasks = [task for task in all_tasks if task.state in ["new", "active"]]
     if not workable_tasks:
@@ -1813,7 +1877,10 @@ def next_(output_json):
         return
 
     # Filter for ready (unblocked) tasks
-    ready_tasks = [task for task in workable_tasks if is_task_ready(task, tasks_dict)]
+    ready_tasks = [
+        task for task in workable_tasks if is_task_ready(task, tasks_dict, issue_cache)
+    ]
+
     if not ready_tasks:
         if output_json:
             print(
@@ -2019,7 +2086,13 @@ def stale(days: int, state: str, output_json: bool):
     is_flag=True,
     help="Output as JSON for machine consumption",
 )
-def sync(update, output_json):
+@click.option(
+    "--use-cache",
+    "use_cache",
+    is_flag=True,
+    help="Use cached issue states instead of live API calls (run 'fetch' first)",
+)
+def sync(update, output_json, use_cache):
     """Sync task states with linked GitHub issues.
 
     Finds tasks with tracking_issue field in frontmatter and compares
@@ -2027,6 +2100,7 @@ def sync(update, output_json):
 
     Use --update to automatically update task states to match issue states.
     Use --json for machine-readable output.
+    Use --use-cache to check cached states (faster, run 'fetch' first).
 
     GitHub state mapping:
     - OPEN issue -> task should be active/new
@@ -2035,6 +2109,16 @@ def sync(update, output_json):
     console = Console()
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
+
+    # Load cache if requested
+    cache: Dict[str, Any] = {}
+    if use_cache:
+        cache_path = get_cache_path(repo_root)
+        cache = load_cache(cache_path)
+        if not cache:
+            console.print(
+                "[yellow]Warning: Cache is empty. Run 'tasks.py fetch' first.[/]"
+            )
 
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
@@ -2086,14 +2170,41 @@ def sync(update, output_json):
             )
             continue
 
-        # Fetch GitHub issue state
-        issue_state = fetch_github_issue_state(issue_info["repo"], issue_info["number"])
+        # Fetch GitHub issue state (from cache or live API)
+        issue_state = None
+
+        if use_cache:
+            # Try to find state in cache using URL format
+            # Construct URL from parsed info
+            issue_type = "issues"  # Default to issues
+            cache_url = f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
+            cached = cache.get(cache_url)
+
+            # Also try pull request URL
+            if not cached:
+                cache_url = f"https://github.com/{issue_info['repo']}/pull/{issue_info['number']}"
+                cached = cache.get(cache_url)
+
+            if cached:
+                issue_state = cached.get("state")
+
+        if issue_state is None and not use_cache:
+            # Fetch from GitHub API
+            issue_state = fetch_github_issue_state(
+                issue_info["repo"], issue_info["number"]
+            )
+
         if issue_state is None:
+            error_msg = (
+                "Issue not in cache (run 'tasks.py fetch' first)"
+                if use_cache
+                else "Could not fetch issue state from GitHub"
+            )
             results.append(
                 {
                     "task": task.name,
                     "tracking": tracking_ref,
-                    "error": "Could not fetch issue state from GitHub",
+                    "error": error_msg,
                     "task_state": task.state,
                     "issue_state": None,
                     "in_sync": False,
@@ -2440,6 +2551,294 @@ def plan(task_id: str, output_json: bool):
         )
     else:
         console.print("[dim]Low impact.[/] This is a leaf task or has few dependents.")
+
+
+# ============================================================================
+# Fetch Command - Cache external issue states
+# ============================================================================
+
+
+def get_cache_path(repo_root: Path) -> Path:
+    """Get path to issue state cache file."""
+    cache_dir = repo_root / "state"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / "issue-cache.json"
+
+
+def load_cache(cache_path: Path) -> Dict[str, Any]:
+    """Load existing cache or return empty dict."""
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+                return dict(data) if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
+    """Save cache to file with atomic write for crash safety."""
+    try:
+        # Write to temp file first, then rename for atomicity
+        temp_path = cache_path.with_suffix(".tmp")
+        with open(temp_path, "w") as f:
+            json.dump(cache, f, indent=2)
+        temp_path.rename(cache_path)
+    except IOError as e:
+        # Log but don't crash - cache is non-critical
+        import sys
+
+        print(f"Warning: Could not save cache: {e}", file=sys.stderr)
+
+
+def extract_external_urls(task: TaskInfo) -> List[str]:
+    """Extract external URLs from task's blocks, related, and tracking fields."""
+    urls = []
+
+    # Check tracking field (full URLs) - support both 'tracking' and 'tracking_issue'
+    # for compatibility with sync command
+    for field_name in ("tracking", "tracking_issue"):
+        tracking = task.metadata.get(field_name)
+        if tracking:
+            if isinstance(tracking, list):
+                for item in tracking:
+                    if isinstance(item, str) and item.startswith("http"):
+                        urls.append(item)
+            elif isinstance(tracking, str) and tracking.startswith("http"):
+                urls.append(tracking)
+
+    # Check blocks field
+    blocks = task.metadata.get("blocks")
+    if blocks:
+        if isinstance(blocks, list):
+            for item in blocks:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+        elif isinstance(blocks, str) and blocks.startswith("http"):
+            urls.append(blocks)
+
+    # Check related field
+    related = task.metadata.get("related")
+    if related:
+        if isinstance(related, list):
+            for item in related:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+        elif isinstance(related, str) and related.startswith("http"):
+            urls.append(related)
+
+    return urls
+
+
+def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
+    """Fetch state for a GitHub/Linear URL."""
+    # Parse GitHub URL
+    gh_match = re.match(r"https://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)", url)
+    if gh_match:
+        repo = gh_match.group(1)
+        number = gh_match.group(3)
+        state = fetch_github_issue_state(repo, number)
+        if state:
+            return {
+                "state": state,
+                "source": "github",
+                "repo": repo,
+                "number": number,
+            }
+        return None
+
+    # TODO: Add Linear support in future
+    # linear_match = re.match(r"https://linear\.app/[^/]+/issue/([^/]+)", url)
+
+    return None
+
+
+@cli.command("fetch")
+@click.option(
+    "--all",
+    "fetch_all",
+    is_flag=True,
+    help="Refresh all URLs ignoring cache age",
+)
+@click.option(
+    "--max-age",
+    type=click.IntRange(min=0),
+    default=3600,
+    help="Max cache age in seconds before refetch (default: 3600, must be >= 0)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.argument("urls", nargs=-1)
+def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...]):
+    """Fetch and cache external issue/PR states.
+
+    Retrieves state (open/closed) from GitHub URLs and caches locally.
+    This enables fast state checks in sync/ready commands without API calls.
+
+    By default, scans all tasks for external URLs in tracking, blocks,
+    and related fields. Pass explicit URLs to fetch specific items.
+
+    Cache is stored in state/issue-cache.json.
+
+    Examples:
+        tasks.py fetch                              # Fetch all external URLs from tasks
+        tasks.py fetch --all                        # Refresh all (ignore cache age)
+        tasks.py fetch https://github.com/o/r/issues/1  # Fetch specific URL
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    cache_path = get_cache_path(repo_root)
+    cache = load_cache(cache_path)
+    now = datetime.now(timezone.utc)
+
+    # Collect URLs to fetch
+    urls_to_fetch: Set[str] = set()
+
+    if urls:
+        # Explicit URLs provided
+        urls_to_fetch.update(urls)
+    else:
+        # Scan tasks for external URLs
+        tasks_dir = repo_root / "tasks"
+        all_tasks = load_tasks(tasks_dir)
+
+        for task in all_tasks:
+            task_urls = extract_external_urls(task)
+            urls_to_fetch.update(task_urls)
+
+    if not urls_to_fetch:
+        if output_json:
+            print(json.dumps({"fetched": 0, "cached": 0, "results": []}, indent=2))
+            return
+        console.print("[yellow]No external URLs found in tasks.[/]")
+        console.print(
+            "\n[dim]Add tracking, blocks, or related URLs to task frontmatter.[/]"
+        )
+        return
+
+    # Filter by cache age if not --all
+    if not fetch_all:
+        fresh_urls = set()
+        for url in urls_to_fetch:
+            cached = cache.get(url)
+            if cached:
+                try:
+                    cached_time = datetime.fromisoformat(
+                        cached.get("last_fetched", "1970-01-01T00:00:00")
+                    )
+                    # Handle timezone-naive cached times by assuming UTC
+                    if cached_time.tzinfo is None:
+                        cached_time = cached_time.replace(tzinfo=timezone.utc)
+                    age_seconds = (now - cached_time).total_seconds()
+                    if age_seconds < max_age:
+                        fresh_urls.add(url)
+                except (ValueError, TypeError):
+                    # Malformed cache entry - treat as stale
+                    pass
+
+        stale_urls = urls_to_fetch - fresh_urls
+    else:
+        stale_urls = urls_to_fetch
+        fresh_urls = set()
+
+    # Fetch stale URLs
+    results = []
+    fetched_count = 0
+    error_count = 0
+
+    for url in sorted(stale_urls):
+        result = {"url": url}
+        state_info = fetch_url_state(url)
+
+        if state_info:
+            cache[url] = {
+                "state": state_info["state"],
+                "source": state_info.get("source", "unknown"),
+                "last_fetched": now.isoformat(),
+            }
+            result["state"] = state_info["state"]
+            result["source"] = state_info.get("source", "unknown")
+            result["status"] = "fetched"
+            fetched_count += 1
+        else:
+            result["status"] = "error"
+            result["error"] = "Could not fetch state"
+            error_count += 1
+
+        results.append(result)
+
+    # Add cached results
+    for url in sorted(fresh_urls):
+        cached = cache.get(url, {})
+        results.append(
+            {
+                "url": url,
+                "state": cached.get("state"),
+                "source": cached.get("source"),
+                "status": "cached",
+                "cached_at": cached.get("last_fetched"),
+            }
+        )
+
+    # Save cache (even if only errors, to track last attempt)
+    save_cache(cache_path, cache)
+
+    # Output
+    if output_json:
+        output = {
+            "fetched": fetched_count,
+            "cached": len(fresh_urls),
+            "errors": error_count,
+            "total": len(urls_to_fetch),
+            "cache_path": str(cache_path),
+            "results": results,
+        }
+        print(json.dumps(output, indent=2))
+        return
+
+    # Rich table output
+    table = Table(title=f"[bold]Issue State Cache[/] ({len(urls_to_fetch)} URLs)")
+    table.add_column("URL", style="cyan", max_width=50)
+    table.add_column("State", style="green")
+    table.add_column("Source", style="blue")
+    table.add_column("Status", style="yellow")
+
+    for r in results:
+        url_display = r["url"]
+        if len(url_display) > 50:
+            url_display = "..." + url_display[-47:]
+
+        state = r.get("state", "N/A")
+        state_style = "green" if state == "OPEN" else "dim" if state == "CLOSED" else ""
+        source = r.get("source", "")
+
+        if r["status"] == "fetched":
+            status = "[green]✓ Fetched[/]"
+        elif r["status"] == "cached":
+            status = "[dim]⏸ Cached[/]"
+        else:
+            status = f"[red]✗ {r.get('error', 'Error')}[/]"
+
+        table.add_row(
+            url_display,
+            f"[{state_style}]{state}[/]" if state_style else state,
+            source,
+            status,
+        )
+
+    console.print(table)
+
+    # Summary
+    console.print(
+        f"\n[bold]Summary:[/] {fetched_count} fetched, {len(fresh_urls)} cached, {error_count} errors"
+    )
+    if fetched_count > 0:
+        console.print(f"[dim]Cache saved to: {cache_path}[/]")
 
 
 if __name__ == "__main__":
