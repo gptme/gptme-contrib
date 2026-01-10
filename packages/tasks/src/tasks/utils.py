@@ -916,7 +916,19 @@ def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
             }
         return None
 
-    # TODO: Add Linear support in future
-    # linear_match = re.match(r"https://linear\.app/[^/]+/issue/([^/]+)", url)
+    # Parse Linear URL
+    linear_match = re.match(r"https://linear\.app/([^/]+)/issue/([^/]+)", url)
+    if linear_match:
+        team = linear_match.group(1)
+        identifier = linear_match.group(2)
+        raw_state = fetch_linear_issue_state(identifier)
+        if raw_state:
+            return {
+                "state": raw_state,
+                "source": "linear",
+                "team": team,
+                "identifier": identifier,
+            }
+        return None
 
     return None

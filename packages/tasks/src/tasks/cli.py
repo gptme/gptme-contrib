@@ -59,6 +59,7 @@ from tasks.utils import (
     # Tracking and state
     parse_tracking_ref,
     fetch_github_issue_state,
+    fetch_linear_issue_state,
     update_task_state,
     # Cache
     get_cache_path,
@@ -1610,35 +1611,64 @@ def sync(update, output_json, use_cache):
             )
             continue
 
-        # Fetch GitHub issue state (from cache or live API)
+        # Fetch issue state (from cache or live API)
         issue_state = None
+        source = issue_info.get("source", "github")
 
-        if use_cache:
-            # Try to find state in cache using URL format
-            # Construct URL from parsed info
-            issue_type = "issues"  # Default to issues
-            cache_url = f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
-            cached = cache.get(cache_url)
-
-            # Also try pull request URL
-            if not cached:
-                cache_url = f"https://github.com/{issue_info['repo']}/pull/{issue_info['number']}"
+        if source == "github":
+            if use_cache:
+                # Try to find state in cache using URL format
+                # Construct URL from parsed info
+                issue_type = "issues"  # Default to issues
+                cache_url = f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
                 cached = cache.get(cache_url)
 
-            if cached:
-                issue_state = cached.get("state")
+                # Also try pull request URL
+                if not cached:
+                    cache_url = f"https://github.com/{issue_info['repo']}/pull/{issue_info['number']}"
+                    cached = cache.get(cache_url)
 
-        if issue_state is None and not use_cache:
-            # Fetch from GitHub API
-            issue_state = fetch_github_issue_state(
-                issue_info["repo"], issue_info["number"]
-            )
+                if cached:
+                    issue_state = cached.get("state")
+
+            if issue_state is None and not use_cache:
+                # Fetch from GitHub API
+                issue_state = fetch_github_issue_state(
+                    issue_info["repo"], issue_info["number"]
+                )
+
+        elif source == "linear":
+            identifier = issue_info.get("identifier", "")
+            team = issue_info.get("team", "")
+
+            if use_cache:
+                # Try to find state in cache using Linear URL format
+                cache_url = f"https://linear.app/{team}/issue/{identifier}"
+                cached = cache.get(cache_url)
+                if cached:
+                    # Linear states need normalization to OPEN/CLOSED
+                    raw_state = cached.get("state")
+                    if raw_state in ("completed", "canceled"):
+                        issue_state = "CLOSED"
+                    elif raw_state:
+                        issue_state = "OPEN"
+
+            if issue_state is None and not use_cache:
+                # Fetch from Linear API
+                raw_state = fetch_linear_issue_state(identifier)
+                if raw_state:
+                    # Normalize Linear states to OPEN/CLOSED
+                    if raw_state in ("completed", "canceled"):
+                        issue_state = "CLOSED"
+                    else:
+                        issue_state = "OPEN"
 
         if issue_state is None:
+            source_name = "Linear" if source == "linear" else "GitHub"
             error_msg = (
                 "Issue not in cache (run 'tasks.py fetch' first)"
                 if use_cache
-                else "Could not fetch issue state from GitHub"
+                else f"Could not fetch issue state from {source_name}"
             )
             results.append(
                 {
