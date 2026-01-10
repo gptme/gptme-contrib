@@ -2022,7 +2022,7 @@ def stale(days: int, state: str, output_json: bool):
 def sync(update, output_json):
     """Sync task states with linked GitHub issues.
 
-    Finds tasks with tracking_issue field in frontmatter and compares
+    Finds tasks with tracking field in frontmatter and compares
     their state with the linked GitHub issue state.
 
     Use --update to automatically update task states to match issue states.
@@ -2042,10 +2042,9 @@ def sync(update, output_json):
         console.print("[yellow]No tasks found![/]")
         return
 
-    # Find tasks with tracking field (support both new 'tracking' list and legacy 'tracking_issue')
+    # Find tasks with tracking field
     tasks_with_tracking = []
     for task in all_tasks:
-        # Try new 'tracking' field first (list of URLs)
         tracking = task.metadata.get("tracking")
         if tracking:
             if isinstance(tracking, list):
@@ -2054,11 +2053,6 @@ def sync(update, output_json):
                     tasks_with_tracking.append((task, track_url))
             else:
                 tasks_with_tracking.append((task, tracking))
-        else:
-            # Fall back to legacy 'tracking_issue' field
-            tracking_issue = task.metadata.get("tracking_issue")
-            if tracking_issue:
-                tasks_with_tracking.append((task, tracking_issue))
 
     if not tasks_with_tracking:
         if output_json:
@@ -2502,8 +2496,8 @@ def plan(task_id: str, output_json: bool):
 def import_issues(source, repo, team, state, label, assignee, limit, dry_run, output_json):
     """Import issues from GitHub or Linear as placeholder tasks.
 
-    Creates minimal task files with tracking_issue frontmatter linking back
-    to the source. Existing tasks with matching tracking_issue are skipped
+    Creates minimal task files with tracking frontmatter linking back
+    to the source. Existing tasks with matching tracking URLs are skipped
     to avoid duplicates.
 
     \b
@@ -2542,17 +2536,12 @@ def import_issues(source, repo, team, state, label, assignee, limit, dry_run, ou
     existing_tasks = load_tasks(tasks_dir)
     existing_tracking = set()
     for task in existing_tasks:
-        # Support both new 'tracking' (list) and legacy 'tracking_issue' (string)
         tracking = task.metadata.get("tracking")
         if tracking:
             if isinstance(tracking, list):
                 existing_tracking.update(tracking)
             else:
                 existing_tracking.add(tracking)
-        # Legacy support
-        tracking_issue = task.metadata.get("tracking_issue")
-        if tracking_issue:
-            existing_tracking.add(tracking_issue)
 
     # Fetch issues based on source
     if source == "github":
@@ -2667,7 +2656,18 @@ def import_issues(source, repo, team, state, label, assignee, limit, dry_run, ou
 
 
 def fetch_github_issues(repo: str, state: str, labels: List[str], assignee: Optional[str], limit: int) -> List[Dict[str, Any]]:
-    """Fetch issues from GitHub using gh CLI."""
+    """Fetch issues from GitHub using gh CLI.
+
+    Args:
+        repo: Repository in owner/repo format
+        state: Issue state filter (open, closed, all)
+        labels: List of labels to filter by
+        assignee: Filter by assignee (use 'me' for authenticated user)
+        limit: Maximum number of issues to fetch
+
+    Returns:
+        List of issue dicts with keys: number, title, state, labels, url, body, tracking_ref, source
+    """
     cmd = [
         "gh", "issue", "list",
         "--repo", repo,
@@ -2708,7 +2708,18 @@ def fetch_github_issues(repo: str, state: str, labels: List[str], assignee: Opti
 
 
 def fetch_linear_issues(team: str, state: str, limit: int) -> List[Dict[str, Any]]:
-    """Fetch issues from Linear using GraphQL API."""
+    """Fetch issues from Linear using GraphQL API.
+
+    Requires LOFTY_LINEAR_TOKEN or LINEAR_API_KEY environment variable.
+
+    Args:
+        team: Linear team key (e.g., 'ENG', 'SUDO')
+        state: Issue state filter (open, closed, all)
+        limit: Maximum number of issues to fetch
+
+    Returns:
+        List of issue dicts with keys: number, title, state, labels, url, body, tracking_ref, source
+    """
     import os
 
     token = os.environ.get("LOFTY_LINEAR_TOKEN") or os.environ.get("LINEAR_API_KEY")
