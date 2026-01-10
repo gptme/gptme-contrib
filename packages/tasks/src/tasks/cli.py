@@ -212,9 +212,11 @@ def list_(sort, active_only, context, output_json, output_jsonl):
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
         if output_json:
+            print("No tasks found", file=sys.stderr)
             print(json.dumps({"tasks": [], "count": 0}, indent=2))
             return
         if output_jsonl:
+            print("No tasks found", file=sys.stderr)
             return  # Empty output for JSONL
         console.print("[red]No tasks found[/]")
         return
@@ -1218,9 +1220,11 @@ def ready(state, output_json, output_jsonl, use_cache):
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
         if output_json:
+            print("No tasks found", file=sys.stderr)
             print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
             return
         if output_jsonl:
+            print("No tasks found", file=sys.stderr)
             return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
         return
@@ -1256,7 +1260,7 @@ def ready(state, output_json, output_jsonl, use_cache):
             print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
             return
         if output_jsonl:
-            return  # Empty output for JSONL when no tasks
+            return  # Empty output for JSONL
         console.print("[yellow]No ready tasks found![/]")
         console.print(
             "\n[dim]Tip: Try checking blocked tasks with --state to see dependencies[/]"
@@ -1480,9 +1484,11 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
         if output_json:
+            print("No tasks found", file=sys.stderr)
             print(json.dumps({"stale_tasks": [], "count": 0}, indent=2))
             return
         if output_jsonl:
+            print("No tasks found", file=sys.stderr)
             return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
         return
