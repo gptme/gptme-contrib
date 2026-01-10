@@ -149,14 +149,14 @@ cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 
 **Opening an issue ≠ blocked**. Creating an issue for a collaborator is an async handoff:
 1. Open issue with clear question/request
-2. Set `waiting_for: "response on #123"` in task metadata
+2. Set `waiting_for` in task metadata (see command below)
 3. Move immediately to SECONDARY/TERTIARY work
 4. Response will surface later via notifications
 
 ```shell
-# When task is waiting (not blocked), update metadata:
-# waiting_for: "Erik review on PR #123"
-# waiting_since: 2026-01-10
+# When task is waiting (not blocked), update metadata using tasks.py:
+./scripts/tasks.py edit <task-name> --set waiting_for "Response on PR #123"
+./scripts/tasks.py edit <task-name> --set waiting_since 2025-01-10
 # Then proceed to next ready work
 ```
 
