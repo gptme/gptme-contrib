@@ -923,8 +923,16 @@ def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
         identifier = linear_match.group(2)
         raw_state = fetch_linear_issue_state(identifier)
         if raw_state:
+            # Normalize Linear states to OPEN/CLOSED format
+            # Linear states like "completed", "canceled" → CLOSED
+            # Other states like "started", "backlog", "in_progress" → OPEN
+            normalized_state = (
+                "CLOSED"
+                if raw_state.lower() in ("completed", "canceled", "done")
+                else "OPEN"
+            )
             return {
-                "state": raw_state,
+                "state": normalized_state,
                 "source": "linear",
                 "team": team,
                 "identifier": identifier,
