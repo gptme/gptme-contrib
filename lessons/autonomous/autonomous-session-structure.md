@@ -85,6 +85,40 @@ gh issue list --assignee @me --state open
 2. **SECONDARY**: Direct requests - GitHub assignments, notifications, mentions
 3. **TERTIARY**: Ready workspace tasks - `tasks.py ready` shows unblocked work
 
+**About the Work Queue (PRIMARY)**:
+The work queue is a workspace-specific file that tracks planned work priorities.
+
+*Creating and maintaining the queue*:
+```shell
+# Check if queue exists
+if [ -f state/queue-manual.md ]; then
+    cat state/queue-manual.md | head -50  # Read planned work
+else
+    echo "No work queue found - continue to SECONDARY"
+fi
+```
+
+*Queue format* (see your workspace's `state/queue-manual.md` for examples):
+```markdown
+# Work Queue
+
+**Last Updated**: YYYY-MM-DD HH:MM UTC
+
+## Planned Next
+
+### Priority 1: [Task Name]
+**STATUS**: Active / Blocked / Waiting
+**Issue**: [Link to tracking issue]
+**Actionable**: [Next concrete step]
+
+---
+
+### Priority 2: [Task Name]
+...
+```
+
+*If no queue exists*: Skip PRIMARY and proceed to SECONDARY. Agents can create a queue by adding `state/queue-manual.md` when they have clear priorities to track.
+
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
 **Purpose**: Identify highest-value work to focus session time on
