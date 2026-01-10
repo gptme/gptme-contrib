@@ -2773,7 +2773,7 @@ def generate_task_filename(title: str, number: str | int, source: str) -> str:
 
     if source == "linear":
         # Linear identifiers are like "ENG-123"
-        return f"linear-{number.lower()}-{safe_title}.md"
+        return f"linear-{str(number).lower()}-{safe_title}.md"
     else:
         return f"gh-{number}-{safe_title}.md"
 
