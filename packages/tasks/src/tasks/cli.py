@@ -61,6 +61,7 @@ from tasks.utils import (
     fetch_github_issue_state,
     fetch_linear_issue_state,
     update_task_state,
+    normalize_state,
     # Cache
     get_cache_path,
     load_cache,
@@ -933,6 +934,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
 
         # Validate based on field type
         if field_spec["type"] == "enum":
+            # For state field, normalize deprecated values
+            if field == "state":
+                normalized = normalize_state(value, warn=True)
+                if normalized != value:
+                    console.print(
+                        f"[yellow]Note: State '{value}' is deprecated, normalizing to '{normalized}'[/]"
+                    )
+                    value = normalized
             if value not in field_spec["values"]:  # type: ignore[operator]
                 valid = ", ".join(field_spec["values"])  # type: ignore[arg-type]
                 console.print(
@@ -1096,6 +1105,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 if value is None:  # Clear field with "none" value
                     post.metadata.pop(field, None)
                 else:
+                    # Normalize deprecated states at write time (defense in depth)
+                    if field == "state":
+                        value = normalize_state(value, warn=False)
                     post.metadata[field] = value
 
         # Save changes

@@ -398,7 +398,9 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
     # Validate state value
     if "state" in metadata:
         state = metadata["state"]
-        if state not in CONFIGS["tasks"].states:
+        # Normalize deprecated states before validation
+        normalized_state = normalize_state(state, warn=False)
+        if normalized_state not in CONFIGS["tasks"].states:
             issues.append(f"Invalid state: {state}")
 
     # Validate created date format if string (accepts date-only or full datetime)
@@ -427,6 +429,17 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
 
     if "depends" in metadata and not isinstance(metadata["depends"], list):
         issues.append("Dependencies must be a list")
+
+    if "blocks" in metadata and not isinstance(metadata["blocks"], list):
+        issues.append("Blocks must be a list")
+
+    if "related" in metadata and not isinstance(metadata["related"], list):
+        issues.append("Related must be a list")
+
+    if "discovered-from" in metadata and not isinstance(
+        metadata["discovered-from"], list
+    ):
+        issues.append("Discovered-from must be a list")
 
     return issues
 
