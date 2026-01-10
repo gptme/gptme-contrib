@@ -2359,7 +2359,7 @@ def plan(task_id: str, output_json: bool):
     unmet_dependencies = []
     for dep_name in target_task.depends:
         for task in all_tasks:
-            if task.name == dep_name and task.state != "done":
+            if task.name == dep_name and task.state not in ["done", "cancelled"]:
                 unmet_dependencies.append(
                     {"task": task.name, "state": task.state or "unknown"}
                 )
