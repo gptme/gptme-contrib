@@ -2442,5 +2442,274 @@ def plan(task_id: str, output_json: bool):
         console.print("[dim]Low impact.[/] This is a leaf task or has few dependents.")
 
 
+# ============================================================================
+# Fetch Command - Cache external issue states
+# ============================================================================
+
+
+def get_cache_path(repo_root: Path) -> Path:
+    """Get path to issue state cache file."""
+    cache_dir = repo_root / "state"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / "issue-cache.json"
+
+
+def load_cache(cache_path: Path) -> Dict[str, Any]:
+    """Load existing cache or return empty dict."""
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+                return dict(data) if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
+    """Save cache to file."""
+    with open(cache_path, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def extract_external_urls(task: TaskInfo) -> List[str]:
+    """Extract external URLs from task's blocks, related, and tracking fields."""
+    urls = []
+
+    # Check tracking field (full URLs)
+    tracking = task.metadata.get("tracking")
+    if tracking:
+        if isinstance(tracking, list):
+            urls.extend(tracking)
+        elif isinstance(tracking, str):
+            urls.append(tracking)
+
+    # Check blocks field
+    blocks = task.metadata.get("blocks")
+    if blocks:
+        if isinstance(blocks, list):
+            for item in blocks:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+        elif isinstance(blocks, str) and blocks.startswith("http"):
+            urls.append(blocks)
+
+    # Check related field
+    related = task.metadata.get("related")
+    if related:
+        if isinstance(related, list):
+            for item in related:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+        elif isinstance(related, str) and related.startswith("http"):
+            urls.append(related)
+
+    return urls
+
+
+def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
+    """Fetch state for a GitHub/Linear URL."""
+    # Parse GitHub URL
+    gh_match = re.match(r"https://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)", url)
+    if gh_match:
+        repo = gh_match.group(1)
+        number = gh_match.group(3)
+        state = fetch_github_issue_state(repo, number)
+        if state:
+            return {
+                "state": state,
+                "source": "github",
+                "repo": repo,
+                "number": number,
+            }
+        return None
+
+    # TODO: Add Linear support in future
+    # linear_match = re.match(r"https://linear\.app/[^/]+/issue/([^/]+)", url)
+
+    return None
+
+
+@cli.command("fetch")
+@click.option(
+    "--all",
+    "fetch_all",
+    is_flag=True,
+    help="Fetch all external URLs from tasks (default: only uncached)",
+)
+@click.option(
+    "--max-age",
+    type=int,
+    default=3600,
+    help="Max cache age in seconds before refetch (default: 3600)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.argument("urls", nargs=-1)
+def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...]):
+    """Fetch and cache external issue/PR states.
+
+    Retrieves state (open/closed) from GitHub URLs and caches locally.
+    This enables fast state checks in sync/ready commands without API calls.
+
+    By default, scans all tasks for external URLs in tracking, blocks,
+    and related fields. Pass explicit URLs to fetch specific items.
+
+    Cache is stored in state/issue-cache.json.
+
+    Examples:
+        tasks.py fetch                              # Fetch all external URLs from tasks
+        tasks.py fetch --all                        # Refresh all (ignore cache age)
+        tasks.py fetch https://github.com/o/r/issues/1  # Fetch specific URL
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    cache_path = get_cache_path(repo_root)
+    cache = load_cache(cache_path)
+    now = datetime.utcnow()
+
+    # Collect URLs to fetch
+    urls_to_fetch: Set[str] = set()
+
+    if urls:
+        # Explicit URLs provided
+        urls_to_fetch.update(urls)
+    else:
+        # Scan tasks for external URLs
+        tasks_dir = repo_root / "tasks"
+        all_tasks = load_tasks(tasks_dir)
+
+        for task in all_tasks:
+            task_urls = extract_external_urls(task)
+            urls_to_fetch.update(task_urls)
+
+    if not urls_to_fetch:
+        if output_json:
+            print(json.dumps({"fetched": 0, "cached": 0, "urls": []}, indent=2))
+            return
+        console.print("[yellow]No external URLs found in tasks.[/]")
+        console.print(
+            "\n[dim]Add tracking, blocks, or related URLs to task frontmatter.[/]"
+        )
+        return
+
+    # Filter by cache age if not --all
+    if not fetch_all:
+        fresh_urls = set()
+        for url in urls_to_fetch:
+            cached = cache.get(url)
+            if cached:
+                cached_time = datetime.fromisoformat(
+                    cached.get("last_fetched", "1970-01-01T00:00:00")
+                )
+                age_seconds = (now - cached_time).total_seconds()
+                if age_seconds < max_age:
+                    fresh_urls.add(url)
+
+        stale_urls = urls_to_fetch - fresh_urls
+    else:
+        stale_urls = urls_to_fetch
+        fresh_urls = set()
+
+    # Fetch stale URLs
+    results = []
+    fetched_count = 0
+    error_count = 0
+
+    for url in sorted(stale_urls):
+        result = {"url": url}
+        state_info = fetch_url_state(url)
+
+        if state_info:
+            cache[url] = {
+                "state": state_info["state"],
+                "source": state_info.get("source", "unknown"),
+                "last_fetched": now.isoformat(),
+            }
+            result["state"] = state_info["state"]
+            result["source"] = state_info.get("source", "unknown")
+            result["status"] = "fetched"
+            fetched_count += 1
+        else:
+            result["status"] = "error"
+            result["error"] = "Could not fetch state"
+            error_count += 1
+
+        results.append(result)
+
+    # Add cached results
+    for url in sorted(fresh_urls):
+        cached = cache.get(url, {})
+        results.append(
+            {
+                "url": url,
+                "state": cached.get("state"),
+                "source": cached.get("source"),
+                "status": "cached",
+                "cached_at": cached.get("last_fetched"),
+            }
+        )
+
+    # Save updated cache
+    if fetched_count > 0:
+        save_cache(cache_path, cache)
+
+    # Output
+    if output_json:
+        output = {
+            "fetched": fetched_count,
+            "cached": len(fresh_urls),
+            "errors": error_count,
+            "total": len(urls_to_fetch),
+            "cache_path": str(cache_path),
+            "results": results,
+        }
+        print(json.dumps(output, indent=2))
+        return
+
+    # Rich table output
+    table = Table(title=f"[bold]Issue State Cache[/] ({len(urls_to_fetch)} URLs)")
+    table.add_column("URL", style="cyan", max_width=50)
+    table.add_column("State", style="green")
+    table.add_column("Source", style="blue")
+    table.add_column("Status", style="yellow")
+
+    for r in results:
+        url_display = r["url"]
+        if len(url_display) > 50:
+            url_display = "..." + url_display[-47:]
+
+        state = r.get("state", "N/A")
+        state_style = "green" if state == "OPEN" else "dim" if state == "CLOSED" else ""
+        source = r.get("source", "")
+
+        if r["status"] == "fetched":
+            status = "[green]✓ Fetched[/]"
+        elif r["status"] == "cached":
+            status = "[dim]⏸ Cached[/]"
+        else:
+            status = f"[red]✗ {r.get('error', 'Error')}[/]"
+
+        table.add_row(
+            url_display,
+            f"[{state_style}]{state}[/]" if state_style else state,
+            source,
+            status,
+        )
+
+    console.print(table)
+
+    # Summary
+    console.print(
+        f"\n[bold]Summary:[/] {fetched_count} fetched, {len(fresh_urls)} cached, {error_count} errors"
+    )
+    if fetched_count > 0:
+        console.print(f"[dim]Cache saved to: {cache_path}[/]")
+
+
 if __name__ == "__main__":
     cli()
