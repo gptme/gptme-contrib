@@ -301,4 +301,4 @@ def generate_task_content(
         ]
     )
 
-    return "\n".join(frontmatter_lines) + "\n".join(body_lines)
+    return "\n".join(frontmatter_lines) + "\n" + "\n".join(body_lines)
