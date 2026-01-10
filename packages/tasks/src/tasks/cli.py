@@ -190,7 +190,19 @@ def show(task_id):
     default=None,
     help="Filter by context tag (e.g., @coding, @research)",
 )
-def list_(sort, active_only, context):
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.option(
+    "--jsonl",
+    "output_jsonl",
+    is_flag=True,
+    help="Output as JSONL (one task per line) - compact for LLM consumption",
+)
+def list_(sort, active_only, context, output_json, output_jsonl):
     """List all tasks in a table format."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -199,6 +211,13 @@ def list_(sort, active_only, context):
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(json.dumps({"tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
         console.print("[red]No tasks found[/]")
         return
 
@@ -213,9 +232,17 @@ def list_(sort, active_only, context):
     if active_only:
         tasks = [task for task in all_tasks if task.state in ["new", "active"]]
         if not tasks:
+            if output_json:
+                print("No new or active tasks found", file=sys.stderr)
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print("No new or active tasks found", file=sys.stderr)
+                return
             console.print("[yellow]No new or active tasks found[/]")
             return
-        console.print("[blue]Showing only new and active tasks[/]\n")
+        if not output_json and not output_jsonl:
+            console.print("[blue]Showing only new and active tasks[/]\n")
 
     # Filter by context if specified
     if context:
@@ -223,9 +250,21 @@ def list_(sort, active_only, context):
         context_tag = context if context.startswith("@") else f"@{context}"
         tasks = [task for task in tasks if context_tag in (task.tags or [])]
         if not tasks:
+            if output_json:
+                print(
+                    f"No tasks found with context tag '{context_tag}'", file=sys.stderr
+                )
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print(
+                    f"No tasks found with context tag '{context_tag}'", file=sys.stderr
+                )
+                return
             console.print(f"[yellow]No tasks found with context tag '{context_tag}'[/]")
             return
-        console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
+        if not output_json and not output_jsonl:
+            console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
 
     # Sort tasks for display based on option
     if sort == "state":
@@ -251,6 +290,21 @@ def list_(sort, active_only, context):
         tasks.sort(key=completion_key, reverse=True)
     else:  # default: date
         tasks.sort(key=lambda t: t.created)
+
+    # JSONL output - one task per line (compact for LLM consumption)
+    if output_jsonl:
+        for task in tasks:
+            print(json.dumps(task_to_dict(task)))
+        return
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "tasks": [task_to_dict(t) for t in tasks],
+            "count": len(tasks),
+        }
+        print(json.dumps(result, indent=2))
+        return
 
     # Create display rows
     display_rows = []
@@ -1157,18 +1211,25 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
     help="Output as JSON for machine consumption",
 )
 @click.option(
+    "--jsonl",
+    "output_jsonl",
+    is_flag=True,
+    help="Output as JSONL (one task per line) - compact for LLM consumption",
+)
+@click.option(
     "--use-cache",
     "use_cache",
     is_flag=True,
     help="Check URL-based blocks against cached states (run 'fetch' first)",
 )
-def ready(state, output_json, use_cache):
+def ready(state, output_json, output_jsonl, use_cache):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
     Inspired by beads' `bd ready` command for finding work to do.
 
     Use --json for machine-readable output in autonomous workflows.
+    Use --jsonl for compact one-task-per-line output (better with head -n).
     Use --use-cache to also check URL-based 'blocks' against cached issue states.
     """
     console = Console()
@@ -1178,6 +1239,13 @@ def ready(state, output_json, use_cache):
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
         return
 
@@ -1209,8 +1277,12 @@ def ready(state, output_json, use_cache):
 
     if not ready_tasks:
         if output_json:
+            print("No ready tasks found", file=sys.stderr)
             print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
             return
+        if output_jsonl:
+            print("No ready tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
         console.print("[yellow]No ready tasks found![/]")
         console.print(
             "\n[dim]Tip: Try checking blocked tasks with --state to see dependencies[/]"
@@ -1224,6 +1296,12 @@ def ready(state, output_json, use_cache):
             t.created,
         )
     )
+
+    # JSONL output - one task per line (compact for LLM consumption)
+    if output_jsonl:
+        for task in ready_tasks:
+            print(json.dumps(task_to_dict(task)))
+        return
 
     # JSON output for machine consumption
     if output_json:
@@ -1299,6 +1377,15 @@ def next_(output_json, use_cache):
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {"next_task": None, "alternatives": [], "error": "No tasks found"},
+                    indent=2,
+                )
+            )
+            return
         console.print("[yellow]No tasks found![/]")
         return
 
@@ -1314,6 +1401,19 @@ def next_(output_json, use_cache):
     # Filter for new or active tasks
     workable_tasks = [task for task in all_tasks if task.state in ["new", "active"]]
     if not workable_tasks:
+        if output_json:
+            print("No new or active tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {
+                        "next_task": None,
+                        "alternatives": [],
+                        "error": "No new or active tasks found",
+                    },
+                    indent=2,
+                )
+            )
+            return
         console.print("[yellow]No new or active tasks found![/]")
         return
 
@@ -1324,6 +1424,7 @@ def next_(output_json, use_cache):
 
     if not ready_tasks:
         if output_json:
+            print("No ready tasks found", file=sys.stderr)
             print(
                 json.dumps(
                     {
@@ -1391,7 +1492,13 @@ def next_(output_json, use_cache):
     is_flag=True,
     help="Output as JSON for machine consumption",
 )
-def stale(days: int, state: str, output_json: bool):
+@click.option(
+    "--jsonl",
+    "output_jsonl",
+    is_flag=True,
+    help="Output as JSONL (one task per line) - compact for LLM consumption",
+)
+def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     """List stale tasks that haven't been modified recently.
 
     Identifies tasks that may need review for completion, archival, or reassessment.
@@ -1403,6 +1510,7 @@ def stale(days: int, state: str, output_json: bool):
         tasks.py stale --state all        # All tasks regardless of state
         tasks.py stale --state paused     # Only paused stale tasks
         tasks.py stale --json             # Machine-readable output
+        tasks.py stale --jsonl            # One task per line (LLM-friendly)
     """
     console = Console()
 
@@ -1421,8 +1529,12 @@ def stale(days: int, state: str, output_json: bool):
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
         if output_json:
+            print("No tasks found", file=sys.stderr)
             print(json.dumps({"stale_tasks": [], "count": 0}, indent=2))
             return
+        if output_jsonl:
+            print("No tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
         return
 
@@ -1441,11 +1553,21 @@ def stale(days: int, state: str, output_json: bool):
     if not stale_tasks:
         if output_json:
             print(
+                f"No stale tasks found (threshold: {days} days, state: {state})",
+                file=sys.stderr,
+            )
+            print(
                 json.dumps(
                     {"stale_tasks": [], "count": 0, "days_threshold": days}, indent=2
                 )
             )
             return
+        if output_jsonl:
+            print(
+                f"No stale tasks found (threshold: {days} days, state: {state})",
+                file=sys.stderr,
+            )
+            return  # Empty output for JSONL when no tasks
         console.print(
             f"[green]No stale tasks found![/] (threshold: {days} days, state: {state})"
         )
@@ -1453,6 +1575,14 @@ def stale(days: int, state: str, output_json: bool):
 
     # Sort by modification date (oldest first)
     stale_tasks.sort(key=lambda t: t.modified)
+
+    # JSONL output - one task per line (compact for LLM consumption)
+    if output_jsonl:
+        for task in stale_tasks:
+            task_dict = task_to_dict(task)
+            task_dict["days_since_modified"] = (datetime.now() - task.modified).days
+            print(json.dumps(task_dict))
+        return
 
     # JSON output for machine consumption
     if output_json:
