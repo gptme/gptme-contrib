@@ -232,9 +232,17 @@ def list_(sort, active_only, context, output_json, output_jsonl):
     if active_only:
         tasks = [task for task in all_tasks if task.state in ["new", "active"]]
         if not tasks:
+            if output_json:
+                print("No new or active tasks found", file=sys.stderr)
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print("No new or active tasks found", file=sys.stderr)
+                return
             console.print("[yellow]No new or active tasks found[/]")
             return
-        console.print("[blue]Showing only new and active tasks[/]\n")
+        if not output_json and not output_jsonl:
+            console.print("[blue]Showing only new and active tasks[/]\n")
 
     # Filter by context if specified
     if context:
@@ -242,9 +250,21 @@ def list_(sort, active_only, context, output_json, output_jsonl):
         context_tag = context if context.startswith("@") else f"@{context}"
         tasks = [task for task in tasks if context_tag in (task.tags or [])]
         if not tasks:
+            if output_json:
+                print(
+                    f"No tasks found with context tag '{context_tag}'", file=sys.stderr
+                )
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print(
+                    f"No tasks found with context tag '{context_tag}'", file=sys.stderr
+                )
+                return
             console.print(f"[yellow]No tasks found with context tag '{context_tag}'[/]")
             return
-        console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
+        if not output_json and not output_jsonl:
+            console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
 
     # Sort tasks for display based on option
     if sort == "state":
@@ -1257,9 +1277,11 @@ def ready(state, output_json, output_jsonl, use_cache):
 
     if not ready_tasks:
         if output_json:
+            print("No ready tasks found", file=sys.stderr)
             print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
             return
         if output_jsonl:
+            print("No ready tasks found", file=sys.stderr)
             return  # Empty output for JSONL
         console.print("[yellow]No ready tasks found![/]")
         console.print(
@@ -1355,6 +1377,15 @@ def next_(output_json, use_cache):
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {"next_task": None, "alternatives": [], "error": "No tasks found"},
+                    indent=2,
+                )
+            )
+            return
         console.print("[yellow]No tasks found![/]")
         return
 
@@ -1370,6 +1401,19 @@ def next_(output_json, use_cache):
     # Filter for new or active tasks
     workable_tasks = [task for task in all_tasks if task.state in ["new", "active"]]
     if not workable_tasks:
+        if output_json:
+            print("No new or active tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {
+                        "next_task": None,
+                        "alternatives": [],
+                        "error": "No new or active tasks found",
+                    },
+                    indent=2,
+                )
+            )
+            return
         console.print("[yellow]No new or active tasks found![/]")
         return
 
@@ -1380,6 +1424,7 @@ def next_(output_json, use_cache):
 
     if not ready_tasks:
         if output_json:
+            print("No ready tasks found", file=sys.stderr)
             print(
                 json.dumps(
                     {
@@ -1508,12 +1553,20 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     if not stale_tasks:
         if output_json:
             print(
+                f"No stale tasks found (threshold: {days} days, state: {state})",
+                file=sys.stderr,
+            )
+            print(
                 json.dumps(
                     {"stale_tasks": [], "count": 0, "days_threshold": days}, indent=2
                 )
             )
             return
         if output_jsonl:
+            print(
+                f"No stale tasks found (threshold: {days} days, state: {state})",
+                file=sys.stderr,
+            )
             return  # Empty output for JSONL when no tasks
         console.print(
             f"[green]No stale tasks found![/] (threshold: {days} days, state: {state})"
