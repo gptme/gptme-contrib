@@ -96,12 +96,8 @@ The work queue (`state/queue-manual.md`) is the agent's **primary planning docum
 
 *Reading the queue*:
 ```shell
-# Check if queue exists
-if [ -f state/queue-manual.md ]; then
-    head -50 state/queue-manual.md  # Read planned priorities
-else
-    echo "No work queue - continue to SECONDARY"
-fi
+# Always read full queue (important context for updates later)
+cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 ```
 
 *Queue format best practices*:
