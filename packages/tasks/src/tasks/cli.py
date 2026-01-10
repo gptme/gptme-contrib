@@ -2126,10 +2126,11 @@ def sync(update, output_json, use_cache):
         console.print("[yellow]No tasks found![/]")
         return
 
-    # Find tasks with tracking_issue field
+    # Find tasks with tracking or tracking_issue field (support both)
     tasks_with_tracking = []
     for task in all_tasks:
-        tracking = task.metadata.get("tracking_issue")
+        # Support both 'tracking' (used by import) and 'tracking_issue' (legacy)
+        tracking = task.metadata.get("tracking") or task.metadata.get("tracking_issue")
         if tracking:
             tasks_with_tracking.append((task, tracking))
 
@@ -2140,15 +2141,15 @@ def sync(update, output_json, use_cache):
                     {
                         "synced_tasks": [],
                         "count": 0,
-                        "message": "No tasks with tracking_issue found",
+                        "message": "No tasks with tracking field found",
                     },
                     indent=2,
                 )
             )
             return
-        console.print("[yellow]No tasks with tracking_issue field found![/]")
+        console.print("[yellow]No tasks with tracking field found![/]")
         console.print(
-            "\n[dim]Add tracking_issue to frontmatter: tracking_issue: 'owner/repo#123'[/]"
+            "\n[dim]Add tracking to frontmatter: tracking: 'https://github.com/owner/repo/issues/123'[/]"
         )
         return
 
