@@ -22,8 +22,6 @@ Features:
 
 import json
 import logging
-import re
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,9 +39,9 @@ from rich.console import Console
 from rich.table import Table
 from tabulate import tabulate
 
-# Import shared utilities from lib (which re-exports from utils)
+# Import utilities directly from utils
 # Using absolute imports (not relative) for uv script compatibility
-from tasks.lib import (
+from tasks.utils import (
     # Data classes
     DirectoryConfig,
     TaskInfo,
@@ -69,6 +67,15 @@ from tasks.lib import (
     # URLs
     extract_external_urls,
     fetch_url_state,
+)
+
+# Import core business logic from lib
+from tasks.lib import (
+    fetch_github_issues,
+    fetch_linear_issues,
+    generate_task_filename,
+    map_priority_from_labels,
+    generate_task_content,
 )
 
 
@@ -2101,262 +2108,6 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
 # =============================================================================
 # Import Command - Import tasks from GitHub/Linear
 # =============================================================================
-
-
-def fetch_github_issues(
-    repo: str, state: str, labels: List[str], assignee: Optional[str], limit: int
-) -> List[Dict[str, Any]]:
-    """Fetch issues from GitHub using gh CLI.
-
-    Args:
-        repo: Repository in owner/repo format
-        state: Issue state filter (open, closed, all)
-        labels: List of labels to filter by
-        assignee: Filter by assignee (use 'me' for authenticated user)
-        limit: Maximum number of issues to fetch
-
-    Returns:
-        List of issue dicts with keys: number, title, state, labels, url, body, tracking_ref, source
-    """
-    cmd = [
-        "gh",
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--limit",
-        str(limit),
-        "--json",
-        "number,title,state,labels,url,body",
-    ]
-
-    if state != "all":
-        cmd.extend(["--state", state])
-
-    for label in labels:
-        cmd.extend(["--label", label])
-
-    if assignee:
-        cmd.extend(["--assignee", assignee])
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            logging.error(f"GitHub CLI failed: {result.stderr}")
-            return []
-
-        issues_data = json.loads(result.stdout)
-        issues = []
-        for issue in issues_data:
-            issues.append(
-                {
-                    "number": issue["number"],
-                    "title": issue["title"],
-                    "state": issue["state"].lower(),
-                    "labels": [lbl["name"] for lbl in issue.get("labels", [])],
-                    "url": issue["url"],
-                    "body": issue.get("body", "")[:500] if issue.get("body") else "",
-                    "tracking_ref": issue["url"],  # Use full URL
-                    "source": "github",
-                }
-            )
-        return issues
-    except subprocess.TimeoutExpired:
-        logging.error("GitHub CLI timed out")
-        return []
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse GitHub response: {e}")
-        return []
-    except Exception as e:
-        logging.error(f"Error fetching GitHub issues: {e}")
-        return []
-
-
-def fetch_linear_issues(team: str, state: str, limit: int) -> List[Dict[str, Any]]:
-    """Fetch issues from Linear using GraphQL API.
-
-    Requires LINEAR_API_KEY environment variable.
-
-    Args:
-        team: Linear team key (e.g., 'ENG', 'SUDO')
-        state: Issue state filter (open, closed, all)
-        limit: Maximum number of issues to fetch
-
-    Returns:
-        List of issue dicts with keys: number, title, state, labels, url, body, tracking_ref, source
-    """
-    import os
-    import urllib.request
-
-    token = os.environ.get("LINEAR_API_KEY")
-    if not token:
-        logging.warning("LINEAR_API_KEY not set")
-        return []
-
-    # Build state filter
-    state_filter = {}
-    if state == "open":
-        state_filter = {"state": {"type": {"nin": ["completed", "canceled"]}}}
-    elif state == "closed":
-        state_filter = {"state": {"type": {"in": ["completed", "canceled"]}}}
-
-    query = """
-    query($teamKey: String!, $first: Int!, $filter: IssueFilter) {
-        team(key: $teamKey) {
-            issues(first: $first, filter: $filter, orderBy: updatedAt) {
-                nodes {
-                    identifier
-                    title
-                    state { name type }
-                    labels { nodes { name } }
-                    url
-                    description
-                }
-            }
-        }
-    }
-    """
-
-    variables = {
-        "teamKey": team,
-        "first": limit,
-        "filter": state_filter if state_filter else None,
-    }
-
-    try:
-        req = urllib.request.Request(
-            "https://api.linear.app/graphql",
-            data=json.dumps({"query": query, "variables": variables}).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": token,
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode())
-
-        if "errors" in data:
-            logging.error(f"Linear API error: {data['errors']}")
-            return []
-
-        team_data = data.get("data", {}).get("team")
-        if not team_data:
-            logging.error(f"Team '{team}' not found")
-            return []
-
-        issues = []
-        for issue in team_data.get("issues", {}).get("nodes", []):
-            issues.append(
-                {
-                    "number": issue["identifier"],
-                    "title": issue["title"],
-                    "state": issue["state"]["type"]
-                    if issue.get("state")
-                    else "unknown",
-                    "labels": [
-                        lbl["name"] for lbl in issue.get("labels", {}).get("nodes", [])
-                    ],
-                    "url": issue["url"],
-                    "body": (issue.get("description") or "")[:500],
-                    "tracking_ref": issue["url"],  # Use full URL
-                    "source": "linear",
-                }
-            )
-        return issues
-    except Exception as e:
-        logging.error(f"Error fetching Linear issues: {e}")
-        return []
-
-
-def generate_task_filename(title: str, number: str | int, source: str) -> str:
-    """Generate a task filename from title and number."""
-    # Sanitize title for filename
-    safe_title = re.sub(r"[^\w\s-]", "", title.lower())
-    safe_title = re.sub(r"[-\s]+", "-", safe_title).strip("-")
-    safe_title = safe_title[:50]  # Limit length
-    if not safe_title:
-        safe_title = "untitled"
-
-    if source == "linear":
-        # Linear identifiers are like "ENG-123"
-        return f"linear-{str(number).lower()}-{safe_title}.md"
-    else:
-        return f"gh-{number}-{safe_title}.md"
-
-
-def map_priority_from_labels(labels: List[str]) -> Optional[str]:
-    """Map issue labels to task priority."""
-    labels_lower = [lbl.lower() for lbl in labels]
-
-    # Check for priority labels
-    for lbl in labels_lower:
-        if lbl in ("priority:high", "high-priority", "p0", "p1", "urgent"):
-            return "high"
-        if lbl in ("priority:medium", "medium-priority", "p2"):
-            return "medium"
-        if lbl in ("priority:low", "low-priority", "p3", "p4"):
-            return "low"
-
-    return None
-
-
-def generate_task_content(
-    issue: Dict[str, Any], source: str, priority: Optional[str]
-) -> str:
-    """Generate task file content from issue data."""
-    from datetime import date
-
-    frontmatter_lines = [
-        "---",
-        "state: new",
-        f"created: {date.today().isoformat()}",
-        f"tracking: ['{issue['tracking_ref']}']",
-    ]
-
-    if priority:
-        frontmatter_lines.append(f"priority: {priority}")
-
-    # Add tags from labels (limit to 5)
-    if issue.get("labels"):
-        tags = [lbl.lower().replace(" ", "-") for lbl in issue["labels"][:5]]
-        tags.append(source)  # Add source as tag
-        frontmatter_lines.append(f"tags: {json.dumps(tags)}")
-
-    frontmatter_lines.append("---")
-
-    # Build body
-    title = issue["title"]
-    url = issue["url"]
-    body = issue.get("body", "")
-
-    body_lines = [
-        "",
-        f"# {title}",
-        "",
-        f"**Source**: [{source.title()} #{issue['number']}]({url})",
-        "",
-    ]
-
-    if body:
-        body_lines.extend(
-            [
-                "## Description",
-                "",
-                body,
-                "",
-            ]
-        )
-
-    body_lines.extend(
-        [
-            "## Notes",
-            "",
-            "*Imported from external tracker. See source link for full context.*",
-            "",
-        ]
-    )
-
-    return "\n".join(frontmatter_lines) + "\n".join(body_lines)
 
 
 @cli.command("import")
