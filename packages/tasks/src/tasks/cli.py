@@ -2007,7 +2007,6 @@ def stale(days: int, state: str, output_json: bool):
     console.print("[dim]Run [bold]tasks.py show <id>[/] to inspect a task's details[/]")
 
 
-
 @cli.command("sync")
 @click.option(
     "--update",
@@ -2103,7 +2102,7 @@ def sync(update, output_json):
             continue
 
         # Determine expected task state based on issue state
-        expected_state = "done" if issue_state == "CLOSED" else task.state
+        expected_state = "done" if issue_state == "CLOSED" else (task.state or "active")
         if issue_state == "OPEN" and task.state == "done":
             expected_state = "active"  # Reopened issue
 
@@ -2258,6 +2257,7 @@ def update_task_state(task_path: Path, new_state: str) -> bool:
         return True
     except Exception:
         return False
+
 
 if __name__ == "__main__":
     cli()
