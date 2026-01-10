@@ -1864,5 +1864,139 @@ def next_(output_json):
     show(next_task.name)
 
 
+@cli.command("stale")
+@click.option(
+    "--days",
+    default=30,
+    type=int,
+    help="Number of days without modification to consider stale (default: 30)",
+)
+@click.option(
+    "--state",
+    type=click.Choice(["active", "paused", "new", "all"]),
+    default="active",
+    help="Filter by task state (default: active)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def stale(days: int, state: str, output_json: bool):
+    """List stale tasks that haven't been modified recently.
+
+    Identifies tasks that may need review for completion, archival, or reassessment.
+    By default shows active tasks not modified in 30+ days.
+
+    Examples:
+        tasks.py stale                    # Active tasks unchanged for 30+ days
+        tasks.py stale --days 60          # Active tasks unchanged for 60+ days
+        tasks.py stale --state all        # All tasks regardless of state
+        tasks.py stale --state paused     # Only paused stale tasks
+        tasks.py stale --json             # Machine-readable output
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print(json.dumps({"stale_tasks": [], "count": 0}, indent=2))
+            return
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Calculate cutoff date
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Filter by state
+    if state == "all":
+        state_filtered = all_tasks
+    else:
+        state_filtered = [task for task in all_tasks if task.state == state]
+
+    # Filter for stale tasks (not modified since cutoff)
+    stale_tasks = [task for task in state_filtered if task.modified < cutoff]
+
+    if not stale_tasks:
+        if output_json:
+            print(
+                json.dumps(
+                    {"stale_tasks": [], "count": 0, "days_threshold": days}, indent=2
+                )
+            )
+            return
+        console.print(
+            f"[green]No stale tasks found![/] (threshold: {days} days, state: {state})"
+        )
+        return
+
+    # Sort by modification date (oldest first)
+    stale_tasks.sort(key=lambda t: t.modified)
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "stale_tasks": [
+                {
+                    **task_to_dict(t),
+                    "days_since_modified": (datetime.now() - t.modified).days,
+                }
+                for t in stale_tasks
+            ],
+            "count": len(stale_tasks),
+            "days_threshold": days,
+            "state_filter": state,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Create table
+    table = Table(
+        title=f"[bold yellow]Stale Tasks[/] ({len(stale_tasks)} unchanged for {days}+ days)"
+    )
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("State", style="blue")
+    table.add_column("Days Stale", style="red", justify="right")
+    table.add_column("Task", style="white")
+    table.add_column("Progress", style="magenta")
+    table.add_column("Priority", style="yellow")
+
+    # Create stable enumerated ID mapping
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+
+    for task in stale_tasks:
+        enum_id = name_to_enum_id[task.name]
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        priority_emoji = STATE_EMOJIS.get(task.priority or "", "")
+        days_stale = (datetime.now() - task.modified).days
+
+        # Progress display
+        if task.subtasks.total > 0:
+            pct = int(task.subtasks.completed / task.subtasks.total * 100)
+            progress_str = f"{pct}% ({task.subtasks.completed}/{task.subtasks.total})"
+        else:
+            progress_str = "-"
+
+        table.add_row(
+            str(enum_id),
+            state_emoji,
+            str(days_stale),
+            task.name,
+            progress_str,
+            priority_emoji or (task.priority or "-"),
+        )
+
+    console.print(table)
+    console.print(
+        "\n[dim]Review these tasks for: completion, archival, or reassessment[/]"
+    )
+    console.print("[dim]Run [bold]tasks.py show <id>[/] to inspect a task's details[/]")
+
+
 if __name__ == "__main__":
     cli()
