@@ -228,7 +228,19 @@ class TaskInfo:
 
 
 def find_repo_root(start_path: Path) -> Path:
-    """Find the repository root by looking for .git directory."""
+    """Find the repository root by looking for .git directory.
+
+    If TASKS_REPO_ROOT environment variable is set, uses that as the
+    starting point instead. This allows the wrapper script to run in
+    a different directory (for module discovery) while still finding
+    tasks in the original workspace.
+    """
+    import os
+
+    # Check for explicit repo root from wrapper script
+    if env_root := os.environ.get("TASKS_REPO_ROOT"):
+        start_path = Path(env_root)
+
     current = start_path.resolve()
     while current != current.parent:
         if (current / ".git").exists():
