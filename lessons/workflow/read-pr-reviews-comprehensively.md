@@ -46,17 +46,47 @@ gh api repos/$REPO/pulls/$PR_NUMBER/comments \
 
 **Why jq?** Raw `gh api` output includes ~50 fields per comment (timestamps, URLs, reactions, etc.). The jq filter extracts only what's needed, reducing context usage by ~80% while preserving actionable information.
 
-### Step 2: Acknowledge Each Thread Individually (suppress output with jq)
-**Don't just post a general PR comment!** Reply to each review comment thread:
+**Reading full review threads & filtering resolved comments (GraphQL):**
+```shell
+# Use GraphQL to see thread resolution status and full thread context
+gh api graphql -f query='
+{
+  repository(owner: "gptme", name: "gptme-contrib") {
+    pullRequest(number: 134) {
+      reviewThreads(first: 50) {
+        nodes {
+          isResolved
+          comments(first: 10) {
+            nodes {
+              author { login }
+              body
+              path
+              line
+            }
+          }
+        }
+      }
+    }
+  }
+}' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | {
+  path: .comments.nodes[0].path,
+  line: .comments.nodes[0].line,
+  thread: [.comments.nodes[] | {author: .author.login, body: (.body | split("\n")[0])}]
+}'
+```
+
+This GraphQL query:
+- Gets all review threads with `isResolved` status
+- Filters to only unresolved threads with `select(.isResolved == false)`
+- Shows full conversation thread (all replies in order)
+- Extracts path and line for context
+
+### Step 2: Acknowledge Each Thread + Post Summary (same toolcall!)
+**Don't just post a general PR comment!** Reply to each review thread, THEN post summary - all in one shell block:
 
 ```shell
-# Reply to individual review comment threads (signals ready to resolve)
+# Batch multiple replies in one shell block (efficient!)
 # Use --jq to suppress verbose response output
-gh api repos/$REPO/pulls/$PR_NUMBER/comments/<comment_id>/replies \
-  -f body="✅ Fixed in commit abc123" \
-  --jq '.id' 2>/dev/null  # Returns only the new comment ID
-
-# Batch multiple replies in one shell block (efficient!):
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822180/replies \
   -f body="✅ Fixed in commit 3389211" --jq '.id' &
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822196/replies \
@@ -64,16 +94,20 @@ gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822196/replies \
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822210/replies \
   -f body="✅ Fixed in commit 5ebce81" --jq '.id' &
 wait
-echo "All replies posted"
-```
 
-### Step 3: Post Summary Comment (optional)
-After individual thread replies, optionally post a summary:
-```shell
+# Then post summary comment (same shell block - signals completion)
 gh pr comment $PR_NUMBER --repo $REPO --body "## ✅ All Review Comments Addressed
 
-Replied to all review threads individually. See thread replies for details."
+Replied to all review threads individually. See thread replies for details.
+
+| Comment | Status |
+|---------|--------|
+| Issue A | ✅ Fixed in abc123 |
+| Issue B | ⚠️ Not addressing (rationale) |
+"
 ```
+
+**Why same shell block?** Review comment thread replies have poor visibility - they're collapsed by default. The summary comment ensures the reviewer sees that you've addressed everything. Keeping them in one toolcall prevents partial completion.
 
 ## Anti-Patterns
 
@@ -94,18 +128,32 @@ gh api repos/$REPO/pulls/$PR_NUMBER/comments  # 50+ fields per comment!
 gh pr comment 134 --body "Fixed all issues"
 ```
 
-**✅ CORRECT: jq-filtered output + individual thread replies**
+**❌ WRONG: Separate toolcalls for replies and summary**
+```shell
+# First toolcall - replies
+gh api .../comments/123/replies -f body="Fixed"
+```
+```shell
+# Second toolcall - summary (BAD: should be same block!)
+gh pr comment 134 --body "All done"
+```
+
+**✅ CORRECT: jq-filtered output + individual thread replies + summary in one block**
 ```shell
 # Read ALL comments with compact output
 gh api repos/$REPO/pulls/$PR_NUMBER/comments \
   --jq '.[] | {id, path, user: .user.login, body: (.body | split("\n")[0])}'
 
-# Reply to EACH thread with suppressed output
-gh api .../comments/<id1>/replies -f body="✅ Fixed" --jq '.id'
-gh api .../comments/<id2>/replies -f body="✅ Fixed" --jq '.id'
+# Reply to EACH thread with suppressed output, then summary
+gh api .../comments/<id1>/replies -f body="✅ Fixed" --jq '.id' &
+gh api .../comments/<id2>/replies -f body="✅ Fixed" --jq '.id' &
+wait
+gh pr comment $PR_NUMBER --body "## Summary..."
 ```
 
 ## jq Quick Reference for PR Reviews
+
+> **Note on escaping:** The `\|` in the table below is markdown table escaping. When copy-pasting these commands, use `|` without the backslash.
 
 | Use Case | jq Filter |
 |----------|-----------|
@@ -114,6 +162,7 @@ gh api .../comments/<id2>/replies -f body="✅ Fixed" --jq '.id'
 | Suppress POST response | `--jq '.id'` |
 | Count comments | `--jq 'length'` |
 | Filter by user | `--jq '.[] \| select(.user.login == "ErikBjare")'` |
+| Unresolved threads only | GraphQL with `select(.isResolved == false)` |
 
 ## Outcome
 Following this pattern results in:
