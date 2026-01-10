@@ -2095,7 +2095,7 @@ def stale(days: int, state: str, output_json: bool):
 def sync(update, output_json, use_cache):
     """Sync task states with linked GitHub issues.
 
-    Finds tasks with tracking_issue field in frontmatter and compares
+    Finds tasks with tracking field in frontmatter and compares
     their state with the linked GitHub issue state.
 
     Use --update to automatically update task states to match issue states.
@@ -2126,11 +2126,10 @@ def sync(update, output_json, use_cache):
         console.print("[yellow]No tasks found![/]")
         return
 
-    # Find tasks with tracking or tracking_issue field (support both)
+    # Find tasks with tracking field
     tasks_with_tracking = []
     for task in all_tasks:
-        # Support both 'tracking' (used by import) and 'tracking_issue' (legacy)
-        tracking = task.metadata.get("tracking") or task.metadata.get("tracking_issue")
+        tracking = task.metadata.get("tracking")
         if tracking:
             tasks_with_tracking.append((task, tracking))
 
@@ -2597,17 +2596,15 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
     """Extract external URLs from task's blocks, related, and tracking fields."""
     urls = []
 
-    # Check tracking field (full URLs) - support both 'tracking' and 'tracking_issue'
-    # for compatibility with sync command
-    for field_name in ("tracking", "tracking_issue"):
-        tracking = task.metadata.get(field_name)
-        if tracking:
-            if isinstance(tracking, list):
-                for item in tracking:
-                    if isinstance(item, str) and item.startswith("http"):
-                        urls.append(item)
-            elif isinstance(tracking, str) and tracking.startswith("http"):
-                urls.append(tracking)
+    # Check tracking field (full URLs)
+    tracking = task.metadata.get("tracking")
+    if tracking:
+        if isinstance(tracking, list):
+            for item in tracking:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+        elif isinstance(tracking, str) and tracking.startswith("http"):
+            urls.append(tracking)
 
     # Check blocks field
     blocks = task.metadata.get("blocks")

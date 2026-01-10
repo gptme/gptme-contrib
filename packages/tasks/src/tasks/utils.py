@@ -30,6 +30,41 @@ from typing import (
 if TYPE_CHECKING:
     import frontmatter as fm
 
+__all__ = [
+    # Data classes
+    "DirectoryConfig",
+    "SubtaskCount",
+    "TaskInfo",
+    "StateChecker",
+    # Constants
+    "CONFIGS",
+    "PRIORITY_RANK",
+    "STATE_STYLES",
+    "STATE_EMOJIS",
+    # Core utilities
+    "find_repo_root",
+    "format_time_ago",
+    "count_subtasks",
+    "validate_task_file",
+    "load_task",
+    "load_tasks",
+    "task_to_dict",
+    "is_task_ready",
+    "resolve_tasks",
+    # Tracking and state
+    "parse_tracking_ref",
+    "fetch_github_issue_state",
+    "fetch_linear_issue_state",
+    "update_task_state",
+    # Cache
+    "get_cache_path",
+    "load_cache",
+    "save_cache",
+    # URLs
+    "extract_external_urls",
+    "fetch_url_state",
+]
+
 # Lazy import frontmatter to avoid import issues in uv scripts
 _frontmatter = None
 
@@ -866,17 +901,15 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
     """Extract external URLs from task's blocks, related, and tracking fields."""
     urls = []
 
-    # Check tracking field (full URLs) - support both 'tracking' and 'tracking_issue'
-    # for compatibility with sync command
-    for field_name in ("tracking", "tracking_issue"):
-        tracking = task.metadata.get(field_name)
-        if tracking:
-            if isinstance(tracking, list):
-                for item in tracking:
-                    if isinstance(item, str) and item.startswith("http"):
-                        urls.append(item)
-            elif isinstance(tracking, str) and tracking.startswith("http"):
-                urls.append(tracking)
+    # Check tracking field (full URLs)
+    tracking = task.metadata.get("tracking")
+    if tracking:
+        if isinstance(tracking, list):
+            for item in tracking:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+        elif isinstance(tracking, str) and tracking.startswith("http"):
+            urls.append(tracking)
 
     # Check blocks field
     blocks = task.metadata.get("blocks")
