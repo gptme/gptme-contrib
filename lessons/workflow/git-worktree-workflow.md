@@ -17,14 +17,6 @@ match:
   - "git worktree for PR"
   - "external repository PR"
   - "multiple branches simultaneously"
-lesson_id: workflow_git-worktree-workflow_15082b29
-version: 1.0.0
-usage_count: 1
-helpful_count: 1
-harmful_count: 0
-created: '2025-11-04T18:14:42.680660Z'
-updated: '2025-11-04T18:24:16.449224Z'
-last_used: '2025-11-04T18:24:16.449224Z'
 ---
 
 # Git Worktree Workflow for External Repositories

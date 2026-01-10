@@ -98,6 +98,25 @@ def validate_lesson(path: Path) -> list[str]:
                 f"Valid values: {', '.join(sorted(valid_statuses))}"
             )
 
+    # Check for deprecated metadata fields that should be computed, not committed
+    # These fields cause unnecessary churn and should come from git history/trajectories
+    deprecated_fields = {
+        "lesson_id": "computed from path",
+        "version": "tracked via git history",
+        "usage_count": "computed from trajectories",
+        "helpful_count": "computed from trajectories",
+        "harmful_count": "computed from trajectories",
+        "created": "use git log --follow --format=%aI --reverse -- <file> | head -1",
+        "updated": "use git log -1 --format=%aI -- <file>",
+        "last_used": "computed from trajectories",
+    }
+    found_deprecated = [f for f in deprecated_fields if f in frontmatter]
+    if found_deprecated:
+        for field in found_deprecated:
+            errors.append(
+                f"Deprecated field '{field}' should not be committed ({deprecated_fields[field]})"
+            )
+
     # Check that content has a title (# Heading)
     content_after_frontmatter = content.split("---", 2)[2].strip()
     if not content_after_frontmatter.startswith("#"):

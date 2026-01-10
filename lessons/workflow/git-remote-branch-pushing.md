@@ -16,14 +16,6 @@ match:
   - "git push explicit destination"
   - "specify remote branch name"
   - "push to feature branch"
-lesson_id: workflow_git-remote-branch-pushing_aa405aaf
-version: 1.0.0
-usage_count: 1
-helpful_count: 1
-harmful_count: 0
-created: '2025-11-04T18:14:42.677760Z'
-updated: '2025-11-04T18:24:16.449224Z'
-last_used: '2025-11-04T18:24:16.449224Z'
 ---
 
 # Git Remote Branch Pushing for PRs
