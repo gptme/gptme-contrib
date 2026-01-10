@@ -87,6 +87,38 @@ gh issue list --assignee @me --state open
 
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
+**PRIMARY Queue (state/queue-manual.md)**:
+
+The PRIMARY queue is an **optional** file maintained by humans to direct agent work. If the file doesn't exist, skip to SECONDARY.
+
+```shell
+# Check if PRIMARY queue exists before reading
+if [ -f state/queue-manual.md ]; then
+    cat state/queue-manual.md
+else
+    echo "No manual queue - proceeding to SECONDARY"
+fi
+```
+
+**Format** (when the file exists):
+```markdown
+# Manual Work Queue
+
+Items added here take highest priority in CASCADE task selection.
+
+## Next Items
+- [ ] PR review: gptme#123 - security fixes
+- [ ] Respond to Erik's question in issue #45
+- [ ] Investigate CI failure on main branch
+
+## Notes
+Added by Erik 2025-01-10: Focus on security PRs this week
+```
+
+**When to create**: Humans create this file when they want to direct agent work to specific items that wouldn't otherwise be selected by SECONDARY/TERTIARY logic. The file is typically gitignored since it's workspace-specific state.
+
+**Agent behavior**: Read but never modify. If an item is completed, the human removes it during their next review.
+
 **Purpose**: Identify highest-value work to focus session time on
 
 ### Phase 3: Work Execution (15-25 minutes)
