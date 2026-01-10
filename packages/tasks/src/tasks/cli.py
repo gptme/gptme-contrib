@@ -2259,7 +2259,6 @@ def update_task_state(task_path: Path, new_state: str) -> bool:
         return False
 
 
-
 @cli.command()
 @click.argument("task_id")
 @click.option(
@@ -2441,7 +2440,6 @@ def plan(task_id: str, output_json: bool):
         )
     else:
         console.print("[dim]Low impact.[/] This is a leaf task or has few dependents.")
-
 
 
 if __name__ == "__main__":
