@@ -36,6 +36,7 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    Union,
 )
 
 import click
@@ -2073,10 +2074,10 @@ def sync(update, output_json):
         )
         return
 
-    # Check each task against GitHub
+    # Check each task against GitHub/Linear
     results = []
     for task, tracking_ref in tasks_with_tracking:
-        # Parse tracking reference (supports owner/repo#123 or full URL)
+        # Parse tracking reference (supports GitHub and Linear URLs)
         issue_info = parse_tracking_ref(tracking_ref)
         if not issue_info:
             results.append(
@@ -2091,14 +2092,21 @@ def sync(update, output_json):
             )
             continue
 
-        # Fetch GitHub issue state
-        issue_state = fetch_github_issue_state(issue_info["repo"], issue_info["number"])
+        # Fetch issue state based on source
+        source = issue_info.get("source", "github")
+        if source == "linear":
+            issue_state = fetch_linear_issue_state(issue_info["identifier"])
+            error_msg = "Could not fetch issue state from Linear"
+        else:
+            issue_state = fetch_github_issue_state(issue_info["repo"], issue_info["number"])
+            error_msg = "Could not fetch issue state from GitHub"
+
         if issue_state is None:
             results.append(
                 {
                     "task": task.name,
                     "tracking": tracking_ref,
-                    "error": "Could not fetch issue state from GitHub",
+                    "error": error_msg,
                     "task_state": task.state,
                     "issue_state": None,
                     "in_sync": False,
@@ -2107,12 +2115,16 @@ def sync(update, output_json):
             continue
 
         # Determine expected task state based on issue state
-        expected_state = "done" if issue_state == "CLOSED" else (task.state or "active")
-        if issue_state == "OPEN" and task.state == "done":
+        # GitHub uses OPEN/CLOSED, Linear uses state types (completed, canceled, started, etc.)
+        is_closed = issue_state in ["CLOSED", "completed", "canceled"]
+        is_open = issue_state in ["OPEN", "started", "triage", "backlog", "unstarted", "in_progress"]
+
+        expected_state = "done" if is_closed else (task.state or "active")
+        if is_open and task.state == "done":
             expected_state = "active"  # Reopened issue
 
-        in_sync = (issue_state == "CLOSED" and task.state == "done") or (
-            issue_state == "OPEN" and task.state in ["new", "active", "paused"]
+        in_sync = (is_closed and task.state == "done") or (
+            is_open and task.state in ["new", "active", "paused"]
         )
 
         result = {
@@ -2185,22 +2197,30 @@ def sync(update, output_json):
 
 
 def parse_tracking_ref(ref: str) -> Optional[Dict[str, str]]:
-    """Parse tracking reference to extract repo and issue number.
+    """Parse tracking reference to extract repo/team and issue number.
 
     Supports formats:
-    - owner/repo#123
+    - owner/repo#123 (GitHub shorthand)
     - https://github.com/owner/repo/issues/123
     - https://github.com/owner/repo/pull/123
-    """
-    # Full URL format
-    url_match = re.match(r"https://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)", ref)
-    if url_match:
-        return {"repo": url_match.group(1), "number": url_match.group(3)}
+    - https://linear.app/team/issue/IDENTIFIER (Linear)
 
-    # Short format: owner/repo#123
-    short_match = re.match(r"([^/]+/[^#]+)#(\d+)", ref)
-    if short_match:
-        return {"repo": short_match.group(1), "number": short_match.group(2)}
+    Returns dict with 'source' ('github' or 'linear'), plus source-specific fields.
+    """
+    # GitHub full URL format
+    github_url_match = re.match(r"https://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)", ref)
+    if github_url_match:
+        return {"source": "github", "repo": github_url_match.group(1), "number": github_url_match.group(3)}
+
+    # GitHub short format: owner/repo#123
+    github_short_match = re.match(r"([^/]+/[^#]+)#(\d+)", ref)
+    if github_short_match:
+        return {"source": "github", "repo": github_short_match.group(1), "number": github_short_match.group(2)}
+
+    # Linear URL format: https://linear.app/team/issue/IDENTIFIER
+    linear_match = re.match(r"https://linear\.app/([^/]+)/issue/([^/]+)", ref)
+    if linear_match:
+        return {"source": "linear", "team": linear_match.group(1), "identifier": linear_match.group(2)}
 
     return None
 
@@ -2249,6 +2269,79 @@ def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
             return result.stdout.strip()
     except (subprocess.TimeoutExpired, Exception):
         pass
+    return None
+
+
+def fetch_linear_issue_state(identifier: str) -> Optional[str]:
+    """Fetch Linear issue state using GraphQL API.
+
+    Args:
+        identifier: Linear issue identifier (e.g., 'SUDO-123')
+
+    Returns:
+        Issue state type (e.g., 'started', 'completed', 'canceled') or None if failed
+    """
+    import os
+
+    token = os.environ.get("LOFTY_LINEAR_TOKEN") or os.environ.get("LINEAR_API_KEY")
+    if not token:
+        return None
+
+    query = """
+    query($identifier: String!) {
+        issue(id: $identifier) {
+            state { type }
+        }
+    }
+    """
+
+    # Linear identifiers like SUDO-123 need to be looked up differently
+    # Try issueViaIdOrKey first
+    query = """
+    query($id: String!) {
+        issueViaIdentifier: issue(id: $id) {
+            state { type }
+        }
+    }
+    """
+
+    try:
+        import urllib.request
+
+        # First try by identifier (SUDO-123)
+        search_query = """
+        query($filter: IssueFilter!) {
+            issues(filter: $filter, first: 1) {
+                nodes {
+                    state { type }
+                }
+            }
+        }
+        """
+
+        req = urllib.request.Request(
+            "https://api.linear.app/graphql",
+            data=json.dumps({
+                "query": search_query,
+                "variables": {"filter": {"identifier": {"eq": identifier}}}
+            }).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": token,
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+
+        if "errors" not in data:
+            issues = data.get("data", {}).get("issues", {}).get("nodes", [])
+            if issues:
+                state_type = issues[0].get("state", {}).get("type")
+                return str(state_type) if state_type else None
+    except Exception:
+        pass
+
     return None
 
 
@@ -2794,7 +2887,7 @@ def fetch_linear_issues(team: str, state: str, limit: int) -> List[Dict[str, Any
         return []
 
 
-def generate_task_filename(title: str, number: str | int, source: str) -> str:
+def generate_task_filename(title: str, number: Union[str, int], source: str) -> str:
     """Generate a task filename from title and number."""
     # Sanitize title for filename
     safe_title = re.sub(r'[^\w\s-]', '', title.lower())
