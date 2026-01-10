@@ -46,40 +46,7 @@ gh api repos/$REPO/pulls/$PR_NUMBER/comments \
 
 **Why jq?** Raw `gh api` output includes ~50 fields per comment (timestamps, URLs, reactions, etc.). The jq filter extracts only what's needed, reducing context usage by ~80% while preserving actionable information.
 
-**Reading full review threads & filtering resolved comments (GraphQL):**
-```shell
-# Use GraphQL to see thread resolution status and full thread context
-gh api graphql -f query='
-{
-  repository(owner: "gptme", name: "gptme-contrib") {
-    pullRequest(number: 134) {
-      reviewThreads(first: 50) {
-        nodes {
-          isResolved
-          comments(first: 10) {
-            nodes {
-              author { login }
-              body
-              path
-              line
-            }
-          }
-        }
-      }
-    }
-  }
-}' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | {
-  path: .comments.nodes[0].path,
-  line: .comments.nodes[0].line,
-  thread: [.comments.nodes[] | {author: .author.login, body: (.body | split("\n")[0])}]
-}'
-```
-
-This GraphQL query:
-- Gets all review threads with `isResolved` status
-- Filters to only unresolved threads with `select(.isResolved == false)`
-- Shows full conversation thread (all replies in order)
-- Extracts path and line for context
+**Note:** For thread resolution status, GraphQL queries can filter unresolved threads (used by gptme's `gh pr view` tool internally). The REST API examples above are simpler and cover most use cases.
 
 ### Step 2: Acknowledge Each Thread + Post Summary (same toolcall!)
 **Don't just post a general PR comment!** Reply to each review thread, THEN post summary - all in one shell block:
@@ -135,20 +102,19 @@ gh pr comment 134 --body "All done"
 
 **✅ CORRECT: Read → Act → Reply workflow**
 
-The workflow has three distinct phases (NOT a single command sequence):
+The workflow has three distinct toolcall boundaries (NOT a single command sequence):
 
-### Phase 1: Read ALL comments
+**Read**: Get all comments
 ```shell
 gh api repos/$REPO/pulls/$PR_NUMBER/comments \
   --jq '.[] | {id, path, user: .user.login, body: (.body | split("\n")[0])}'
 ```
 
-### Phase 2: Act on the feedback
-This happens OUTSIDE the shell - you exit, fix code, commit changes.
-May take multiple commits across multiple files.
+**Act**: Fix the issues (separate toolcalls)
+This means using shell tool to make commits - may take multiple toolcalls across files.
 
-### Phase 3: Reply to threads + post summary
-Only AFTER fixing issues, batch replies and summary in one block:
+**Reply**: Batch all replies + summary in one block
+Only AFTER fixing issues, post replies and summary together:
 ```shell
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id1>/replies -f body="✅ Fixed in abc123" --jq '.id' &
 gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id2>/replies -f body="✅ Fixed in abc123" --jq '.id' &
