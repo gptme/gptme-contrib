@@ -1572,7 +1572,10 @@ def sync(update, output_json, use_cache):
     for task in all_tasks:
         tracking = task.metadata.get("tracking")
         if tracking:
-            tasks_with_tracking.append((task, tracking))
+            # Handle tracking as either list or string for compatibility
+            tracking_urls = tracking if isinstance(tracking, list) else [tracking]
+            for tracking_url in tracking_urls:
+                tasks_with_tracking.append((task, tracking_url))
 
     if not tasks_with_tracking:
         if output_json:

@@ -255,7 +255,7 @@ def generate_task_content(
         "---",
         "state: new",
         f"created: {date.today().isoformat()}",
-        f"tracking: ['{issue['tracking_ref']}']",
+        f"tracking: {json.dumps([issue['tracking_ref']])}",
     ]
 
     if priority:
