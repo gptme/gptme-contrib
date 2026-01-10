@@ -138,31 +138,53 @@ gh api .../comments/123/replies -f body="Fixed"
 gh pr comment 134 --body "All done"
 ```
 
-**✅ CORRECT: jq-filtered output + individual thread replies + summary in one block**
+**✅ CORRECT: Read → Act → Reply workflow**
+
+The workflow has three phases:
+1. **Read**: Get all comments with compact jq output
+2. **Act**: Fix the issues mentioned (may take multiple commits!)
+3. **Reply**: Batch replies to threads + summary comment in one shell block
+
 ```shell
-# Read ALL comments with compact output
+# Phase 1: Read ALL comments with compact output
 gh api repos/$REPO/pulls/$PR_NUMBER/comments \
   --jq '.[] | {id, path, user: .user.login, body: (.body | split("\n")[0])}'
 
-# Reply to EACH thread with suppressed output, then summary
-gh api .../comments/<id1>/replies -f body="✅ Fixed" --jq '.id' &
-gh api .../comments/<id2>/replies -f body="✅ Fixed" --jq '.id' &
+# Phase 2: (In between) Actually fix the issues in code, commit changes
+
+# Phase 3: Reply to EACH thread (after fixing!) + summary in one block
+gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id1>/replies -f body="✅ Fixed in abc123" --jq '.id' &
+gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id2>/replies -f body="✅ Fixed in abc123" --jq '.id' &
 wait
-gh pr comment $PR_NUMBER --body "## Summary..."
+gh pr comment $PR_NUMBER --body "## All Review Comments Addressed
+
+| Comment | Resolution |
+|---------|------------|
+| Issue 1 | ✅ Fixed in abc123 |
+| Issue 2 | ✅ Fixed in abc123 |"
 ```
 
 ## jq Quick Reference for PR Reviews
 
-> **Note on escaping:** The `\|` in the table below is markdown table escaping. When copy-pasting these commands, use `|` without the backslash.
+```text
+Compact comment list:
+  --jq '.[] | {id, path, user: .user.login, body}'
 
-| Use Case | jq Filter |
-|----------|-----------|
-| Compact comment list | `--jq '.[] \| {id, path, user: .user.login, body}'` |
-| First line of body only | `--jq '.[] \| {id, body: (.body \| split("\n")[0])}'` |
-| Suppress POST response | `--jq '.id'` |
-| Count comments | `--jq 'length'` |
-| Filter by user | `--jq '.[] \| select(.user.login == "ErikBjare")'` |
-| Unresolved threads only | GraphQL with `select(.isResolved == false)` |
+First line of body only:
+  --jq '.[] | {id, body: (.body | split("\n")[0])}'
+
+Suppress POST response:
+  --jq '.id'
+
+Count comments:
+  --jq 'length'
+
+Filter by user:
+  --jq '.[] | select(.user.login == "ErikBjare")'
+
+Unresolved threads only:
+  GraphQL with: select(.isResolved == false)
+```
 
 ## Outcome
 Following this pattern results in:
