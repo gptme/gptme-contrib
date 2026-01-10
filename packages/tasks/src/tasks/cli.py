@@ -20,6 +20,7 @@ Features:
 - Link checking
 """
 
+import json
 import logging
 import re
 import subprocess
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import (
+    Any,
     Dict,
     List,
     NamedTuple,
@@ -1181,6 +1183,36 @@ PRIORITY_RANK: dict[str | None, int] = {
 }
 
 
+def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
+    """Serialize TaskInfo to a JSON-compatible dictionary.
+
+    Returns dict with:
+    - id: task filename without .md
+    - state: current state
+    - priority: task priority
+    - created: ISO timestamp
+    - modified: ISO timestamp
+    - tags: list of tags
+    - depends: list of dependencies
+    - subtasks: {completed: int, total: int}
+    """
+    return {
+        "id": task.id,
+        "name": task.name,
+        "state": task.state,
+        "priority": task.priority,
+        "created": task.created.isoformat() if task.created else None,
+        "modified": task.modified.isoformat() if task.modified else None,
+        "tags": task.tags,
+        "depends": task.depends,
+        "subtasks": {
+            "completed": task.subtasks.completed,
+            "total": task.subtasks.total,
+        },
+        "has_issues": task.has_issues,
+    }
+
+
 def is_task_ready(task: TaskInfo, all_tasks: Dict[str, TaskInfo]) -> bool:
     """Check if a task is ready (unblocked) to work on.
 
@@ -1644,11 +1676,19 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
     default="both",
     help="Filter by task state (new, active, or both)",
 )
-def ready(state):
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def ready(state, output_json):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
     Inspired by beads' `bd ready` command for finding work to do.
+
+    Use --json for machine-readable output in autonomous workflows.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -1675,6 +1715,9 @@ def ready(state):
     ready_tasks = [task for task in filtered_tasks if is_task_ready(task, tasks_dict)]
 
     if not ready_tasks:
+        if output_json:
+            print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
+            return
         console.print("[yellow]No ready tasks found![/]")
         console.print(
             "\n[dim]Tip: Try checking blocked tasks with --state to see dependencies[/]"
@@ -1688,6 +1731,15 @@ def ready(state):
             t.created,
         )
     )
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "ready_tasks": [task_to_dict(t) for t in ready_tasks],
+            "count": len(ready_tasks),
+        }
+        print(json.dumps(result, indent=2))
+        return
 
     # Create table
     table = Table(title=f"[bold green]Ready Tasks[/] ({len(ready_tasks)} unblocked)")
@@ -1726,11 +1778,19 @@ def ready(state):
 
 
 @cli.command("next")
-def next_():
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def next_(output_json):
     """Show the highest priority ready (unblocked) task.
 
     Picks from new or active tasks that have no dependencies
     or whose dependencies are all completed.
+
+    Use --json for machine-readable output in autonomous workflows.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -1754,6 +1814,18 @@ def next_():
     # Filter for ready (unblocked) tasks
     ready_tasks = [task for task in workable_tasks if is_task_ready(task, tasks_dict)]
     if not ready_tasks:
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "next_task": None,
+                        "alternatives": [],
+                        "error": "No ready tasks found",
+                    },
+                    indent=2,
+                )
+            )
+            return
         console.print("[yellow]No ready tasks found![/]")
         console.print("\n[dim]All new/active tasks are blocked by dependencies.[/]")
         console.print(
@@ -1771,6 +1843,17 @@ def next_():
 
     # Get the highest priority ready task
     next_task = ready_tasks[0]
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "next_task": task_to_dict(next_task),
+            "alternatives": [
+                task_to_dict(t) for t in ready_tasks[1:4]
+            ],  # Top 3 alternatives
+        }
+        print(json.dumps(result, indent=2))
+        return
 
     # Show task using same format as show command
     console.print(
