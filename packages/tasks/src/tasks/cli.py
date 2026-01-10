@@ -2442,5 +2442,419 @@ def plan(task_id: str, output_json: bool):
         console.print("[dim]Low impact.[/] This is a leaf task or has few dependents.")
 
 
+@cli.command("import")
+@click.option(
+    "--source",
+    type=click.Choice(["github", "linear"]),
+    required=True,
+    help="Source to import from (github or linear)",
+)
+@click.option(
+    "--repo",
+    help="GitHub repository in owner/repo format (required for github source)",
+)
+@click.option(
+    "--team",
+    help="Linear team key (required for linear source)",
+)
+@click.option(
+    "--state",
+    type=click.Choice(["open", "closed", "all"]),
+    default="open",
+    help="Filter by issue state",
+)
+@click.option(
+    "--label",
+    multiple=True,
+    help="Filter by label (can be used multiple times)",
+)
+@click.option(
+    "--assignee",
+    help="Filter by assignee (GitHub username or 'me')",
+)
+@click.option(
+    "--limit",
+    default=20,
+    help="Maximum number of issues to import",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be imported without creating files",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def import_issues(source, repo, team, state, label, assignee, limit, dry_run, output_json):
+    """Import issues from GitHub or Linear as placeholder tasks.
+
+    Creates minimal task files with tracking_issue frontmatter linking back
+    to the source. Existing tasks with matching tracking_issue are skipped
+    to avoid duplicates.
+
+    \b
+    Examples:
+        # Import open issues from a GitHub repo
+        tasks.py import --source github --repo gptme/gptme --state open
+
+        # Import issues with specific labels
+        tasks.py import --source github --repo gptme/gptme --label bug --label priority:high
+
+        # Import issues assigned to you
+        tasks.py import --source github --repo gptme/gptme --assignee me
+
+        # Dry run to preview imports
+        tasks.py import --source github --repo gptme/gptme --dry-run
+
+        # Import from Linear (requires LOFTY_LINEAR_TOKEN)
+        tasks.py import --source linear --team ENG
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Validate source-specific options
+    if source == "github" and not repo:
+        console.print("[red]Error: --repo is required for github source[/]")
+        sys.exit(1)
+    if source == "linear" and not team:
+        console.print("[red]Error: --team is required for linear source[/]")
+        sys.exit(1)
+
+    # Ensure tasks directory exists
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load existing tasks to check for duplicates
+    existing_tasks = load_tasks(tasks_dir)
+    existing_tracking = set()
+    for task in existing_tasks:
+        tracking = task.metadata.get("tracking_issue")
+        if tracking:
+            existing_tracking.add(tracking)
+
+    # Fetch issues based on source
+    if source == "github":
+        issues = fetch_github_issues(repo, state, list(label), assignee, limit)
+    else:  # linear
+        issues = fetch_linear_issues(team, state, limit)
+
+    if not issues:
+        if output_json:
+            print(json.dumps({"imported": [], "count": 0, "message": "No issues found"}, indent=2))
+            return
+        console.print("[yellow]No issues found matching criteria[/]")
+        return
+
+    # Process issues
+    imported = []
+    skipped = []
+    for issue in issues:
+        tracking_ref = issue["tracking_ref"]
+
+        # Check for duplicates
+        if tracking_ref in existing_tracking:
+            skipped.append({
+                "title": issue["title"],
+                "tracking_ref": tracking_ref,
+                "reason": "Already exists in tasks",
+            })
+            continue
+
+        # Generate task filename
+        task_filename = generate_task_filename(issue["title"], issue["number"], source)
+        task_path = tasks_dir / task_filename
+
+        # Skip if file already exists (belt and suspenders)
+        if task_path.exists():
+            skipped.append({
+                "title": issue["title"],
+                "tracking_ref": tracking_ref,
+                "reason": f"File {task_filename} already exists",
+            })
+            continue
+
+        # Map priority from labels if available
+        priority = map_priority_from_labels(issue.get("labels", []))
+
+        # Generate task content
+        task_content = generate_task_content(issue, source, priority)
+
+        if dry_run:
+            imported.append({
+                "title": issue["title"],
+                "tracking_ref": tracking_ref,
+                "filename": task_filename,
+                "dry_run": True,
+            })
+        else:
+            # Create the task file
+            try:
+                task_path.write_text(task_content)
+                imported.append({
+                    "title": issue["title"],
+                    "tracking_ref": tracking_ref,
+                    "filename": task_filename,
+                    "created": True,
+                })
+            except Exception as e:
+                skipped.append({
+                    "title": issue["title"],
+                    "tracking_ref": tracking_ref,
+                    "reason": f"Failed to create file: {e}",
+                })
+
+    # Output results
+    if output_json:
+        result = {
+            "imported": imported,
+            "skipped": skipped,
+            "count": len(imported),
+            "skipped_count": len(skipped),
+        }
+        if dry_run:
+            result["dry_run"] = True
+        print(json.dumps(result, indent=2))
+        return
+
+    # Rich output
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/] - No files created\n")
+
+    if imported:
+        table = Table(title=f"[bold]{'Would Import' if dry_run else 'Imported'} ({len(imported)} issues)[/]")
+        table.add_column("Title", style="cyan", max_width=50)
+        table.add_column("Tracking", style="blue")
+        table.add_column("Filename", style="green")
+
+        for item in imported:
+            table.add_row(
+                item["title"][:50],
+                item["tracking_ref"],
+                item["filename"],
+            )
+        console.print(table)
+
+    if skipped:
+        console.print(f"\n[yellow]Skipped {len(skipped)} issues:[/]")
+        for item in skipped:
+            console.print(f"  - {item['title'][:40]}: {item['reason']}")
+
+    if not dry_run and imported:
+        console.print(f"\n[green]✓ Created {len(imported)} task files in {tasks_dir}[/]")
+        console.print("[dim]Run 'tasks.py sync' to keep states synchronized[/]")
+
+
+def fetch_github_issues(repo: str, state: str, labels: List[str], assignee: Optional[str], limit: int) -> List[Dict[str, Any]]:
+    """Fetch issues from GitHub using gh CLI."""
+    cmd = [
+        "gh", "issue", "list",
+        "--repo", repo,
+        "--limit", str(limit),
+        "--json", "number,title,state,labels,url,body",
+    ]
+
+    if state != "all":
+        cmd.extend(["--state", state])
+
+    for label in labels:
+        cmd.extend(["--label", label])
+
+    if assignee:
+        cmd.extend(["--assignee", assignee])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return []
+
+        issues_data = json.loads(result.stdout)
+        issues = []
+        for issue in issues_data:
+            issues.append({
+                "number": issue["number"],
+                "title": issue["title"],
+                "state": issue["state"].lower(),
+                "labels": [l["name"] for l in issue.get("labels", [])],
+                "url": issue["url"],
+                "body": issue.get("body", "")[:500] if issue.get("body") else "",
+                "tracking_ref": f"{repo}#{issue['number']}",
+                "source": "github",
+            })
+        return issues
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
+        return []
+
+
+def fetch_linear_issues(team: str, state: str, limit: int) -> List[Dict[str, Any]]:
+    """Fetch issues from Linear using GraphQL API."""
+    import os
+
+    token = os.environ.get("LOFTY_LINEAR_TOKEN") or os.environ.get("LINEAR_API_KEY")
+    if not token:
+        return []
+
+    # Build state filter
+    state_filter = {}
+    if state == "open":
+        state_filter = {"state": {"type": {"nin": ["completed", "canceled"]}}}
+    elif state == "closed":
+        state_filter = {"state": {"type": {"in": ["completed", "canceled"]}}}
+
+    query = """
+    query($teamKey: String!, $first: Int!, $filter: IssueFilter) {
+        team(key: $teamKey) {
+            issues(first: $first, filter: $filter, orderBy: updatedAt) {
+                nodes {
+                    identifier
+                    title
+                    state { name type }
+                    labels { nodes { name } }
+                    url
+                    description
+                }
+            }
+        }
+    }
+    """
+
+    variables = {
+        "teamKey": team,
+        "first": limit,
+        "filter": state_filter if state_filter else None,
+    }
+
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            "https://api.linear.app/graphql",
+            data=json.dumps({"query": query, "variables": variables}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": token,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode())
+
+        if "errors" in data:
+            return []
+
+        team_data = data.get("data", {}).get("team")
+        if not team_data:
+            return []
+
+        issues = []
+        for issue in team_data.get("issues", {}).get("nodes", []):
+            issues.append({
+                "number": issue["identifier"],
+                "title": issue["title"],
+                "state": issue["state"]["type"] if issue.get("state") else "unknown",
+                "labels": [l["name"] for l in issue.get("labels", {}).get("nodes", [])],
+                "url": issue["url"],
+                "body": (issue.get("description") or "")[:500],
+                "tracking_ref": issue["url"],  # Use full URL for Linear
+                "source": "linear",
+            })
+        return issues
+    except Exception:
+        return []
+
+
+def generate_task_filename(title: str, number: str | int, source: str) -> str:
+    """Generate a task filename from title and number."""
+    # Sanitize title for filename
+    safe_title = re.sub(r'[^\w\s-]', '', title.lower())
+    safe_title = re.sub(r'[-\s]+', '-', safe_title).strip('-')
+    safe_title = safe_title[:50]  # Limit length
+
+    if source == "linear":
+        # Linear identifiers are like "ENG-123"
+        return f"linear-{number.lower()}-{safe_title}.md"
+    else:
+        return f"gh-{number}-{safe_title}.md"
+
+
+def map_priority_from_labels(labels: List[str]) -> Optional[str]:
+    """Map labels to task priority."""
+    labels_lower = [l.lower() for l in labels]
+
+    if any(p in labels_lower for p in ["priority:high", "priority: high", "p0", "p1", "urgent", "critical"]):
+        return "high"
+    elif any(p in labels_lower for p in ["priority:medium", "priority: medium", "p2"]):
+        return "medium"
+    elif any(p in labels_lower for p in ["priority:low", "priority: low", "p3", "p4"]):
+        return "low"
+
+    return None
+
+
+def generate_task_content(issue: Dict[str, Any], source: str, priority: Optional[str]) -> str:
+    """Generate task file content from issue data."""
+    # Map issue state to task state
+    if issue["state"] in ["closed", "completed", "canceled"]:
+        task_state = "done"
+    else:
+        task_state = "new"
+
+    # Build frontmatter
+    frontmatter_lines = [
+        "---",
+        f"state: {task_state}",
+        f"created: {datetime.now().strftime('%Y-%m-%d')}",
+        f"tracking_issue: '{issue['tracking_ref']}'",
+    ]
+
+    if priority:
+        frontmatter_lines.append(f"priority: {priority}")
+
+    # Add source-specific tags
+    tags = []
+    if source == "github":
+        tags.append("github")
+    elif source == "linear":
+        tags.append("linear")
+
+    # Add labels as tags (sanitized)
+    for label in issue.get("labels", [])[:5]:  # Limit to 5 labels
+        safe_label = re.sub(r'[^\w-]', '-', label.lower()).strip('-')
+        if safe_label and safe_label not in tags:
+            tags.append(safe_label)
+
+    if tags:
+        frontmatter_lines.append(f"tags: [{', '.join(tags)}]")
+
+    frontmatter_lines.append("---")
+
+    # Build body
+    body_lines = [
+        "",
+        f"# {issue['title']}",
+        "",
+        f"**Source**: [{source.capitalize()} #{issue['number']}]({issue['url']})",
+        "",
+    ]
+
+    if issue.get("body"):
+        body_lines.extend([
+            "## Description",
+            "",
+            issue["body"],
+            "",
+        ])
+
+    body_lines.extend([
+        "## Notes",
+        "",
+        "*Imported from external tracker. See source link for full context.*",
+        "",
+    ])
+
+    return "\n".join(frontmatter_lines) + "\n".join(body_lines)
+
+
 if __name__ == "__main__":
     cli()
