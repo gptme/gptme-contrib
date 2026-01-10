@@ -71,13 +71,13 @@ gh issue list --assignee @me --state open
 
 # Check ready tasks - tasks with no blockers (TERTIARY in CASCADE)
 # Use --json for machine-readable output in automated workflows
-tasks ready --json | jq '.ready_tasks[] | "\(.priority): \(.name)"'
+uv run python3 -m tasks ready --json | jq '.ready_tasks[] | "\(.priority): \(.name)"'
 
 # Get recommended next task with reasoning
-tasks next --json | jq '.next_task'
+uv run python3 -m tasks next --json | jq '.next_task'
 
 # Full status for context (human-readable overview)
-tasks status --compact
+uv run python3 -m tasks status --compact
 ```
 
 **CASCADE Priority Order**:
@@ -176,8 +176,8 @@ git push origin master
 
 **Phase 2** (4 min):
 - `gh issue list --assignee @me` → found GitHub issue from collaborator (SECONDARY)
-- `tasks ready --json` → 4 ready tasks, highest priority: agent-hosting-patterns
-- `tasks next --json` → recommends agent-hosting-patterns with reasoning
+- `uv run python3 -m tasks ready --json` → 4 ready tasks, highest priority: agent-hosting-patterns
+- `uv run python3 -m tasks next --json` → recommends agent-hosting-patterns with reasoning
 - Decision: Work on GitHub issue (SECONDARY takes priority over TERTIARY)
 
 **Phase 3** (22 min):
