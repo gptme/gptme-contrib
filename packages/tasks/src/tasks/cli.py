@@ -20,6 +20,7 @@ Features:
 - Link checking
 """
 
+import json
 import logging
 import re
 import subprocess
@@ -1644,7 +1645,14 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
     default="both",
     help="Filter by task state (new, active, or both)",
 )
-def ready(state):
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Output as JSON for machine consumption",
+)
+def ready(state, output_json):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
@@ -1719,6 +1727,35 @@ def ready(state):
             subtasks_str,
         )
 
+    # Output JSON if requested
+    if output_json:
+        # Create stable enumerated ID mapping (same as table view)
+        tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+        name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+
+        json_output = {
+            "ready_tasks": [
+                {
+                    "id": name_to_enum_id[task.name],
+                    "name": task.name,
+                    "state": task.state,
+                    "priority": task.priority or "none",
+                    "subtasks": {
+                        "completed": task.subtasks.completed,
+                        "total": task.subtasks.total,
+                    }
+                    if task.subtasks.total > 0
+                    else None,
+                    "created": task.created.isoformat() if task.created else None,
+                    "depends": task.depends if task.depends else [],
+                }
+                for task in ready_tasks
+            ],
+            "count": len(ready_tasks),
+        }
+        click.echo(json.dumps(json_output, indent=2))
+        return
+
     console.print(table)
     console.print(
         "\n[dim]Run [bold]tasks.py next[/] to pick the top priority ready task[/]"
@@ -1726,7 +1763,14 @@ def ready(state):
 
 
 @cli.command("next")
-def next_():
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Output as JSON for machine consumption",
+)
+def next_(output_json):
     """Show the highest priority ready (unblocked) task.
 
     Picks from new or active tasks that have no dependencies
@@ -1771,6 +1815,35 @@ def next_():
 
     # Get the highest priority ready task
     next_task = ready_tasks[0]
+
+    # Output JSON if requested
+    if output_json:
+        # Create stable enumerated ID mapping
+        tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+        name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+
+        json_output = {
+            "next_task": {
+                "id": name_to_enum_id[next_task.name],
+                "name": next_task.name,
+                "state": next_task.state,
+                "priority": next_task.priority or "none",
+                "subtasks": {
+                    "completed": next_task.subtasks.completed,
+                    "total": next_task.subtasks.total,
+                }
+                if next_task.subtasks.total > 0
+                else None,
+                "created": next_task.created.isoformat() if next_task.created else None,
+                "depends": next_task.depends if next_task.depends else [],
+                "next_action": next_task.next_action
+                if hasattr(next_task, "next_action")
+                else None,
+            },
+            "alternatives_count": len(ready_tasks) - 1,
+        }
+        click.echo(json.dumps(json_output, indent=2))
+        return
 
     # Show task using same format as show command
     console.print(
