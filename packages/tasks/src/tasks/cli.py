@@ -154,8 +154,8 @@ def show(task_id):
         table.add_row("Priority", STATE_EMOJIS.get(task.priority) or task.priority)
     if task.tags:
         table.add_row("Tags", ", ".join(task.tags))
-    if task.blocks:
-        table.add_row("Blocks", ", ".join(task.blocks))
+    if task.requires:
+        table.add_row("Requires", ", ".join(task.requires))
     if task.subtasks.total > 0:
         table.add_row(
             "Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed"
@@ -323,9 +323,9 @@ def list_(sort, active_only, context, output_json, output_jsonl):
             name_with_count = task.name
 
         # Format dependencies with enumerated IDs or task info
-        if task.blocks:
+        if task.requires:
             dep_ids = []
-            for dep in task.blocks:
+            for dep in task.requires:
                 if dep in all_tasks_dict:
                     dep_task = all_tasks_dict[dep]
                     # If dependency is in filtered list, show its ID
@@ -359,7 +359,7 @@ def list_(sort, active_only, context, output_json, output_jsonl):
     # Print table
     headers = ["", "Task", "Created", "Priority", "Complete", "Deps"]
     # Only show dependencies column if any task has dependencies
-    has_deps = any(task.blocks for task in tasks)
+    has_deps = any(task.requires for task in tasks)
     if not has_deps:
         display_rows = [row[:-1] for row in display_rows]
         headers = headers[:-1]
@@ -385,13 +385,13 @@ def list_(sort, active_only, context, output_json, output_jsonl):
     # Print legend for tasks with dependencies
     if has_deps:
         tasks_with_deps = [
-            (task, name_to_enum_id[task.name]) for task in tasks if task.blocks
+            (task, name_to_enum_id[task.name]) for task in tasks if task.requires
         ]
         if tasks_with_deps:
             console.print("\nDependencies:")
             for task, enum_id in tasks_with_deps:
                 dep_strs = []
-                for dep in task.blocks:
+                for dep in task.requires:
                     if dep in all_tasks_dict:
                         dep_task = all_tasks_dict[dep]
                         # If dependency is in filtered list, show its ID
@@ -732,7 +732,7 @@ def check(fix: bool, task_files: list[str]):
         tasks_to_validate = all_tasks
 
     # Track dependencies in tasks being validated
-    tasks_with_deps = [task for task in tasks_to_validate if task.blocks]
+    tasks_with_deps = [task for task in tasks_to_validate if task.requires]
 
     def has_cycle(task_id: str, visited: Set[str], path: Set[str]) -> bool:
         """Check for circular dependencies."""
@@ -745,7 +745,7 @@ def check(fix: bool, task_files: list[str]):
         # Find task object to get its dependencies (search in ALL tasks)
         task = next((t for t in all_tasks if t.id == task_id), None)
         if task:
-            for dep in task.blocks:
+            for dep in task.requires:
                 if has_cycle(dep, visited, path):
                     return True
         path.remove(task_id)
@@ -763,7 +763,7 @@ def check(fix: bool, task_files: list[str]):
 
     # Check for missing dependencies
     for task in tasks_with_deps:
-        for dep in task.blocks:
+        for dep in task.requires:
             if dep not in task_ids:
                 dependency_issues.append(f"{task.id}: Dependency '{dep}' not found")
 
@@ -902,8 +902,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
-        "depends": {"type": "list"},  # Deprecated, use blocks instead
-        "blocks": {"type": "list"},  # Blocking dependencies (canonical)
+        "depends": {"type": "list"},  # Deprecated, use requires instead
+        "blocks": {
+            "type": "list"
+        },  # Deprecated, use requires instead (note: different semantics)
+        "requires": {"type": "list"},  # Required dependencies (canonical)
         "related": {"type": "list"},  # Related items (informational)
         "discovered-from": {"type": "list"},  # Tasks this was discovered from
         "output_types": {"type": "list"},
@@ -984,22 +987,26 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 "tags",
                 "tag",
                 "dep",
+                "requires",
+                "require",
                 "blocks",
                 "block",
                 "related",
                 "discovered-from",
             ):
                 console.print(
-                    f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags/blocks/related/discovered-from.[/]"
+                    f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags/requires/related/discovered-from.[/]"
                 )
                 return
 
-            # Normalize field names (tag -> tags, dep -> depends, deps -> depends, block -> blocks)
+            # Normalize field names (tag -> tags, dep -> depends, deps -> depends, require -> requires, block -> requires, blocks -> requires)
             field_map = {
                 "tag": "tags",
                 "dep": "depends",
                 "deps": "depends",
-                "block": "blocks",
+                "require": "requires",
+                "block": "requires",
+                "blocks": "requires",  # blocks → requires (different semantics warning)
             }
             field = field_map.get(field, field)
             changes.append((op, field, value))
@@ -1026,6 +1033,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 "deps",
                 "tags",
                 "depends",
+                "requires",
                 "blocks",
                 "related",
                 "discovered-from",
@@ -1091,11 +1099,12 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 "depends",
                 "deps",
                 "tags",
+                "requires",
                 "blocks",
                 "related",
                 "discovered-from",
             ):
-                # Handle list fields (after normalization, "dep"/"deps" → "depends", "block" → "blocks")
+                # Handle list fields (after normalization, "dep"/"deps" → "depends", "require"/"block"/"blocks" → "requires")
                 current = post.metadata.get(field, [])
                 if op == "add":
                     post.metadata[field] = list(set(current + [value]))
@@ -1265,7 +1274,7 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
     "--use-cache",
     "use_cache",
     is_flag=True,
-    help="Check URL-based blocks against cached states (run 'fetch' first)",
+    help="Check URL-based requires against cached states (run 'fetch' first)",
 )
 def ready(state, output_json, output_jsonl, use_cache):
     """List all ready (unblocked) tasks.
@@ -1275,7 +1284,7 @@ def ready(state, output_json, output_jsonl, use_cache):
 
     Use --json for machine-readable output in autonomous workflows.
     Use --jsonl for compact one-task-per-line output (better with head -n).
-    Use --use-cache to also check URL-based 'blocks' against cached issue states.
+    Use --use-cache to also check URL-based 'requires' against cached issue states.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -1406,7 +1415,7 @@ def ready(state, output_json, output_jsonl, use_cache):
     "--use-cache",
     "use_cache",
     is_flag=True,
-    help="Check URL-based blocks against cached states (run 'fetch' first)",
+    help="Check URL-based requires against cached states (run 'fetch' first)",
 )
 def next_(output_json, use_cache):
     """Show the highest priority ready (unblocked) task.
@@ -1415,7 +1424,7 @@ def next_(output_json, use_cache):
     or whose dependencies are all completed.
 
     Use --json for machine-readable output in autonomous workflows.
-    Use --use-cache to also check URL-based 'blocks' against cached issue states.
+    Use --use-cache to also check URL-based 'requires' against cached issue states.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2008,7 +2017,7 @@ def plan(task_id: str, output_json: bool):
     # Find all tasks that depend on this task (reverse dependency lookup)
     dependent_tasks = []
     for task in all_tasks:
-        if target_task.name in task.blocks:
+        if target_task.name in task.requires:
             dependent_tasks.append(task)
 
     # Calculate impact score
@@ -2037,7 +2046,7 @@ def plan(task_id: str, output_json: bool):
 
     # Check if this task has unmet dependencies itself
     unmet_dependencies = []
-    for dep_name in target_task.blocks:
+    for dep_name in target_task.requires:
         for task in all_tasks:
             if task.name == dep_name and task.state not in ["done", "cancelled"]:
                 unmet_dependencies.append(
@@ -2154,7 +2163,7 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
     Retrieves state (open/closed) from GitHub URLs and caches locally.
     This enables fast state checks in sync/ready commands without API calls.
 
-    By default, scans all tasks for external URLs in tracking, blocks,
+    By default, scans all tasks for external URLs in tracking, requires,
     and related fields. Pass explicit URLs to fetch specific items.
 
     Cache is stored in state/issue-cache.json.
@@ -2191,7 +2200,7 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
             return
         console.print("[yellow]No external URLs found in tasks.[/]")
         console.print(
-            "\n[dim]Add tracking, blocks, or related URLs to task frontmatter.[/]"
+            "\n[dim]Add tracking, requires, or related URLs to task frontmatter.[/]"
         )
         return
 

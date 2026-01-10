@@ -233,8 +233,8 @@ class TaskInfo:
         modified: Last modification timestamp
         priority: Task priority (high, medium, low)
         tags: List of tags
-        depends: List of task dependencies (deprecated, use blocks instead)
-        blocks: List of blocking task IDs or URLs (canonical for depends)
+        depends: List of task dependencies (deprecated, use requires instead)
+        requires: List of required task IDs or URLs (canonical for depends)
         related: List of related task IDs or URLs
         parent: Parent task ID or URL (for subtasks)
         discovered_from: List of task IDs this was discovered from
@@ -250,8 +250,8 @@ class TaskInfo:
     modified: datetime
     priority: Optional[str]
     tags: List[str]
-    depends: List[str]  # Deprecated, use blocks instead
-    blocks: List[str]  # Blocking dependencies (task IDs or URLs)
+    depends: List[str]  # Deprecated, use requires instead
+    requires: List[str]  # Required dependencies (task IDs or URLs)
     related: List[str]  # Related items (informational)
     parent: Optional[str]  # Parent task ID
     discovered_from: List[str]  # Tasks this was discovered from
@@ -430,6 +430,10 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
     if "depends" in metadata and not isinstance(metadata["depends"], list):
         issues.append("Dependencies must be a list")
 
+    if "requires" in metadata and not isinstance(metadata["requires"], list):
+        issues.append("Requires must be a list")
+
+    # Also check deprecated blocks field
     if "blocks" in metadata and not isinstance(metadata["blocks"], list):
         issues.append("Blocks must be a list")
 
@@ -563,11 +567,19 @@ def load_tasks(
 
             # Create TaskInfo object
             # Get relationship fields (new typed dependencies)
-            # blocks is canonical, depends is deprecated alias
+            # requires is canonical, depends and blocks are deprecated aliases
             depends_list = metadata.get("depends", [])
-            blocks_list = metadata.get("blocks", [])
-            # Merge depends into blocks (blocks takes precedence if both exist)
-            effective_blocks = blocks_list if blocks_list else depends_list
+            blocks_list = metadata.get(
+                "blocks", []
+            )  # Deprecated (note: different semantics)
+            requires_list = metadata.get("requires", [])
+            # Merge deprecated fields into requires (requires takes precedence)
+            # Priority: requires > blocks > depends
+            effective_requires = (
+                requires_list
+                if requires_list
+                else (blocks_list if blocks_list else depends_list)
+            )
 
             task = TaskInfo(
                 path=file,
@@ -577,8 +589,8 @@ def load_tasks(
                 modified=modified,
                 priority=metadata.get("priority"),
                 tags=metadata.get("tags", []),
-                depends=depends_list,  # Keep for backward compat
-                blocks=effective_blocks,  # Canonical blocking deps
+                depends=depends_list,  # Deprecated, use requires instead
+                requires=effective_requires,  # Canonical required deps
                 related=metadata.get("related", []),
                 parent=metadata.get("parent"),
                 discovered_from=metadata.get("discovered-from", []),
@@ -609,11 +621,11 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     - created: ISO timestamp
     - modified: ISO timestamp
     - tags: list of tags
-    - blocks: list of blocking dependencies (canonical)
+    - requires: list of required dependencies (canonical)
     - related: list of related items
     - parent: parent task ID
     - discovered_from: list of tasks this was discovered from
-    - depends: list of dependencies (deprecated, same as blocks)
+    - depends: list of dependencies (deprecated, same as requires)
     - subtasks: {completed: int, total: int}
     """
     return {
@@ -624,7 +636,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "created": task.created.isoformat() if task.created else None,
         "modified": task.modified.isoformat() if task.modified else None,
         "tags": task.tags,
-        "blocks": task.blocks,  # Canonical blocking deps
+        "requires": task.requires,  # Canonical required deps
         "related": task.related,
         "parent": task.parent,
         "discovered_from": task.discovered_from,
@@ -645,37 +657,37 @@ def is_task_ready(
     """Check if a task is ready (unblocked) to work on.
 
     A task is ready if:
-    - It has no blocking dependencies, OR
-    - All its blocking dependencies are in "done" or "cancelled" state
-    - All URL-based blocks are CLOSED (if cache provided)
+    - It has no required dependencies, OR
+    - All its required dependencies are in "done" or "cancelled" state
+    - All URL-based requires are CLOSED (if cache provided)
 
-    Uses task.blocks (canonical) which includes both explicit blocks
-    and deprecated depends entries.
+    Uses task.requires (canonical) which includes both explicit requires
+    and deprecated depends/blocks entries.
 
     Args:
         task: Task to check
         all_tasks: Dictionary mapping task names to TaskInfo objects
-        issue_cache: Optional cache of issue states for URL-based blocks
+        issue_cache: Optional cache of issue states for URL-based requires
 
     Returns:
         True if task is ready, False if blocked
     """
-    # Use blocks (canonical field, includes deprecated depends)
-    blocks = task.blocks
-    if not blocks:
+    # Use requires (canonical field, includes deprecated depends/blocks)
+    requires = task.requires
+    if not requires:
         return True
 
-    # Separate URL-based and task-based blocks
-    url_blocks = []
-    task_blocks = []
-    for block in blocks:
-        if isinstance(block, str) and block.startswith("http"):
-            url_blocks.append(block)
+    # Separate URL-based and task-based requires
+    url_requires = []
+    task_requires = []
+    for req in requires:
+        if isinstance(req, str) and req.startswith("http"):
+            url_requires.append(req)
         else:
-            task_blocks.append(block)
+            task_requires.append(req)
 
     # Check task-based blocking dependencies
-    for dep_name in task_blocks:
+    for dep_name in task_requires:
         dep_task = all_tasks.get(dep_name)
         if dep_task is None:
             # Missing dependency = blocked (should be validated separately)
@@ -684,17 +696,17 @@ def is_task_ready(
             # Dependency not completed = blocked
             return False
 
-    # Check URL-based blocks if cache provided
-    if issue_cache and url_blocks:
-        for block_url in url_blocks:
-            cached = issue_cache.get(block_url)
+    # Check URL-based requires if cache provided
+    if issue_cache and url_requires:
+        for req_url in url_requires:
+            cached = issue_cache.get(req_url)
             if cached:
                 # If URL is OPEN, task is blocked
                 if cached.get("state") == "OPEN":
                     return False
             # If not in cache, we can't determine - assume not blocked
 
-    # All blocking dependencies resolved = ready
+    # All required dependencies resolved = ready
     return True
 
 
@@ -985,7 +997,7 @@ def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
 
 
 def extract_external_urls(task: TaskInfo) -> List[str]:
-    """Extract external URLs from task's blocks, related, and tracking fields."""
+    """Extract external URLs from task's requires, related, and tracking fields."""
     urls = []
 
     # Check tracking field (full URLs)
