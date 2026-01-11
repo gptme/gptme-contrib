@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import subprocess
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -400,7 +401,9 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
         state = metadata["state"]
         # Normalize deprecated states before validation
         normalized_state = normalize_state(state, warn=False)
-        if normalized_state not in CONFIGS["tasks"].states:
+        # Use canonical states only (not deprecated ones in CONFIGS)
+        canonical_states = get_canonical_states()
+        if normalized_state not in canonical_states:
             issues.append(f"Invalid state: {state}")
 
     # Validate created date format if string (accepts date-only or full datetime)
@@ -567,19 +570,31 @@ def load_tasks(
 
             # Create TaskInfo object
             # Get relationship fields (new typed dependencies)
-            # requires is canonical, depends and blocks are deprecated aliases
+            # requires is canonical, depends is deprecated alias, blocks is NOT merged (different semantics)
             depends_list = metadata.get("depends", [])
-            blocks_list = metadata.get(
-                "blocks", []
-            )  # Deprecated (note: different semantics)
+            blocks_list = metadata.get("blocks", [])  # NOT merged - different semantics
             requires_list = metadata.get("requires", [])
-            # Merge deprecated fields into requires (requires takes precedence)
-            # Priority: requires > blocks > depends
-            effective_requires = (
-                requires_list
-                if requires_list
-                else (blocks_list if blocks_list else depends_list)
-            )
+
+            # Warn if multiple fields are present (potential confusion)
+            fields_present = []
+            if requires_list:
+                fields_present.append("requires")
+            if blocks_list:
+                fields_present.append("blocks")
+            if depends_list:
+                fields_present.append("depends")
+            if len(fields_present) > 1:
+                warnings.warn(
+                    f"Task '{file.stem}' has multiple dependency fields: {fields_present}. "
+                    f"Using 'requires' (canonical). Note: 'blocks' has different semantics and is ignored.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+            # Merge depends into requires (depends is deprecated alias with same semantics)
+            # blocks is NOT merged because it has inverse semantics (this task blocks X, not X blocks this)
+            # Priority: requires > depends (blocks is separate)
+            effective_requires = requires_list if requires_list else depends_list
 
             task = TaskInfo(
                 path=file,

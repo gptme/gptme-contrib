@@ -978,37 +978,53 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             return
         changes.append(("set_subtask", subtask_text, state))
 
+    # Canonical list fields in task metadata (no aliases)
+    CANONICAL_LIST_FIELDS = {
+        "tags",
+        "depends",
+        "requires",
+        "blocks",
+        "related",
+        "discovered-from",
+    }
+
+    # Allowed fields for --add/--remove operations (includes aliases)
+    ADDABLE_FIELDS = CANONICAL_LIST_FIELDS | {
+        "deps",
+        "tag",
+        "dep",
+        "require",
+        "block",
+    }
+
+    # Normalize field names (tag -> tags, dep -> depends, deps -> depends, require -> requires, block -> requires, blocks -> requires)
+    FIELD_ALIASES = {
+        "tag": "tags",
+        "dep": "depends",
+        "deps": "depends",
+        "require": "requires",
+        "block": "requires",
+        "blocks": "requires",
+    }
+
     # Validate add/remove operations
     for op, fields in [("add", add_fields), ("remove", remove_fields)]:
         for field, value in fields:
-            if field not in (
-                "depends",
-                "deps",
-                "tags",
-                "tag",
-                "dep",
-                "requires",
-                "require",
-                "blocks",
-                "block",
-                "related",
-                "discovered-from",
-            ):
+            if field not in ADDABLE_FIELDS:
                 console.print(
                     f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags/requires/related/discovered-from.[/]"
                 )
                 return
 
-            # Normalize field names (tag -> tags, dep -> depends, deps -> depends, require -> requires, block -> requires, blocks -> requires)
-            field_map = {
-                "tag": "tags",
-                "dep": "depends",
-                "deps": "depends",
-                "require": "requires",
-                "block": "requires",
-                "blocks": "requires",  # blocks → requires (different semantics warning)
-            }
-            field = field_map.get(field, field)
+            # Warn about blocks → requires semantic change
+            if field in ("block", "blocks"):
+                console.print(
+                    "[yellow]Warning: 'blocks' is deprecated. Use 'requires' instead. "
+                    "Note: semantics have changed - 'requires' means dependencies this task needs, "
+                    "not tasks that this task blocks.[/]"
+                )
+
+            field = FIELD_ALIASES.get(field, field)
             changes.append((op, field, value))
 
     if not changes:
@@ -1029,15 +1045,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
 
         # Show changes for each field
         for field, field_ops in field_changes.items():
-            if field in (
-                "deps",
-                "tags",
-                "depends",
-                "requires",
-                "blocks",
-                "related",
-                "discovered-from",
-            ):
+            if field in CANONICAL_LIST_FIELDS:
                 current = task.metadata.get(field, [])
                 new = current.copy()
 
@@ -1095,16 +1103,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     return
 
                 post.content = "\n".join(lines)
-            elif field in (
-                "depends",
-                "deps",
-                "tags",
-                "requires",
-                "blocks",
-                "related",
-                "discovered-from",
-            ):
-                # Handle list fields (after normalization, "dep"/"deps" → "depends", "require"/"block"/"blocks" → "requires")
+            elif field in CANONICAL_LIST_FIELDS:
+                # Handle list fields (after normalization via FIELD_ALIASES)
                 current = post.metadata.get(field, [])
                 if op == "add":
                     post.metadata[field] = list(set(current + [value]))
