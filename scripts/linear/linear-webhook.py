@@ -474,7 +474,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 **IMPORTANT**: Keep the Linear user informed of your progress! Use ephemeral activities to show what you're doing:
 
 1. When starting work: `action --ephemeral "Starting analysis..."`
-2. During work: `action --ephemeral "Checking file X..."` 
+2. During work: `action --ephemeral "Checking file X..."`
 3. Key findings: `thought "Found issue: ..."` (non-ephemeral for important info)
 4. Before completion: `thought "Preparing final response..."`
 5. Final: `response "Done! Here's what I did..."`
@@ -483,7 +483,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 
 1. ✅ Emit progress updates during work (use --ephemeral for transient status)
 2. ✅ Submit final response via `response` command (this closes the session)
-3. ✅ Update journal with session summary  
+3. ✅ Update journal with session summary
 4. ✅ Commit and merge to main
 5. ✅ Exit
 """

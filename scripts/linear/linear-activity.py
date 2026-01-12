@@ -18,6 +18,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -73,7 +74,7 @@ def load_oauth_credentials() -> tuple[str, str] | None:
             if "=" in line and not line.startswith("#"):
                 key, value = line.split("=", 1)
                 creds[key.strip()] = value.strip()
-        
+
         client_id = creds.get("LINEAR_CLIENT_ID")
         client_secret = creds.get("LINEAR_CLIENT_SECRET")
         if client_id and client_secret:
@@ -88,15 +89,15 @@ def is_token_expired() -> bool:
     tokens_file = find_tokens_file()
     if not tokens_file:
         return True
-    
+
     try:
         tokens = json.loads(tokens_file.read_text())
-        expires_at = tokens.get("expiresAt", 0)
+        expires_at = float(tokens.get("expiresAt", 0))
         # Convert from milliseconds if needed
         if expires_at > 1e12:
             expires_at = expires_at / 1000
         # Add 5 minute buffer
-        return time.time() > (expires_at - 300)
+        return bool(time.time() > (expires_at - 300))
     except Exception:
         return True
 
@@ -111,7 +112,10 @@ def refresh_token() -> bool:
     credentials = load_oauth_credentials()
     if not credentials:
         print("Error: No OAuth credentials found", file=sys.stderr)
-        print("Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in environment or .env file", file=sys.stderr)
+        print(
+            "Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in environment or .env file",
+            file=sys.stderr,
+        )
         return False
 
     client_id, client_secret = credentials
@@ -133,9 +137,9 @@ def refresh_token() -> bool:
             },
             timeout=30.0,
         )
-        
+
         new_tokens = response.json()
-        
+
         if "access_token" not in new_tokens:
             print(f"Error refreshing token: {new_tokens}", file=sys.stderr)
             return False
@@ -147,10 +151,14 @@ def refresh_token() -> bool:
             "tokenType": new_tokens.get("token_type", "Bearer"),
             "scope": new_tokens.get("scope", tokens.get("scope")),
             "actorType": "application",
-            "expiresAt": int((time.time() + new_tokens.get("expires_in", 86400)) * 1000),
+            "expiresAt": int(
+                (time.time() + new_tokens.get("expires_in", 86400)) * 1000
+            ),
         }
         tokens_file.write_text(json.dumps(save_tokens, indent=2))
-        print(f"✓ Token refreshed, expires in {new_tokens.get('expires_in', 0) // 3600}h")
+        print(
+            f"✓ Token refreshed, expires in {new_tokens.get('expires_in', 0) // 3600}h"
+        )
         return True
 
     except Exception as e:
@@ -170,11 +178,12 @@ def token_status() -> None:
         expires_at = tokens.get("expiresAt", 0)
         if expires_at > 1e12:
             expires_at = expires_at / 1000
-        
+
         from datetime import datetime
+
         expiry = datetime.fromtimestamp(expires_at)
         now = datetime.now()
-        
+
         print(f"Tokens file: {tokens_file}")
         print(f"Expires: {expiry}")
         print(f"Expired: {now > expiry}")
@@ -203,7 +212,7 @@ def get_access_token() -> str:
             if access_token := (
                 tokens.get("accessToken") or tokens.get("access_token")
             ):
-                return access_token
+                return str(access_token)
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Failed to read tokens file: {e}", file=sys.stderr)
 
@@ -227,7 +236,7 @@ def emit_activity(
     signal: str | None = None,
 ) -> bool:
     """Emit an activity to a Linear agent session.
-    
+
     Args:
         session_id: The Linear agent session ID
         content: The message content
@@ -240,7 +249,10 @@ def emit_activity(
     # All valid activity types
     valid_types = {"thought", "action", "response", "elicitation", "error", "prompt"}
     if activity_type not in valid_types:
-        print(f"Warning: Unknown activity type '{activity_type}', using 'thought'", file=sys.stderr)
+        print(
+            f"Warning: Unknown activity type '{activity_type}', using 'thought'",
+            file=sys.stderr,
+        )
         activity_type = "thought"
 
     # GraphQL mutation for creating agent activity
@@ -262,15 +274,15 @@ def emit_activity(
     }
 
     # Build input
-    input_obj = {
+    input_obj: dict[str, Any] = {
         "agentSessionId": session_id,
         "content": content_obj,
     }
-    
+
     # Add optional fields
     if ephemeral:
         input_obj["ephemeral"] = True
-    
+
     if signal:
         valid_signals = {"stop", "continue", "auth", "select"}
         if signal in valid_signals:
@@ -278,9 +290,7 @@ def emit_activity(
         else:
             print(f"Warning: Unknown signal '{signal}', ignoring", file=sys.stderr)
 
-    variables = {
-        "input": input_obj
-    }
+    variables = {"input": input_obj}
 
     try:
         response = httpx.post(
@@ -322,19 +332,25 @@ def emit_activity(
 def main():
     # Valid activity types
     activity_types = {"thought", "action", "response", "elicitation", "error", "prompt"}
-    
+
     if len(sys.argv) < 2:
         print(__doc__)
         print("\nActivity Commands:")
         print("  thought <session_id> <message>      - Emit thinking/progress update")
         print("  action <session_id> <message>       - Emit tool/action invocation")
-        print("  response <session_id> <message>     - Emit final response (closes session)")
+        print(
+            "  response <session_id> <message>     - Emit final response (closes session)"
+        )
         print("  elicitation <session_id> <message>  - Request information from user")
         print("  error <session_id> <message>        - Emit error message")
         print("  prompt <session_id> <message>       - Emit prompt/instruction")
         print("\nFlags (add before message):")
-        print("  --ephemeral                         - Activity disappears after next one")
-        print("  --signal=<signal>                   - Add signal: stop, continue, auth, select")
+        print(
+            "  --ephemeral                         - Activity disappears after next one"
+        )
+        print(
+            "  --signal=<signal>                   - Add signal: stop, continue, auth, select"
+        )
         print("\nToken Commands:")
         print("  refresh                             - Refresh OAuth token")
         print("  token-status                        - Check token status")
@@ -357,21 +373,27 @@ def main():
 
     # Activity commands require session_id and message
     if len(sys.argv) < 4:
-        print(f"Usage: {command} <session_id> [--ephemeral] [--signal=X] <message>", file=sys.stderr)
+        print(
+            f"Usage: {command} <session_id> [--ephemeral] [--signal=X] <message>",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if command not in activity_types:
         print(f"Unknown command: {command}", file=sys.stderr)
-        print(f"Use one of: {', '.join(sorted(activity_types))}, refresh, token-status", file=sys.stderr)
+        print(
+            f"Use one of: {', '.join(sorted(activity_types))}, refresh, token-status",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     session_id = sys.argv[2]
-    
+
     # Parse flags and message from remaining args
     ephemeral = False
     signal = None
     message_parts = []
-    
+
     for arg in sys.argv[3:]:
         if arg == "--ephemeral":
             ephemeral = True
@@ -379,9 +401,9 @@ def main():
             signal = arg.split("=", 1)[1]
         else:
             message_parts.append(arg)
-    
+
     message = " ".join(message_parts)
-    
+
     if not message:
         print("Error: Message is required", file=sys.stderr)
         sys.exit(1)
@@ -390,9 +412,13 @@ def main():
     if is_token_expired():
         print("Token expired, attempting refresh...", file=sys.stderr)
         if not refresh_token():
-            print("Warning: Could not refresh token, proceeding anyway", file=sys.stderr)
+            print(
+                "Warning: Could not refresh token, proceeding anyway", file=sys.stderr
+            )
 
-    success = emit_activity(session_id, message, command, ephemeral=ephemeral, signal=signal)
+    success = emit_activity(
+        session_id, message, command, ephemeral=ephemeral, signal=signal
+    )
     sys.exit(0 if success else 1)
 
 
