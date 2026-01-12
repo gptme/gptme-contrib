@@ -726,12 +726,18 @@ class ProjectMonitoringRun(BaseRunLoop):
             if not failed_notifications:
                 return []
 
-            self.logger.info(f"Found {len(failed_notifications)} failed Linear notification(s)")
+            self.logger.info(
+                f"Found {len(failed_notifications)} failed Linear notification(s)"
+            )
 
             # Check if token is valid for retry
-            linear_activity = self.workspace / "scripts" / "linear" / "linear-activity.py"
+            linear_activity = (
+                self.workspace / "scripts" / "linear" / "linear-activity.py"
+            )
             if not linear_activity.exists():
-                self.logger.debug("Linear activity script not found, skipping retry check")
+                self.logger.debug(
+                    "Linear activity script not found, skipping retry check"
+                )
                 return []
 
             result = subprocess.run(
@@ -744,7 +750,9 @@ class ProjectMonitoringRun(BaseRunLoop):
             token_valid = result.returncode == 0 and "Expired: False" in result.stdout
 
             if not token_valid:
-                self.logger.debug("Linear token still invalid, skipping notification retry")
+                self.logger.debug(
+                    "Linear token still invalid, skipping notification retry"
+                )
                 return []
 
             # Create work items for retryable notifications
@@ -757,14 +765,17 @@ class ProjectMonitoringRun(BaseRunLoop):
                 if error_time:
                     try:
                         error_dt = datetime.fromisoformat(error_time)
-                        age_hours = (datetime.utcnow() - error_dt).total_seconds() / 3600
+                        age_hours = (
+                            datetime.utcnow() - error_dt
+                        ).total_seconds() / 3600
                         if age_hours > 24:
-                            self.logger.debug(f"Skipping old notification: {filepath.name} ({age_hours:.1f}h old)")
+                            self.logger.debug(
+                                f"Skipping old notification: {filepath.name} ({age_hours:.1f}h old)"
+                            )
                             continue
                     except ValueError:
                         pass
 
-                event_type = payload.get("type", "unknown")
                 session = payload.get("agentSession", {})
                 issue = session.get("issue", {})
 
