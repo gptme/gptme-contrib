@@ -1254,9 +1254,9 @@ def process_timeline_tweets(
                 if response.thread_needed and response.follow_up:
                     for i, follow_up in enumerate([response.follow_up], 1):
                         # Assert that eval_result is not None before using asdict()
-                        assert (
-                            eval_result is not None
-                        ), "eval_result should not be None in thread context"
+                        assert eval_result is not None, (
+                            "eval_result should not be None in thread context"
+                        )
 
                         thread_draft = TweetDraft(
                             text=follow_up,

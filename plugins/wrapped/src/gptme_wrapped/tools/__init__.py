@@ -206,9 +206,9 @@ def wrapped_report(year: int | None = None, logs_dir: Path | None = None) -> str
     # Format numbers
     def fmt_tokens(n: int) -> str:
         if n >= 1_000_000:
-            return f"{n/1_000_000:.1f}M"
+            return f"{n / 1_000_000:.1f}M"
         if n >= 1_000:
-            return f"{n/1_000:.1f}K"
+            return f"{n / 1_000:.1f}K"
         return str(n)
 
     def fmt_cost(c: float) -> str:
@@ -253,7 +253,7 @@ def wrapped_report(year: int | None = None, logs_dir: Path | None = None) -> str
     if stats["hours"]:
         peak_hour = max(stats["hours"], key=stats["hours"].get)
         lines.append("⏰ Peak Usage:")
-        lines.append(f"  • Most active hour: {peak_hour}:00-{peak_hour+1}:00")
+        lines.append(f"  • Most active hour: {peak_hour}:00-{peak_hour + 1}:00")
 
     if stats["weekdays"]:
         days = [
@@ -272,7 +272,7 @@ def wrapped_report(year: int | None = None, logs_dir: Path | None = None) -> str
     # Cache efficiency
     if stats["cache_read_tokens"] > 0:
         lines.append("💾 Cache Efficiency:")
-        lines.append(f"  • Cache hit rate: {stats['cache_hit_rate']*100:.0f}%")
+        lines.append(f"  • Cache hit rate: {stats['cache_hit_rate'] * 100:.0f}%")
         lines.append(f"  • Cached tokens: {fmt_tokens(stats['cache_read_tokens'])}")
         # Rough savings estimate (cached tokens cost ~10% of regular)
         savings = stats["cache_read_tokens"] * 0.9 * 0.000003
@@ -430,7 +430,7 @@ def wrapped_export(
         html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>gptme Wrapped {stats['year']}</title>
+    <title>gptme Wrapped {stats["year"]}</title>
     <style>
         body {{ font-family: monospace; padding: 20px; background: #1a1a2e; color: #eee; }}
         pre {{ white-space: pre-wrap; }}

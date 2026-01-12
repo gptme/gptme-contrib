@@ -37,7 +37,9 @@ PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
 AGENT_NAME = os.environ.get("AGENT_NAME", "agent")
 # Use persistent storage in workspace logs (not /tmp which is cleared on reboot)
-_DEFAULT_NOTIFICATIONS_DIR = Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
+_DEFAULT_NOTIFICATIONS_DIR = (
+    Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
+)
 NOTIFICATIONS_DIR = Path(
     os.environ.get("NOTIFICATIONS_DIR", str(_DEFAULT_NOTIFICATIONS_DIR))
 )
@@ -427,7 +429,7 @@ def build_gptme_prompt(session_data: dict) -> str:
 
     return f"""# Linear Agent Session: {session_id}
 
-You have been {action} in Linear issue {issue.get('identifier', 'unknown')}: {issue.get('title', 'Unknown')}
+You have been {action} in Linear issue {issue.get("identifier", "unknown")}: {issue.get("title", "Unknown")}
 
 ## Context from Linear
 {prompt_context}
