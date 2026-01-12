@@ -59,8 +59,10 @@ from tasks.utils import (
     # Tracking and state
     parse_tracking_ref,
     fetch_github_issue_state,
+    fetch_github_issue_details,
     fetch_linear_issue_state,
     update_task_state,
+    has_new_activity,
     # Cache
     get_cache_path,
     load_cache,
@@ -1319,6 +1321,7 @@ def ready(state, output_json, output_jsonl, use_cache):
     table.add_column("Priority", style="yellow")
     table.add_column("Task", style="white")
     table.add_column("Subtasks", style="magenta")
+    table.add_column("Activity", style="green")  # New activity indicator
 
     # Create stable enumerated ID mapping
     tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
@@ -1334,12 +1337,29 @@ def ready(state, output_json, output_jsonl, use_cache):
         else:
             subtasks_str = "-"
 
+        # Check for new activity on tracked URLs (Issue #241)
+        activity_str = "-"
+        if use_cache and issue_cache:
+            tracking = task.metadata.get("tracking")
+            waiting_since = task.metadata.get("waiting_since")
+            if tracking and waiting_since:
+                # Handle tracking as list or string
+                tracking_urls = tracking if isinstance(tracking, list) else [tracking]
+                for url in tracking_urls:
+                    cached = issue_cache.get(url)
+                    if cached and has_new_activity(
+                        cached.get("updatedAt"), waiting_since
+                    ):
+                        activity_str = "[bold green]🔔 NEW[/]"
+                        break
+
         table.add_row(
             str(enum_id),
             state_emoji,
             priority_emoji or (task.priority or ""),
             task.name,
             subtasks_str,
+            activity_str,
         )
 
     console.print(table)
@@ -1824,6 +1844,28 @@ def sync(update, output_json, use_cache):
             issue_state == "OPEN" and task.state in ["new", "active", "paused"]
         )
 
+        # Check for new activity since waiting_since (Issue #241 feature)
+        updated_at = None
+        new_activity = False
+        waiting_since = task.metadata.get("waiting_since")
+
+        if source == "github":
+            if use_cache:
+                cached = cache.get(tracking_ref) or cache.get(cache_url)
+                if cached:
+                    updated_at = cached.get("updatedAt")
+            else:
+                # Fetch details including updatedAt
+                details = fetch_github_issue_details(
+                    issue_info["repo"], issue_info["number"]
+                )
+                if details:
+                    updated_at = details.get("updatedAt")
+
+        # Check if there's new activity since waiting_since
+        if waiting_since and updated_at:
+            new_activity = has_new_activity(updated_at, waiting_since)
+
         result = {
             "task": task.name,
             "tracking": tracking_ref,
@@ -1831,6 +1873,9 @@ def sync(update, output_json, use_cache):
             "issue_state": issue_state,
             "expected_state": expected_state,
             "in_sync": in_sync,
+            "updated_at": updated_at,
+            "waiting_since": str(waiting_since) if waiting_since else None,
+            "new_activity": new_activity,
         }
 
         # Update task if requested and out of sync
@@ -1850,6 +1895,9 @@ def sync(update, output_json, use_cache):
             "count": len(results),
             "in_sync": sum(1 for r in results if r.get("in_sync", False)),
             "out_of_sync": sum(1 for r in results if not r.get("in_sync", False)),
+            "with_new_activity": sum(
+                1 for r in results if r.get("new_activity", False)
+            ),
         }
         if update:
             output["updated"] = sum(1 for r in results if r.get("updated", False))
@@ -1862,6 +1910,7 @@ def sync(update, output_json, use_cache):
     table.add_column("Issue", style="blue")
     table.add_column("Task State", style="yellow")
     table.add_column("Issue State", style="green")
+    table.add_column("Activity", style="magenta")
     table.add_column("Status", style="white")
 
     for result in results:
@@ -1874,11 +1923,20 @@ def sync(update, output_json, use_cache):
         else:
             status = f"[yellow]⚠ Out of sync (expected: {result.get('expected_state', 'unknown')})[/]"
 
+        # Activity indicator - shows if there's new activity since waiting_since
+        if result.get("new_activity"):
+            activity = "[bold green]🔔 NEW[/]"
+        elif result.get("waiting_since"):
+            activity = f"[dim]since {result['waiting_since']}[/]"
+        else:
+            activity = "[dim]—[/]"
+
         table.add_row(
             result["task"][:30],
             result.get("tracking", "")[:25],
             result.get("task_state", ""),
             result.get("issue_state", "N/A"),
+            activity,
             status,
         )
 
@@ -2187,9 +2245,12 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
                 "state": state_info["state"],
                 "source": state_info.get("source", "unknown"),
                 "last_fetched": now.isoformat(),
+                # Store updatedAt for activity tracking (Issue #241)
+                "updatedAt": state_info.get("updatedAt"),
             }
             result["state"] = state_info["state"]
             result["source"] = state_info.get("source", "unknown")
+            result["updatedAt"] = state_info.get("updatedAt") or ""
             result["status"] = "fetched"
             fetched_count += 1
         else:
