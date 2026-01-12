@@ -1,10 +1,11 @@
 ---
-keywords:
-  - "Linear"
-  - "linear api"
-  - "linear graphql"
-  - "LOFTY_LINEAR_TOKEN"
-  - "LINEAR_API_KEY"
+match:
+  keywords:
+    - "Linear"
+    - "linear api"
+    - "linear graphql"
+    - "LOFTY_LINEAR_TOKEN"
+    - "LINEAR_API_KEY"
 category: tools
 ---
 # Linear API Integration

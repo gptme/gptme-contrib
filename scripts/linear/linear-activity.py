@@ -73,7 +73,7 @@ def load_oauth_credentials() -> tuple[str, str] | None:
             if "=" in line and not line.startswith("#"):
                 key, value = line.split("=", 1)
                 creds[key.strip()] = value.strip()
-        
+
         client_id = creds.get("LINEAR_CLIENT_ID")
         client_secret = creds.get("LINEAR_CLIENT_SECRET")
         if client_id and client_secret:
@@ -88,15 +88,15 @@ def is_token_expired() -> bool:
     tokens_file = find_tokens_file()
     if not tokens_file:
         return True
-    
+
     try:
         tokens = json.loads(tokens_file.read_text())
-        expires_at = tokens.get("expiresAt", 0)
+        expires_at: float = float(tokens.get("expiresAt", 0))
         # Convert from milliseconds if needed
         if expires_at > 1e12:
             expires_at = expires_at / 1000
         # Add 5 minute buffer
-        return time.time() > (expires_at - 300)
+        return bool(time.time() > (expires_at - 300))
     except Exception:
         return True
 
@@ -111,7 +111,10 @@ def refresh_token() -> bool:
     credentials = load_oauth_credentials()
     if not credentials:
         print("Error: No OAuth credentials found", file=sys.stderr)
-        print("Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in environment or .env file", file=sys.stderr)
+        print(
+            "Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in environment or .env file",
+            file=sys.stderr,
+        )
         return False
 
     client_id, client_secret = credentials
@@ -133,9 +136,9 @@ def refresh_token() -> bool:
             },
             timeout=30.0,
         )
-        
+
         new_tokens = response.json()
-        
+
         if "access_token" not in new_tokens:
             print(f"Error refreshing token: {new_tokens}", file=sys.stderr)
             return False
@@ -147,10 +150,14 @@ def refresh_token() -> bool:
             "tokenType": new_tokens.get("token_type", "Bearer"),
             "scope": new_tokens.get("scope", tokens.get("scope")),
             "actorType": "application",
-            "expiresAt": int((time.time() + new_tokens.get("expires_in", 86400)) * 1000),
+            "expiresAt": int(
+                (time.time() + new_tokens.get("expires_in", 86400)) * 1000
+            ),
         }
         tokens_file.write_text(json.dumps(save_tokens, indent=2))
-        print(f"✓ Token refreshed, expires in {new_tokens.get('expires_in', 0) // 3600}h")
+        print(
+            f"✓ Token refreshed, expires in {new_tokens.get('expires_in', 0) // 3600}h"
+        )
         return True
 
     except Exception as e:
@@ -170,11 +177,12 @@ def token_status() -> None:
         expires_at = tokens.get("expiresAt", 0)
         if expires_at > 1e12:
             expires_at = expires_at / 1000
-        
+
         from datetime import datetime
+
         expiry = datetime.fromtimestamp(expires_at)
         now = datetime.now()
-        
+
         print(f"Tokens file: {tokens_file}")
         print(f"Expires: {expiry}")
         print(f"Expired: {now > expiry}")
@@ -200,9 +208,10 @@ def get_access_token() -> str:
         try:
             tokens = json.loads(tokens_file.read_text())
             # Support both camelCase and snake_case keys
-            if access_token := (
-                tokens.get("accessToken") or tokens.get("access_token")
-            ):
+            access_token: str | None = tokens.get("accessToken") or tokens.get(
+                "access_token"
+            )
+            if access_token:
                 return access_token
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Failed to read tokens file: {e}", file=sys.stderr)
@@ -327,14 +336,18 @@ def main():
 
     if command not in ("thought", "response", "error"):
         print(f"Unknown command: {command}", file=sys.stderr)
-        print("Use: thought, response, error, refresh, or token-status", file=sys.stderr)
+        print(
+            "Use: thought, response, error, refresh, or token-status", file=sys.stderr
+        )
         sys.exit(1)
 
     # Auto-refresh if token is expired
     if is_token_expired():
         print("Token expired, attempting refresh...", file=sys.stderr)
         if not refresh_token():
-            print("Warning: Could not refresh token, proceeding anyway", file=sys.stderr)
+            print(
+                "Warning: Could not refresh token, proceeding anyway", file=sys.stderr
+            )
 
     success = emit_activity(session_id, message, command)
     sys.exit(0 if success else 1)

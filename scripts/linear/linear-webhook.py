@@ -121,7 +121,10 @@ def get_access_token() -> str | None:
         try:
             tokens = json.loads(TOKENS_FILE.read_text())
             # Support both camelCase and snake_case keys
-            return tokens.get("accessToken") or tokens.get("access_token")
+            access_token: str | None = tokens.get("accessToken") or tokens.get(
+                "access_token"
+            )
+            return access_token
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -357,6 +360,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
                 ["git", "push", "origin", "main"],
                 cwd=LOFTY_WORKSPACE,
                 capture_output=True,
+                text=True,
             )
             if push_result.returncode != 0:
                 return False

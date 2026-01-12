@@ -1,5 +1,5 @@
 # Linear Webhook Service Template
-# 
+#
 # To use this template:
 # 1. Copy to ~/.config/systemd/user/<agent-name>-linear-webhook.service
 # 2. Replace all <PLACEHOLDERS> with actual values
