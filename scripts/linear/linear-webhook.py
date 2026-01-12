@@ -437,19 +437,55 @@ You have been {action} in Linear issue {issue.get("identifier", "unknown")}: {is
 ## Your Tools
 
 ### Emit Activities to Linear
-Use Python script to show progress:
+
+Use the linear-activity.py script to communicate with Linear. The user can see your progress in real-time!
+
+**Activity Types:**
+| Type | Purpose | Session Effect |
+|------|---------|----------------|
+| `thought` | Show reasoning/progress | Stays active |
+| `action` | Tool invocation (e.g., "Running tests...") | Stays active |
+| `response` | Final answer | **Closes session** |
+| `elicitation` | Request info from user | Stays active |
+| `error` | Error occurred | Marks as errored |
+
+**Flags:**
+- `--ephemeral` - Activity disappears after next one (great for progress updates)
+
+**Examples:**
 ```bash
-uv run {linear_activity_path} thought {session_id} "your thinking"
-uv run {linear_activity_path} response {session_id} "final answer"
-uv run {linear_activity_path} error {session_id} "error details"
+# Show progress (ephemeral - disappears when next update comes)
+uv run {linear_activity_path} action {session_id} --ephemeral "Reading codebase..."
+uv run {linear_activity_path} action {session_id} --ephemeral "Running tests..."
+uv run {linear_activity_path} thought {session_id} --ephemeral "Found 3 issues, fixing..."
+
+# Permanent updates (stay visible)
+uv run {linear_activity_path} thought {session_id} "Analysis complete: found authentication bug in login.py"
+
+# Final response (CLOSES the session)
+uv run {linear_activity_path} response {session_id} "Fixed the bug. See commit abc123."
+
+# Report error
+uv run {linear_activity_path} error {session_id} "Failed to access repository"
 ```
+
+### Progress Updates Best Practice
+
+**IMPORTANT**: Keep the Linear user informed of your progress! Use ephemeral activities to show what you're doing:
+
+1. When starting work: `action --ephemeral "Starting analysis..."`
+2. During work: `action --ephemeral "Checking file X..."` 
+3. Key findings: `thought "Found issue: ..."` (non-ephemeral for important info)
+4. Before completion: `thought "Preparing final response..."`
+5. Final: `response "Done! Here's what I did..."`
 
 ## COMPLETION PROTOCOL (Required before exit)
 
-1. ✅ Submit final response via linear-activity.py
-2. ✅ Update journal with session summary
-3. ✅ Commit and merge to main
-4. ✅ Exit
+1. ✅ Emit progress updates during work (use --ephemeral for transient status)
+2. ✅ Submit final response via `response` command (this closes the session)
+3. ✅ Update journal with session summary  
+4. ✅ Commit and merge to main
+5. ✅ Exit
 """
 
 
