@@ -1,0 +1,35 @@
+# Linear Webhook Service Template
+# 
+# To use this template:
+# 1. Copy to ~/.config/systemd/user/<agent-name>-linear-webhook.service
+# 2. Replace all <PLACEHOLDERS> with actual values
+# 3. Run: systemctl --user daemon-reload
+# 4. Run: systemctl --user enable --now <agent-name>-linear-webhook.service
+
+[Unit]
+Description=<AGENT_NAME> Linear Webhook Server - Handle Linear agent sessions
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=<WORKSPACE>/scripts/linear
+ExecStart=<HOME>/.local/bin/uv run <WORKSPACE>/scripts/linear/linear-webhook.py
+Environment=PATH=<HOME>/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=<HOME>
+StandardOutput=journal
+StandardError=journal
+
+# Restart configuration - always restart on failure
+Restart=always
+RestartSec=5
+
+# Give it time to start
+TimeoutStartSec=30
+
+[Install]
+WantedBy=default.target
+
+# Placeholders to replace:
+# <AGENT_NAME> - Your agent's name (e.g., "lofty", "bob")
+# <WORKSPACE>  - Full path to agent workspace (e.g., /home/lofty/repos/lofty)
+# <HOME>       - User home directory (e.g., /home/lofty)
