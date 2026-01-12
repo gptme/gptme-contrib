@@ -50,6 +50,7 @@ Follow these steps to set up Linear integration for your agent.
 - Python 3.10+ with `uv` installed
 - `ngrok` installed and authenticated
 - Access to Linear workspace settings
+- **Agent workspace** with `run.sh` script (like gptme fork repos)
 
 ## Step 1: Get ngrok URL
 
@@ -129,24 +130,59 @@ EOF
 
 The first time, you need to authorize the app to get access tokens.
 
+### Option A: Using linear-activity.py (Recommended)
+
 ```bash
 cd ~/repos/<your-workspace>/scripts/linear
 
-# Start the webhook server temporarily
-uv run linear-webhook.py &
-
-# In another terminal, start ngrok
-ngrok http 8081
+# Start OAuth flow - opens browser for authorization
+uv run linear-activity.py auth
 ```
 
-Have your human operator:
-1. Visit `https://<your-ngrok-domain>/oauth/authorize` in browser
-2. Authorize the application in Linear
-3. They'll be redirected back and tokens will be saved
+This will:
+1. Generate the Linear authorization URL
+2. Open it in your browser (or print if no display)
+3. After you authorize, Linear redirects to your callback URL
+4. Extract the code from the redirect and exchange for tokens
 
-Verify tokens were created:
+### Option B: Manual Token Creation
+
+If the CLI auth flow doesn't work, manually create tokens:
+
+1. Build the authorization URL:
+   ```
+   https://linear.app/oauth/authorize?client_id=<CLIENT_ID>&redirect_uri=<CALLBACK_URL>&scope=read,write,app:mentionable,app:assignable&response_type=code&state=auth
+   ```
+
+2. Visit the URL in browser and authorize
+
+3. After redirect, extract the `code` parameter from the URL
+
+4. Exchange code for tokens:
+   ```bash
+   curl -X POST https://api.linear.app/oauth/token \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     -d "grant_type=authorization_code" \
+     -d "client_id=<CLIENT_ID>" \
+     -d "client_secret=<CLIENT_SECRET>" \
+     -d "redirect_uri=<CALLBACK_URL>" \
+     -d "code=<CODE>"
+   ```
+
+5. Save the response to `.tokens.json`:
+   ```json
+   {
+     "access_token": "<from response>",
+     "refresh_token": "<from response>",
+     "expires_at": "<calculate: now + expires_in seconds>"
+   }
+   ```
+
+### Verify Tokens
+
 ```bash
-cat ~/repos/<your-workspace>/scripts/linear/.tokens.json
+# Check token status
+uv run linear-activity.py token-status
 ```
 
 ## Step 6: Install Systemd Services

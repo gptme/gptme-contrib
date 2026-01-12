@@ -9,6 +9,7 @@ Usage:
     ./linear-activity.py thought <session_id> <message>
     ./linear-activity.py response <session_id> <message>
     ./linear-activity.py error <session_id> <message>
+    ./linear-activity.py auth                             # Initial OAuth flow
     ./linear-activity.py refresh                          # Refresh OAuth token
     ./linear-activity.py token-status                     # Check token status
 """
@@ -24,6 +25,7 @@ import httpx
 # Linear endpoints
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_OAUTH_TOKEN = "https://api.linear.app/oauth/token"
+LINEAR_OAUTH_AUTHORIZE = "https://linear.app/oauth/authorize"
 
 
 # Find tokens - check multiple locations
@@ -81,6 +83,102 @@ def load_oauth_credentials() -> tuple[str, str] | None:
     except Exception:
         pass
     return None
+
+
+def do_auth() -> bool:
+    """Perform initial OAuth authorization flow."""
+    creds = load_oauth_credentials()
+    if not creds:
+        print("Error: LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET required in .env")
+        print("Create scripts/linear/.env with these values from Linear OAuth app")
+        return False
+
+    client_id, client_secret = creds
+
+    # Get callback URL from env if set, otherwise use a placeholder
+    env_file = find_env_file()
+    callback_url = "https://your-ngrok-domain/oauth/callback"
+    if env_file:
+        content = env_file.read_text()
+        for line in content.strip().split("\n"):
+            if line.startswith("LINEAR_CALLBACK_URL="):
+                callback_url = line.split("=", 1)[1].strip()
+                break
+
+    # Build authorization URL
+    scopes = "read,write,app:mentionable,app:assignable"
+    auth_url = (
+        f"{LINEAR_OAUTH_AUTHORIZE}?"
+        f"client_id={client_id}&"
+        f"redirect_uri={callback_url}&"
+        f"scope={scopes}&"
+        f"response_type=code&"
+        f"state=auth"
+    )
+
+    print("=== Linear OAuth Authorization ===\n")
+    print("1. Open this URL in your browser:\n")
+    print(f"   {auth_url}\n")
+    print("2. Authorize the application in Linear")
+    print("3. After redirect, copy the FULL redirect URL (with ?code=...)")
+    print("4. Paste the URL here:\n")
+
+    try:
+        redirect_url = input("Redirect URL: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted")
+        return False
+
+    # Extract code from URL
+    if "code=" not in redirect_url:
+        print("Error: No authorization code found in URL")
+        return False
+
+    code = redirect_url.split("code=")[1].split("&")[0]
+    print("\nExchanging code for tokens...")
+
+    # Exchange code for tokens
+    try:
+        with httpx.Client() as client:
+            response = client.post(
+                LINEAR_OAUTH_TOKEN,
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": callback_url,
+                    "code": code,
+                },
+            )
+
+            if response.status_code != 200:
+                print(f"Error: {response.status_code} - {response.text}")
+                return False
+
+            data = response.json()
+            tokens = {
+                "access_token": data["access_token"],
+                "refresh_token": data.get("refresh_token"),
+                "expiresAt": int(time.time() + data.get("expires_in", 36000)) * 1000,
+            }
+
+            # Save tokens
+            tokens_file = find_tokens_file()
+            if not tokens_file:
+                # Create in same directory as env file
+                env_file = find_env_file()
+                if env_file:
+                    tokens_file = env_file.parent / ".tokens.json"
+                else:
+                    tokens_file = Path.cwd() / ".tokens.json"
+
+            tokens_file.write_text(json.dumps(tokens, indent=2))
+            print(f"✓ Tokens saved to {tokens_file}")
+            return True
+
+    except Exception as e:
+        print(f"Error exchanging code: {e}")
+        return False
 
 
 def is_token_expired() -> bool:
@@ -311,6 +409,7 @@ def main():
         print("  thought <session_id> <message>  - Emit a thinking/progress update")
         print("  response <session_id> <message> - Emit a final response")
         print("  error <session_id> <message>    - Emit an error message")
+        print("  auth                            - Initial OAuth authorization flow")
         print("  refresh                         - Refresh OAuth token")
         print("  token-status                    - Check token status")
         sys.exit(1)
@@ -318,6 +417,10 @@ def main():
     command = sys.argv[1]
 
     # Token management commands
+    if command == "auth":
+        success = do_auth()
+        sys.exit(0 if success else 1)
+
     if command == "refresh":
         success = refresh_token()
         sys.exit(0 if success else 1)

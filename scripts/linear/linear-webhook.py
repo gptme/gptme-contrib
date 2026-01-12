@@ -231,9 +231,10 @@ def create_worktree(session_id: str) -> Path:
             capture_output=True,
         )
 
-    # Fetch and update local main branch
+    # Fetch latest main from origin
+    # Note: Using fetch origin main (not main:main) to avoid issues if main is checked out
     subprocess.run(
-        ["git", "fetch", "origin", "main:main"],
+        ["git", "fetch", "origin", "main"],
         cwd=LOFTY_WORKSPACE,
         capture_output=True,
     )
@@ -312,7 +313,12 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             print(f"⚠ Merge conflict in {branch_name}, leaving for manual resolution")
             return False
 
-        # Switch to main and merge
+        # Switch to main and merge (stash any uncommitted changes first)
+        subprocess.run(
+            ["git", "stash", "--include-untracked"],
+            cwd=LOFTY_WORKSPACE,
+            capture_output=True,
+        )
         subprocess.run(["git", "checkout", "main"], cwd=LOFTY_WORKSPACE, check=True)
         subprocess.run(
             ["git", "pull", "--rebase", "origin", "main"],

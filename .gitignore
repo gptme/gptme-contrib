@@ -3,6 +3,7 @@ __pycache__
 
 scripts/discord/logs/*
 scripts/*/.env
+scripts/*/.tokens.json
 scripts/.env
 
 .venv/
