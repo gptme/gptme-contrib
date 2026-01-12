@@ -1851,7 +1851,7 @@ def sync(update, output_json, use_cache):
 
         if source == "github":
             if use_cache:
-                cached = cache.get(tracking_ref) or cache.get(cache_url)
+                cached = cache.get(cache_url)  # Cache keyed by full URL
                 if cached:
                     updated_at = cached.get("updatedAt")
             else:

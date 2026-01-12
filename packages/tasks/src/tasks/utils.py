@@ -313,11 +313,13 @@ def has_new_activity(
         else:
             return False
 
-        # Make both timezone-naive for comparison if needed
+        # Make both timezone-naive for comparison if needed.
+        # Use astimezone() to convert to local time BEFORE stripping tzinfo,
+        # otherwise we'd compare UTC times against local midnight incorrectly.
         if updated_dt.tzinfo and not waiting_dt.tzinfo:
-            updated_dt = updated_dt.replace(tzinfo=None)
+            updated_dt = updated_dt.astimezone().replace(tzinfo=None)
         elif waiting_dt.tzinfo and not updated_dt.tzinfo:
-            waiting_dt = waiting_dt.replace(tzinfo=None)
+            waiting_dt = waiting_dt.astimezone().replace(tzinfo=None)
 
         return updated_dt > waiting_dt
     except (ValueError, TypeError):
