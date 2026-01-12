@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -35,20 +35,17 @@ if ENV_FILE.exists():
 # Configuration
 PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
-AGENT_NAME = os.environ.get("AGENT_NAME", "agent")
-# Use persistent storage in workspace logs (not /tmp which is cleared on reboot)
-_DEFAULT_NOTIFICATIONS_DIR = (
-    Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
-)
+# Default to persistent location in workspace logs
+_DEFAULT_NOTIFICATIONS_DIR = Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
 NOTIFICATIONS_DIR = Path(
     os.environ.get("NOTIFICATIONS_DIR", str(_DEFAULT_NOTIFICATIONS_DIR))
 )
-AGENT_WORKSPACE = Path(
-    os.environ.get("AGENT_WORKSPACE", Path.home() / "repos" / AGENT_NAME)
+LOFTY_WORKSPACE = Path(
+    os.environ.get("LOFTY_WORKSPACE", Path.home() / "repos" / "lofty")
 )
-LOGS_DIR = AGENT_WORKSPACE / "logs" / "linear-sessions"
+LOGS_DIR = LOFTY_WORKSPACE / "logs" / "linear-sessions"
 WORKTREE_BASE = Path(
-    os.environ.get("WORKTREE_BASE", Path.home() / "repos" / f"{AGENT_NAME}-worktrees")
+    os.environ.get("WORKTREE_BASE", Path.home() / "repos" / "lofty-worktrees")
 )
 GPTME_TIMEOUT = 30 * 60  # 30 minutes
 
@@ -62,6 +59,11 @@ SESSION_DEDUP_TTL = 60 * 60  # 1 hour
 
 # Session locks to prevent race conditions
 session_locks: dict[str, threading.Lock] = {}
+
+# Track active issues to handle elicitation responses
+# Maps issue_identifier -> (session_id, worktree_path)
+active_issues: dict[str, tuple[str, Path]] = {}
+active_issues_lock = threading.Lock()
 
 app = Flask(__name__)
 
@@ -126,10 +128,7 @@ def get_access_token() -> str | None:
         try:
             tokens = json.loads(TOKENS_FILE.read_text())
             # Support both camelCase and snake_case keys
-            access_token: str | None = tokens.get("accessToken") or tokens.get(
-                "access_token"
-            )
-            return access_token
+            return tokens.get("accessToken") or tokens.get("access_token")
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -149,7 +148,7 @@ def verify_signature(payload: bytes, signature: str) -> bool:
 
 def store_notification(payload: dict) -> Path:
     """Store webhook payload for logging."""
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.utcnow().isoformat()
     event_type = payload.get("type", "unknown")
     random_suffix = os.urandom(4).hex()
     filename = f"{int(time.time() * 1000)}-{random_suffix}-{event_type}.json"
@@ -232,15 +231,14 @@ def create_worktree(session_id: str) -> Path:
         print(f"Removing existing worktree: {worktree_path}")
         subprocess.run(
             ["git", "worktree", "remove", "-f", str(worktree_path)],
-            cwd=AGENT_WORKSPACE,
+            cwd=LOFTY_WORKSPACE,
             capture_output=True,
         )
 
-    # Fetch latest main from origin
-    # Note: Using fetch origin main (not main:main) to avoid issues if main is checked out
+    # Fetch and update local main branch
     subprocess.run(
-        ["git", "fetch", "origin", "main"],
-        cwd=AGENT_WORKSPACE,
+        ["git", "fetch", "origin", "main:main"],
+        cwd=LOFTY_WORKSPACE,
         capture_output=True,
     )
 
@@ -255,7 +253,7 @@ def create_worktree(session_id: str) -> Path:
             branch_name,
             "origin/main",
         ],
-        cwd=AGENT_WORKSPACE,
+        cwd=LOFTY_WORKSPACE,
         check=True,
     )
 
@@ -297,7 +295,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         # Fetch latest main
         subprocess.run(
             ["git", "fetch", "origin", "main"],
-            cwd=AGENT_WORKSPACE,
+            cwd=LOFTY_WORKSPACE,
             capture_output=True,
             check=True,
         )
@@ -318,16 +316,11 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             print(f"⚠ Merge conflict in {branch_name}, leaving for manual resolution")
             return False
 
-        # Switch to main and merge (stash any uncommitted changes first)
-        subprocess.run(
-            ["git", "stash", "--include-untracked"],
-            cwd=AGENT_WORKSPACE,
-            capture_output=True,
-        )
-        subprocess.run(["git", "checkout", "main"], cwd=AGENT_WORKSPACE, check=True)
+        # Switch to main and merge
+        subprocess.run(["git", "checkout", "main"], cwd=LOFTY_WORKSPACE, check=True)
         subprocess.run(
             ["git", "pull", "--rebase", "origin", "main"],
-            cwd=AGENT_WORKSPACE,
+            cwd=LOFTY_WORKSPACE,
             check=True,
         )
 
@@ -340,7 +333,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
                 "-m",
                 f"feat(linear): merge session {session_id}",
             ],
-            cwd=AGENT_WORKSPACE,
+            cwd=LOFTY_WORKSPACE,
             capture_output=True,
             text=True,
         )
@@ -348,7 +341,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         if merge_result.returncode != 0:
             # Merge failed - abort
             subprocess.run(
-                ["git", "merge", "--abort"], cwd=AGENT_WORKSPACE, capture_output=True
+                ["git", "merge", "--abort"], cwd=LOFTY_WORKSPACE, capture_output=True
             )
             print(f"⚠ Merge to main failed for {branch_name}")
             return False
@@ -356,7 +349,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         # Push to origin
         push_result = subprocess.run(
             ["git", "push", "origin", "main"],
-            cwd=AGENT_WORKSPACE,
+            cwd=LOFTY_WORKSPACE,
             capture_output=True,
             text=True,
         )
@@ -365,13 +358,12 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             print(f"⚠ Push failed, will retry: {push_result.stderr}")
             # Pull and retry once
             subprocess.run(
-                ["git", "pull", "--rebase", "origin", "main"], cwd=AGENT_WORKSPACE
+                ["git", "pull", "--rebase", "origin", "main"], cwd=LOFTY_WORKSPACE
             )
             push_result = subprocess.run(
                 ["git", "push", "origin", "main"],
-                cwd=AGENT_WORKSPACE,
+                cwd=LOFTY_WORKSPACE,
                 capture_output=True,
-                text=True,
             )
             if push_result.returncode != 0:
                 return False
@@ -405,13 +397,13 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
         if worktree_path.exists():
             subprocess.run(
                 ["git", "worktree", "remove", str(worktree_path)],
-                cwd=AGENT_WORKSPACE,
+                cwd=LOFTY_WORKSPACE,
                 capture_output=True,
             )
             # Also delete the branch
             subprocess.run(
                 ["git", "branch", "-d", branch_name],
-                cwd=AGENT_WORKSPACE,
+                cwd=LOFTY_WORKSPACE,
                 capture_output=True,
             )
             print(f"✓ Cleaned up worktree and branch for session {session_id}")
@@ -429,7 +421,7 @@ def build_gptme_prompt(session_data: dict) -> str:
 
     return f"""# Linear Agent Session: {session_id}
 
-You have been {action} in Linear issue {issue.get("identifier", "unknown")}: {issue.get("title", "Unknown")}
+You have been {action} in Linear issue {issue.get('identifier', 'unknown')}: {issue.get('title', 'Unknown')}
 
 ## Context from Linear
 {prompt_context}
@@ -474,7 +466,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 **IMPORTANT**: Keep the Linear user informed of your progress! Use ephemeral activities to show what you're doing:
 
 1. When starting work: `action --ephemeral "Starting analysis..."`
-2. During work: `action --ephemeral "Checking file X..."`
+2. During work: `action --ephemeral "Checking file X..."` 
 3. Key findings: `thought "Found issue: ..."` (non-ephemeral for important info)
 4. Before completion: `thought "Preparing final response..."`
 5. Final: `response "Done! Here's what I did..."`
@@ -483,7 +475,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 
 1. ✅ Emit progress updates during work (use --ephemeral for transient status)
 2. ✅ Submit final response via `response` command (this closes the session)
-3. ✅ Update journal with session summary
+3. ✅ Update journal with session summary  
 4. ✅ Commit and merge to main
 5. ✅ Exit
 """
@@ -494,20 +486,20 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
     print(f"Spawning gptme in {worktree_path}...")
 
     # Create log file for this session
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     log_file = LOGS_DIR / f"{timestamp}-{session_id}.log"
 
     try:
         with open(log_file, "w") as f:
             f.write(f"=== Linear Session: {session_id} ===\n")
-            f.write(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
+            f.write(f"Started: {datetime.utcnow().isoformat()}\n")
             f.write(f"Worktree: {worktree_path}\n")
             f.write(f"Prompt: {prompt}\n")
             f.write("=" * 50 + "\n\n")
             f.flush()
 
             result = subprocess.run(
-                ["gptme", "--non-interactive", prompt],
+                ["./run.sh", "--non-interactive", prompt],
                 cwd=worktree_path,
                 timeout=GPTME_TIMEOUT,
                 stdout=f,
@@ -515,7 +507,7 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
             )
 
             f.write(f"\n{'=' * 50}\n")
-            f.write(f"Finished: {datetime.now(timezone.utc).isoformat()}\n")
+            f.write(f"Finished: {datetime.utcnow().isoformat()}\n")
             f.write(f"Exit code: {result.returncode}\n")
 
         print(f"Session log: {log_file}")
@@ -561,7 +553,7 @@ def process_agent_session_event(payload: dict, filepath: Path):
             notification = json.loads(filepath.read_text())
             notification["processed"] = False
             notification["error"] = "token_expired"
-            notification["error_time"] = datetime.now(timezone.utc).isoformat()
+            notification["error_time"] = datetime.utcnow().isoformat()
             filepath.write_text(json.dumps(notification, indent=2))
         except Exception as e:
             print(f"Failed to update notification file: {e}", file=sys.stderr)
@@ -596,11 +588,38 @@ def process_agent_session_event(payload: dict, filepath: Path):
     if session_id not in session_locks:
         session_locks[session_id] = threading.Lock()
 
+    # Get issue identifier for tracking
+    issue_identifier = issue.get("identifier", "unknown")
+
     with session_locks[session_id]:
         worktree_path = None
         try:
+            # Check if there's an existing worktree for this issue (e.g., from elicitation)
+            with active_issues_lock:
+                if issue_identifier in active_issues:
+                    old_session_id, old_worktree_path = active_issues[issue_identifier]
+                    if old_worktree_path.exists():
+                        print(f"Found existing worktree for {issue_identifier} from session {old_session_id}")
+                        print(f"Merging existing work before starting new session...")
+                        
+                        # Try to merge the old worktree's work
+                        if try_merge_worktree(old_session_id, old_worktree_path):
+                            print(f"✓ Merged existing work from previous session")
+                        else:
+                            print(f"⚠ Could not merge existing work (may have conflicts)")
+                        
+                        # Clean up old worktree
+                        cleanup_worktree(old_session_id, old_worktree_path)
+                    
+                    # Remove from tracking
+                    del active_issues[issue_identifier]
+
             # Create worktree
             worktree_path = create_worktree(session_id)
+            
+            # Track this session for the issue
+            with active_issues_lock:
+                active_issues[issue_identifier] = (session_id, worktree_path)
 
             # Build prompt
             session_data = {
@@ -646,6 +665,13 @@ def process_agent_session_event(payload: dict, filepath: Path):
             )
 
         finally:
+            # Clean up issue tracking
+            with active_issues_lock:
+                if issue_identifier in active_issues:
+                    tracked_session, _ = active_issues[issue_identifier]
+                    if tracked_session == session_id:
+                        del active_issues[issue_identifier]
+            
             if worktree_path:
                 cleanup_worktree(session_id, worktree_path)
 
