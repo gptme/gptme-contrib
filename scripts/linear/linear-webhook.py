@@ -36,7 +36,9 @@ if ENV_FILE.exists():
 PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
 # Default to persistent location in workspace logs
-_DEFAULT_NOTIFICATIONS_DIR = Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
+_DEFAULT_NOTIFICATIONS_DIR = (
+    Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
+)
 NOTIFICATIONS_DIR = Path(
     os.environ.get("NOTIFICATIONS_DIR", str(_DEFAULT_NOTIFICATIONS_DIR))
 )
@@ -128,7 +130,8 @@ def get_access_token() -> str | None:
         try:
             tokens = json.loads(TOKENS_FILE.read_text())
             # Support both camelCase and snake_case keys
-            return tokens.get("accessToken") or tokens.get("access_token")
+            access_token = tokens.get("accessToken") or tokens.get("access_token")
+            return str(access_token) if access_token else None
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -364,6 +367,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
                 ["git", "push", "origin", "main"],
                 cwd=LOFTY_WORKSPACE,
                 capture_output=True,
+                text=True,
             )
             if push_result.returncode != 0:
                 return False
@@ -466,7 +470,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 **IMPORTANT**: Keep the Linear user informed of your progress! Use ephemeral activities to show what you're doing:
 
 1. When starting work: `action --ephemeral "Starting analysis..."`
-2. During work: `action --ephemeral "Checking file X..."` 
+2. During work: `action --ephemeral "Checking file X..."`
 3. Key findings: `thought "Found issue: ..."` (non-ephemeral for important info)
 4. Before completion: `thought "Preparing final response..."`
 5. Final: `response "Done! Here's what I did..."`
@@ -475,7 +479,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 
 1. ✅ Emit progress updates during work (use --ephemeral for transient status)
 2. ✅ Submit final response via `response` command (this closes the session)
-3. ✅ Update journal with session summary  
+3. ✅ Update journal with session summary
 4. ✅ Commit and merge to main
 5. ✅ Exit
 """
@@ -599,24 +603,28 @@ def process_agent_session_event(payload: dict, filepath: Path):
                 if issue_identifier in active_issues:
                     old_session_id, old_worktree_path = active_issues[issue_identifier]
                     if old_worktree_path.exists():
-                        print(f"Found existing worktree for {issue_identifier} from session {old_session_id}")
-                        print(f"Merging existing work before starting new session...")
-                        
+                        print(
+                            f"Found existing worktree for {issue_identifier} from session {old_session_id}"
+                        )
+                        print("Merging existing work before starting new session...")
+
                         # Try to merge the old worktree's work
                         if try_merge_worktree(old_session_id, old_worktree_path):
-                            print(f"✓ Merged existing work from previous session")
+                            print("✓ Merged existing work from previous session")
                         else:
-                            print(f"⚠ Could not merge existing work (may have conflicts)")
-                        
+                            print(
+                                "⚠ Could not merge existing work (may have conflicts)"
+                            )
+
                         # Clean up old worktree
                         cleanup_worktree(old_session_id, old_worktree_path)
-                    
+
                     # Remove from tracking
                     del active_issues[issue_identifier]
 
             # Create worktree
             worktree_path = create_worktree(session_id)
-            
+
             # Track this session for the issue
             with active_issues_lock:
                 active_issues[issue_identifier] = (session_id, worktree_path)
@@ -671,7 +679,7 @@ def process_agent_session_event(payload: dict, filepath: Path):
                     tracked_session, _ = active_issues[issue_identifier]
                     if tracked_session == session_id:
                         del active_issues[issue_identifier]
-            
+
             if worktree_path:
                 cleanup_worktree(session_id, worktree_path)
 
