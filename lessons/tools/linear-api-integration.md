@@ -62,7 +62,7 @@ req = urllib.request.Request(
     }).encode(),
     headers={
         "Content-Type": "application/json",
-        "Authorization": token,  # Token already includes "Bearer" prefix
+        "Authorization": f"Bearer {token}",  # OAuth tokens require Bearer prefix
     },
 )
 

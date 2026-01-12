@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -35,15 +35,16 @@ if ENV_FILE.exists():
 # Configuration
 PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
+AGENT_NAME = os.environ.get("AGENT_NAME", "agent")
 NOTIFICATIONS_DIR = Path(
-    os.environ.get("NOTIFICATIONS_DIR", "/tmp/lofty-linear-notifications")
+    os.environ.get("NOTIFICATIONS_DIR", f"/tmp/{AGENT_NAME}-linear-notifications")
 )
-LOFTY_WORKSPACE = Path(
-    os.environ.get("LOFTY_WORKSPACE", Path.home() / "repos" / "lofty")
+AGENT_WORKSPACE = Path(
+    os.environ.get("AGENT_WORKSPACE", Path.home() / "repos" / AGENT_NAME)
 )
-LOGS_DIR = LOFTY_WORKSPACE / "logs" / "linear-sessions"
+LOGS_DIR = AGENT_WORKSPACE / "logs" / "linear-sessions"
 WORKTREE_BASE = Path(
-    os.environ.get("WORKTREE_BASE", Path.home() / "repos" / "lofty-worktrees")
+    os.environ.get("WORKTREE_BASE", Path.home() / "repos" / f"{AGENT_NAME}-worktrees")
 )
 GPTME_TIMEOUT = 30 * 60  # 30 minutes
 
@@ -144,7 +145,7 @@ def verify_signature(payload: bytes, signature: str) -> bool:
 
 def store_notification(payload: dict) -> Path:
     """Store webhook payload for logging."""
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     event_type = payload.get("type", "unknown")
     random_suffix = os.urandom(4).hex()
     filename = f"{int(time.time() * 1000)}-{random_suffix}-{event_type}.json"
@@ -227,7 +228,7 @@ def create_worktree(session_id: str) -> Path:
         print(f"Removing existing worktree: {worktree_path}")
         subprocess.run(
             ["git", "worktree", "remove", "-f", str(worktree_path)],
-            cwd=LOFTY_WORKSPACE,
+            cwd=AGENT_WORKSPACE,
             capture_output=True,
         )
 
@@ -235,7 +236,7 @@ def create_worktree(session_id: str) -> Path:
     # Note: Using fetch origin main (not main:main) to avoid issues if main is checked out
     subprocess.run(
         ["git", "fetch", "origin", "main"],
-        cwd=LOFTY_WORKSPACE,
+        cwd=AGENT_WORKSPACE,
         capture_output=True,
     )
 
@@ -250,7 +251,7 @@ def create_worktree(session_id: str) -> Path:
             branch_name,
             "origin/main",
         ],
-        cwd=LOFTY_WORKSPACE,
+        cwd=AGENT_WORKSPACE,
         check=True,
     )
 
@@ -292,7 +293,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         # Fetch latest main
         subprocess.run(
             ["git", "fetch", "origin", "main"],
-            cwd=LOFTY_WORKSPACE,
+            cwd=AGENT_WORKSPACE,
             capture_output=True,
             check=True,
         )
@@ -316,13 +317,13 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         # Switch to main and merge (stash any uncommitted changes first)
         subprocess.run(
             ["git", "stash", "--include-untracked"],
-            cwd=LOFTY_WORKSPACE,
+            cwd=AGENT_WORKSPACE,
             capture_output=True,
         )
-        subprocess.run(["git", "checkout", "main"], cwd=LOFTY_WORKSPACE, check=True)
+        subprocess.run(["git", "checkout", "main"], cwd=AGENT_WORKSPACE, check=True)
         subprocess.run(
             ["git", "pull", "--rebase", "origin", "main"],
-            cwd=LOFTY_WORKSPACE,
+            cwd=AGENT_WORKSPACE,
             check=True,
         )
 
@@ -335,7 +336,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
                 "-m",
                 f"feat(linear): merge session {session_id}",
             ],
-            cwd=LOFTY_WORKSPACE,
+            cwd=AGENT_WORKSPACE,
             capture_output=True,
             text=True,
         )
@@ -343,7 +344,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         if merge_result.returncode != 0:
             # Merge failed - abort
             subprocess.run(
-                ["git", "merge", "--abort"], cwd=LOFTY_WORKSPACE, capture_output=True
+                ["git", "merge", "--abort"], cwd=AGENT_WORKSPACE, capture_output=True
             )
             print(f"⚠ Merge to main failed for {branch_name}")
             return False
@@ -351,7 +352,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         # Push to origin
         push_result = subprocess.run(
             ["git", "push", "origin", "main"],
-            cwd=LOFTY_WORKSPACE,
+            cwd=AGENT_WORKSPACE,
             capture_output=True,
             text=True,
         )
@@ -360,11 +361,11 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             print(f"⚠ Push failed, will retry: {push_result.stderr}")
             # Pull and retry once
             subprocess.run(
-                ["git", "pull", "--rebase", "origin", "main"], cwd=LOFTY_WORKSPACE
+                ["git", "pull", "--rebase", "origin", "main"], cwd=AGENT_WORKSPACE
             )
             push_result = subprocess.run(
                 ["git", "push", "origin", "main"],
-                cwd=LOFTY_WORKSPACE,
+                cwd=AGENT_WORKSPACE,
                 capture_output=True,
                 text=True,
             )
@@ -400,13 +401,13 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
         if worktree_path.exists():
             subprocess.run(
                 ["git", "worktree", "remove", str(worktree_path)],
-                cwd=LOFTY_WORKSPACE,
+                cwd=AGENT_WORKSPACE,
                 capture_output=True,
             )
             # Also delete the branch
             subprocess.run(
                 ["git", "branch", "-d", branch_name],
-                cwd=LOFTY_WORKSPACE,
+                cwd=AGENT_WORKSPACE,
                 capture_output=True,
             )
             print(f"✓ Cleaned up worktree and branch for session {session_id}")
@@ -453,13 +454,13 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
     print(f"Spawning gptme in {worktree_path}...")
 
     # Create log file for this session
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_file = LOGS_DIR / f"{timestamp}-{session_id}.log"
 
     try:
         with open(log_file, "w") as f:
             f.write(f"=== Linear Session: {session_id} ===\n")
-            f.write(f"Started: {datetime.utcnow().isoformat()}\n")
+            f.write(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
             f.write(f"Worktree: {worktree_path}\n")
             f.write(f"Prompt: {prompt}\n")
             f.write("=" * 50 + "\n\n")
@@ -474,7 +475,7 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
             )
 
             f.write(f"\n{'=' * 50}\n")
-            f.write(f"Finished: {datetime.utcnow().isoformat()}\n")
+            f.write(f"Finished: {datetime.now(timezone.utc).isoformat()}\n")
             f.write(f"Exit code: {result.returncode}\n")
 
         print(f"Session log: {log_file}")
@@ -520,7 +521,7 @@ def process_agent_session_event(payload: dict, filepath: Path):
             notification = json.loads(filepath.read_text())
             notification["processed"] = False
             notification["error"] = "token_expired"
-            notification["error_time"] = datetime.utcnow().isoformat()
+            notification["error_time"] = datetime.now(timezone.utc).isoformat()
             filepath.write_text(json.dumps(notification, indent=2))
         except Exception as e:
             print(f"Failed to update notification file: {e}", file=sys.stderr)

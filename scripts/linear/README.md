@@ -350,6 +350,10 @@ If using free ngrok, the URL changes on restart. Update the Webhook URL in Linea
 | `LINEAR_WEBHOOK_SECRET` | Verify webhook signatures | Yes |
 | `LINEAR_CLIENT_ID` | OAuth token refresh | Yes |
 | `LINEAR_CLIENT_SECRET` | OAuth token refresh | Yes |
+| `AGENT_NAME` | Agent name for paths (default: "agent") | No |
+| `AGENT_WORKSPACE` | Path to agent workspace (default: `~/repos/$AGENT_NAME`) | No |
+| `WORKTREE_BASE` | Path for session worktrees (default: `~/repos/$AGENT_NAME-worktrees`) | No |
+| `PORT` | Webhook server port (default: 8081) | No |
 
 ## Important Paths
 
