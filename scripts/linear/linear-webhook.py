@@ -36,8 +36,10 @@ if ENV_FILE.exists():
 PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
 AGENT_NAME = os.environ.get("AGENT_NAME", "agent")
+# Use persistent storage in workspace logs (not /tmp which is cleared on reboot)
+_DEFAULT_NOTIFICATIONS_DIR = Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
 NOTIFICATIONS_DIR = Path(
-    os.environ.get("NOTIFICATIONS_DIR", f"/tmp/{AGENT_NAME}-linear-notifications")
+    os.environ.get("NOTIFICATIONS_DIR", str(_DEFAULT_NOTIFICATIONS_DIR))
 )
 AGENT_WORKSPACE = Path(
     os.environ.get("AGENT_WORKSPACE", Path.home() / "repos" / AGENT_NAME)
