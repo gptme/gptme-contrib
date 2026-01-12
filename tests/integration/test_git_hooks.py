@@ -230,9 +230,9 @@ def test_hooks_exist():
     """Verify that required hook files exist."""
     assert HOOKS_DIR.exists(), f"Hooks directory not found: {HOOKS_DIR}"
     assert (HOOKS_DIR / "pre-push").exists(), "pre-push hook not found"
-    assert (HOOKS_DIR / "validate-worktree-tracking.sh").exists(), (
-        "validate-worktree-tracking.sh not found"
-    )
+    assert (
+        HOOKS_DIR / "validate-worktree-tracking.sh"
+    ).exists(), "validate-worktree-tracking.sh not found"
     assert (HOOKS_DIR / "pre-commit").exists(), "pre-commit hook not found"
 
 
