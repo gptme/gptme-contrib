@@ -49,8 +49,9 @@ Follow these steps to set up Linear integration for your agent.
 - Linux server with systemd (user services)
 - Python 3.10+ with `uv` installed
 - `ngrok` installed and authenticated
+- `gptme` installed and accessible in PATH
 - Access to Linear workspace settings
-- **Agent workspace** with `run.sh` script (like gptme fork repos)
+- **Agent workspace** with `gptme.toml` configuration
 
 ## Step 1: Get ngrok URL
 

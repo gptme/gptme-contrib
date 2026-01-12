@@ -471,7 +471,7 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
             f.flush()
 
             result = subprocess.run(
-                ["./run.sh", "--non-interactive", prompt],
+                ["gptme", "--non-interactive", prompt],
                 cwd=worktree_path,
                 timeout=GPTME_TIMEOUT,
                 stdout=f,
