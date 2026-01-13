@@ -240,9 +240,9 @@ def create_worktree(session_id: str) -> Path:
             capture_output=True,
         )
 
-    # Fetch and update local main branch
+    # Fetch latest from origin
     subprocess.run(
-        ["git", "fetch", "origin", "main:main"],
+        ["git", "fetch", "origin", DEFAULT_BRANCH],
         cwd=AGENT_WORKSPACE,
         capture_output=True,
     )
