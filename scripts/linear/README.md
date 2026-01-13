@@ -48,10 +48,36 @@ Follow these steps to set up Linear integration for your agent.
 
 - Linux server with systemd (user services)
 - Python 3.10+ with `uv` installed
-- `ngrok` installed and authenticated
+- `ngrok` installed and authenticated (see below)
 - `gptme` installed and accessible in PATH
 - Access to Linear workspace settings
 - **Agent workspace** with `gptme.toml` configuration
+
+### Installing ngrok
+
+**Have your human operator do the following:**
+
+1. Sign up for a free ngrok account at https://ngrok.com
+2. Install ngrok:
+   ```bash
+   # Linux (snap)
+   sudo snap install ngrok
+
+   # Linux (apt)
+   curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+     | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
+     && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+     | sudo tee /etc/apt/sources.list.d/ngrok.list \
+     && sudo apt update \
+     && sudo apt install ngrok
+
+   # macOS
+   brew install ngrok
+   ```
+3. Authenticate ngrok with your authtoken (from ngrok dashboard):
+   ```bash
+   ngrok config add-authtoken <your-authtoken>
+   ```
 
 ## Step 1: Get ngrok URL
 

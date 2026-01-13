@@ -287,14 +287,15 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
         )
 
         if status.stdout.strip():
-            # Commit any uncommitted changes as WIP
-            print(f"Committing uncommitted changes in {branch_name}...")
-            subprocess.run(["git", "add", "-A"], cwd=worktree_path, check=True)
-            subprocess.run(
-                ["git", "commit", "-m", f"WIP: auto-commit from session {session_id}"],
-                cwd=worktree_path,
-                capture_output=True,
+            # Fail merge if there are uncommitted changes - will be picked up by cleanup job
+            print(f"⚠ Uncommitted changes in {branch_name}, skipping auto-merge")
+            emit_activity(
+                session_id,
+                f"⚠ Session left uncommitted changes in branch `{branch_name}`. "
+                "Worktree preserved for manual review.",
+                "thought",
             )
+            return False
 
         # Fetch latest main
         subprocess.run(
@@ -392,8 +393,8 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
         print(f"⚠ Leaving worktree {worktree_path} for scheduled cleanup")
         emit_activity(
             session_id,
-            f"⚠ Could not auto-merge branch {branch_name}. Left for manual review.",
-            "error",
+            f"⚠ Could not auto-merge branch `{branch_name}`. Left for manual review.",
+            "thought",  # Use thought, not error - session work may still be valid
         )
         return
 

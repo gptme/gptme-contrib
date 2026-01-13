@@ -4,17 +4,17 @@ match:
     - "Linear"
     - "linear api"
     - "linear graphql"
-    - "LOFTY_LINEAR_TOKEN"
+    - "linear-activity"
     - "LINEAR_API_KEY"
 category: tools
 ---
 # Linear API Integration
 
 ## Rule
-Access Linear via GraphQL API with `LOFTY_LINEAR_TOKEN` or `LINEAR_API_KEY` environment variable, using `urllib` for requests.
+Use `linear-activity.py` CLI for common operations. Fall back to GraphQL API only when CLI doesn't support the operation.
 
 ## Context
-When fetching issues, teams, or other data from Linear in Python code.
+When fetching issues, teams, or other data from Linear.
 
 ## Detection
 Observable signals indicating Linear API work:
@@ -23,8 +23,33 @@ Observable signals indicating Linear API work:
 - Syncing tasks with Linear
 - Any mention of Linear team (ENG, SUDO, etc.)
 
-## Pattern
-Standard Linear GraphQL query:
+## Pattern: Preferred - Use CLI
+
+For common operations, use the CLI wrapper:
+
+```bash
+# Get issue details
+uv run scripts/linear/linear-activity.py get-issue SUDO-123
+
+# Get issue comments
+uv run scripts/linear/linear-activity.py get-comments SUDO-123
+
+# Get workflow states
+uv run scripts/linear/linear-activity.py get-states --team=SUDO
+
+# Get unread notifications
+uv run scripts/linear/linear-activity.py get-notifications
+
+# Update issue state
+uv run scripts/linear/linear-activity.py update-issue SUDO-123 --state=<state-id>
+
+# Add comment
+uv run scripts/linear/linear-activity.py add-comment SUDO-123 "Comment text"
+```
+
+## Pattern: Fallback - GraphQL API
+
+For operations not supported by CLI, use GraphQL directly:
 ```python
 import os
 import json

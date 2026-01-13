@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# dependencies = ["httpx"]
+# dependencies = ["httpx", "python-dotenv"]
 # ///
 """
 Linear Activity CLI - Emit thoughts/responses to Linear agent sessions.
@@ -21,77 +21,34 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
+
+# Load environment from .env file in script directory
+ENV_FILE = Path(__file__).parent / ".env"
+TOKENS_FILE = Path(__file__).parent / ".tokens.json"
+load_dotenv(ENV_FILE)
 
 # Linear endpoints
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_OAUTH_TOKEN = "https://api.linear.app/oauth/token"
 
 
-# Find tokens - check multiple locations
-def find_tokens_file() -> Path | None:
-    """Find .tokens.json in various locations."""
-    candidates = [
-        Path(__file__).parent / ".tokens.json",
-        Path(__file__).parent / "linear-webhook" / ".tokens.json",  # Legacy path
-        Path.home() / ".config" / "linear" / "tokens.json",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
-
-
-def find_env_file() -> Path | None:
-    """Find .env file with OAuth credentials."""
-    candidates = [
-        Path(__file__).parent / ".env",
-        Path(__file__).parent / "linear-webhook" / ".env",  # Legacy path
-        Path.home() / ".config" / "linear" / ".env",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
-
-
 def load_oauth_credentials() -> tuple[str, str] | None:
-    """Load OAuth client credentials from env file."""
-    # Check environment first
+    """Load OAuth client credentials from environment (loaded via python-dotenv)."""
     client_id = os.environ.get("LINEAR_CLIENT_ID")
     client_secret = os.environ.get("LINEAR_CLIENT_SECRET")
     if client_id and client_secret:
         return client_id, client_secret
-
-    # Load from .env file
-    env_file = find_env_file()
-    if not env_file:
-        return None
-
-    try:
-        content = env_file.read_text()
-        creds = {}
-        for line in content.strip().split("\n"):
-            if "=" in line and not line.startswith("#"):
-                key, value = line.split("=", 1)
-                creds[key.strip()] = value.strip()
-
-        client_id = creds.get("LINEAR_CLIENT_ID")
-        client_secret = creds.get("LINEAR_CLIENT_SECRET")
-        if client_id and client_secret:
-            return client_id, client_secret
-    except Exception:
-        pass
     return None
 
 
 def is_token_expired() -> bool:
     """Check if the current token is expired."""
-    tokens_file = find_tokens_file()
-    if not tokens_file:
+    if not TOKENS_FILE.exists():
         return True
 
     try:
-        tokens = json.loads(tokens_file.read_text())
+        tokens = json.loads(TOKENS_FILE.read_text())
         expires_at = float(tokens.get("expiresAt", 0))
         # Convert from milliseconds if needed
         if expires_at > 1e12:
@@ -104,16 +61,15 @@ def is_token_expired() -> bool:
 
 def refresh_token() -> bool:
     """Refresh the OAuth token."""
-    tokens_file = find_tokens_file()
-    if not tokens_file:
-        print("Error: No tokens file found", file=sys.stderr)
+    if not TOKENS_FILE.exists():
+        print(f"Error: No tokens file found at {TOKENS_FILE}", file=sys.stderr)
         return False
 
     credentials = load_oauth_credentials()
     if not credentials:
         print("Error: No OAuth credentials found", file=sys.stderr)
         print(
-            "Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in environment or .env file",
+            f"Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in {ENV_FILE}",
             file=sys.stderr,
         )
         return False
@@ -121,7 +77,7 @@ def refresh_token() -> bool:
     client_id, client_secret = credentials
 
     try:
-        tokens = json.loads(tokens_file.read_text())
+        tokens = json.loads(TOKENS_FILE.read_text())
         refresh_tok = tokens.get("refreshToken") or tokens.get("refresh_token")
         if not refresh_tok:
             print("Error: No refresh token in tokens file", file=sys.stderr)
@@ -155,7 +111,7 @@ def refresh_token() -> bool:
                 (time.time() + new_tokens.get("expires_in", 86400)) * 1000
             ),
         }
-        tokens_file.write_text(json.dumps(save_tokens, indent=2))
+        TOKENS_FILE.write_text(json.dumps(save_tokens, indent=2))
         print(
             f"✓ Token refreshed, expires in {new_tokens.get('expires_in', 0) // 3600}h"
         )
@@ -168,13 +124,12 @@ def refresh_token() -> bool:
 
 def token_status() -> None:
     """Print token status information."""
-    tokens_file = find_tokens_file()
-    if not tokens_file:
-        print("No tokens file found")
+    if not TOKENS_FILE.exists():
+        print(f"No tokens file found at {TOKENS_FILE}")
         return
 
     try:
-        tokens = json.loads(tokens_file.read_text())
+        tokens = json.loads(TOKENS_FILE.read_text())
         expires_at = tokens.get("expiresAt", 0)
         if expires_at > 1e12:
             expires_at = expires_at / 1000
@@ -184,7 +139,7 @@ def token_status() -> None:
         expiry = datetime.fromtimestamp(expires_at)
         now = datetime.now()
 
-        print(f"Tokens file: {tokens_file}")
+        print(f"Tokens file: {TOKENS_FILE}")
         print(f"Expires: {expiry}")
         print(f"Expired: {now > expiry}")
         if now < expiry:
@@ -204,10 +159,9 @@ def get_access_token() -> str:
         return token
 
     # Check tokens file
-    tokens_file = find_tokens_file()
-    if tokens_file:
+    if TOKENS_FILE.exists():
         try:
-            tokens = json.loads(tokens_file.read_text())
+            tokens = json.loads(TOKENS_FILE.read_text())
             # Support both camelCase and snake_case keys
             if access_token := (
                 tokens.get("accessToken") or tokens.get("access_token")
