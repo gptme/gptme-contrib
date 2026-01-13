@@ -221,6 +221,7 @@ def refresh_token() -> None:
             },
             timeout=30.0,
         )
+        response.raise_for_status()
 
         new_tokens = response.json()
 
