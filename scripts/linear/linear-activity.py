@@ -3,14 +3,40 @@
 # dependencies = ["httpx", "python-dotenv"]
 # ///
 """
-Linear Activity CLI - Emit thoughts/responses to Linear agent sessions.
+Linear Activity CLI - Emit activities to Linear agent sessions.
 
 Usage:
-    ./linear-activity.py thought <session_id> <message>
-    ./linear-activity.py response <session_id> <message>
-    ./linear-activity.py error <session_id> <message>
-    ./linear-activity.py refresh                          # Refresh OAuth token
-    ./linear-activity.py token-status                     # Check token status
+    ./linear-activity.py thought <session_id> <message>       # Show reasoning/progress
+    ./linear-activity.py action <session_id> --action=<name> --parameter=<param>
+                                                              # Tool invocation
+    ./linear-activity.py response <session_id> <message>      # Final answer (closes session)
+    ./linear-activity.py elicitation <session_id> <message>   # Request info from user
+    ./linear-activity.py error <session_id> <message>         # Report error
+    ./linear-activity.py refresh                              # Refresh OAuth token
+    ./linear-activity.py token-status                         # Check token status
+
+Common flags:
+    --ephemeral    Activity disappears after next one (good for progress)
+    --signal=X     Send signal: stop, continue, auth, select
+
+Examples:
+    # Progress update (ephemeral)
+    ./linear-activity.py thought <session_id> --ephemeral "Reading files..."
+
+    # Tool invocation
+    ./linear-activity.py action <session_id> --action="shell" --parameter="git status"
+
+    # Final response (closes the session)
+    ./linear-activity.py response <session_id> "Done! Fixed the bug in commit abc123."
+
+API Commands:
+    ./linear-activity.py get-issue <identifier>           # Get issue details
+    ./linear-activity.py get-comments <identifier>        # Get issue comments
+    ./linear-activity.py get-states [--team=KEY]          # Get workflow states
+    ./linear-activity.py get-notifications                # Get unread notifications
+    ./linear-activity.py update-issue <id> --state=ID     # Update issue state
+    ./linear-activity.py add-comment <id> <body>          # Add comment to issue
+    ./linear-activity.py auth                             # Run OAuth flow
 """
 
 import json
@@ -283,15 +309,19 @@ def emit_activity(
     activity_type: str = "thought",
     ephemeral: bool = False,
     signal: str | None = None,
+    action_name: str | None = None,
+    action_param: str | None = None,
 ) -> bool:
     """Emit an activity to a Linear agent session.
 
     Args:
         session_id: The Linear agent session ID
-        content: The message content
+        content: The message content (used as 'body' for most types)
         activity_type: One of: thought, action, response, elicitation, error, prompt
         ephemeral: If True, activity disappears after the next one (good for progress)
         signal: Optional signal: stop, continue, auth, select
+        action_name: Required for 'action' type - the action being performed
+        action_param: Required for 'action' type - the parameter for the action
     """
     token = get_access_token()
 
@@ -316,11 +346,26 @@ def emit_activity(
     }
     """
 
-    # Content is a JSON object with type and body
-    content_obj = {
-        "type": activity_type,
-        "body": content,
-    }
+    # Content structure depends on activity type
+    # 'action' type requires 'action' and 'parameter' fields
+    if activity_type == "action":
+        if not action_name or not action_param:
+            print(
+                "Error: 'action' type requires --action and --parameter flags",
+                file=sys.stderr,
+            )
+            return False
+        content_obj = {
+            "type": activity_type,
+            "action": action_name,
+            "parameter": action_param,
+        }
+    else:
+        # Other types use 'body' for the message content
+        content_obj = {
+            "type": activity_type,
+            "body": content,
+        }
 
     # Build input
     input_obj: dict[str, Any] = {
@@ -817,10 +862,16 @@ def main():
         sys.exit(1)
 
     if len(sys.argv) < 4:
-        print(
-            f"Usage: {command} <session_id> [--ephemeral] [--signal=X] <message>",
-            file=sys.stderr,
-        )
+        if command == "action":
+            print(
+                f"Usage: {command} <session_id> --action=<name> --parameter=<param> [--ephemeral] [--signal=X]",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Usage: {command} <session_id> [--ephemeral] [--signal=X] <message>",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     session_id = sys.argv[2]
@@ -828,6 +879,8 @@ def main():
     # Parse flags and message from remaining args
     ephemeral = False
     signal = None
+    action_name = None
+    action_param = None
     message_parts = []
 
     for arg in sys.argv[3:]:
@@ -835,12 +888,24 @@ def main():
             ephemeral = True
         elif arg.startswith("--signal="):
             signal = arg.split("=", 1)[1]
+        elif arg.startswith("--action="):
+            action_name = arg.split("=", 1)[1]
+        elif arg.startswith("--parameter="):
+            action_param = arg.split("=", 1)[1]
         else:
             message_parts.append(arg)
 
     message = " ".join(message_parts)
 
-    if not message:
+    # For 'action' type, message is optional but action/parameter are required
+    if command == "action":
+        if not action_name or not action_param:
+            print(
+                "Error: 'action' type requires --action=<name> and --parameter=<param>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    elif not message:
         print("Error: Message is required", file=sys.stderr)
         sys.exit(1)
 
@@ -853,7 +918,13 @@ def main():
             )
 
     success = emit_activity(
-        session_id, message, command, ephemeral=ephemeral, signal=signal
+        session_id,
+        message,
+        command,
+        ephemeral=ephemeral,
+        signal=signal,
+        action_name=action_name,
+        action_param=action_param,
     )
     sys.exit(0 if success else 1)
 
