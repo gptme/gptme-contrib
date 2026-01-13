@@ -51,6 +51,67 @@ import httpx
 from dotenv import load_dotenv
 
 
+# ============================================================================
+# Custom Exceptions
+# ============================================================================
+
+
+class LinearCLIError(Exception):
+    """Base exception for Linear CLI errors."""
+
+    exit_code: int = 1
+
+    def __init__(self, message: str, exit_code: int | None = None):
+        super().__init__(message)
+        if exit_code is not None:
+            self.exit_code = exit_code
+
+
+class AuthenticationError(LinearCLIError):
+    """Raised when authentication fails or credentials are missing."""
+
+    exit_code: int = 2
+
+
+class TokenExpiredError(AuthenticationError):
+    """Raised when the OAuth token is expired and cannot be refreshed."""
+
+    exit_code: int = 3
+
+
+class APIError(LinearCLIError):
+    """Raised when a Linear API request fails."""
+
+    exit_code: int = 4
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        graphql_errors: list | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.graphql_errors = graphql_errors
+
+
+class NotFoundError(APIError):
+    """Raised when a requested resource is not found."""
+
+    exit_code: int = 5
+
+
+class ValidationError(LinearCLIError):
+    """Raised when input validation fails."""
+
+    exit_code: int = 6
+
+
+# ============================================================================
+# Constants and Configuration
+# ============================================================================
+
+
 class ActivityType(Enum):
     """Valid activity types for Linear agent sessions."""
 
@@ -73,13 +134,30 @@ LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 LINEAR_OAUTH_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 
 
-def load_oauth_credentials() -> tuple[str, str] | None:
-    """Load OAuth client credentials from environment (loaded via python-dotenv)."""
+# ============================================================================
+# Authentication Functions
+# ============================================================================
+
+
+def load_oauth_credentials() -> tuple[str, str]:
+    """Load OAuth client credentials from environment.
+
+    Returns:
+        Tuple of (client_id, client_secret)
+
+    Raises:
+        AuthenticationError: If credentials are not found in environment
+    """
     client_id = os.environ.get("LINEAR_CLIENT_ID")
     client_secret = os.environ.get("LINEAR_CLIENT_SECRET")
-    if client_id and client_secret:
-        return client_id, client_secret
-    return None
+
+    if not client_id or not client_secret:
+        raise AuthenticationError(
+            f"OAuth credentials not found. "
+            f"Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in {ENV_FILE}"
+        )
+
+    return client_id, client_secret
 
 
 def is_token_expired() -> bool:
@@ -99,30 +177,40 @@ def is_token_expired() -> bool:
         return True
 
 
-def refresh_token() -> bool:
-    """Refresh the OAuth token."""
+def load_tokens() -> dict[str, Any]:
+    """Load tokens from the tokens file.
+
+    Returns:
+        Dictionary containing token data
+
+    Raises:
+        AuthenticationError: If tokens file doesn't exist or is invalid
+    """
     if not TOKENS_FILE.exists():
-        print(f"Error: No tokens file found at {TOKENS_FILE}", file=sys.stderr)
-        return False
-
-    credentials = load_oauth_credentials()
-    if not credentials:
-        print("Error: No OAuth credentials found", file=sys.stderr)
-        print(
-            f"Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in {ENV_FILE}",
-            file=sys.stderr,
-        )
-        return False
-
-    client_id, client_secret = credentials
+        raise AuthenticationError(f"No tokens file found at {TOKENS_FILE}")
 
     try:
-        tokens = json.loads(TOKENS_FILE.read_text())
-        refresh_tok = tokens.get("refreshToken") or tokens.get("refresh_token")
-        if not refresh_tok:
-            print("Error: No refresh token in tokens file", file=sys.stderr)
-            return False
+        result: dict[str, Any] = json.loads(TOKENS_FILE.read_text())
+        return result
+    except json.JSONDecodeError as e:
+        raise AuthenticationError(f"Invalid tokens file: {e}")
 
+
+def refresh_token() -> None:
+    """Refresh the OAuth token.
+
+    Raises:
+        AuthenticationError: If credentials are missing
+        TokenExpiredError: If refresh fails
+    """
+    tokens = load_tokens()
+    client_id, client_secret = load_oauth_credentials()
+
+    refresh_tok = tokens.get("refreshToken") or tokens.get("refresh_token")
+    if not refresh_tok:
+        raise TokenExpiredError("No refresh token in tokens file")
+
+    try:
         response = httpx.post(
             LINEAR_OAUTH_TOKEN_URL,
             data={
@@ -137,8 +225,7 @@ def refresh_token() -> bool:
         new_tokens = response.json()
 
         if "access_token" not in new_tokens:
-            print(f"Error refreshing token: {new_tokens}", file=sys.stderr)
-            return False
+            raise TokenExpiredError(f"Token refresh failed: {new_tokens}")
 
         # Save in our format
         save_tokens = {
@@ -155,30 +242,27 @@ def refresh_token() -> bool:
         print(
             f"✓ Token refreshed, expires in {new_tokens.get('expires_in', 0) // 3600}h"
         )
-        return True
 
-    except Exception as e:
-        print(f"Error refreshing token: {e}", file=sys.stderr)
-        return False
+    except httpx.HTTPError as e:
+        raise TokenExpiredError(f"HTTP error during token refresh: {e}")
 
 
-def do_auth() -> bool:
-    """Perform initial OAuth authorization flow."""
-    credentials = load_oauth_credentials()
-    if not credentials:
-        print("Error: LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET required in .env")
-        print(f"Create {ENV_FILE} with these values from Linear OAuth app")
-        return False
+def do_auth() -> None:
+    """Perform initial OAuth authorization flow.
 
-    client_id, client_secret = credentials
+    Raises:
+        AuthenticationError: If credentials are missing or auth fails
+    """
+    client_id, client_secret = load_oauth_credentials()
 
     # Get callback URL from env
     callback_url = os.environ.get("LINEAR_CALLBACK_URL")
     if not callback_url:
-        print("Error: LINEAR_CALLBACK_URL required in .env")
-        print("Set it to your ngrok HTTPS URL + /oauth/callback")
-        print("Example: https://abc123.ngrok-free.app/oauth/callback")
-        return False
+        raise AuthenticationError(
+            "LINEAR_CALLBACK_URL required in .env\n"
+            "Set it to your ngrok HTTPS URL + /oauth/callback\n"
+            "Example: https://abc123.ngrok-free.app/oauth/callback"
+        )
 
     # Build authorization URL
     scopes = "read,write,app:mentionable,app:assignable"
@@ -202,13 +286,11 @@ def do_auth() -> bool:
     try:
         redirect_url = input("Redirect URL: ").strip()
     except (EOFError, KeyboardInterrupt):
-        print("\nAborted")
-        return False
+        raise AuthenticationError("Authorization aborted")
 
     # Extract code from URL
     if "code=" not in redirect_url:
-        print("Error: No authorization code found in URL")
-        return False
+        raise AuthenticationError("No authorization code found in URL")
 
     code = redirect_url.split("code=")[1].split("&")[0]
     print("\nExchanging code for tokens...")
@@ -228,13 +310,13 @@ def do_auth() -> bool:
         )
 
         if response.status_code != 200:
-            print(f"Error: {response.status_code} - {response.text}")
-            return False
+            raise AuthenticationError(
+                f"Token exchange failed: {response.status_code} - {response.text}"
+            )
 
         data = response.json()
         if "access_token" not in data:
-            print(f"Error: {data}")
-            return False
+            raise AuthenticationError(f"Token exchange failed: {data}")
 
         tokens = {
             "accessToken": data["access_token"],
@@ -248,11 +330,9 @@ def do_auth() -> bool:
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
         print(f"✓ Tokens saved to {TOKENS_FILE}")
         print(f"  Expires in {data.get('expires_in', 0) // 3600}h")
-        return True
 
-    except Exception as e:
-        print(f"Error exchanging code: {e}")
-        return False
+    except httpx.HTTPError as e:
+        raise AuthenticationError(f"HTTP error during token exchange: {e}")
 
 
 def token_status() -> None:
@@ -287,7 +367,14 @@ def token_status() -> None:
 
 
 def get_access_token() -> str:
-    """Get Linear access token from tokens file or environment."""
+    """Get Linear access token from tokens file or environment.
+
+    Returns:
+        Access token string
+
+    Raises:
+        AuthenticationError: If no token is available
+    """
     # Check environment first
     if token := os.environ.get("LINEAR_ACCESS_TOKEN"):
         return token
@@ -302,14 +389,79 @@ def get_access_token() -> str:
             ):
                 return str(access_token)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Warning: Failed to read tokens file: {e}", file=sys.stderr)
+            raise AuthenticationError(f"Failed to read tokens file: {e}")
 
-    print("Error: No Linear access token found.", file=sys.stderr)
-    print(
-        "Set LINEAR_ACCESS_TOKEN environment variable or create .tokens.json",
-        file=sys.stderr,
+    raise AuthenticationError(
+        "No Linear access token found. "
+        "Set LINEAR_ACCESS_TOKEN environment variable or run 'auth' command"
     )
-    sys.exit(1)
+
+
+def ensure_valid_token() -> None:
+    """Ensure we have a valid token, refreshing if needed.
+
+    Raises:
+        TokenExpiredError: If token is expired and cannot be refreshed
+    """
+    if is_token_expired():
+        print("Token expired, attempting refresh...", file=sys.stderr)
+        refresh_token()
+
+
+# ============================================================================
+# GraphQL API Functions
+# ============================================================================
+
+
+def _graphql_request(query: str, variables: dict | None = None) -> dict:
+    """Execute a GraphQL request against Linear API.
+
+    Args:
+        query: GraphQL query string
+        variables: Optional query variables
+
+    Returns:
+        Response data dictionary
+
+    Raises:
+        APIError: If the request fails or returns errors
+    """
+    token = get_access_token()
+
+    try:
+        response = httpx.post(
+            LINEAR_API_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "variables": variables or {}},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise APIError(
+            f"HTTP {e.response.status_code}: {e.response.text}",
+            status_code=e.response.status_code,
+        )
+    except httpx.HTTPError as e:
+        raise APIError(f"HTTP error: {e}")
+
+    result = response.json()
+
+    if errors := result.get("errors"):
+        raise APIError(
+            f"GraphQL errors: {errors}",
+            graphql_errors=errors,
+        )
+
+    data = result.get("data", {})
+    return dict(data) if data else {}
+
+
+# ============================================================================
+# Activity Functions
+# ============================================================================
 
 
 def emit_activity(
@@ -320,20 +472,25 @@ def emit_activity(
     signal: str | None = None,
     action_name: str | None = None,
     action_param: str | None = None,
-) -> bool:
+) -> str:
     """Emit an activity to a Linear agent session.
 
     Args:
         session_id: The Linear agent session ID
         content: The message content (used as 'body' for most types)
-        activity_type: ActivityType enum or string (thought, action, response, elicitation, error, prompt)
-        ephemeral: If True, activity disappears after the next one (good for progress)
+        activity_type: ActivityType enum or string
+        ephemeral: If True, activity disappears after the next one
         signal: Optional signal: stop, continue, auth, select
         action_name: Required for 'action' type - the action being performed
         action_param: Required for 'action' type - the parameter for the action
-    """
-    token = get_access_token()
 
+    Returns:
+        Activity ID on success
+
+    Raises:
+        ValidationError: If required parameters are missing
+        APIError: If the API request fails
+    """
     # Normalize activity_type to string value
     if isinstance(activity_type, ActivityType):
         activity_type_str = activity_type.value
@@ -349,34 +506,18 @@ def emit_activity(
         else:
             activity_type_str = activity_type
 
-    # GraphQL mutation for creating agent activity
-    mutation = """
-    mutation CreateAgentActivity($input: AgentActivityCreateInput!) {
-      agentActivityCreate(input: $input) {
-        success
-        agentActivity {
-          id
-        }
-      }
-    }
-    """
-
     # Content structure depends on activity type
-    # 'action' type requires 'action' and 'parameter' fields
     if activity_type_str == "action":
         if not action_name or not action_param:
-            print(
-                "Error: 'action' type requires --action and --parameter flags",
-                file=sys.stderr,
+            raise ValidationError(
+                "'action' type requires --action and --parameter flags"
             )
-            return False
         content_obj = {
             "type": activity_type_str,
             "action": action_name,
             "parameter": action_param,
         }
     else:
-        # Other types use 'body' for the message content
         content_obj = {
             "type": activity_type_str,
             "body": content,
@@ -388,54 +529,38 @@ def emit_activity(
         "content": content_obj,
     }
 
-    # Add optional fields
     if ephemeral:
         input_obj["ephemeral"] = True
 
     if signal:
         valid_signals = {"stop", "continue", "auth", "select"}
-        if signal in valid_signals:
-            input_obj["signal"] = signal
-        else:
+        if signal not in valid_signals:
             print(f"Warning: Unknown signal '{signal}', ignoring", file=sys.stderr)
-
-    variables = {"input": input_obj}
-
-    try:
-        response = httpx.post(
-            LINEAR_API_URL,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            json={"query": mutation, "variables": variables},
-            timeout=30.0,
-        )
-        response.raise_for_status()
-
-        result = response.json()
-
-        if errors := result.get("errors"):
-            print(f"GraphQL errors: {errors}", file=sys.stderr)
-            return False
-
-        data = result.get("data", {}).get("agentActivityCreate", {})
-        if data.get("success"):
-            activity_id = data.get("agentActivity", {}).get("id", "unknown")
-            print(
-                f"✓ Emitted {activity_type_str} to session {session_id} (activity: {activity_id})"
-            )
-            return True
         else:
-            print(f"Failed to emit activity: {result}", file=sys.stderr)
-            return False
+            input_obj["signal"] = signal
 
-    except httpx.HTTPError as e:
-        print(f"HTTP error: {e}", file=sys.stderr)
-        return False
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return False
+    mutation = """
+    mutation CreateAgentActivity($input: AgentActivityCreateInput!) {
+      agentActivityCreate(input: $input) {
+        success
+        agentActivity {
+          id
+        }
+      }
+    }
+    """
+
+    data = _graphql_request(mutation, {"input": input_obj})
+    result = data.get("agentActivityCreate", {})
+
+    if not result.get("success"):
+        raise APIError(f"Failed to emit activity: {data}")
+
+    activity_id: str = result.get("agentActivity", {}).get("id", "unknown")
+    print(
+        f"✓ Emitted {activity_type_str} to session {session_id} (activity: {activity_id})"
+    )
+    return activity_id
 
 
 # ============================================================================
@@ -443,29 +568,18 @@ def emit_activity(
 # ============================================================================
 
 
-def _graphql_request(query: str, variables: dict | None = None) -> dict:
-    """Execute a GraphQL request against Linear API."""
-    token = get_access_token()
-    response = httpx.post(
-        LINEAR_API_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        json={"query": query, "variables": variables or {}},
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    result = response.json()
-    if errors := result.get("errors"):
-        print(f"GraphQL errors: {errors}", file=sys.stderr)
-        return {}
-    data = result.get("data", {})
-    return dict(data) if data else {}
+def get_issue(identifier: str) -> dict[str, Any]:
+    """Get issue details by identifier (e.g., SUDO-3).
 
+    Args:
+        identifier: Issue identifier (e.g., SUDO-3)
 
-def get_issue(identifier: str) -> bool:
-    """Get issue details by identifier (e.g., SUDO-3)."""
+    Returns:
+        Issue data dictionary
+
+    Raises:
+        NotFoundError: If the issue is not found
+    """
     query = """
     query GetIssue($identifier: String!) {
       issue(id: $identifier) {
@@ -486,9 +600,9 @@ def get_issue(identifier: str) -> bool:
     issue = data.get("issue")
 
     if not issue:
-        print(f"Issue {identifier} not found", file=sys.stderr)
-        return False
+        raise NotFoundError(f"Issue {identifier} not found")
 
+    # Print formatted output
     print(f"Issue: {issue['identifier']} - {issue['title']}")
     print(f"URL: {issue['url']}")
     print(f"State: {issue['state']['name']} ({issue['state']['type']})")
@@ -503,11 +617,21 @@ def get_issue(identifier: str) -> bool:
     if issue.get("description"):
         print(f"\nDescription:\n{issue['description'][:500]}...")
 
-    return True
+    return dict(issue)
 
 
-def get_comments(identifier: str) -> bool:
-    """Get comments on an issue."""
+def get_comments(identifier: str) -> list[dict[str, Any]]:
+    """Get comments on an issue.
+
+    Args:
+        identifier: Issue identifier
+
+    Returns:
+        List of comment dictionaries
+
+    Raises:
+        NotFoundError: If the issue is not found
+    """
     query = """
     query GetComments($identifier: String!) {
       issue(id: $identifier) {
@@ -528,27 +652,35 @@ def get_comments(identifier: str) -> bool:
     issue = data.get("issue")
 
     if not issue:
-        print(f"Issue {identifier} not found", file=sys.stderr)
-        return False
+        raise NotFoundError(f"Issue {identifier} not found")
 
     comments = issue.get("comments", {}).get("nodes", [])
     print(f"Comments on {issue['identifier']} - {issue['title']}:\n")
 
     if not comments:
         print("No comments")
-        return True
+    else:
+        for c in comments:
+            user = c.get("user", {}).get("displayName", "Unknown")
+            print(f"--- {user} ({c['createdAt'][:10]}) ---")
+            print(c.get("body", "")[:500])
+            print()
 
-    for c in comments:
-        user = c.get("user", {}).get("displayName", "Unknown")
-        print(f"--- {user} ({c['createdAt'][:10]}) ---")
-        print(c.get("body", "")[:500])
-        print()
-
-    return True
+    return list(comments)
 
 
-def get_states(team_key: str | None = None) -> bool:
-    """Get workflow states, optionally filtered by team."""
+def get_states(team_key: str | None = None) -> list[dict[str, Any]]:
+    """Get workflow states, optionally filtered by team.
+
+    Args:
+        team_key: Optional team key to filter by
+
+    Returns:
+        List of state dictionaries
+
+    Raises:
+        NotFoundError: If the team is not found
+    """
     if team_key:
         query = """
         query GetTeamStates($teamKey: String!) {
@@ -568,8 +700,7 @@ def get_states(team_key: str | None = None) -> bool:
         data = _graphql_request(query, {"teamKey": team_key})
         team = data.get("team")
         if not team:
-            print(f"Team {team_key} not found", file=sys.stderr)
-            return False
+            raise NotFoundError(f"Team {team_key} not found")
         states = team.get("states", {}).get("nodes", [])
         print(f"Workflow states for {team['name']}:")
     else:
@@ -595,11 +726,15 @@ def get_states(team_key: str | None = None) -> bool:
         team_info = f" [{s['team']['key']}]" if s.get("team") else ""
         print(f"  {s['id']}: {s['name']} ({s['type']}){team_info}")
 
-    return True
+    return list(states)
 
 
-def get_notifications() -> bool:
-    """Get unread notifications."""
+def get_notifications() -> list[dict[str, Any]]:
+    """Get unread notifications.
+
+    Returns:
+        List of unread notification dictionaries
+    """
     query = """
     query GetNotifications {
       notifications(first: 20) {
@@ -633,13 +768,29 @@ def get_notifications() -> bool:
         else:
             print(f"- [{n['type']}] {n.get('createdAt', '')[:10]}")
 
-    return True
+    return unread
 
 
 def update_issue(
     identifier: str, state_id: str | None = None, assignee_id: str | None = None
-) -> bool:
-    """Update an issue's state or assignee."""
+) -> dict[str, Any]:
+    """Update an issue's state or assignee.
+
+    Args:
+        identifier: Issue identifier
+        state_id: Optional new state ID
+        assignee_id: Optional new assignee ID
+
+    Returns:
+        Updated issue data
+
+    Raises:
+        NotFoundError: If the issue is not found
+        ValidationError: If no updates are specified
+    """
+    if not state_id and not assignee_id:
+        raise ValidationError("No updates specified (use --state or --assignee)")
+
     # First get the issue ID from identifier
     get_query = """
     query GetIssueId($identifier: String!) {
@@ -653,8 +804,7 @@ def update_issue(
     issue = data.get("issue")
 
     if not issue:
-        print(f"Issue {identifier} not found", file=sys.stderr)
-        return False
+        raise NotFoundError(f"Issue {identifier} not found")
 
     issue_id = issue["id"]
 
@@ -664,10 +814,6 @@ def update_issue(
         update_input["stateId"] = state_id
     if assignee_id:
         update_input["assigneeId"] = assignee_id
-
-    if not update_input:
-        print("No updates specified", file=sys.stderr)
-        return False
 
     mutation = """
     mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
@@ -685,23 +831,34 @@ def update_issue(
     data = _graphql_request(mutation, {"id": issue_id, "input": update_input})
     result = data.get("issueUpdate", {})
 
-    if result.get("success"):
-        updated = result.get("issue", {})
-        print(f"✓ Updated {updated.get('identifier', identifier)}")
-        if state_id:
-            print(f"  State: {updated.get('state', {}).get('name', 'unknown')}")
-        if assignee_id:
-            print(
-                f"  Assignee: {updated.get('assignee', {}).get('displayName', 'unassigned')}"
-            )
-        return True
-    else:
-        print("Failed to update issue", file=sys.stderr)
-        return False
+    if not result.get("success"):
+        raise APIError("Failed to update issue")
+
+    updated = result.get("issue", {})
+    print(f"✓ Updated {updated.get('identifier', identifier)}")
+    if state_id:
+        print(f"  State: {updated.get('state', {}).get('name', 'unknown')}")
+    if assignee_id:
+        print(
+            f"  Assignee: {updated.get('assignee', {}).get('displayName', 'unassigned')}"
+        )
+
+    return dict(updated) if updated else {}
 
 
-def add_comment(identifier: str, body: str) -> bool:
-    """Add a comment to an issue."""
+def add_comment(identifier: str, body: str) -> dict[str, Any]:
+    """Add a comment to an issue.
+
+    Args:
+        identifier: Issue identifier
+        body: Comment body text
+
+    Returns:
+        Created comment data
+
+    Raises:
+        NotFoundError: If the issue is not found
+    """
     # First get the issue ID
     get_query = """
     query GetIssueId($identifier: String!) {
@@ -715,8 +872,7 @@ def add_comment(identifier: str, body: str) -> bool:
     issue = data.get("issue")
 
     if not issue:
-        print(f"Issue {identifier} not found", file=sys.stderr)
-        return False
+        raise NotFoundError(f"Issue {identifier} not found")
 
     mutation = """
     mutation AddComment($input: CommentCreateInput!) {
@@ -732,15 +888,60 @@ def add_comment(identifier: str, body: str) -> bool:
     data = _graphql_request(mutation, {"input": {"issueId": issue["id"], "body": body}})
     result = data.get("commentCreate", {})
 
-    if result.get("success"):
-        print(f"✓ Added comment to {identifier}")
-        return True
-    else:
-        print("Failed to add comment", file=sys.stderr)
-        return False
+    if not result.get("success"):
+        raise APIError("Failed to add comment")
+
+    print(f"✓ Added comment to {identifier}")
+    comment: dict[str, Any] = result.get("comment", {})
+    return comment
 
 
-def main():
+# ============================================================================
+# CLI Main
+# ============================================================================
+
+
+def print_help() -> None:
+    """Print help message."""
+    print(__doc__)
+    print("\nActivity Commands:")
+    print("  thought <session_id> <message>      - Emit thinking/progress update")
+    print("  action <session_id> <message>       - Emit tool/action invocation")
+    print(
+        "  response <session_id> <message>     - Emit final response (closes session)"
+    )
+    print("  elicitation <session_id> <message>  - Request information from user")
+    print("  error <session_id> <message>        - Emit error message")
+    print("  prompt <session_id> <message>       - Emit prompt/instruction")
+    print("\nFlags (add before message):")
+    print("  --ephemeral                         - Activity disappears after next one")
+    print(
+        "  --signal=<signal>                   - Add signal: stop, continue, auth, select"
+    )
+    print("\nAPI Commands:")
+    print("  get-issue <identifier>              - Get issue details (e.g., SUDO-3)")
+    print("  get-comments <identifier>           - Get comments on an issue")
+    print("  get-states [--team=KEY]             - Get workflow states")
+    print("  get-notifications                   - Get unread notifications")
+    print("  update-issue <id> --state=ID        - Update issue state")
+    print("  add-comment <identifier> <body>     - Add comment to issue")
+    print("\nToken Commands:")
+    print("  auth                                - Initial OAuth authorization")
+    print("  refresh                             - Refresh OAuth token")
+    print("  token-status                        - Check token status")
+    print("\nExamples:")
+    print("  thought abc123 'Analyzing code...'")
+    print("  action abc123 --ephemeral 'Running tests...'")
+    print("  get-issue SUDO-3")
+    print("  add-comment SUDO-3 'Fixed in PR #42'")
+
+
+def main() -> int:
+    """Main entry point.
+
+    Returns:
+        Exit code (0 for success, non-zero for errors)
+    """
     # Valid activity types
     activity_types = {"thought", "action", "response", "elicitation", "error", "prompt"}
     # API wrapper commands
@@ -754,195 +955,143 @@ def main():
     }
 
     # Show help if no args or -h/--help requested
-    show_help = len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help")
-    if show_help:
-        print(__doc__)
-        print("\nActivity Commands:")
-        print("  thought <session_id> <message>      - Emit thinking/progress update")
-        print("  action <session_id> <message>       - Emit tool/action invocation")
-        print(
-            "  response <session_id> <message>     - Emit final response (closes session)"
-        )
-        print("  elicitation <session_id> <message>  - Request information from user")
-        print("  error <session_id> <message>        - Emit error message")
-        print("  prompt <session_id> <message>       - Emit prompt/instruction")
-        print("\nFlags (add before message):")
-        print(
-            "  --ephemeral                         - Activity disappears after next one"
-        )
-        print(
-            "  --signal=<signal>                   - Add signal: stop, continue, auth, select"
-        )
-        print("\nAPI Commands:")
-        print(
-            "  get-issue <identifier>              - Get issue details (e.g., SUDO-3)"
-        )
-        print("  get-comments <identifier>           - Get comments on an issue")
-        print("  get-states [--team=KEY]             - Get workflow states")
-        print("  get-notifications                   - Get unread notifications")
-        print("  update-issue <id> --state=ID        - Update issue state")
-        print("  add-comment <identifier> <body>     - Add comment to issue")
-        print("\nToken Commands:")
-        print("  auth                                - Initial OAuth authorization")
-        print("  refresh                             - Refresh OAuth token")
-        print("  token-status                        - Check token status")
-        print("\nExamples:")
-        print("  thought abc123 'Analyzing code...'")
-        print("  action abc123 --ephemeral 'Running tests...'")
-        print("  get-issue SUDO-3")
-        print("  add-comment SUDO-3 'Fixed in PR #42'")
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print_help()
         # Exit 0 for explicit --help, 1 for missing args
-        sys.exit(0 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 1)
+        return 0 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 1
 
     command = sys.argv[1]
 
-    # Token management commands
-    if command == "auth":
-        success = do_auth()
-        sys.exit(0 if success else 1)
+    try:
+        # Token management commands
+        if command == "auth":
+            do_auth()
+            return 0
 
-    if command == "refresh":
-        success = refresh_token()
-        sys.exit(0 if success else 1)
+        if command == "refresh":
+            refresh_token()
+            return 0
 
-    if command == "token-status":
-        token_status()
-        sys.exit(0)
+        if command == "token-status":
+            token_status()
+            return 0
 
-    # Auto-refresh for API commands if token expired
-    if command in api_commands or command in activity_types:
-        if is_token_expired():
-            print("Token expired, attempting refresh...", file=sys.stderr)
-            if not refresh_token():
-                print("Warning: Could not refresh token", file=sys.stderr)
+        # Auto-refresh for API commands if token expired
+        if command in api_commands or command in activity_types:
+            ensure_valid_token()
 
-    # API wrapper commands
-    if command == "get-issue":
-        if len(sys.argv) < 3:
-            print("Usage: get-issue <identifier>", file=sys.stderr)
-            sys.exit(1)
-        success = get_issue(sys.argv[2])
-        sys.exit(0 if success else 1)
+        # API wrapper commands
+        if command == "get-issue":
+            if len(sys.argv) < 3:
+                raise ValidationError("Usage: get-issue <identifier>")
+            get_issue(sys.argv[2])
+            return 0
 
-    if command == "get-comments":
-        if len(sys.argv) < 3:
-            print("Usage: get-comments <identifier>", file=sys.stderr)
-            sys.exit(1)
-        success = get_comments(sys.argv[2])
-        sys.exit(0 if success else 1)
+        if command == "get-comments":
+            if len(sys.argv) < 3:
+                raise ValidationError("Usage: get-comments <identifier>")
+            get_comments(sys.argv[2])
+            return 0
 
-    if command == "get-states":
-        team_key = None
-        for arg in sys.argv[2:]:
-            if arg.startswith("--team="):
-                team_key = arg.split("=", 1)[1]
-        success = get_states(team_key)
-        sys.exit(0 if success else 1)
+        if command == "get-states":
+            team_key = None
+            for arg in sys.argv[2:]:
+                if arg.startswith("--team="):
+                    team_key = arg.split("=", 1)[1]
+            get_states(team_key)
+            return 0
 
-    if command == "get-notifications":
-        success = get_notifications()
-        sys.exit(0 if success else 1)
+        if command == "get-notifications":
+            get_notifications()
+            return 0
 
-    if command == "update-issue":
-        if len(sys.argv) < 3:
-            print("Usage: update-issue <identifier> --state=ID", file=sys.stderr)
-            sys.exit(1)
-        identifier = sys.argv[2]
-        state_id = None
-        assignee_id = None
-        for arg in sys.argv[3:]:
-            if arg.startswith("--state="):
-                state_id = arg.split("=", 1)[1]
-            elif arg.startswith("--assignee="):
-                assignee_id = arg.split("=", 1)[1]
-        success = update_issue(identifier, state_id=state_id, assignee_id=assignee_id)
-        sys.exit(0 if success else 1)
+        if command == "update-issue":
+            if len(sys.argv) < 3:
+                raise ValidationError("Usage: update-issue <identifier> --state=ID")
+            identifier = sys.argv[2]
+            state_id = None
+            assignee_id = None
+            for arg in sys.argv[3:]:
+                if arg.startswith("--state="):
+                    state_id = arg.split("=", 1)[1]
+                elif arg.startswith("--assignee="):
+                    assignee_id = arg.split("=", 1)[1]
+            update_issue(identifier, state_id=state_id, assignee_id=assignee_id)
+            return 0
 
-    if command == "add-comment":
+        if command == "add-comment":
+            if len(sys.argv) < 4:
+                raise ValidationError("Usage: add-comment <identifier> <body>")
+            identifier = sys.argv[2]
+            body = " ".join(sys.argv[3:])
+            add_comment(identifier, body)
+            return 0
+
+        # Activity commands require session_id and message
+        if command not in activity_types:
+            raise ValidationError(
+                f"Unknown command: {command}\n"
+                f"Use one of: {', '.join(sorted(activity_types | api_commands))}"
+            )
+
         if len(sys.argv) < 4:
-            print("Usage: add-comment <identifier> <body>", file=sys.stderr)
-            sys.exit(1)
-        identifier = sys.argv[2]
-        body = " ".join(sys.argv[3:])
-        success = add_comment(identifier, body)
-        sys.exit(0 if success else 1)
+            if command == "action":
+                raise ValidationError(
+                    f"Usage: {command} <session_id> --action=<name> --parameter=<param> [--ephemeral] [--signal=X]"
+                )
+            else:
+                raise ValidationError(
+                    f"Usage: {command} <session_id> [--ephemeral] [--signal=X] <message>"
+                )
 
-    # Activity commands require session_id and message
-    if command not in activity_types:
-        print(f"Unknown command: {command}", file=sys.stderr)
-        print(
-            f"Use one of: {', '.join(sorted(activity_types | api_commands))}",
-            file=sys.stderr,
+        session_id = sys.argv[2]
+
+        # Parse flags and message from remaining args
+        ephemeral = False
+        signal = None
+        action_name = None
+        action_param = None
+        message_parts = []
+
+        for arg in sys.argv[3:]:
+            if arg == "--ephemeral":
+                ephemeral = True
+            elif arg.startswith("--signal="):
+                signal = arg.split("=", 1)[1]
+            elif arg.startswith("--action="):
+                action_name = arg.split("=", 1)[1]
+            elif arg.startswith("--parameter="):
+                action_param = arg.split("=", 1)[1]
+            else:
+                message_parts.append(arg)
+
+        message = " ".join(message_parts)
+
+        # For 'action' type, message is optional but action/parameter are required
+        if command != "action" and not message:
+            raise ValidationError("Message is required")
+
+        emit_activity(
+            session_id,
+            message,
+            command,
+            ephemeral=ephemeral,
+            signal=signal,
+            action_name=action_name,
+            action_param=action_param,
         )
-        sys.exit(1)
+        return 0
 
-    if len(sys.argv) < 4:
-        if command == "action":
-            print(
-                f"Usage: {command} <session_id> --action=<name> --parameter=<param> [--ephemeral] [--signal=X]",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"Usage: {command} <session_id> [--ephemeral] [--signal=X] <message>",
-                file=sys.stderr,
-            )
-        sys.exit(1)
-
-    session_id = sys.argv[2]
-
-    # Parse flags and message from remaining args
-    ephemeral = False
-    signal = None
-    action_name = None
-    action_param = None
-    message_parts = []
-
-    for arg in sys.argv[3:]:
-        if arg == "--ephemeral":
-            ephemeral = True
-        elif arg.startswith("--signal="):
-            signal = arg.split("=", 1)[1]
-        elif arg.startswith("--action="):
-            action_name = arg.split("=", 1)[1]
-        elif arg.startswith("--parameter="):
-            action_param = arg.split("=", 1)[1]
-        else:
-            message_parts.append(arg)
-
-    message = " ".join(message_parts)
-
-    # For 'action' type, message is optional but action/parameter are required
-    if command == "action":
-        if not action_name or not action_param:
-            print(
-                "Error: 'action' type requires --action=<name> and --parameter=<param>",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    elif not message:
-        print("Error: Message is required", file=sys.stderr)
-        sys.exit(1)
-
-    # Auto-refresh if token is expired
-    if is_token_expired():
-        print("Token expired, attempting refresh...", file=sys.stderr)
-        if not refresh_token():
-            print(
-                "Warning: Could not refresh token, proceeding anyway", file=sys.stderr
-            )
-
-    success = emit_activity(
-        session_id,
-        message,
-        command,
-        ephemeral=ephemeral,
-        signal=signal,
-        action_name=action_name,
-        action_param=action_param,
-    )
-    sys.exit(0 if success else 1)
+    except LinearCLIError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return e.exit_code
+    except KeyboardInterrupt:
+        print("\nAborted", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
