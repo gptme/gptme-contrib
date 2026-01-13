@@ -323,7 +323,9 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             return False
 
         # Switch to main and merge
-        subprocess.run(["git", "checkout", DEFAULT_BRANCH], cwd=AGENT_WORKSPACE, check=True)
+        subprocess.run(
+            ["git", "checkout", DEFAULT_BRANCH], cwd=AGENT_WORKSPACE, check=True
+        )
         subprocess.run(
             ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH],
             cwd=AGENT_WORKSPACE,
@@ -364,7 +366,8 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             print(f"⚠ Push failed, will retry: {push_result.stderr}")
             # Pull and retry once
             subprocess.run(
-                ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH], cwd=AGENT_WORKSPACE
+                ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH],
+                cwd=AGENT_WORKSPACE,
             )
             push_result = subprocess.run(
                 ["git", "push", "origin", DEFAULT_BRANCH],
@@ -428,7 +431,7 @@ def build_gptme_prompt(session_data: dict) -> str:
 
     return f"""# Linear Agent Session: {session_id}
 
-You have been {action} in Linear issue {issue.get('identifier', 'unknown')}: {issue.get('title', 'Unknown')}
+You have been {action} in Linear issue {issue.get("identifier", "unknown")}: {issue.get("title", "Unknown")}
 
 ## Context from Linear
 {prompt_context}
