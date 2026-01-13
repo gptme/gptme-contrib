@@ -144,8 +144,9 @@ def token_status() -> None:
         print(f"Expired: {now > expiry}")
         if now < expiry:
             remaining = expiry - now
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds % 3600) // 60
+            total_seconds = int(remaining.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
             print(f"Remaining: {hours}h {minutes}m")
         print(f"Scope: {tokens.get('scope', 'unknown')}")
     except Exception as e:
