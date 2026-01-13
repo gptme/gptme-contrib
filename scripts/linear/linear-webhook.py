@@ -43,12 +43,15 @@ _DEFAULT_NOTIFICATIONS_DIR = (
 NOTIFICATIONS_DIR = Path(
     os.environ.get("NOTIFICATIONS_DIR", str(_DEFAULT_NOTIFICATIONS_DIR))
 )
+# Workspace defaults to parent of this script's directory (scripts/linear/ -> workspace)
+_DEFAULT_WORKSPACE = Path(__file__).parent.parent.parent
 AGENT_WORKSPACE = Path(
-    os.environ.get("AGENT_WORKSPACE", Path.home() / "repos" / AGENT_NAME)
+    os.environ.get("AGENT_WORKSPACE", _DEFAULT_WORKSPACE)
 )
 LOGS_DIR = AGENT_WORKSPACE / "logs" / "linear-sessions"
+# Worktrees default to sibling directory of workspace
 WORKTREE_BASE = Path(
-    os.environ.get("WORKTREE_BASE", Path.home() / "repos" / f"{AGENT_NAME}-worktrees")
+    os.environ.get("WORKTREE_BASE", AGENT_WORKSPACE.parent / f"{AGENT_NAME}-worktrees")
 )
 GPTME_TIMEOUT = 30 * 60  # 30 minutes
 DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "main")
