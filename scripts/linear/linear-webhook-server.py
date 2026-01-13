@@ -303,146 +303,55 @@ def create_worktree(session_id: str) -> Path:
     return worktree_path
 
 
-def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
-    """Try to merge worktree branch to main. Returns True if successful."""
-    branch_name = f"linear-session-{session_id}"
-
-    try:
-        # Check if there are uncommitted changes
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=worktree_path,
-            capture_output=True,
-            text=True,
-        )
-
-        if status.stdout.strip():
-            # Fail merge if there are uncommitted changes - will be picked up by cleanup job
-            print(f"⚠ Uncommitted changes in {branch_name}, skipping auto-merge")
-            emit_activity(
-                session_id,
-                f"⚠ Session left uncommitted changes in branch `{branch_name}`. "
-                "Worktree preserved for manual review.",
-                "thought",
-            )
-            return False
-
-        # Fetch latest main
-        subprocess.run(
-            ["git", "fetch", "origin", DEFAULT_BRANCH],
-            cwd=AGENT_WORKSPACE,
-            capture_output=True,
-            check=True,
-        )
-
-        # Try to rebase worktree branch onto main
-        rebase_result = subprocess.run(
-            ["git", "rebase", f"origin/{DEFAULT_BRANCH}"],
-            cwd=worktree_path,
-            capture_output=True,
-            text=True,
-        )
-
-        if rebase_result.returncode != 0:
-            # Rebase failed (conflict) - abort and return False
-            subprocess.run(
-                ["git", "rebase", "--abort"], cwd=worktree_path, capture_output=True
-            )
-            print(f"⚠ Merge conflict in {branch_name}, leaving for manual resolution")
-            return False
-
-        # Switch to main and merge
-        subprocess.run(
-            ["git", "checkout", DEFAULT_BRANCH], cwd=AGENT_WORKSPACE, check=True
-        )
-        subprocess.run(
-            ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH],
-            cwd=AGENT_WORKSPACE,
-            check=True,
-        )
-
-        merge_result = subprocess.run(
-            [
-                "git",
-                "merge",
-                "--no-ff",
-                branch_name,
-                "-m",
-                f"feat(linear): merge session {session_id}",
-            ],
-            cwd=AGENT_WORKSPACE,
-            capture_output=True,
-            text=True,
-        )
-
-        if merge_result.returncode != 0:
-            # Merge failed - abort
-            subprocess.run(
-                ["git", "merge", "--abort"], cwd=AGENT_WORKSPACE, capture_output=True
-            )
-            print(f"⚠ Merge to main failed for {branch_name}")
-            return False
-
-        # Push to origin
-        push_result = subprocess.run(
-            ["git", "push", "origin", DEFAULT_BRANCH],
-            cwd=AGENT_WORKSPACE,
-            capture_output=True,
-            text=True,
-        )
-
-        if push_result.returncode != 0:
-            print(f"⚠ Push failed, will retry: {push_result.stderr}")
-            # Pull and retry once
-            subprocess.run(
-                ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH],
-                cwd=AGENT_WORKSPACE,
-            )
-            push_result = subprocess.run(
-                ["git", "push", "origin", DEFAULT_BRANCH],
-                cwd=AGENT_WORKSPACE,
-                capture_output=True,
-                text=True,
-            )
-            if push_result.returncode != 0:
-                return False
-
-        print(f"✓ Successfully merged {branch_name} to main")
-        return True
-
-    except Exception as e:
-        print(f"Error during merge: {e}", file=sys.stderr)
-        return False
-
-
 def cleanup_worktree(session_id: str, worktree_path: Path):
-    """Try to merge worktree to main, then clean up if successful."""
+    """Verify work is merged to upstream main, then clean up worktree.
+
+    The agent is responsible for merging work. This function just verifies
+    the commit is in origin/main before cleaning up.
+    """
     branch_name = f"linear-session-{session_id}"
 
-    # Check if branch was already merged (e.g., by the agent manually)
+    # Fetch latest from origin
+    subprocess.run(
+        ["git", "fetch", "origin", DEFAULT_BRANCH],
+        cwd=AGENT_WORKSPACE,
+        capture_output=True,
+    )
+
+    # Get the latest commit from the worktree branch
+    worktree_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+    )
+
+    if worktree_commit.returncode != 0:
+        print("⚠ Could not get commit from worktree", file=sys.stderr)
+        return
+
+    commit_sha = worktree_commit.stdout.strip()
+
+    # Check if this commit is in origin/main (i.e., work was merged and pushed)
     check_merged = subprocess.run(
-        ["git", "branch", "--merged", DEFAULT_BRANCH],
+        ["git", "branch", "-r", "--contains", commit_sha],
         cwd=AGENT_WORKSPACE,
         capture_output=True,
         text=True,
     )
-    if branch_name in check_merged.stdout:
-        print(f"✓ Branch {branch_name} already merged to {DEFAULT_BRANCH}")
-        merge_success = True
-    else:
-        # Try to merge
-        merge_success = try_merge_worktree(session_id, worktree_path)
 
-    if not merge_success:
-        print(f"⚠ Leaving worktree {worktree_path} for scheduled cleanup")
+    if f"origin/{DEFAULT_BRANCH}" in check_merged.stdout:
+        print(f"✓ Commit {commit_sha[:8]} verified in origin/{DEFAULT_BRANCH}")
+    else:
+        print(f"⚠ Commit {commit_sha[:8]} NOT found in origin/{DEFAULT_BRANCH}")
         emit_activity(
             session_id,
-            f"⚠ Could not auto-merge branch `{branch_name}`. Left for manual review.",
+            f"⚠ Work not merged to {DEFAULT_BRANCH}. Branch `{branch_name}` commit {commit_sha[:8]} not in origin/{DEFAULT_BRANCH}. Please merge and push manually.",
             "thought",  # Use thought, not error - session work may still be valid
         )
         return
 
-    # Merge succeeded - safe to remove worktree
+    # Work verified - safe to remove worktree
     try:
         if worktree_path.exists():
             subprocess.run(
@@ -652,17 +561,9 @@ def process_agent_session_event(payload: dict, filepath: Path):
                         print(
                             f"Found existing worktree for {issue_identifier} from session {old_session_id}"
                         )
-                        print("Merging existing work before starting new session...")
+                        print("Checking if previous work was merged...")
 
-                        # Try to merge the old worktree's work
-                        if try_merge_worktree(old_session_id, old_worktree_path):
-                            print("✓ Merged existing work from previous session")
-                        else:
-                            print(
-                                "⚠ Could not merge existing work (may have conflicts)"
-                            )
-
-                        # Clean up old worktree
+                        # Verify and clean up old worktree (no auto-merge - agent is responsible)
                         cleanup_worktree(old_session_id, old_worktree_path)
 
                     # Remove from tracking
