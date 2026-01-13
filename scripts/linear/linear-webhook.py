@@ -300,7 +300,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
 
         # Fetch latest main
         subprocess.run(
-            ["git", "fetch", "origin", "main"],
+            ["git", "fetch", "origin", DEFAULT_BRANCH],
             cwd=AGENT_WORKSPACE,
             capture_output=True,
             check=True,
@@ -323,9 +323,9 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             return False
 
         # Switch to main and merge
-        subprocess.run(["git", "checkout", "main"], cwd=AGENT_WORKSPACE, check=True)
+        subprocess.run(["git", "checkout", DEFAULT_BRANCH], cwd=AGENT_WORKSPACE, check=True)
         subprocess.run(
-            ["git", "pull", "--rebase", "origin", "main"],
+            ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH],
             cwd=AGENT_WORKSPACE,
             check=True,
         )
@@ -354,7 +354,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
 
         # Push to origin
         push_result = subprocess.run(
-            ["git", "push", "origin", "main"],
+            ["git", "push", "origin", DEFAULT_BRANCH],
             cwd=AGENT_WORKSPACE,
             capture_output=True,
             text=True,
@@ -364,10 +364,10 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
             print(f"⚠ Push failed, will retry: {push_result.stderr}")
             # Pull and retry once
             subprocess.run(
-                ["git", "pull", "--rebase", "origin", "main"], cwd=AGENT_WORKSPACE
+                ["git", "pull", "--rebase", "origin", DEFAULT_BRANCH], cwd=AGENT_WORKSPACE
             )
             push_result = subprocess.run(
-                ["git", "push", "origin", "main"],
+                ["git", "push", "origin", DEFAULT_BRANCH],
                 cwd=AGENT_WORKSPACE,
                 capture_output=True,
                 text=True,
