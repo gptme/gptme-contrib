@@ -419,8 +419,19 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
     """Try to merge worktree to main, then clean up if successful."""
     branch_name = f"linear-session-{session_id}"
 
-    # Try to merge first
-    merge_success = try_merge_worktree(session_id, worktree_path)
+    # Check if branch was already merged (e.g., by the agent manually)
+    check_merged = subprocess.run(
+        ["git", "branch", "--merged", DEFAULT_BRANCH],
+        cwd=AGENT_WORKSPACE,
+        capture_output=True,
+        text=True,
+    )
+    if branch_name in check_merged.stdout:
+        print(f"✓ Branch {branch_name} already merged to {DEFAULT_BRANCH}")
+        merge_success = True
+    else:
+        # Try to merge
+        merge_success = try_merge_worktree(session_id, worktree_path)
 
     if not merge_success:
         print(f"⚠ Leaving worktree {worktree_path} for scheduled cleanup")
@@ -515,7 +526,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 1. ✅ Emit progress updates during work (use --ephemeral for transient status)
 2. ✅ Submit final response via `response` command (this closes the session)
 3. ✅ Update journal with session summary
-4. ✅ Commit and merge to main
+4. ✅ Commit your changes (the webhook server will merge after you exit)
 5. ✅ Exit
 """
 
