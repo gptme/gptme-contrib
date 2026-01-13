@@ -31,6 +31,7 @@ load_dotenv(ENV_FILE)
 # Linear endpoints
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_OAUTH_TOKEN = "https://api.linear.app/oauth/token"
+LINEAR_OAUTH_AUTHORIZE = "https://linear.app/oauth/authorize"
 
 
 def load_oauth_credentials() -> tuple[str, str] | None:
@@ -119,6 +120,98 @@ def refresh_token() -> bool:
 
     except Exception as e:
         print(f"Error refreshing token: {e}", file=sys.stderr)
+        return False
+
+
+def do_auth() -> bool:
+    """Perform initial OAuth authorization flow."""
+    credentials = load_oauth_credentials()
+    if not credentials:
+        print("Error: LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET required in .env")
+        print(f"Create {ENV_FILE} with these values from Linear OAuth app")
+        return False
+
+    client_id, client_secret = credentials
+
+    # Get callback URL from env
+    callback_url = os.environ.get("LINEAR_CALLBACK_URL")
+    if not callback_url:
+        print("Error: LINEAR_CALLBACK_URL required in .env")
+        print("Set it to your ngrok HTTPS URL + /oauth/callback")
+        print("Example: https://abc123.ngrok-free.app/oauth/callback")
+        return False
+
+    # Build authorization URL
+    scopes = "read,write,app:mentionable,app:assignable"
+    auth_url = (
+        f"{LINEAR_OAUTH_AUTHORIZE}?"
+        f"client_id={client_id}&"
+        f"redirect_uri={callback_url}&"
+        f"scope={scopes}&"
+        f"response_type=code&"
+        f"state=auth"
+    )
+
+    print("=== Linear OAuth Authorization ===\n")
+    print("1. Open this URL in your browser:\n")
+    print(f"   {auth_url}\n")
+    print("2. Authorize the application in Linear")
+    print("3. After redirect, copy the FULL redirect URL (with ?code=...)")
+    print("4. Paste the URL here:\n")
+
+    try:
+        redirect_url = input("Redirect URL: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted")
+        return False
+
+    # Extract code from URL
+    if "code=" not in redirect_url:
+        print("Error: No authorization code found in URL")
+        return False
+
+    code = redirect_url.split("code=")[1].split("&")[0]
+    print("\nExchanging code for tokens...")
+
+    # Exchange code for tokens
+    try:
+        response = httpx.post(
+            LINEAR_OAUTH_TOKEN,
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": callback_url,
+                "code": code,
+            },
+            timeout=30.0,
+        )
+
+        if response.status_code != 200:
+            print(f"Error: {response.status_code} - {response.text}")
+            return False
+
+        data = response.json()
+        if "access_token" not in data:
+            print(f"Error: {data}")
+            return False
+
+        tokens = {
+            "accessToken": data["access_token"],
+            "refreshToken": data.get("refresh_token"),
+            "tokenType": data.get("token_type", "Bearer"),
+            "scope": data.get("scope"),
+            "actorType": "application",
+            "expiresAt": int((time.time() + data.get("expires_in", 36000)) * 1000),
+        }
+
+        TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+        print(f"✓ Tokens saved to {TOKENS_FILE}")
+        print(f"  Expires in {data.get('expires_in', 0) // 3600}h")
+        return True
+
+    except Exception as e:
+        print(f"Error exchanging code: {e}")
         return False
 
 
@@ -629,6 +722,7 @@ def main():
         print("  update-issue <id> --state=ID        - Update issue state")
         print("  add-comment <identifier> <body>     - Add comment to issue")
         print("\nToken Commands:")
+        print("  auth                                - Initial OAuth authorization")
         print("  refresh                             - Refresh OAuth token")
         print("  token-status                        - Check token status")
         print("\nExamples:")
@@ -642,6 +736,10 @@ def main():
     command = sys.argv[1]
 
     # Token management commands
+    if command == "auth":
+        success = do_auth()
+        sys.exit(0 if success else 1)
+
     if command == "refresh":
         success = refresh_token()
         sys.exit(0 if success else 1)
