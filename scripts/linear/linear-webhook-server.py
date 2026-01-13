@@ -32,27 +32,45 @@ ENV_FILE = Path(__file__).parent / ".env"
 if ENV_FILE.exists():
     load_dotenv(ENV_FILE)
 
-# Configuration
+# Configuration - Required environment variables (set in .env file)
 PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
-AGENT_NAME = os.environ.get("AGENT_NAME", "agent")
-# Default to persistent location in workspace logs
-_DEFAULT_NOTIFICATIONS_DIR = (
-    Path(__file__).parent.parent.parent / "logs" / "linear-notifications"
-)
-NOTIFICATIONS_DIR = Path(
-    os.environ.get("NOTIFICATIONS_DIR", str(_DEFAULT_NOTIFICATIONS_DIR))
-)
-# Workspace defaults to parent of this script's directory (scripts/linear/ -> workspace)
-_DEFAULT_WORKSPACE = Path(__file__).parent.parent.parent
-AGENT_WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", _DEFAULT_WORKSPACE))
+AGENT_NAME = os.environ.get("AGENT_NAME")  # Required: no default
+AGENT_WORKSPACE = (
+    Path(os.environ["AGENT_WORKSPACE"]) if os.environ.get("AGENT_WORKSPACE") else None
+)  # Required
+DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH")  # Required: no default
+
+# Validate required config at import time
+_missing = []
+if not AGENT_NAME:
+    _missing.append("AGENT_NAME")
+if not AGENT_WORKSPACE:
+    _missing.append("AGENT_WORKSPACE")
+if not DEFAULT_BRANCH:
+    _missing.append("DEFAULT_BRANCH")
+if _missing:
+    print(
+        f"Error: Missing required environment variables: {', '.join(_missing)}",
+        file=sys.stderr,
+    )
+    print(
+        "Please set these in your .env file. See .env.template for examples.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+# Derived paths
 LOGS_DIR = AGENT_WORKSPACE / "logs" / "linear-sessions"
-# Worktrees default to sibling directory of workspace
+NOTIFICATIONS_DIR = Path(
+    os.environ.get(
+        "NOTIFICATIONS_DIR", str(AGENT_WORKSPACE / "logs" / "linear-notifications")
+    )
+)
 WORKTREE_BASE = Path(
     os.environ.get("WORKTREE_BASE", AGENT_WORKSPACE.parent / f"{AGENT_NAME}-worktrees")
 )
 GPTME_TIMEOUT = 30 * 60  # 30 minutes
-DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "main")
 
 # Linear API
 LINEAR_API = "https://api.linear.app/graphql"

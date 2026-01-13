@@ -43,11 +43,24 @@ import json
 import os
 import sys
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+
+
+class ActivityType(Enum):
+    """Valid activity types for Linear agent sessions."""
+
+    THOUGHT = "thought"
+    ACTION = "action"
+    RESPONSE = "response"
+    ELICITATION = "elicitation"
+    ERROR = "error"
+    PROMPT = "prompt"
+
 
 # Load environment from .env file in script directory
 ENV_FILE = Path(__file__).parent / ".env"
@@ -55,9 +68,9 @@ TOKENS_FILE = Path(__file__).parent / ".tokens.json"
 load_dotenv(ENV_FILE)
 
 # Linear endpoints
-LINEAR_API = "https://api.linear.app/graphql"
-LINEAR_OAUTH_TOKEN = "https://api.linear.app/oauth/token"
-LINEAR_OAUTH_AUTHORIZE = "https://linear.app/oauth/authorize"
+LINEAR_API_URL = "https://api.linear.app/graphql"
+LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
+LINEAR_OAUTH_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 
 
 def load_oauth_credentials() -> tuple[str, str] | None:
@@ -111,7 +124,7 @@ def refresh_token() -> bool:
             return False
 
         response = httpx.post(
-            LINEAR_OAUTH_TOKEN,
+            LINEAR_OAUTH_TOKEN_URL,
             data={
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_tok,
@@ -170,7 +183,7 @@ def do_auth() -> bool:
     # Build authorization URL
     scopes = "read,write,app:mentionable,app:assignable"
     auth_url = (
-        f"{LINEAR_OAUTH_AUTHORIZE}?"
+        f"{LINEAR_OAUTH_AUTHORIZE_URL}?"
         f"client_id={client_id}&"
         f"redirect_uri={callback_url}&"
         f"scope={scopes}&"
@@ -203,7 +216,7 @@ def do_auth() -> bool:
     # Exchange code for tokens
     try:
         response = httpx.post(
-            LINEAR_OAUTH_TOKEN,
+            LINEAR_OAUTH_TOKEN_URL,
             data={
                 "grant_type": "authorization_code",
                 "client_id": client_id,
@@ -291,10 +304,6 @@ def get_access_token() -> str:
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Failed to read tokens file: {e}", file=sys.stderr)
 
-    # Check for personal API key
-    if token := os.environ.get("LINEAR_API_KEY"):
-        return token
-
     print("Error: No Linear access token found.", file=sys.stderr)
     print(
         "Set LINEAR_ACCESS_TOKEN environment variable or create .tokens.json",
@@ -306,7 +315,7 @@ def get_access_token() -> str:
 def emit_activity(
     session_id: str,
     content: str,
-    activity_type: str = "thought",
+    activity_type: str | ActivityType = ActivityType.THOUGHT,
     ephemeral: bool = False,
     signal: str | None = None,
     action_name: str | None = None,
@@ -317,7 +326,7 @@ def emit_activity(
     Args:
         session_id: The Linear agent session ID
         content: The message content (used as 'body' for most types)
-        activity_type: One of: thought, action, response, elicitation, error, prompt
+        activity_type: ActivityType enum or string (thought, action, response, elicitation, error, prompt)
         ephemeral: If True, activity disappears after the next one (good for progress)
         signal: Optional signal: stop, continue, auth, select
         action_name: Required for 'action' type - the action being performed
@@ -325,14 +334,20 @@ def emit_activity(
     """
     token = get_access_token()
 
-    # All valid activity types
-    valid_types = {"thought", "action", "response", "elicitation", "error", "prompt"}
-    if activity_type not in valid_types:
-        print(
-            f"Warning: Unknown activity type '{activity_type}', using 'thought'",
-            file=sys.stderr,
-        )
-        activity_type = "thought"
+    # Normalize activity_type to string value
+    if isinstance(activity_type, ActivityType):
+        activity_type_str = activity_type.value
+    else:
+        # Validate string against enum values
+        valid_values = {t.value for t in ActivityType}
+        if activity_type not in valid_values:
+            print(
+                f"Warning: Unknown activity type '{activity_type}', using 'thought'",
+                file=sys.stderr,
+            )
+            activity_type_str = ActivityType.THOUGHT.value
+        else:
+            activity_type_str = activity_type
 
     # GraphQL mutation for creating agent activity
     mutation = """
@@ -348,7 +363,7 @@ def emit_activity(
 
     # Content structure depends on activity type
     # 'action' type requires 'action' and 'parameter' fields
-    if activity_type == "action":
+    if activity_type_str == "action":
         if not action_name or not action_param:
             print(
                 "Error: 'action' type requires --action and --parameter flags",
@@ -356,14 +371,14 @@ def emit_activity(
             )
             return False
         content_obj = {
-            "type": activity_type,
+            "type": activity_type_str,
             "action": action_name,
             "parameter": action_param,
         }
     else:
         # Other types use 'body' for the message content
         content_obj = {
-            "type": activity_type,
+            "type": activity_type_str,
             "body": content,
         }
 
@@ -388,7 +403,7 @@ def emit_activity(
 
     try:
         response = httpx.post(
-            LINEAR_API,
+            LINEAR_API_URL,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -408,7 +423,7 @@ def emit_activity(
         if data.get("success"):
             activity_id = data.get("agentActivity", {}).get("id", "unknown")
             print(
-                f"✓ Emitted {activity_type} to session {session_id} (activity: {activity_id})"
+                f"✓ Emitted {activity_type_str} to session {session_id} (activity: {activity_id})"
             )
             return True
         else:
@@ -432,7 +447,7 @@ def _graphql_request(query: str, variables: dict | None = None) -> dict:
     """Execute a GraphQL request against Linear API."""
     token = get_access_token()
     response = httpx.post(
-        LINEAR_API,
+        LINEAR_API_URL,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",

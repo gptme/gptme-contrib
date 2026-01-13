@@ -20,7 +20,7 @@ Linear sends AgentSessionEvent webhook
 ngrok tunnel (public HTTPS)
          |
          v
-linear-webhook.py (Flask server:8081)
+linear-webhook-server.py (Flask server:8081)
          |
          +---> Validates token (auto-refresh if expired)
          +---> Emits acknowledgment activity
@@ -32,7 +32,7 @@ linear-webhook.py (Flask server:8081)
 
 | File | Description |
 |------|-------------|
-| `linear-webhook.py` | Flask webhook server - receives Linear events |
+| `linear-webhook-server.py` | Flask webhook server - receives Linear events |
 | `linear-activity.py` | CLI tool to emit activities back to Linear |
 | `.env` | Configuration (secrets - never commit!) |
 | `.tokens.json` | OAuth access/refresh tokens (never commit!) |

@@ -13,7 +13,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=<WORKSPACE>/scripts/linear
-ExecStart=<HOME>/.local/bin/uv run <WORKSPACE>/scripts/linear/linear-webhook.py
+ExecStart=<HOME>/.local/bin/uv run <WORKSPACE>/scripts/linear/linear-webhook-server.py
 Environment=PATH=<HOME>/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=<HOME>
 StandardOutput=journal
