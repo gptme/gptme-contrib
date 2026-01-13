@@ -149,6 +149,7 @@ def do_auth() -> bool:
         f"redirect_uri={callback_url}&"
         f"scope={scopes}&"
         f"response_type=code&"
+        f"actor=app&"
         f"state=auth"
     )
 

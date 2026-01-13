@@ -51,6 +51,7 @@ WORKTREE_BASE = Path(
     os.environ.get("WORKTREE_BASE", Path.home() / "repos" / f"{AGENT_NAME}-worktrees")
 )
 GPTME_TIMEOUT = 30 * 60  # 30 minutes
+DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "main")
 
 # Linear API
 LINEAR_API = "https://api.linear.app/graphql"
@@ -255,7 +256,7 @@ def create_worktree(session_id: str) -> Path:
             str(worktree_path),
             "-B",
             branch_name,
-            "origin/main",
+            f"origin/{DEFAULT_BRANCH}",
         ],
         cwd=AGENT_WORKSPACE,
         check=True,
@@ -307,7 +308,7 @@ def try_merge_worktree(session_id: str, worktree_path: Path) -> bool:
 
         # Try to rebase worktree branch onto main
         rebase_result = subprocess.run(
-            ["git", "rebase", "origin/main"],
+            ["git", "rebase", f"origin/{DEFAULT_BRANCH}"],
             cwd=worktree_path,
             capture_output=True,
             text=True,
