@@ -45,9 +45,7 @@ NOTIFICATIONS_DIR = Path(
 )
 # Workspace defaults to parent of this script's directory (scripts/linear/ -> workspace)
 _DEFAULT_WORKSPACE = Path(__file__).parent.parent.parent
-AGENT_WORKSPACE = Path(
-    os.environ.get("AGENT_WORKSPACE", _DEFAULT_WORKSPACE)
-)
+AGENT_WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", _DEFAULT_WORKSPACE))
 LOGS_DIR = AGENT_WORKSPACE / "logs" / "linear-sessions"
 # Worktrees default to sibling directory of workspace
 WORKTREE_BASE = Path(
