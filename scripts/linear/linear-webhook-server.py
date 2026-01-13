@@ -377,6 +377,8 @@ def build_gptme_prompt(session_data: dict) -> str:
     issue = session_data.get("issue", {})
     prompt_context = session_data.get("prompt_context", "")
     linear_activity_path = LINEAR_ACTIVITY_CLI
+    branch_name = f"linear-session-{session_id}"
+    main_workspace = AGENT_WORKSPACE
 
     return f"""# Linear Agent Session: {session_id}
 
@@ -432,11 +434,21 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 
 ## COMPLETION PROTOCOL (Required before exit)
 
+**CRITICAL**: You MUST emit a `response` activity to close this Linear session.
+Posting comments via GraphQL API does NOT close the session - only `response` does!
+
 1. ✅ Emit progress updates during work (use --ephemeral for transient status)
-2. ✅ Submit final response via `response` command (this closes the session)
-3. ✅ Update journal with session summary
-4. ✅ Commit your changes (the webhook server will merge after you exit)
-5. ✅ Exit
+2. ✅ Update journal with session summary
+3. ✅ Commit and push your branch
+4. ✅ Merge to main and push (from main workspace, not worktree):
+   ```bash
+   cd {main_workspace} && git fetch origin && git checkout {DEFAULT_BRANCH} && git pull && git merge origin/{branch_name} && git push
+   ```
+5. ✅ **EMIT RESPONSE** (this closes the Linear session):
+   ```bash
+   uv run {linear_activity_path} response {session_id} "Summary of what you accomplished"
+   ```
+6. ✅ Exit
 """
 
 
