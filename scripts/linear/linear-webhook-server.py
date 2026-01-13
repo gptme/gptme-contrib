@@ -35,19 +35,19 @@ if ENV_FILE.exists():
 # Configuration - Required environment variables (set in .env file)
 PORT = int(os.environ.get("PORT", 8081))
 WEBHOOK_SECRET = os.environ.get("LINEAR_WEBHOOK_SECRET")
-AGENT_NAME = os.environ.get("AGENT_NAME")  # Required: no default
-AGENT_WORKSPACE = (
-    Path(os.environ["AGENT_WORKSPACE"]) if os.environ.get("AGENT_WORKSPACE") else None
-)  # Required
-DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH")  # Required: no default
+
+# Required environment variables - use temp vars for validation
+_agent_name = os.environ.get("AGENT_NAME")
+_agent_workspace_str = os.environ.get("AGENT_WORKSPACE")
+_default_branch = os.environ.get("DEFAULT_BRANCH")
 
 # Validate required config at import time
 _missing = []
-if not AGENT_NAME:
+if not _agent_name:
     _missing.append("AGENT_NAME")
-if not AGENT_WORKSPACE:
+if not _agent_workspace_str:
     _missing.append("AGENT_WORKSPACE")
-if not DEFAULT_BRANCH:
+if not _default_branch:
     _missing.append("DEFAULT_BRANCH")
 if _missing:
     print(
@@ -59,6 +59,16 @@ if _missing:
         file=sys.stderr,
     )
     sys.exit(1)
+
+# Type narrowing for mypy - validated above
+assert _agent_name is not None
+assert _agent_workspace_str is not None
+assert _default_branch is not None
+
+# After validation, assign to typed constants
+AGENT_NAME: str = _agent_name
+AGENT_WORKSPACE: Path = Path(_agent_workspace_str)
+DEFAULT_BRANCH: str = _default_branch
 
 # Derived paths
 LOGS_DIR = AGENT_WORKSPACE / "logs" / "linear-sessions"
