@@ -305,6 +305,43 @@ uv run linear-activity.py refresh
 | `response` | Final answer | **Closes the session** |
 | `error` | Error occurred | Marks session as errored |
 
+## Mentioning Users
+
+**Important**: When mentioning users in Linear comments or agent responses via the API, you must use the full Linear profile URL format. Using `@username` syntax does **not** work through the API.
+
+### Correct Format
+
+Use the full profile link in your comment body:
+```markdown
+[User Name](https://linear.app/<workspace>/settings/account/<user-id>)
+```
+
+### Example
+
+Instead of writing:
+```markdown
+@ErikBjare can you review this?
+```
+
+Write:
+```markdown
+[Erik Bjäreholt](https://linear.app/superuserlabs/settings/account/ace04b67-c8dc-432f-a00d-85953cc14e13) can you review this?
+```
+
+### Finding User Profile Links
+
+To find a user's profile link:
+1. Go to Linear
+2. Click on any user's avatar/name to open their profile
+3. Copy the URL from the browser address bar
+
+The URL format is: `https://linear.app/<workspace>/settings/account/<user-id>`
+
+Where:
+- `<workspace>` is your Linear workspace slug (e.g., `superuserlabs`)
+- `<user-id>` is the user's UUID (e.g., `ace04b67-c8dc-432f-a00d-85953cc14e13`)
+
+
 ## Service Management
 
 ```bash

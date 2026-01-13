@@ -108,6 +108,21 @@ else:
 2. **Team key**: Use team key (e.g., "SUDO", "ENG") not team ID
 3. **State filtering**: Use `filter` parameter with state type (completed, canceled, etc.)
 4. **Rate limits**: Linear has generous rate limits, but add timeout for safety
+5. **User mentions**: `@username` does NOT work via API - use full profile links
+
+## Mentioning Users in Comments
+
+**Critical**: When mentioning users via the API, `@username` syntax does NOT work.
+You must use the full profile link format:
+
+```markdown
+[User Name](https://linear.app/<workspace>/settings/account/<user-id>)
+```
+
+Example:
+```markdown
+[Erik Bjäreholt](https://linear.app/superuserlabs/settings/account/ace04b67-c8dc-432f-a00d-85953cc14e13) can you review this?
+```
 
 ## State Filter Example
 ```python
