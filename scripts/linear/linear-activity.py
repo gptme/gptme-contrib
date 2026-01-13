@@ -599,7 +599,9 @@ def main():
         "add-comment",
     }
 
-    if len(sys.argv) < 2:
+    # Show help if no args or -h/--help requested
+    show_help = len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help")
+    if show_help:
         print(__doc__)
         print("\nActivity Commands:")
         print("  thought <session_id> <message>      - Emit thinking/progress update")
@@ -634,7 +636,8 @@ def main():
         print("  action abc123 --ephemeral 'Running tests...'")
         print("  get-issue SUDO-3")
         print("  add-comment SUDO-3 'Fixed in PR #42'")
-        sys.exit(1)
+        # Exit 0 for explicit --help, 1 for missing args
+        sys.exit(0 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 1)
 
     command = sys.argv[1]
 
