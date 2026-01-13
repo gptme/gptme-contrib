@@ -1,0 +1,6 @@
+# Secrets - NEVER commit these
+.env
+.tokens.json
+
+# Logs
+*.log

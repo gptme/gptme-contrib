@@ -1,9 +1,12 @@
 *.pyc
 __pycache__
 
+# Secrets - never commit
 scripts/discord/logs/*
 scripts/*/.env
+scripts/*/.tokens.json
 scripts/.env
+*.tokens.json
 
 .venv/
 venv/

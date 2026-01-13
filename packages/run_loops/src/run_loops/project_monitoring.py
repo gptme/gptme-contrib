@@ -689,6 +689,112 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         return work_items
 
+    def check_linear_notifications(self) -> list[WorkItem]:
+        """Check for failed Linear notifications that can be retried.
+
+        Returns:
+            List of WorkItem for Linear notifications needing retry
+        """
+        work_items = []
+
+        # Check standard locations for linear-notifications
+        possible_dirs = [
+            self.workspace / "logs" / "linear-notifications",
+            self.workspace / "scripts" / "linear" / "logs" / "linear-notifications",
+        ]
+
+        notifications_dir = None
+        for d in possible_dirs:
+            if d.exists():
+                notifications_dir = d
+                break
+
+        if not notifications_dir:
+            return []
+
+        try:
+            # Find unprocessed notifications
+            failed_notifications = []
+            for f in notifications_dir.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text())
+                    if not data.get("processed", True) and data.get("error"):
+                        failed_notifications.append((f, data))
+                except (json.JSONDecodeError, IOError):
+                    continue
+
+            if not failed_notifications:
+                return []
+
+            self.logger.info(
+                f"Found {len(failed_notifications)} failed Linear notification(s)"
+            )
+
+            # Check if token is valid for retry
+            linear_activity = (
+                self.workspace / "scripts" / "linear" / "linear-activity.py"
+            )
+            if not linear_activity.exists():
+                self.logger.debug(
+                    "Linear activity script not found, skipping retry check"
+                )
+                return []
+
+            result = subprocess.run(
+                ["uv", "run", str(linear_activity), "token-status"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            token_valid = result.returncode == 0 and "Expired: False" in result.stdout
+
+            if not token_valid:
+                self.logger.debug(
+                    "Linear token still invalid, skipping notification retry"
+                )
+                return []
+
+            # Create work items for retryable notifications
+            for filepath, data in failed_notifications:
+                payload = data.get("payload", {})
+                error = data.get("error", "unknown")
+                error_time = data.get("error_time", "")
+
+                # Skip if too old (> 24 hours)
+                if error_time:
+                    try:
+                        error_dt = datetime.fromisoformat(error_time)
+                        age_hours = (
+                            datetime.utcnow() - error_dt
+                        ).total_seconds() / 3600
+                        if age_hours > 24:
+                            self.logger.debug(
+                                f"Skipping old notification: {filepath.name} ({age_hours:.1f}h old)"
+                            )
+                            continue
+                    except ValueError:
+                        pass
+
+                session = payload.get("agentSession", {})
+                issue = session.get("issue", {})
+
+                work_items.append(
+                    WorkItem(
+                        repo="linear",
+                        item_type="linear_notification_retry",
+                        number=0,
+                        title=f"Retry: {issue.get('identifier', 'unknown')} - {issue.get('title', 'Unknown')}",
+                        url=issue.get("url", filepath.name),
+                        details=f"Failed Linear notification ({error}) ready for retry. File: {filepath.name}",
+                    )
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error checking Linear notifications: {e}")
+
+        return work_items
+
     def discover_work(self) -> list[WorkItem]:
         """Discover all work items across repositories.
 
@@ -701,6 +807,11 @@ class ProjectMonitoringRun(BaseRunLoop):
         self.logger.info("Checking notifications...")
         notification_work = self.check_notifications()
         all_work.extend(notification_work)
+
+        # Check for failed Linear notifications that can be retried
+        self.logger.info("Checking Linear notifications...")
+        linear_work = self.check_linear_notifications()
+        all_work.extend(linear_work)
 
         repos = self.discover_repositories()
 
