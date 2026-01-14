@@ -252,11 +252,34 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
     clean_message_id = message_id.replace("<", "").replace(">", "")
     references_chain.append(clean_message_id)
 
+    # Get original message body for quoting
+    original_body = ""
+    in_body = False
+    for line in original.split("\n"):
+        if in_body:
+            original_body += line + "\n"
+        elif not line.strip():
+            in_body = True
+
+    # Format quoted reply with original message
+    original_date = headers.get("Date", "")
+    original_from = headers.get("From", "")
+
+    # Build the full content with quoted original
+    quoted_original = ""
+    if original_body.strip():
+        # Quote each line of the original
+        quoted_lines = [f"> {line}" for line in original_body.strip().split("\n")]
+        quoted_text = "\n".join(quoted_lines)
+        quoted_original = f"\n\n---\n\nOn {original_date}, {original_from} wrote:\n\n{quoted_text}"
+
+    full_content = content + quoted_original
+
     # Create reply draft with proper threading
     reply_id = email.compose(
         to=to,
         subject=subject,
-        content=content,
+        content=full_content,
         from_address=from_address,
         reply_to=message_id,
         references=references_chain,
