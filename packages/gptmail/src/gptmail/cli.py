@@ -506,7 +506,7 @@ def process_unreplied(dry_run: bool) -> None:
             "--non-interactive",
             "--name",
             f"email-{sender.replace('@', '_at_')}-at-{int(time.time())}",
-            f"I received an email that needs a response. Please read `{email_file}`, and if there is anything you need to do or act on, do that. Then generate an appropriate reply using `./cli.py reply {message_id} <your_reply_content>` and send it using `./cli.py send <draft_id>`. It's important to use the 'reply' command (not 'compose') to maintain email threading. Format the message as markdown and include links if appropriate (it will be rendered as HTML). Only reply when appropriate.",
+            f"I received an email that needs a response. Please read `{email_file}`, and if there is anything you need to do or act on, do that. Then generate an appropriate reply using `uv run python3 -m gptmail reply {message_id} <your_reply_content>` and send it using `uv run python3 -m gptmail send <draft_id>`. It's important to use the 'reply' command (not 'compose') to maintain email threading. Format the message as markdown and include links if appropriate (it will be rendered as HTML). Only reply when appropriate.",
         ]
 
         try:
