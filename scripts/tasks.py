@@ -17,9 +17,10 @@ import sys
 from pathlib import Path
 
 # Get the directory containing this script
-SCRIPT_DIR = Path(__file__).parent.absolute()
+SCRIPT_DIR = Path(__file__).resolve().parent.absolute()
+GPTME_CONTRIB_ROOT = SCRIPT_DIR.parent
 # packages/tasks is relative to the gptme-contrib root
-TASKS_PKG_DIR = SCRIPT_DIR.parent / "packages" / "tasks"
+TASKS_PKG_DIR = GPTME_CONTRIB_ROOT / "packages" / "tasks"
 
 if not TASKS_PKG_DIR.exists():
     print(
