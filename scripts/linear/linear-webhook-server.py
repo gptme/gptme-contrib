@@ -270,14 +270,18 @@ def create_worktree(session_id: str) -> Path:
         )
 
     # Fetch latest from origin
-    subprocess.run(
+    fetch_result = subprocess.run(
         ["git", "fetch", "origin", DEFAULT_BRANCH],
         cwd=AGENT_WORKSPACE,
         capture_output=True,
+        text=True,
     )
+    if fetch_result.returncode != 0:
+        print(f"Warning: git fetch failed: {fetch_result.stderr}", file=sys.stderr)
+        # Continue anyway - we can still create worktree from local branch
 
     # Create worktree
-    subprocess.run(
+    worktree_result = subprocess.run(
         [
             "git",
             "worktree",
@@ -288,14 +292,24 @@ def create_worktree(session_id: str) -> Path:
             f"origin/{DEFAULT_BRANCH}",
         ],
         cwd=AGENT_WORKSPACE,
-        check=True,
+        capture_output=True,
+        text=True,
     )
+
+    if worktree_result.returncode != 0:
+        raise RuntimeError(f"git worktree add failed: {worktree_result.stderr}")
+
+    # Verify worktree was actually created
+    if not worktree_path.exists():
+        raise RuntimeError(
+            f"git worktree add reported success but directory not created: {worktree_path}"
+        )
 
     # Initialize submodules
     print("Initializing submodules...")
     subprocess.run(
         ["git", "submodule", "update", "--init", "--recursive"],
-        cwd=worktree_path,
+        cwd=str(worktree_path),  # Convert Path to string explicitly
         check=True,
     )
 
@@ -471,7 +485,7 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
 
             result = subprocess.run(
                 ["gptme", "--non-interactive", prompt],
-                cwd=worktree_path,
+                cwd=str(worktree_path),  # Convert Path to string explicitly
                 timeout=GPTME_TIMEOUT,
                 stdout=f,
                 stderr=subprocess.STDOUT,
