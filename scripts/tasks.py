@@ -3,21 +3,17 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Simple wrapper script for tasks CLI.
-
-This script wraps the tasks package module to provide a consistent
-entry point across agent workspaces: ./scripts/tasks.py
-
-All functionality lives in packages/tasks - this just forwards calls.
-"""
+"""Wrapper script for tasks CLI - calls the package entry point."""
 
 import subprocess
 import sys
+from pathlib import Path
 
-if __name__ == "__main__":
-    # Forward all arguments to the tasks package module
-    result = subprocess.run(
-        ["uv", "run", "python3", "-m", "tasks"] + sys.argv[1:],
-        cwd=None,  # Use current directory
-    )
-    sys.exit(result.returncode)
+# Get workspace root (parent of scripts directory)
+WORKSPACE_ROOT = Path(__file__).parent.parent
+
+# Call the package via uv run
+result = subprocess.run(
+    ["uv", "run", "python3", "-m", "tasks"] + sys.argv[1:], cwd=str(WORKSPACE_ROOT)
+)
+sys.exit(result.returncode)
