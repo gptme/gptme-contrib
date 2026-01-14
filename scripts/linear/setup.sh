@@ -323,8 +323,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory="$LINEAR_DIR"
-ExecStart=/usr/bin/env uv run "$LINEAR_DIR/linear-webhook-server.py"
+WorkingDirectory=$LINEAR_DIR
+ExecStart=/usr/bin/env uv run $LINEAR_DIR/linear-webhook-server.py
 Restart=always
 RestartSec=5
 Environment="PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
