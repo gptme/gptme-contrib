@@ -120,13 +120,20 @@ class AgentEmail:
         >>> agent.send(msg_id)
     """
 
-    def __init__(self, workspace_dir: str | Path, own_email: str | None = None):
+    def __init__(
+        self,
+        workspace_dir: str | Path,
+        own_email: str | None = None,
+        own_email_name: str | None = None,
+    ):
         """Initialize with workspace directory.
 
         Args:
             workspace_dir: Path to the workspace directory
             own_email: The agent's own email address (used to avoid replying to self).
                       If None, will use AGENT_EMAIL environment variable (required)
+            own_email_name: Display name for the agent's email (e.g. "Thomas, Michael's Assistant").
+                      If None, will use AGENT_EMAIL_NAME environment variable (optional)
         """
         # Clear message index cache at start of sync
         # This ensures we rebuild the index with current state
@@ -140,6 +147,10 @@ class AgentEmail:
             raise ValueError(
                 "own_email must be provided or AGENT_EMAIL environment variable must be set"
             )
+        # Optional display name for the agent's email
+        self.own_email_name: str | None = (
+            own_email_name if own_email_name is not None else os.getenv("AGENT_EMAIL_NAME")
+        )
 
         # External maildir paths (from mbsync)
         # Use environment variables with fallback to defaults for backward compatibility
@@ -506,7 +517,12 @@ class AgentEmail:
         now = datetime.now(timezone.utc)
 
         # Use custom from_address or default
-        sender = from_address or self.own_email
+        sender_email = from_address or self.own_email
+        # Format sender with display name if available
+        if self.own_email_name and not from_address:
+            sender = f"{self.own_email_name} <{sender_email}>"
+        else:
+            sender = sender_email
 
         # Build headers
         headers = [
