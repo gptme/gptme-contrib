@@ -276,11 +276,13 @@ def create_worktree(session_id: str) -> Path:
         capture_output=True,
         text=True,
     )
-    if fetch_result.returncode != 0:
+    fetch_failed = fetch_result.returncode != 0
+    if fetch_failed:
         print(f"Warning: git fetch failed: {fetch_result.stderr}", file=sys.stderr)
-        # Continue anyway - we can still create worktree from local branch
+        print("Continuing with local branch...", file=sys.stderr)
 
-    # Create worktree
+    # Create worktree - use local branch if fetch failed, origin otherwise
+    base_ref = DEFAULT_BRANCH if fetch_failed else f"origin/{DEFAULT_BRANCH}"
     worktree_result = subprocess.run(
         [
             "git",
@@ -289,7 +291,7 @@ def create_worktree(session_id: str) -> Path:
             str(worktree_path),
             "-B",
             branch_name,
-            f"origin/{DEFAULT_BRANCH}",
+            base_ref,
         ],
         cwd=AGENT_WORKSPACE,
         capture_output=True,
@@ -335,7 +337,7 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
     # Get the latest commit from the worktree branch
     worktree_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=worktree_path,
+        cwd=str(worktree_path),  # Convert Path to string explicitly
         capture_output=True,
         text=True,
     )
