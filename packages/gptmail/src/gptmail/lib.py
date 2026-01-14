@@ -519,8 +519,10 @@ class AgentEmail:
         # Use custom from_address or default
         sender_email = from_address or self.own_email
         # Format sender with display name if available
+        # Display name must be quoted if it contains special characters (RFC 5322)
         if self.own_email_name and not from_address:
-            sender = f"{self.own_email_name} <{sender_email}>"
+            # Always quote the display name to handle commas, apostrophes, etc.
+            sender = f'"{self.own_email_name}" <{sender_email}>'
         else:
             sender = sender_email
 
