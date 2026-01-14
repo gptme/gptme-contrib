@@ -608,9 +608,16 @@ class AgentEmail:
             msg = MIMEMultipart("alternative")
 
             # Set headers from extracted metadata
-            # RFC 2047 encode From and Subject for proper non-ASCII handling
+            # For From header, only encode display name, not email address
             from_header = headers.get("From") or sender
-            msg["From"] = Header(from_header, "utf-8").encode()
+            # Parse to separate display name and email
+            from_name, from_email = parseaddr(from_header)
+            if from_name:
+                # RFC 2047 encode only the display name if it has non-ASCII
+                encoded_name = Header(from_name, "utf-8").encode()
+                msg["From"] = f"{encoded_name} <{from_email}>"
+            else:
+                msg["From"] = from_email
             msg["To"] = recipient
             # RFC 2047 encode Subject to handle non-ASCII characters (åäö etc)
             subject = headers.get("Subject", "")
