@@ -66,7 +66,8 @@ check_prerequisites() {
 
     # Check ngrok
     if command -v ngrok &> /dev/null; then
-        success "ngrok found"
+        NGROK_PATH=$(command -v ngrok)
+        success "ngrok found at $NGROK_PATH"
     else
         missing+=("ngrok (install: snap install ngrok or see https://ngrok.com/download)")
     fi
@@ -334,7 +335,7 @@ WantedBy=default.target
 EOF
     success "Created webhook service: ${AGENT_NAME}-linear-webhook.service"
 
-    # ngrok service
+    # ngrok service - use full path since systemd has minimal PATH
     cat > ~/.config/systemd/user/${AGENT_NAME}-ngrok.service << EOF
 [Unit]
 Description=Ngrok tunnel for ${AGENT_NAME^} Linear webhook
@@ -342,7 +343,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env ngrok http $PORT --log=stdout
+ExecStart=$NGROK_PATH http $PORT --log=stdout
 Restart=always
 RestartSec=5
 
