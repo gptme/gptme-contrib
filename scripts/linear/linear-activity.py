@@ -266,7 +266,7 @@ def do_auth() -> None:
         )
 
     # Build authorization URL
-    scopes = "read,write,app:mentionable,app:assignable"
+    scopes = "read,write,app:mentionable,app:assignable,initiative:read,initiative:write,issues:create,comments:create"
     auth_url = (
         f"{LINEAR_OAUTH_AUTHORIZE_URL}?"
         f"client_id={client_id}&"
