@@ -270,14 +270,20 @@ def create_worktree(session_id: str) -> Path:
         )
 
     # Fetch latest from origin
-    subprocess.run(
+    fetch_result = subprocess.run(
         ["git", "fetch", "origin", DEFAULT_BRANCH],
         cwd=AGENT_WORKSPACE,
         capture_output=True,
+        text=True,
     )
+    fetch_failed = fetch_result.returncode != 0
+    if fetch_failed:
+        print(f"Warning: git fetch failed: {fetch_result.stderr}", file=sys.stderr)
+        print("Continuing with local branch...", file=sys.stderr)
 
-    # Create worktree
-    subprocess.run(
+    # Create worktree - use local branch if fetch failed, origin otherwise
+    base_ref = DEFAULT_BRANCH if fetch_failed else f"origin/{DEFAULT_BRANCH}"
+    worktree_result = subprocess.run(
         [
             "git",
             "worktree",
@@ -285,17 +291,27 @@ def create_worktree(session_id: str) -> Path:
             str(worktree_path),
             "-B",
             branch_name,
-            f"origin/{DEFAULT_BRANCH}",
+            base_ref,
         ],
         cwd=AGENT_WORKSPACE,
-        check=True,
+        capture_output=True,
+        text=True,
     )
+
+    if worktree_result.returncode != 0:
+        raise RuntimeError(f"git worktree add failed: {worktree_result.stderr}")
+
+    # Verify worktree was actually created
+    if not worktree_path.exists():
+        raise RuntimeError(
+            f"git worktree add reported success but directory not created: {worktree_path}"
+        )
 
     # Initialize submodules
     print("Initializing submodules...")
     subprocess.run(
         ["git", "submodule", "update", "--init", "--recursive"],
-        cwd=worktree_path,
+        cwd=str(worktree_path),  # Convert Path to string explicitly
         check=True,
     )
 
@@ -321,7 +337,7 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
     # Get the latest commit from the worktree branch
     worktree_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=worktree_path,
+        cwd=str(worktree_path),  # Convert Path to string explicitly
         capture_output=True,
         text=True,
     )
@@ -471,7 +487,7 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
 
             result = subprocess.run(
                 ["gptme", "--non-interactive", prompt],
-                cwd=worktree_path,
+                cwd=str(worktree_path),  # Convert Path to string explicitly
                 timeout=GPTME_TIMEOUT,
                 stdout=f,
                 stderr=subprocess.STDOUT,
