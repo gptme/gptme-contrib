@@ -287,6 +287,7 @@ class AgentEmail:
                 message_id_match = re.search(r"Message-ID: (<[^>]+>)", content)
                 subject_match = re.search(r"Subject: (.+)", content)
                 from_match = re.search(r"From: (.+)", content)
+                to_match = re.search(r"To: (.+)", content)
 
                 if not (message_id_match and subject_match and from_match):
                     continue
@@ -294,6 +295,13 @@ class AgentEmail:
                 message_id = message_id_match.group(1)
                 subject = subject_match.group(1)
                 from_line = from_match.group(1)
+
+                # Skip if not addressed to the agent's email
+                # (only process emails sent TO the agent, not CC'd or other recipients)
+                if to_match and self.own_email:
+                    to_line = to_match.group(1).lower()
+                    if self.own_email.lower() not in to_line:
+                        continue
 
                 # Extract email from "Name <email>" format
                 sender = from_line
