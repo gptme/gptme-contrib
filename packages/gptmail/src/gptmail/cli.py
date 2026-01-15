@@ -115,9 +115,9 @@ def send(message_id: str) -> None:
     email.send(message_id)
 
 
-@cli.command()
+@cli.command(name="list")
 @click.argument("folder", default="inbox")
-def list(folder: str) -> None:
+def list_cmd(folder: str) -> None:
     """List messages in folder (default: inbox)."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
@@ -483,8 +483,7 @@ def check_unreplied(folders: tuple[str, ...] | None) -> None:
     email = AgentEmail(workspace_dir)
 
     # Convert tuple to list, or None if empty
-    # Note: Using [*folders] because `list` function is shadowed by the `list` command
-    folders_list = [*folders] if folders else None
+    folders_list = list(folders) if folders else None
     unreplied = email.get_unreplied_emails(folders=folders_list)
 
     if not unreplied:
@@ -521,8 +520,7 @@ def process_unreplied(dry_run: bool, folders: tuple[str, ...] | None) -> None:
     email = AgentEmail(workspace_dir)
 
     # Convert tuple to list, or None if empty (uses library default)
-    # Note: Using [*folders] because `list` function is shadowed by the `list` command
-    folders_list = [*folders] if folders else None
+    folders_list = list(folders) if folders else None
     # For file search, default to inbox only if not specified
     search_folders = folders_list if folders_list else ["inbox"]
 
