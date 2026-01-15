@@ -252,11 +252,34 @@ def reply(message_id: str, content: str | None = None, from_address: str | None 
     clean_message_id = message_id.replace("<", "").replace(">", "")
     references_chain.append(clean_message_id)
 
+    # Get original message body for quoting
+    original_body = ""
+    in_body = False
+    for line in original.split("\n"):
+        if in_body:
+            original_body += line + "\n"
+        elif not line.strip():
+            in_body = True
+
+    # Format quoted reply with original message
+    original_date = headers.get("Date", "")
+    original_from = headers.get("From", "")
+
+    # Build the full content with quoted original
+    quoted_original = ""
+    if original_body.strip():
+        # Quote each line of the original
+        quoted_lines = [f"> {line}" for line in original_body.strip().split("\n")]
+        quoted_text = "\n".join(quoted_lines)
+        quoted_original = f"\n\n---\n\nOn {original_date}, {original_from} wrote:\n\n{quoted_text}"
+
+    full_content = content + quoted_original
+
     # Create reply draft with proper threading
     reply_id = email.compose(
         to=to,
         subject=subject,
-        content=content,
+        content=full_content,
         from_address=from_address,
         reply_to=message_id,
         references=references_chain,
@@ -506,7 +529,7 @@ def process_unreplied(dry_run: bool) -> None:
             "--non-interactive",
             "--name",
             f"email-{sender.replace('@', '_at_')}-at-{int(time.time())}",
-            f"I received an email that needs a response. Please read `{email_file}`, and if there is anything you need to do or act on, do that. Then generate an appropriate reply using `./cli.py reply {message_id} <your_reply_content>` and send it using `./cli.py send <draft_id>`. It's important to use the 'reply' command (not 'compose') to maintain email threading. Format the message as markdown and include links if appropriate (it will be rendered as HTML). Only reply when appropriate.",
+            f"I received an email that needs a response. Please read `{email_file}`, and if there is anything you need to do or act on, do that. Then generate an appropriate reply using `uv run python3 -m gptmail reply {message_id} <your_reply_content>` and send it using `uv run python3 -m gptmail send <draft_id>`. It's important to use the 'reply' command (not 'compose') to maintain email threading. Format the message as markdown and include links if appropriate (it will be rendered as HTML). Only reply when appropriate.",
         ]
 
         try:

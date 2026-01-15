@@ -45,7 +45,7 @@ from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.policy import default
-from email.utils import format_datetime, parsedate_to_datetime
+from email.utils import format_datetime, parseaddr, parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 
@@ -120,13 +120,20 @@ class AgentEmail:
         >>> agent.send(msg_id)
     """
 
-    def __init__(self, workspace_dir: str | Path, own_email: str | None = None):
+    def __init__(
+        self,
+        workspace_dir: str | Path,
+        own_email: str | None = None,
+        own_email_name: str | None = None,
+    ):
         """Initialize with workspace directory.
 
         Args:
             workspace_dir: Path to the workspace directory
             own_email: The agent's own email address (used to avoid replying to self).
                       If None, will use AGENT_EMAIL environment variable (required)
+            own_email_name: Display name for the agent's email (e.g. "Thomas, Michael's Assistant").
+                      If None, will use AGENT_EMAIL_NAME environment variable (optional)
         """
         # Clear message index cache at start of sync
         # This ensures we rebuild the index with current state
@@ -140,6 +147,10 @@ class AgentEmail:
             raise ValueError(
                 "own_email must be provided or AGENT_EMAIL environment variable must be set"
             )
+        # Optional display name for the agent's email
+        self.own_email_name: str | None = (
+            own_email_name if own_email_name is not None else os.getenv("AGENT_EMAIL_NAME")
+        )
 
         # External maildir paths (from mbsync)
         # Use environment variables with fallback to defaults for backward compatibility
@@ -276,6 +287,7 @@ class AgentEmail:
                 message_id_match = re.search(r"Message-ID: (<[^>]+>)", content)
                 subject_match = re.search(r"Subject: (.+)", content)
                 from_match = re.search(r"From: (.+)", content)
+                to_match = re.search(r"To: (.+)", content)
 
                 if not (message_id_match and subject_match and from_match):
                     continue
@@ -283,6 +295,13 @@ class AgentEmail:
                 message_id = message_id_match.group(1)
                 subject = subject_match.group(1)
                 from_line = from_match.group(1)
+
+                # Skip if not addressed to the agent's email
+                # (only process emails sent TO the agent, not CC'd or other recipients)
+                if to_match and self.own_email:
+                    to_line = to_match.group(1).lower()
+                    if self.own_email.lower() not in to_line:
+                        continue
 
                 # Extract email from "Name <email>" format
                 sender = from_line
@@ -331,7 +350,7 @@ class AgentEmail:
         """Check if sender is allowlisted for auto-responses.
 
         Normalizes email addresses by removing +tags and checks against
-        a hardcoded allowlist. Self-emails are automatically excluded.
+        allowlist from EMAIL_ALLOWLIST env var. Self-emails are automatically excluded.
 
         Args:
             sender: The email address to check.
@@ -339,14 +358,21 @@ class AgentEmail:
         Returns:
             True if the sender is allowlisted and not self, False otherwise.
         """
-        # TODO: set in config or env variable
-        allowlisted = [
-            "erik@bjareho.lt",
-            "erik.bjareholt@gmail.com",
-            "filip.harald@gmail.com",
-            # Agent-specific allowlist entries configured via AGENT_EMAIL
-            "rickard.edic@gmail.com",
-        ]
+        # Read from environment variable, fall back to defaults
+        env_allowlist = os.getenv("EMAIL_ALLOWLIST", "")
+        if env_allowlist == "*":
+            # Wildcard - allow all senders (except self)
+            pass  # Will check self below
+        elif env_allowlist:
+            allowlisted = [e.strip() for e in env_allowlist.split(",") if e.strip()]
+        else:
+            # Default allowlist if not configured
+            allowlisted = [
+                "erik@bjareho.lt",
+                "erik.bjareholt@gmail.com",
+                "filip.harald@gmail.com",
+                "rickard.edic@gmail.com",
+            ]
 
         # Remove +tag from email address for comparison
         clean_sender = sender.lower()
@@ -367,7 +393,18 @@ class AgentEmail:
         if clean_sender == clean_own_email:
             return False
 
-        return clean_sender in [s.lower() for s in allowlisted]
+        # Check wildcard mode
+        if os.getenv("EMAIL_ALLOWLIST", "") == "*":
+            return True
+
+        # Check if sender's domain matches any allowlisted domain
+        sender_domain = clean_sender.split("@")[-1] if "@" in clean_sender else ""
+        for allowed in allowlisted:
+            allowed_lower = allowed.lower()
+            # Match full email OR domain
+            if clean_sender == allowed_lower or sender_domain == allowed_lower:
+                return True
+        return False
 
     def _is_notification_email(self, subject: str, content: str) -> bool:
         """Check if email is a notification that doesn't need a reply.
@@ -488,7 +525,14 @@ class AgentEmail:
         now = datetime.now(timezone.utc)
 
         # Use custom from_address or default
-        sender = from_address or self.own_email
+        sender_email = from_address or self.own_email
+        # Format sender with display name if available
+        # Display name must be quoted if it contains special characters (RFC 5322)
+        if self.own_email_name and not from_address:
+            # Always quote the display name to handle commas, apostrophes, etc.
+            sender = f'"{self.own_email_name}" <{sender_email}>'
+        else:
+            sender = sender_email
 
         # Build headers
         headers = [
@@ -572,9 +616,16 @@ class AgentEmail:
             msg = MIMEMultipart("alternative")
 
             # Set headers from extracted metadata
-            # RFC 2047 encode From and Subject for proper non-ASCII handling
+            # For From header, only encode display name, not email address
             from_header = headers.get("From") or sender
-            msg["From"] = Header(from_header, "utf-8").encode()
+            # Parse to separate display name and email
+            from_name, from_email = parseaddr(from_header)
+            if from_name:
+                # RFC 2047 encode only the display name if it has non-ASCII
+                encoded_name = Header(from_name, "utf-8").encode()
+                msg["From"] = f"{encoded_name} <{from_email}>"
+            else:
+                msg["From"] = from_email
             msg["To"] = recipient
             # RFC 2047 encode Subject to handle non-ASCII characters (åäö etc)
             subject = headers.get("Subject", "")
@@ -602,13 +653,20 @@ class AgentEmail:
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
             # Get appropriate msmtp account
-            account = self._get_msmtp_account_for_address(sender)
+            # Extract just email address from "Name <email>" format for account lookup
+            _, sender_email = parseaddr(sender)
+            account = self._get_msmtp_account_for_address(sender_email or sender)
 
             # Build msmtp command
+            # Extract just the email address from "Name <email>" format
+            _, recipient_email = parseaddr(recipient)
+            if not recipient_email:
+                recipient_email = recipient  # Fallback if parsing fails
+
             msmtp_cmd = ["msmtp"]
             if account:
                 msmtp_cmd.extend(["-a", account])
-            msmtp_cmd.append(recipient)
+            msmtp_cmd.append(recipient_email)
 
             # Check rate limit before sending
             if not self.rate_limiter.can_proceed():
