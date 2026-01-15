@@ -16,7 +16,7 @@ import re
 import subprocess
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -354,6 +354,60 @@ def format_time_ago(dt: datetime) -> str:
         return f"{days}d ago"
     else:
         return dt.strftime("%Y-%m-%d")
+
+
+def has_new_activity(
+    updated_at: Optional[str], waiting_since: Optional[str | date]
+) -> bool:
+    """Check if there's been new activity since waiting_since.
+
+    Args:
+        updated_at: ISO format timestamp from GitHub/Linear (e.g., "2026-01-12T10:30:00Z")
+        waiting_since: Date when task started waiting (from task frontmatter)
+
+    Returns:
+        True if updated_at is after waiting_since, False otherwise.
+        Returns False if either value is None.
+    """
+    if not updated_at or not waiting_since:
+        return False
+
+    try:
+        # Parse updated_at (ISO format with timezone)
+        if isinstance(updated_at, str):
+            # Handle both "2026-01-12T10:30:00Z" and "2026-01-12" formats
+            if "T" in updated_at:
+                updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            else:
+                updated_dt = datetime.fromisoformat(updated_at)
+        else:
+            return False
+
+        # Parse waiting_since (could be date or datetime string)
+        if isinstance(waiting_since, date) and not isinstance(waiting_since, datetime):
+            # Convert date to datetime at start of day
+            waiting_dt = datetime.combine(waiting_since, datetime.min.time())
+        elif isinstance(waiting_since, str):
+            if "T" in waiting_since:
+                waiting_dt = datetime.fromisoformat(
+                    waiting_since.replace("Z", "+00:00")
+                )
+            else:
+                waiting_dt = datetime.fromisoformat(waiting_since)
+        else:
+            return False
+
+        # Make both timezone-naive for comparison if needed.
+        # Use astimezone() to convert to local time BEFORE stripping tzinfo,
+        # otherwise we'd compare UTC times against local midnight incorrectly.
+        if updated_dt.tzinfo and not waiting_dt.tzinfo:
+            updated_dt = updated_dt.astimezone().replace(tzinfo=None)
+        elif waiting_dt.tzinfo and not updated_dt.tzinfo:
+            waiting_dt = waiting_dt.astimezone().replace(tzinfo=None)
+
+        return updated_dt > waiting_dt
+    except (ValueError, TypeError):
+        return False
 
 
 def count_subtasks(content: str) -> SubtaskCount:
@@ -869,7 +923,23 @@ def parse_tracking_ref(ref: str) -> Optional[Dict[str, str]]:
 
 
 def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
-    """Fetch GitHub issue/PR state using gh CLI."""
+    """Fetch GitHub issue/PR state using gh CLI.
+
+    Note: For state + updatedAt, use fetch_github_issue_details() instead.
+    """
+    details = fetch_github_issue_details(repo, number)
+    if details:
+        return details.get("state")
+    return None
+
+
+def fetch_github_issue_details(repo: str, number: str) -> Optional[Dict[str, Any]]:
+    """Fetch GitHub issue/PR state and metadata including updatedAt.
+
+    Returns:
+        Dict with 'state' and 'updatedAt' fields, or None on failure.
+        updatedAt is ISO format string: "2026-01-12T10:30:00Z"
+    """
     try:
         result = subprocess.run(
             [
@@ -880,16 +950,18 @@ def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
                 "--repo",
                 repo,
                 "--json",
-                "state",
-                "-q",
-                ".state",
+                "state,updatedAt",
             ],
             capture_output=True,
             text=True,
             timeout=10,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            data = json.loads(result.stdout)
+            return {
+                "state": data.get("state"),
+                "updatedAt": data.get("updatedAt"),
+            }
         # Try as PR if issue fails
         result = subprocess.run(
             [
@@ -900,17 +972,19 @@ def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
                 "--repo",
                 repo,
                 "--json",
-                "state",
-                "-q",
-                ".state",
+                "state,updatedAt",
             ],
             capture_output=True,
             text=True,
             timeout=10,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, Exception):
+            data = json.loads(result.stdout)
+            return {
+                "state": data.get("state"),
+                "updatedAt": data.get("updatedAt"),
+            }
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
         pass
     return None
 
@@ -1061,16 +1135,22 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
 
 
 def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
-    """Fetch state for a GitHub/Linear URL."""
+    """Fetch state and metadata for a GitHub/Linear URL.
+
+    Returns:
+        Dict with 'state', 'source', 'repo'/'team', 'number'/'identifier',
+        and optionally 'updatedAt' for activity tracking.
+    """
     # Parse GitHub URL
     gh_match = re.match(r"https://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)", url)
     if gh_match:
         repo = gh_match.group(1)
         number = gh_match.group(3)
-        state = fetch_github_issue_state(repo, number)
-        if state:
+        details = fetch_github_issue_details(repo, number)
+        if details:
             return {
-                "state": state,
+                "state": details.get("state"),
+                "updatedAt": details.get("updatedAt"),
                 "source": "github",
                 "repo": repo,
                 "number": number,
