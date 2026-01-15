@@ -263,7 +263,7 @@ main() {
         # Calculate relative path from LINEAR_DIR to SCRIPT_DIR for portable symlinks
         local RELATIVE_SCRIPT_DIR
         RELATIVE_SCRIPT_DIR=$(python3 -c "import os.path; print(os.path.relpath('$SCRIPT_DIR', '$LINEAR_DIR'))")
-        
+
         # Create symlinks (remove existing files/links first)
         for script in linear-webhook-server.py linear-activity.py README.md .env.template .gitignore services setup.sh; do
             rm -f "$LINEAR_DIR/$script" 2>/dev/null || true

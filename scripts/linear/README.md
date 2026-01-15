@@ -132,12 +132,35 @@ The OAuth scopes automatically requested include:
 
 The **Name** you enter becomes the agent's @username in Linear.
 
-## Step 3: Copy Scripts to Your Workspace
+## Step 3: Set Up Scripts in Your Workspace
+
+### Option A: Automated Setup (Recommended)
+
+Run the interactive setup script which creates symlinks to gptme-contrib (so you get updates automatically via submodule update):
+
+```bash
+cd /path/to/gptme-contrib/scripts/linear
+./setup.sh
+```
+
+The script will:
+- Check prerequisites
+- Prompt for configuration values
+- Display exact values to enter in Linear OAuth app
+- Create symlinks in your workspace
+- Set up systemd services
+- Offer to run OAuth flow
+
+### Option B: Manual Copy
+
+If you prefer to manage files manually:
 
 ```bash
 # Copy the linear integration scripts to your workspace
 cp -r /path/to/gptme-contrib/scripts/linear ~/repos/<your-workspace>/scripts/
 ```
+
+**Note**: With manual copy, you'll need to re-copy files to get updates.
 
 ## Step 4: Create Configuration
 
