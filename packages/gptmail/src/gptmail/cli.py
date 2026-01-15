@@ -508,13 +508,18 @@ def process_unreplied(dry_run: bool) -> None:
             click.echo(f"Would process: {sender} - {subject}")
             return
 
-        # Find the email file
+        # Find the email file (search inbox, archive, and other folders)
         email_file = None
-        inbox_dir = workspace_dir / "email" / "inbox"
-        for f in inbox_dir.glob("*.md"):
-            content = f.read_text()
-            if message_id in content:
-                email_file = f
+        for folder in ["inbox", "archive"]:
+            folder_dir = workspace_dir / "email" / folder
+            if not folder_dir.exists():
+                continue
+            for f in folder_dir.glob("*.md"):
+                content = f.read_text()
+                if message_id in content:
+                    email_file = f
+                    break
+            if email_file:
                 break
 
         if not email_file:
