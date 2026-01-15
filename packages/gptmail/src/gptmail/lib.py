@@ -286,15 +286,15 @@ class AgentEmail:
         """Get list of emails that haven't been replied to.
 
         Args:
-            folders: List of folders to scan (default: ["inbox", "archive"])
-                     Scans archive by default to catch emails auto-archived before monitoring.
+            folders: List of folders to scan (default: ["inbox"])
+                     Pass ["inbox", "archive"] to also check archived emails.
 
         Returns:
             List of (message_id, subject, sender) tuples for unreplied emails
         """
         if folders is None:
-            # Default to inbox + archive (archive catches emails auto-archived before monitoring)
-            folders = ["inbox", "archive"]
+            # Default to inbox only - caller can pass ["inbox", "archive"] if needed
+            folders = ["inbox"]
 
         unreplied = []
         seen_message_ids: set[str] = set()  # Avoid duplicates across folders
