@@ -161,6 +161,19 @@ class AgentEmail:
             os.getenv("MAILDIR_SENT", str(Path.home() / ".local/share/mail/gmail/Sent"))
         )
 
+        # Build folder mappings from environment variables
+        # Supports MAILDIR_INBOX, MAILDIR_SENT, MAILDIR_ARCHIVE, MAILDIR_<NAME>, etc.
+        self.external_maildir_folders: dict[str, Path] = {
+            "inbox": self.external_maildir_inbox,
+            "sent": self.external_maildir_sent,
+        }
+
+        # Add any additional MAILDIR_* folders from environment
+        for key, value in os.environ.items():
+            if key.startswith("MAILDIR_") and key not in ("MAILDIR_INBOX", "MAILDIR_SENT"):
+                folder_name = key[8:].lower()  # MAILDIR_ARCHIVE -> archive
+                self.external_maildir_folders[folder_name] = Path(value)
+
         # State files for tracking
         self.processed_state_file = self.email_dir / "processed_state.txt"
         self.locks_dir = self.email_dir / "locks"
@@ -269,80 +282,98 @@ class AgentEmail:
 
     # TODO: this should probably return some list[Message] or list[EmailMessage] type instead of a list of tuples
     # TODO: this should probably sort the emails by timestamp in some suitable order (or make it easy for consumers to sort by using an Message type)
-    def get_unreplied_emails(self) -> list[tuple[str, str, str]]:
+    def get_unreplied_emails(self, folders: list[str] | None = None) -> list[tuple[str, str, str]]:
         """Get list of emails that haven't been replied to.
+
+        Args:
+            folders: List of folders to scan (default: ["inbox", "archive"])
+                     Scans archive by default to catch emails auto-archived before monitoring.
 
         Returns:
             List of (message_id, subject, sender) tuples for unreplied emails
         """
+        if folders is None:
+            # Default to inbox + archive (archive catches emails auto-archived before monitoring)
+            folders = ["inbox", "archive"]
+
         unreplied = []
+        seen_message_ids: set[str] = set()  # Avoid duplicates across folders
 
-        # Scan inbox for emails from allowlisted senders
-        inbox_dir = self.email_dir / "inbox"
-        for email_file in inbox_dir.glob("*.md"):
-            try:
-                content = email_file.read_text()
-
-                # Extract message details
-                message_id_match = re.search(r"Message-ID: (<[^>]+>)", content)
-                subject_match = re.search(r"Subject: (.+)", content)
-                from_match = re.search(r"From: (.+)", content)
-                to_match = re.search(r"To: (.+)", content)
-
-                if not (message_id_match and subject_match and from_match):
-                    continue
-
-                message_id = message_id_match.group(1)
-                subject = subject_match.group(1)
-                from_line = from_match.group(1)
-
-                # Skip if not addressed to the agent's email
-                # (only process emails sent TO the agent, not CC'd or other recipients)
-                if to_match and self.own_email:
-                    to_line = to_match.group(1).lower()
-                    if self.own_email.lower() not in to_line:
-                        continue
-
-                # Extract email from "Name <email>" format
-                sender = from_line
-                if "<" in from_line and ">" in from_line:
-                    start = from_line.find("<")
-                    end = from_line.find(">", start)
-                    if start != -1 and end != -1:
-                        sender = from_line[start + 1 : end].strip()
-
-                # Skip if already completed (replied or marked as no reply needed)
-                if self._is_completed(message_id):
-                    continue
-
-                # Skip if not from allowlisted sender
-                if not self._is_allowlisted_sender(sender):
-                    continue
-
-                # Skip notification-type emails that don't need replies
-                if self._is_notification_email(subject, content):
-                    continue
-
-                # Skip if we already replied to this email
-                # (check sent folder for In-Reply-To pointing to this message)
-                sent_dir = self.email_dir / "sent"
-                already_replied = False
-                for sent_file in sent_dir.glob("*.md"):
-                    try:
-                        sent_content = sent_file.read_text()
-                        if f"In-Reply-To: {message_id}" in sent_content:
-                            already_replied = True
-                            break
-                    except Exception:
-                        continue
-                if already_replied:
-                    continue
-
-                unreplied.append((message_id, subject, sender))
-
-            except Exception as e:
-                print(f"Error processing {email_file}: {e}")
+        for folder in folders:
+            folder_dir = self.email_dir / folder
+            if not folder_dir.exists():
                 continue
+
+            for email_file in folder_dir.glob("*.md"):
+                try:
+                    content = email_file.read_text()
+
+                    # Extract message details
+                    message_id_match = re.search(r"Message-ID: (<[^>]+>)", content)
+                    subject_match = re.search(r"Subject: (.+)", content)
+                    from_match = re.search(r"From: (.+)", content)
+                    to_match = re.search(r"To: (.+)", content)
+
+                    if not (message_id_match and subject_match and from_match):
+                        continue
+
+                    message_id = message_id_match.group(1)
+
+                    # Skip if we've already seen this message in another folder
+                    if message_id in seen_message_ids:
+                        continue
+                    seen_message_ids.add(message_id)
+
+                    subject = subject_match.group(1)
+                    from_line = from_match.group(1)
+
+                    # Skip if not addressed to the agent's email
+                    # (only process emails sent TO the agent, not CC'd or other recipients)
+                    if to_match and self.own_email:
+                        to_line = to_match.group(1).lower()
+                        if self.own_email.lower() not in to_line:
+                            continue
+
+                    # Extract email from "Name <email>" format
+                    sender = from_line
+                    if "<" in from_line and ">" in from_line:
+                        start = from_line.find("<")
+                        end = from_line.find(">", start)
+                        if start != -1 and end != -1:
+                            sender = from_line[start + 1 : end].strip()
+
+                    # Skip if already completed (replied or marked as no reply needed)
+                    if self._is_completed(message_id):
+                        continue
+
+                    # Skip if not from allowlisted sender
+                    if not self._is_allowlisted_sender(sender):
+                        continue
+
+                    # Skip notification-type emails that don't need replies
+                    if self._is_notification_email(subject, content):
+                        continue
+
+                    # Skip if we already replied to this email
+                    # (check sent folder for In-Reply-To pointing to this message)
+                    sent_dir = self.email_dir / "sent"
+                    already_replied = False
+                    for sent_file in sent_dir.glob("*.md"):
+                        try:
+                            sent_content = sent_file.read_text()
+                            if f"In-Reply-To: {message_id}" in sent_content:
+                                already_replied = True
+                                break
+                        except Exception:
+                            continue
+                    if already_replied:
+                        continue
+
+                    unreplied.append((message_id, subject, sender))
+
+                except Exception as e:
+                    print(f"Error processing {email_file}: {e}")
+                    continue
 
         return unreplied
 
@@ -1337,15 +1368,14 @@ class AgentEmail:
             folder: Folder to sync - supports "inbox" and "sent" (configure via MAILDIR_INBOX/MAILDIR_SENT env vars)
         """
 
-        # Choose appropriate external maildir
-        if folder == "inbox":
-            maildir_folder = self.external_maildir_inbox
-        elif folder == "sent":
-            maildir_folder = self.external_maildir_sent
-        else:
+        # Choose appropriate external maildir from folder mappings
+        if folder not in self.external_maildir_folders:
+            available = ", ".join(sorted(self.external_maildir_folders.keys()))
             raise ValueError(
-                f"sync_from_maildir supports 'inbox' and 'sent' folders, got: {folder}"
+                f"Unknown folder '{folder}'. Available folders: {available}. "
+                f"Add MAILDIR_{folder.upper()} environment variable to configure."
             )
+        maildir_folder = self.external_maildir_folders[folder]
 
         if not maildir_folder.exists():
             print(f"Warning: Maildir folder does not exist: {maildir_folder}")
