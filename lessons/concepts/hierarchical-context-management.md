@@ -4,26 +4,25 @@ match:
   - hierarchical context management
   - Droid context architecture
   - agent context layers
-  - immediate context
-  - session context
-  - project context
-  - global context
-  - context cascading
-  - Factory Droid
+  - Factory Droid context
+  - multi-layer context
   - context layer architecture
+  - agentic context layers
 ---
 
 # Hierarchical Context Management (Droid Architecture)
 
+> **Not to be confused with**: The "CASCADE" workflow used in gptme autonomous sessions, which refers to task selection priority (PRIMARY → SECONDARY → TERTIARY). This lesson is about context management architecture, not task prioritization.
+
 ## Term
-**Hierarchical Context Management**: Context architecture used in Factory's Droid and similar advanced agent systems.
+**Hierarchical Context Management**: Context architecture pattern used in advanced agent systems like Factory's Droid.
 
 ## Definition
-Multi-layered context management approach that organizes information in cascading levels of importance and accessibility, assembling context per-step based on the current action.
+Multi-layered context management approach that organizes information in levels of importance and accessibility, assembling context per-step based on the current action.
 
 ## Architecture Layers
 
-Per Factory's Droid documentation:
+Common pattern in sophisticated agent systems:
 
 - **Global Context**: System policies, guardrails, organization conventions, role definitions
 - **Project/Repo Context**: Structural view of codebase, framework conventions, key entrypoints (retrieved on-demand via tools)
@@ -39,15 +38,17 @@ Per Factory's Droid documentation:
 3. **Role-aware prompts**: Each specialized agent has own context configuration
 4. **Guardrails by default**: Constraints in global and role layers enforced via prompt + tool policy
 
-## Disambiguation
+## Applicability
 
-**Note**: This is DIFFERENT from the "CASCADE" workflow used in gptme autonomous sessions, which refers to the task selection priority order: PRIMARY → SECONDARY → TERTIARY. That CASCADE is about task prioritization, not context management architecture.
+This pattern is valuable when:
+- Managing complex multi-step tasks with varying context needs
+- Building specialized agents with different context requirements
+- Implementing context-efficient systems that avoid token waste
 
 ## Source
-Factory AI's Droid product and public documentation on agentic context engineering.
+Pattern derived from Factory AI's Droid product and related agentic context engineering approaches. See also ACE (Agentic Context Engineering) for broader framework.
 
 ## Related
 - ACE (Agentic Context Engineering)
 - Context compression strategies
 - Memory hierarchy patterns
-- Multi-agent architectures
