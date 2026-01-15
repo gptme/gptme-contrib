@@ -483,7 +483,8 @@ def check_unreplied(folders: tuple[str, ...] | None) -> None:
     email = AgentEmail(workspace_dir)
 
     # Convert tuple to list, or None if empty
-    folders_list = list(folders) if folders else None
+    # Note: Using [*folders] because `list` function is shadowed by the `list` command
+    folders_list = [*folders] if folders else None
     unreplied = email.get_unreplied_emails(folders=folders_list)
 
     if not unreplied:
@@ -520,7 +521,8 @@ def process_unreplied(dry_run: bool, folders: tuple[str, ...] | None) -> None:
     email = AgentEmail(workspace_dir)
 
     # Convert tuple to list, or None if empty (uses library default)
-    folders_list = list(folders) if folders else None
+    # Note: Using [*folders] because `list` function is shadowed by the `list` command
+    folders_list = [*folders] if folders else None
     # For file search, default to inbox only if not specified
     search_folders = folders_list if folders_list else ["inbox"]
 
