@@ -471,17 +471,18 @@ class AgentEmail:
 
         return False
 
-    def process_unreplied_emails(self, callback_func) -> int:
+    def process_unreplied_emails(self, callback_func, folders: list[str] | None = None) -> int:
         """Process unreplied emails with locking to prevent duplicates.
 
         Args:
             callback_func: Function to call for each unreplied email,
                           should accept (message_id, subject, sender)
+            folders: List of folders to scan (default: ["inbox"])
 
         Returns:
             Number of emails processed
         """
-        unreplied = self.get_unreplied_emails()
+        unreplied = self.get_unreplied_emails(folders=folders)
         processed_count = 0
 
         for message_id, subject, sender in unreplied:

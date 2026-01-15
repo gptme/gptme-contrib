@@ -470,12 +470,21 @@ def sync_maildir(folder: str) -> None:
 
 
 @cli.command()
-def check_unreplied() -> None:
+@click.option(
+    "--folders",
+    "-f",
+    multiple=True,
+    default=None,
+    help="Folders to scan (default: inbox). Use -f inbox -f archive to include archive.",
+)
+def check_unreplied(folders: tuple[str, ...] | None) -> None:
     """Check for unreplied emails from allowlisted senders."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
 
-    unreplied = email.get_unreplied_emails()
+    # Convert tuple to list, or None if empty
+    folders_list = list(folders) if folders else None
+    unreplied = email.get_unreplied_emails(folders=folders_list)
 
     if not unreplied:
         click.echo("No unreplied emails found.")
@@ -498,19 +507,31 @@ def check_unreplied() -> None:
     is_flag=True,
     help="Show what would be processed without actually doing it",
 )
-def process_unreplied(dry_run: bool) -> None:
+@click.option(
+    "--folders",
+    "-f",
+    multiple=True,
+    default=None,
+    help="Folders to scan (default: inbox). Use -f inbox -f archive to include archive.",
+)
+def process_unreplied(dry_run: bool, folders: tuple[str, ...] | None) -> None:
     """Process unreplied emails with gptme (same as watcher but on-demand)."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
+
+    # Convert tuple to list, or None if empty (uses library default)
+    folders_list = list(folders) if folders else None
+    # For file search, default to inbox only if not specified
+    search_folders = folders_list if folders_list else ["inbox"]
 
     def process_email(message_id: str, subject: str, sender: str) -> None:
         if dry_run:
             click.echo(f"Would process: {sender} - {subject}")
             return
 
-        # Find the email file (search inbox, archive, and other folders)
+        # Find the email file in the specified folders
         email_file = None
-        for folder in ["inbox", "archive"]:
+        for folder in search_folders:
             folder_dir = workspace_dir / "email" / folder
             if not folder_dir.exists():
                 continue
@@ -556,7 +577,7 @@ def process_unreplied(dry_run: bool) -> None:
         except Exception as e:
             click.echo(f"Error processing email from {sender}: {e}", err=True)
 
-    processed = email.process_unreplied_emails(process_email)
+    processed = email.process_unreplied_emails(process_email, folders=folders_list)
 
     if dry_run:
         click.echo(f"Dry run complete. Would have processed {processed} emails.")
