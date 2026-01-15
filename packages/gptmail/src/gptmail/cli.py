@@ -115,9 +115,9 @@ def send(message_id: str) -> None:
     email.send(message_id)
 
 
-@cli.command()
+@cli.command(name="list")
 @click.argument("folder", default="inbox")
-def list(folder: str) -> None:
+def list_cmd(folder: str) -> None:
     """List messages in folder (default: inbox)."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
