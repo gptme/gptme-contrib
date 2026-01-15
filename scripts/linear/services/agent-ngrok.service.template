@@ -1,0 +1,37 @@
+# Ngrok Tunnel Service Template
+#
+# To use this template:
+# 1. Copy to ~/.config/systemd/user/<agent-name>-ngrok.service
+# 2. Replace all <PLACEHOLDERS> with actual values
+# 3. Run: systemctl --user daemon-reload
+# 4. Run: systemctl --user enable --now <agent-name>-ngrok.service
+#
+# Prerequisites:
+# - ngrok installed at /usr/local/bin/ngrok (or update path below)
+# - ngrok authtoken configured: ngrok config add-authtoken <token>
+
+[Unit]
+Description=Ngrok tunnel for <AGENT_NAME> Linear webhook
+After=network.target <AGENT_NAME>-linear-webhook.service
+Requires=<AGENT_NAME>-linear-webhook.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ngrok http 8081 --log=stdout
+Environment=HOME=<HOME>
+StandardOutput=journal
+StandardError=journal
+
+# Restart on failure
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+
+# Placeholders to replace:
+# <AGENT_NAME> - Your agent's name (e.g., "lofty", "bob")
+# <HOME>       - User home directory (e.g., /home/lofty)
+#
+# Note: If using ngrok paid plan with static domain, add:
+# ExecStart=/usr/local/bin/ngrok http 8081 --domain=<your-domain> --log=stdout

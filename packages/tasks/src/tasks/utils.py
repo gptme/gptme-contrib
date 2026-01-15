@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import subprocess
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -59,10 +60,74 @@ class DirectoryConfig:
     emoji: str  # Emoji for visual distinction
 
 
+# Deprecated state aliases - these map to their canonical state
+# Used by normalize_state() to provide backward compatibility
+DEPRECATED_STATE_ALIASES: dict[str, str] = {
+    "new": "backlog",  # new → backlog (untriaged work)
+    "someday": "backlog",  # someday → backlog (deferred work)
+    "paused": "backlog",  # paused → backlog (intentionally deferred)
+}
+
+
+def normalize_state(state: str, warn: bool = True) -> str:
+    """Normalize deprecated state aliases to their canonical form.
+
+    Args:
+        state: The state string to normalize
+        warn: If True, emit deprecation warning for deprecated states
+
+    Returns:
+        The canonical state (or original if already canonical/unknown)
+
+    Examples:
+        >>> normalize_state("new")
+        'backlog'
+        >>> normalize_state("active")
+        'active'
+    """
+    import warnings
+
+    if state in DEPRECATED_STATE_ALIASES:
+        canonical = DEPRECATED_STATE_ALIASES[state]
+        if warn:
+            warnings.warn(
+                f"State '{state}' is deprecated, use '{canonical}' instead. "
+                f"Deprecated states will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return canonical
+    return state
+
+
+def get_canonical_states() -> list[str]:
+    """Get list of canonical (non-deprecated) task states."""
+    return ["backlog", "todo", "active", "waiting", "done", "cancelled"]
+
+
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",
-        states=["new", "active", "paused", "done", "cancelled", "someday"],
+        # New state model per Issue #240 design:
+        # - backlog: not triaged or intentionally deferred (consolidates new/someday/paused)
+        # - todo: triaged and ready to pick up
+        # - active: being actively worked on
+        # - waiting: blocked on external response
+        # - done: completed
+        # - cancelled: won't do
+        # Also accepts deprecated aliases: new, someday, paused (with warnings)
+        states=[
+            "backlog",
+            "todo",
+            "active",
+            "waiting",
+            "done",
+            "cancelled",
+            # Deprecated aliases accepted for backward compatibility
+            "new",
+            "someday",
+            "paused",
+        ],
         special_files=["README.md", "templates", "video-scripts"],
         emoji="📋",
     ),
@@ -90,12 +155,17 @@ PRIORITY_RANK: dict[str | None, int] = {
 
 # State-specific styling
 STATE_STYLES = {
-    # Tasks
-    "new": ("yellow", "new"),
+    # Tasks - canonical states
+    "backlog": ("yellow", "backlog"),
+    "todo": ("cyan", "todo"),
     "active": ("blue", "active"),
-    "paused": ("cyan", "paused"),
+    "waiting": ("magenta", "waiting"),
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
+    # Deprecated task states (still accepted, mapped to canonical)
+    "new": ("yellow", "new"),  # deprecated → backlog
+    "paused": ("cyan", "paused"),  # deprecated → backlog
+    "someday": ("yellow", "someday"),  # deprecated → backlog
     # Tweets
     "queued": ("yellow", "queued"),
     "approved": ("blue", "approved"),
@@ -112,11 +182,17 @@ STATE_STYLES = {
 
 # State emojis for consistent use
 STATE_EMOJIS = {
-    "new": "🆕",
+    # Canonical task states
+    "backlog": "📥",
+    "todo": "📋",
     "active": "🏃",
-    "paused": "⚪",
+    "waiting": "⏳",
     "done": "✅",
     "cancelled": "❌",
+    # Deprecated task states (still accepted)
+    "new": "🆕",  # deprecated → backlog
+    "paused": "⚪",  # deprecated → backlog
+    "someday": "💭",  # deprecated → backlog
     "issues": "⚠️",
     "untracked": "❓",
     # priorities
@@ -153,12 +229,16 @@ class TaskInfo:
     Attributes:
         path: Path to the task file
         name: Filename without .md extension
-        state: Current state from frontmatter (new, active, paused, etc.)
+        state: Current state from frontmatter (backlog, todo, active, waiting, done, cancelled)
         created: Creation timestamp
         modified: Last modification timestamp
         priority: Task priority (high, medium, low)
         tags: List of tags
-        depends: List of task dependencies
+        depends: List of task dependencies (deprecated, use requires instead)
+        requires: List of required task IDs or URLs (canonical for depends)
+        related: List of related task IDs or URLs
+        parent: Parent task ID or URL (for subtasks)
+        discovered_from: List of task IDs this was discovered from
         subtasks: Count of completed and total subtasks
         issues: List of validation issues
         metadata: Raw frontmatter metadata
@@ -171,7 +251,11 @@ class TaskInfo:
     modified: datetime
     priority: Optional[str]
     tags: List[str]
-    depends: List[str]
+    depends: List[str]  # Deprecated, use requires instead
+    requires: List[str]  # Required dependencies (task IDs or URLs)
+    related: List[str]  # Related items (informational)
+    parent: Optional[str]  # Parent task ID
+    discovered_from: List[str]  # Tasks this was discovered from
     subtasks: SubtaskCount
     issues: List[str]
     metadata: Dict
@@ -381,7 +465,11 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
     # Validate state value
     if "state" in metadata:
         state = metadata["state"]
-        if state not in CONFIGS["tasks"].states:
+        # Normalize deprecated states before validation
+        normalized_state = normalize_state(state, warn=False)
+        # Use canonical states only (not deprecated ones in CONFIGS)
+        canonical_states = get_canonical_states()
+        if normalized_state not in canonical_states:
             issues.append(f"Invalid state: {state}")
 
     # Validate created date format if string (accepts date-only or full datetime)
@@ -410,6 +498,21 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
 
     if "depends" in metadata and not isinstance(metadata["depends"], list):
         issues.append("Dependencies must be a list")
+
+    if "requires" in metadata and not isinstance(metadata["requires"], list):
+        issues.append("Requires must be a list")
+
+    # Also check deprecated blocks field
+    if "blocks" in metadata and not isinstance(metadata["blocks"], list):
+        issues.append("Blocks must be a list")
+
+    if "related" in metadata and not isinstance(metadata["related"], list):
+        issues.append("Related must be a list")
+
+    if "discovered-from" in metadata and not isinstance(
+        metadata["discovered-from"], list
+    ):
+        issues.append("Discovered-from must be a list")
 
     return issues
 
@@ -468,11 +571,15 @@ def load_tasks(
             # Count subtasks
             subtasks = count_subtasks(post.content)
 
-            # Get state (default to new if missing)
+            # Get state (default to backlog if missing)
             state = metadata.get("state")
             if not state:
                 issues.append("No state in frontmatter")
-                state = "new"  # Default state
+                state = "backlog"  # Default state (canonical)
+            else:
+                # Normalize deprecated states (new/someday/paused → backlog)
+                # Note: warnings suppressed during load, validated separately
+                state = normalize_state(state, warn=False)
 
             # Parse timestamps
             # Helper to parse datetime fields (accepts date-only or full datetime)
@@ -528,6 +635,33 @@ def load_tasks(
                 modified = modified.astimezone().replace(tzinfo=None)
 
             # Create TaskInfo object
+            # Get relationship fields (new typed dependencies)
+            # requires is canonical, depends is deprecated alias, blocks is NOT merged (different semantics)
+            depends_list = metadata.get("depends", [])
+            blocks_list = metadata.get("blocks", [])  # NOT merged - different semantics
+            requires_list = metadata.get("requires", [])
+
+            # Warn if multiple fields are present (potential confusion)
+            fields_present = []
+            if requires_list:
+                fields_present.append("requires")
+            if blocks_list:
+                fields_present.append("blocks")
+            if depends_list:
+                fields_present.append("depends")
+            if len(fields_present) > 1:
+                warnings.warn(
+                    f"Task '{file.stem}' has multiple dependency fields: {fields_present}. "
+                    f"Using 'requires' (canonical). Note: 'blocks' has different semantics and is ignored.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+            # Merge depends into requires (depends is deprecated alias with same semantics)
+            # blocks is NOT merged because it has inverse semantics (this task blocks X, not X blocks this)
+            # Priority: requires > depends (blocks is separate)
+            effective_requires = requires_list if requires_list else depends_list
+
             task = TaskInfo(
                 path=file,
                 name=file.stem,
@@ -536,7 +670,11 @@ def load_tasks(
                 modified=modified,
                 priority=metadata.get("priority"),
                 tags=metadata.get("tags", []),
-                depends=metadata.get("depends", []),
+                depends=depends_list,  # Deprecated, use requires instead
+                requires=effective_requires,  # Canonical required deps
+                related=metadata.get("related", []),
+                parent=metadata.get("parent"),
+                discovered_from=metadata.get("discovered-from", []),
                 subtasks=subtasks,
                 issues=issues,
                 metadata=metadata,
@@ -564,7 +702,11 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     - created: ISO timestamp
     - modified: ISO timestamp
     - tags: list of tags
-    - depends: list of dependencies
+    - requires: list of required dependencies (canonical)
+    - related: list of related items
+    - parent: parent task ID
+    - discovered_from: list of tasks this was discovered from
+    - depends: list of dependencies (deprecated, same as requires)
     - subtasks: {completed: int, total: int}
     """
     return {
@@ -575,7 +717,11 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "created": task.created.isoformat() if task.created else None,
         "modified": task.modified.isoformat() if task.modified else None,
         "tags": task.tags,
-        "depends": task.depends,
+        "requires": task.requires,  # Canonical required deps
+        "related": task.related,
+        "parent": task.parent,
+        "discovered_from": task.discovered_from,
+        "depends": task.depends,  # Deprecated, kept for compatibility
         "subtasks": {
             "completed": task.subtasks.completed,
             "total": task.subtasks.total,
@@ -592,36 +738,37 @@ def is_task_ready(
     """Check if a task is ready (unblocked) to work on.
 
     A task is ready if:
-    - It has no dependencies, OR
-    - All its dependencies are in "done" or "cancelled" state
-    - All URL-based blocks are CLOSED (if cache provided)
+    - It has no required dependencies, OR
+    - All its required dependencies are in "done" or "cancelled" state
+    - All URL-based requires are CLOSED (if cache provided)
+
+    Uses task.requires (canonical) which includes both explicit requires
+    and deprecated depends/blocks entries.
 
     Args:
         task: Task to check
         all_tasks: Dictionary mapping task names to TaskInfo objects
-        issue_cache: Optional cache of issue states for URL-based blocks
+        issue_cache: Optional cache of issue states for URL-based requires
 
     Returns:
         True if task is ready, False if blocked
     """
-    if not task.depends:
-        # Check URL-based blocks if cache provided
-        if issue_cache:
-            blocks = task.metadata.get("blocks", [])
-            if isinstance(blocks, str):
-                blocks = [blocks]
-            for block in blocks:
-                if isinstance(block, str) and block.startswith("http"):
-                    cached = issue_cache.get(block)
-                    if cached:
-                        # If URL is OPEN, task is blocked
-                        if cached.get("state") == "OPEN":
-                            return False
-                    # If not in cache, we can't determine - assume not blocked
+    # Use requires (canonical field, includes deprecated depends/blocks)
+    requires = task.requires
+    if not requires:
         return True
 
-    # Check if all task-based dependencies are completed
-    for dep_name in task.depends:
+    # Separate URL-based and task-based requires
+    url_requires = []
+    task_requires = []
+    for req in requires:
+        if isinstance(req, str) and req.startswith("http"):
+            url_requires.append(req)
+        else:
+            task_requires.append(req)
+
+    # Check task-based blocking dependencies
+    for dep_name in task_requires:
         dep_task = all_tasks.get(dep_name)
         if dep_task is None:
             # Missing dependency = blocked (should be validated separately)
@@ -630,21 +777,17 @@ def is_task_ready(
             # Dependency not completed = blocked
             return False
 
-    # Check URL-based blocks if cache provided
-    if issue_cache:
-        blocks = task.metadata.get("blocks", [])
-        if isinstance(blocks, str):
-            blocks = [blocks]
-        for block in blocks:
-            if isinstance(block, str) and block.startswith("http"):
-                cached = issue_cache.get(block)
-                if cached:
-                    # If URL is OPEN, task is blocked
-                    if cached.get("state") == "OPEN":
-                        return False
-                # If not in cache, we can't determine - assume not blocked
+    # Check URL-based requires if cache provided
+    if issue_cache and url_requires:
+        for req_url in url_requires:
+            cached = issue_cache.get(req_url)
+            if cached:
+                # If URL is OPEN, task is blocked
+                if cached.get("state") == "OPEN":
+                    return False
+            # If not in cache, we can't determine - assume not blocked
 
-    # All dependencies completed = ready
+    # All required dependencies resolved = ready
     return True
 
 
@@ -897,11 +1040,17 @@ def fetch_linear_issue_state(identifier: str) -> Optional[str]:
 
 
 def update_task_state(task_path: Path, new_state: str) -> bool:
-    """Update task frontmatter state field."""
+    """Update task frontmatter state field.
+
+    If new_state is a deprecated alias (new, someday, paused),
+    it will be normalized to the canonical state (backlog) with a warning.
+    """
     frontmatter = _get_frontmatter()
     try:
+        # Normalize deprecated states with warning
+        canonical_state = normalize_state(new_state, warn=True)
         post = frontmatter.load(task_path)
-        post["state"] = new_state
+        post["state"] = canonical_state
         with open(task_path, "w") as f:
             f.write(frontmatter.dumps(post))
         return True
@@ -949,7 +1098,7 @@ def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
 
 
 def extract_external_urls(task: TaskInfo) -> List[str]:
-    """Extract external URLs from task's blocks, related, and tracking fields."""
+    """Extract external URLs from task's requires, related, and tracking fields."""
     urls = []
 
     # Check tracking field (full URLs)
