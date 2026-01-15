@@ -166,7 +166,7 @@ def get_access_token() -> str | None:
         except (json.JSONDecodeError, IOError):
             pass
 
-    return os.environ.get("LINEAR_API_KEY")
+    return None
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
