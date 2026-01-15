@@ -256,19 +256,25 @@ main() {
     mkdir -p "$LINEAR_DIR"
     success "Created linear scripts directory: $LINEAR_DIR"
 
-    # Copy scripts if not already present
+    # Symlink scripts to gptme-contrib (allows easy updates via submodule)
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     if [[ "$SCRIPT_DIR" != "$LINEAR_DIR" ]]; then
-        cp "$SCRIPT_DIR/linear-webhook-server.py" "$LINEAR_DIR/" || {
-            error "Failed to copy linear-webhook-server.py"
-            exit 1
-        }
-        cp "$SCRIPT_DIR/linear-activity.py" "$LINEAR_DIR/" || {
-            error "Failed to copy linear-activity.py"
-            exit 1
-        }
-        success "Copied linear scripts to workspace"
+        # Calculate relative path from LINEAR_DIR to SCRIPT_DIR for portable symlinks
+        local RELATIVE_SCRIPT_DIR
+        RELATIVE_SCRIPT_DIR=$(python3 -c "import os.path; print(os.path.relpath('$SCRIPT_DIR', '$LINEAR_DIR'))")
+        
+        # Create symlinks (remove existing files/links first)
+        for script in linear-webhook-server.py linear-activity.py README.md .env.template .gitignore services setup.sh; do
+            rm -f "$LINEAR_DIR/$script" 2>/dev/null || true
+            if [[ -e "$SCRIPT_DIR/$script" ]]; then
+                ln -s "$RELATIVE_SCRIPT_DIR/$script" "$LINEAR_DIR/$script" || {
+                    error "Failed to symlink $script"
+                    exit 1
+                }
+            fi
+        done
+        success "Created symlinks to gptme-contrib scripts (updates via submodule)"
     fi
 
     # Create .env file with secure permissions from the start
