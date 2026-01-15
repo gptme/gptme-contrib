@@ -645,7 +645,9 @@ class AgentEmail:
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
             # Get appropriate msmtp account
-            account = self._get_msmtp_account_for_address(sender)
+            # Extract just email address from "Name <email>" format for account lookup
+            _, sender_email = parseaddr(sender)
+            account = self._get_msmtp_account_for_address(sender_email or sender)
 
             # Build msmtp command
             # Extract just the email address from "Name <email>" format
