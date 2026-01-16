@@ -3,6 +3,8 @@ match:
   keywords:
     - "mcp-cli"
     - "mcp cli"
+    - "mcp"
+    - "tools"
     - "MCP token"
     - "MCP context"
     - "lazy MCP"
@@ -14,14 +16,18 @@ category: tools
 Use `mcp-cli` to interact with MCP servers on-demand instead of loading all tool schemas into context at startup.
 
 ## Context
-When working with MCP tools and wanting to reduce token consumption. Instead of eager-loading all MCP tool schemas (which can consume 3000+ tokens), use mcp-cli to query tools on-demand.
+When starting any work that involves MCP tools. Use mcp-cli as your default approach for MCP interactions rather than relying on eager-loaded tool schemas. This prevents the ~3000 token overhead of loading all MCP schemas at startup.
 
 ## Detection
-Observable signals indicating mcp-cli would help:
-- MCP tool schemas consuming significant context tokens
-- Multiple MCP servers configured but rarely all used
-- Need to call specific MCP tools without loading everything
-- Want to explore available MCP tools interactively
+Proactive signals to use mcp-cli (before starting work):
+- About to use MCP tools for a task
+- MCP servers configured in your environment
+- Need to call external services via MCP (filesystem, APIs, etc.)
+- Exploring what MCP capabilities are available
+
+Reactive signals (if you notice these, start using mcp-cli):
+- Context window filling up with tool schemas
+- Slow startup due to MCP server connections
 
 ## Pattern: Using mcp-cli
 
