@@ -132,12 +132,12 @@ echo -e "${GREEN}✓${NC} Linked ~/.config/git/hooks -> $DOTFILES_DIR/.config/gi
 # Symlink MCP config directory (for mcp-cli)
 if [ -d "$DOTFILES_DIR/.config/mcp" ]; then
     mkdir -p ~/.config/mcp
-    
+
     # Handle existing mcp config
     if [ -L ~/.config/mcp/mcp_servers.json ]; then
         rm ~/.config/mcp/mcp_servers.json
     fi
-    
+
     # Symlink the template as the actual config
     # The server reads NOTION_TOKEN from inherited environment
     ln -sf "$DOTFILES_DIR/.config/mcp/mcp_servers.json.template" ~/.config/mcp/mcp_servers.json
