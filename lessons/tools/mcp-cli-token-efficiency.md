@@ -50,28 +50,24 @@ Create `mcp_servers.json` in current directory or `~/.config/mcp/`:
 }
 ```
 
-### Common Commands
+### When to Use Each Command
+
+**Quick discovery** - Find available tools without loading schemas:
 ```bash
-# List all available servers and tools (names only)
-mcp-cli
+mcp-cli              # List servers/tools (~10 tokens vs 3000 with eager-load)
+mcp-cli filesystem   # Narrow to one server when you know which you need
+```
 
-# List with descriptions
-mcp-cli -d
+**Targeted lookup** - Get specific schema only when needed:
+```bash
+mcp-cli grep "read*"           # Find tools by pattern first
+mcp-cli filesystem/read_file   # Then load only the schema you'll use
+```
 
-# Show tools for a specific server
-mcp-cli filesystem
-
-# Show tool schema (input parameters)
-mcp-cli filesystem/read_file
-
-# Call a tool with arguments
-mcp-cli filesystem/read_file '{"path": "./README.md"}'
-
-# Search tools by pattern
-mcp-cli grep "read*"
-
-# JSON output for scripting
-mcp-cli -j filesystem/read_file '{"path": "./file.txt"}'
+**Direct execution** - Call tools without going through gptme:
+```bash
+mcp-cli filesystem/read_file '{"path": "./README.md"}'  # One-shot call
+mcp-cli -j filesystem/read_file '{"path": "./file.txt"}'  # JSON for parsing
 ```
 
 ### Token Efficiency Workflow
@@ -101,13 +97,14 @@ mcp-cli filesystem/read_file '{"path": "./config.json"}'
 - Result: ~100 tokens per tool used
 ```
 
-## Options Reference
-| Option | Description |
-|--------|-------------|
-| `-d, --with-descriptions` | Include tool descriptions |
-| `-j, --json` | Output as JSON (for scripting) |
-| `-r, --raw` | Output raw text content |
-| `-c, --config <path>` | Custom config file path |
+## Options for Agents
+
+| Scenario | Option | Benefit |
+|----------|--------|---------|
+| Need to understand tool purposes | `-d` | Adds descriptions without full schema loading |
+| Parsing output programmatically | `-j` | JSON output for reliable parsing in scripts |
+| Extracting just the content | `-r` | Raw output without formatting overhead |
+| Multiple config environments | `-c <path>` | Switch between dev/prod MCP configs |
 
 ## Outcome
 Following this pattern results in:
