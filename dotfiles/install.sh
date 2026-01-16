@@ -128,23 +128,6 @@ handle_existing_hooks_dir
 ln -sf "$DOTFILES_DIR/.config/git/hooks" ~/.config/git/hooks
 echo -e "${GREEN}✓${NC} Linked ~/.config/git/hooks -> $DOTFILES_DIR/.config/git/hooks"
 
-# --- MCP Configuration ---
-# Symlink MCP config directory (for mcp-cli)
-if [ -d "$DOTFILES_DIR/.config/mcp" ]; then
-    mkdir -p ~/.config/mcp
-
-    # Handle existing mcp config
-    if [ -L ~/.config/mcp/mcp_servers.json ]; then
-        rm ~/.config/mcp/mcp_servers.json
-    fi
-
-    # Symlink the template as the actual config
-    # The server reads NOTION_TOKEN from inherited environment
-    ln -sf "$DOTFILES_DIR/.config/mcp/mcp_servers.json" ~/.config/mcp/mcp_servers.json
-    echo -e "${GREEN}✓${NC} Linked ~/.config/mcp/mcp_servers.json"
-    echo "  Note: Set NOTION_TOKEN environment variable for Notion MCP"
-fi
-
 # Configure git to use global hooks
 git config --global core.hooksPath ~/.config/git/hooks
 echo -e "${GREEN}✓${NC} Set core.hooksPath to ~/.config/git/hooks"
