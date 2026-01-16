@@ -27,16 +27,27 @@ Reactive signals (if you notice these, start using mcp-cli):
 - Context window filling up with tool schemas
 - Slow startup due to MCP server connections
 
+## Quick Reference
+
+| Command | Output |
+|---------|--------|
+| `mcp-cli` | List all servers and tool names |
+| `mcp-cli <server>` | Show tools with parameters |
+| `mcp-cli <server>/<tool>` | Get tool JSON schema |
+| `mcp-cli <server>/<tool> '<json>'` | Call tool with arguments |
+| `mcp-cli grep "<glob>"` | Search tools by name |
+
+**Add `-d` to include descriptions** (e.g., `mcp-cli filesystem -d`)
+
 ## Pattern: Using mcp-cli
 
 ### Installation
 ```bash
-# Quick install
+# Download pre-built binary (no dependencies required)
 curl -fsSL https://raw.githubusercontent.com/philschmid/mcp-cli/main/install.sh | bash
-
-# Or via bun
-bun install -g https://github.com/philschmid/mcp-cli
 ```
+
+Installs to `~/.local/bin/mcp-cli`. Supports Linux (x64/arm64) and macOS (x64/arm64).
 
 ### Configuration
 Create `mcp_servers.json` in current directory or `~/.config/mcp/`:
@@ -109,6 +120,30 @@ mcp-cli filesystem/read_file '{"path": "./config.json"}'
 | Parsing output programmatically | `-j` | JSON output for reliable parsing in scripts |
 | Extracting just the content | `-r` | Raw output without formatting overhead |
 | Multiple config environments | `-c <path>` | Switch between dev/prod MCP configs |
+
+### Complex JSON with Quotes
+
+Use `-` for stdin input when JSON contains quotes or special characters:
+```bash
+# Heredoc for complex content
+mcp-cli server/tool - <<EOF
+{"content": "Text with 'quotes' and \"double quotes\" inside"}
+EOF
+
+# Or pipe from file
+cat args.json | mcp-cli server/tool -
+```
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Client error (bad args, missing config) |
+| `2` | Server error (tool failed) |
+| `3` | Network error |
+
+Use in scripts: `mcp-cli server/tool '{}' || echo "Failed with code $?"`
 
 ## Outcome
 Following this pattern results in:
