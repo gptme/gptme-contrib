@@ -146,4 +146,3 @@ Following this pattern enables:
 
 ## Related
 - [mcp-cli Token Efficiency](./mcp-cli-token-efficiency.md) - General mcp-cli usage
-- [Notion Integration Research](/home/lofty/repos/lofty/knowledge/notion-integration-research.md) - Full research document
