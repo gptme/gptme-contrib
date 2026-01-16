@@ -39,20 +39,9 @@ bun install -g https://github.com/philschmid/mcp-cli
 ```
 
 ### Configuration
-Create `mcp_servers.json` in current directory or `~/.config/mcp/`:
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
-    },
-    "deepwiki": {
-      "url": "https://mcp.deepwiki.com/mcp"
-    }
-  }
-}
-```
+See [`dotfiles/.config/mcp/mcp_servers.json`](../../dotfiles/.config/mcp/mcp_servers.json) for the canonical template.
+
+Run `dotfiles/install.sh` to symlink it to `~/.config/mcp/mcp_servers.json`.
 
 ### When to Use Each Command
 
