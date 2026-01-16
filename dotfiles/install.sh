@@ -140,7 +140,7 @@ if [ -d "$DOTFILES_DIR/.config/mcp" ]; then
 
     # Symlink the template as the actual config
     # The server reads NOTION_TOKEN from inherited environment
-    ln -sf "$DOTFILES_DIR/.config/mcp/mcp_servers.json.template" ~/.config/mcp/mcp_servers.json
+    ln -sf "$DOTFILES_DIR/.config/mcp/mcp_servers.json" ~/.config/mcp/mcp_servers.json
     echo -e "${GREEN}✓${NC} Linked ~/.config/mcp/mcp_servers.json"
     echo "  Note: Set NOTION_TOKEN environment variable for Notion MCP"
 fi
