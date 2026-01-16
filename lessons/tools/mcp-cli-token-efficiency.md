@@ -3,8 +3,6 @@ match:
   keywords:
     - "mcp-cli"
     - "mcp cli"
-    - "mcp"
-    - "tools"
     - "MCP token"
     - "MCP context"
     - "lazy MCP"
