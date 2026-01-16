@@ -1,0 +1,15 @@
+{
+  "_comment": "MCP Server Configuration Template - Copy to mcp_servers.json and fill in secrets",
+  "mcpServers": {
+    "notion": {
+      "_description": "Notion MCP - Internal Integration (API Token)",
+      "_docs": "https://developers.notion.com/docs/mcp",
+      "_requires": "Node.js (npx)",
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {
+        "NOTION_TOKEN": "${NOTION_TOKEN:-ntn_your_token_here}"
+      }
+    }
+  }
+}
