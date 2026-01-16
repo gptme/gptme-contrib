@@ -43,12 +43,11 @@ Reactive signals (if you notice these, start using mcp-cli):
 
 ### Installation
 ```bash
-# Quick install
+# Download pre-built binary (no dependencies required)
 curl -fsSL https://raw.githubusercontent.com/philschmid/mcp-cli/main/install.sh | bash
-
-# Or via bun
-bun install -g https://github.com/philschmid/mcp-cli
 ```
+
+Installs to `~/.local/bin/mcp-cli`. Supports Linux (x64/arm64) and macOS (x64/arm64).
 
 ### Configuration
 Create `mcp_servers.json` in current directory or `~/.config/mcp/`:
