@@ -12,7 +12,7 @@ category: tools
 # Notion MCP Integration
 
 ## Rule
-Use mcp-cli with the Notion MCP server for reading and writing Notion content. Create `~/.config/mcp/mcp_servers.json` and set `NOTION_TOKEN`.
+Use mcp-cli with the Notion MCP server for reading and writing Notion content. Add the Notion server config to `~/.config/mcp/mcp_servers.json` and set `NOTION_TOKEN`.
 
 ## Context
 When needing to search, read, or write content in Notion workspaces.
@@ -66,10 +66,9 @@ For each page/database you want to access:
 
 ## MCP Server Configuration
 
-Create `~/.config/mcp/mcp_servers.json`:
-```bash
-mkdir -p ~/.config/mcp
-cat > ~/.config/mcp/mcp_servers.json << 'EOF'
+Add the Notion server to your `~/.config/mcp/mcp_servers.json`:
+
+```json
 {
   "mcpServers": {
     "notion": {
@@ -81,8 +80,9 @@ cat > ~/.config/mcp/mcp_servers.json << 'EOF'
     }
   }
 }
-EOF
 ```
+
+**Note**: If you already have other MCP servers configured, add the `"notion": {...}` entry to your existing `mcpServers` object rather than replacing the entire file.
 
 The `${NOTION_TOKEN}` is expanded by mcp-cli from your environment.
 
