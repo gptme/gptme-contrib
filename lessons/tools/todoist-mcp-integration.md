@@ -25,23 +25,42 @@ When needing to create, read, update, or manage tasks in Todoist.
    ```
 
 2. **For local server**: Node.js/npx required
-3. **For hosted endpoint**: Just authenticate via browser
+3. **For hosted endpoint**: Node.js/npx required for `mcp-remote` proxy
 
 ## Setup Options
 
-### Option 1: Hosted Endpoint (Recommended)
+### Option 1: Hosted Endpoint with OAuth (Recommended)
 
 **URL**: `https://ai.todoist.net/mcp` (Streamable HTTP)
 
-The hosted endpoint handles OAuth automatically - when you first connect via mcp-cli,
-authentication happens via browser redirect. No local server or API token needed.
+The hosted endpoint uses OAuth authentication via `mcp-remote` proxy. First-time connection
+opens your browser for Todoist authorization. No API token needed.
+
+**1. Create MCP Config**
 
 ```bash
-# Connect to hosted endpoint (browser opens for OAuth)
-mcp-cli --url https://ai.todoist.net/mcp todoist/get_tasks '{}'
+mkdir -p ~/.config/mcp
+cat > ~/.config/mcp/mcp_servers.json <<'EOF'
+{
+  "mcpServers": {
+    "todoist": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://ai.todoist.net/mcp"]
+    }
+  }
+}
+EOF
 ```
 
-After initial authentication, the token is cached and subsequent calls work directly.
+**2. First Connection (OAuth)**
+
+```bash
+# First run opens browser for OAuth authorization
+mcp-cli todoist
+```
+
+Your browser will open to Todoist's authorization page. After approving, the OAuth token
+is cached and subsequent calls work automatically.
 
 ### Option 2: Local Server (API Token)
 
@@ -82,23 +101,26 @@ EOF
 ## Usage
 
 ```bash
-# Source your token (if using local server)
-source .env
-
-# List available tools
+# List available tools (24 tools available)
 mcp-cli todoist
 
 # Create a task
-mcp-cli todoist/create_task '{"content": "Review PR #123", "priority": 4}'
+mcp-cli todoist/add-tasks '{"tasks": [{"content": "Review PR #123", "priority": "p1"}]}'
 
-# List tasks
-mcp-cli todoist/get_tasks '{}'
+# Find tasks by date range
+mcp-cli todoist/find-tasks-by-date '{"startDate": "today", "daysCount": 7}'
 
-# Complete a task
-mcp-cli todoist/complete_task '{"task_id": "123456789"}'
+# Find tasks with filters
+mcp-cli todoist/find-tasks '{"searchText": "review"}'
 
-# Search tasks
-mcp-cli todoist/search_tasks '{"query": "review"}'
+# Complete tasks
+mcp-cli todoist/complete-tasks '{"ids": ["task-id-here"]}'
+
+# Get user info
+mcp-cli todoist/user-info '{}'
+
+# Get overview (projects, tasks count)
+mcp-cli todoist/get-overview '{}'
 ```
 
 ## Supported Operations
@@ -109,7 +131,7 @@ mcp-cli todoist/search_tasks '{"query": "review"}'
 | Subtasks | ✅ Works | Create tasks under parent tasks |
 | Projects | ✅ Works | List and manage projects |
 | Labels | ✅ Works | Add/remove labels |
-| Priorities | ✅ Works | 1 (normal) to 4 (urgent) |
+| Priorities | ✅ Works | p1 (urgent) to p4 (normal) |
 | Filters | ✅ Works | `today`, `overdue`, `p1`, etc. |
 | Search | ✅ Works | Text-based task search |
 | Natural dates | ✅ Works | `tomorrow`, `next Monday at 2pm` |
@@ -118,22 +140,26 @@ mcp-cli todoist/search_tasks '{"query": "review"}'
 
 | Tool | Purpose |
 |------|---------|
-| `create_task` | Create a new task |
-| `get_tasks` | List tasks (with optional filter) |
-| `update_task` | Modify task content/due date/priority |
-| `complete_task` | Mark task as complete |
-| `delete_task` | Remove a task |
-| `search_tasks` | Search tasks by query |
-| `get_projects` | List all projects |
+| `add-tasks` | Create new tasks (batch support) |
+| `find-tasks` | Find tasks with filters (searchText, projectId, labels) |
+| `find-tasks-by-date` | Find tasks by date range |
+| `update-tasks` | Modify task content/due date/priority |
+| `complete-tasks` | Mark tasks as complete (batch support) |
+| `delete-object` | Remove a task (type: "task", id: "...") |
+| `find-projects` | List all projects |
+| `get-overview` | Get summary of projects and tasks |
+| `user-info` | Get current user information |
 
 ## Priority Levels
 
-| Level | Meaning | Todoist Display |
-|-------|---------|-----------------|
-| 1 | Normal (default) | No flag |
-| 2 | Medium | Blue flag |
-| 3 | High | Orange flag |
-| 4 | Urgent | Red flag |
+| API Value | Meaning | Todoist Display |
+|-----------|---------|-----------------|
+| `p4` | Normal (default) | No flag |
+| `p3` | Medium | Blue flag |
+| `p2` | High | Orange flag |
+| `p1` | Urgent | Red flag |
+
+**Note**: Priority values are inverted - `p1` is highest priority (urgent), `p4` is lowest (normal).
 
 ## Outcome
 Following this pattern enables:
