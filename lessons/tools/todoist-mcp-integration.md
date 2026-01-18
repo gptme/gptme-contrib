@@ -33,16 +33,15 @@ When needing to create, read, update, or manage tasks in Todoist.
 
 **URL**: `https://ai.todoist.net/mcp` (Streamable HTTP)
 
-- No local setup required
-- OAuth handles authentication automatically
-- Works with Claude Desktop, Cursor, VS Code MCP extension
+The hosted endpoint handles OAuth automatically - when you first connect via mcp-cli,
+authentication happens via browser redirect. No local server or API token needed.
 
-**Claude Desktop**: Settings → Connectors → Add custom connector → `https://ai.todoist.net/mcp`
-
-**Claude CLI**:
 ```bash
-claude mcp add --transport http todoist https://ai.todoist.net/mcp
+# Connect to hosted endpoint (browser opens for OAuth)
+mcp-cli --url https://ai.todoist.net/mcp todoist/get_tasks '{}'
 ```
+
+After initial authentication, the token is cached and subsequent calls work directly.
 
 ### Option 2: Local Server (API Token)
 
