@@ -22,6 +22,7 @@ Features:
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -80,6 +81,15 @@ from tasks.lib import (
     generate_task_filename,
     map_priority_from_labels,
     generate_task_content,
+)
+
+# Import locking functionality (Phase 3 of Issue #240)
+from tasks.locks import (
+    acquire_lock,
+    release_lock,
+    list_locks,
+    cleanup_expired_locks,
+    DEFAULT_LOCK_TIMEOUT_HOURS,
 )
 
 
@@ -2624,6 +2634,252 @@ def import_issues(
             f"\n[green]✓ Created {len(imported)} task files in {tasks_dir}[/]"
         )
         console.print("[dim]Run 'tasks.py sync' to keep states synchronized[/]")
+
+
+# =============================================================================
+# Lock Commands (Phase 3 - Issue #240)
+# =============================================================================
+
+
+@cli.command("lock")
+@click.argument("task_id")
+@click.option(
+    "--worker",
+    "-w",
+    default=None,
+    help="Worker identifier (default: auto-generated from hostname/pid)",
+)
+@click.option(
+    "--timeout",
+    "-t",
+    default=DEFAULT_LOCK_TIMEOUT_HOURS,
+    type=float,
+    help=f"Lock timeout in hours (default: {DEFAULT_LOCK_TIMEOUT_HOURS})",
+)
+@click.option(
+    "--force", "-f", is_flag=True, help="Force acquire even if locked by another"
+)
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def lock_task(
+    task_id: str, worker: Optional[str], timeout: float, force: bool, output_json: bool
+):
+    """Acquire a lock on a task.
+
+    Prevents multiple agents/processes from working on the same task.
+    Locks expire after timeout (default 4 hours).
+
+    Examples:
+        tasks.py lock my-task
+        tasks.py lock my-task --worker bob-session-123
+        tasks.py lock my-task --timeout 2.0
+        tasks.py lock my-task --force  # Steal lock from another worker
+    """
+    import socket
+
+    # Generate default worker ID if not provided
+    if worker is None:
+        worker = f"{socket.gethostname()}-{os.getpid()}"
+
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+    tasks_dir = repo_root / "tasks"
+
+    # First verify the task exists
+    all_tasks = load_tasks(tasks_dir)
+    tasks = resolve_tasks([task_id], all_tasks, tasks_dir)
+    if not tasks:
+        if output_json:
+            print(json.dumps({"success": False, "error": f"Task not found: {task_id}"}))
+        else:
+            console = Console()
+            console.print(f"[red]Error: Task not found: {task_id}[/]")
+        sys.exit(1)
+
+    task = tasks[0]
+    actual_task_id = task.id
+
+    # Attempt to acquire lock
+    success, existing = acquire_lock(actual_task_id, worker, timeout, repo_root, force)
+
+    if output_json:
+        result = {
+            "success": success,
+            "task_id": actual_task_id,
+            "worker": worker,
+            "timeout_hours": timeout,
+        }
+        if existing:
+            result["previous_lock"] = {
+                "worker": existing.worker,
+                "started": existing.started,
+                "expired": existing.is_expired(),
+            }
+        print(json.dumps(result, indent=2))
+    else:
+        console = Console()
+        if success:
+            if existing:
+                if force:
+                    console.print(f"[yellow]⚠ Stole lock from {existing.worker}[/]")
+                else:
+                    console.print(
+                        f"[dim]Previous lock by {existing.worker} had expired[/]"
+                    )
+            console.print(f"[green]✓ Locked task: {actual_task_id}[/]")
+            console.print(f"[dim]  Worker: {worker}[/]")
+            console.print(f"[dim]  Timeout: {timeout} hours[/]")
+        else:
+            console.print(f"[red]✗ Failed to lock task: {actual_task_id}[/]")
+            if existing:
+                age = existing.age_hours()
+                console.print(f"[yellow]  Locked by: {existing.worker}[/]")
+                console.print(
+                    f"[yellow]  Since: {existing.started} ({age:.1f}h ago)[/]"
+                )
+                console.print("[dim]  Use --force to steal the lock[/]")
+            sys.exit(1)
+
+
+@cli.command("unlock")
+@click.argument("task_id")
+@click.option(
+    "--worker",
+    "-w",
+    default=None,
+    help="Worker identifier (must match lock owner unless --force)",
+)
+@click.option("--force", "-f", is_flag=True, help="Force release even if not owner")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def unlock_task(task_id: str, worker: Optional[str], force: bool, output_json: bool):
+    """Release a lock on a task.
+
+    By default, only the lock owner can release. Use --force to override.
+
+    Examples:
+        tasks.py unlock my-task
+        tasks.py unlock my-task --worker bob-session-123
+        tasks.py unlock my-task --force
+    """
+    import socket
+
+    # Generate default worker ID if not provided
+    if worker is None:
+        worker = f"{socket.gethostname()}-{os.getpid()}"
+
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+    tasks_dir = repo_root / "tasks"
+
+    # Resolve task ID
+    all_tasks = load_tasks(tasks_dir)
+    tasks = resolve_tasks([task_id], all_tasks, tasks_dir)
+    actual_task_id = tasks[0].id if tasks else task_id
+
+    success, message = release_lock(actual_task_id, worker, repo_root, force)
+
+    if output_json:
+        result = {"success": success, "task_id": actual_task_id}
+        if message:
+            result["message"] = message
+        print(json.dumps(result, indent=2))
+    else:
+        console = Console()
+        if success:
+            console.print(f"[green]✓ Unlocked task: {actual_task_id}[/]")
+            if message:
+                console.print(f"[dim]  {message}[/]")
+        else:
+            console.print(f"[red]✗ Failed to unlock task: {actual_task_id}[/]")
+            if message:
+                console.print(f"[yellow]  {message}[/]")
+            sys.exit(1)
+
+
+@cli.command("locks")
+@click.option("--cleanup", is_flag=True, help="Remove expired locks")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def list_all_locks(cleanup: bool, output_json: bool):
+    """List all current task locks.
+
+    Shows which tasks are currently locked and by whom.
+    Use --cleanup to remove expired locks.
+
+    Examples:
+        tasks.py locks
+        tasks.py locks --cleanup
+        tasks.py locks --json
+    """
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+
+    if cleanup:
+        removed = cleanup_expired_locks(repo_root)
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "removed": [
+                            {"task_id": lock.task_id, "worker": lock.worker}
+                            for lock in removed
+                        ],
+                        "count": len(removed),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console = Console()
+            if removed:
+                console.print(f"[green]✓ Removed {len(removed)} expired lock(s)[/]")
+                for lock in removed:
+                    console.print(f"[dim]  - {lock.task_id} (was: {lock.worker})[/]")
+            else:
+                console.print("[dim]No expired locks to remove[/]")
+        return
+
+    locks = list_locks(repo_root)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "locks": [
+                        {
+                            "task_id": lock.task_id,
+                            "worker": lock.worker,
+                            "started": lck.started,
+                            "timeout_hours": lck.timeout_hours,
+                            "age_hours": round(lck.age_hours(), 2),
+                            "expired": lck.is_expired(),
+                        }
+                        for lck in locks
+                    ],
+                    "count": len(locks),
+                },
+                indent=2,
+            )
+        )
+    else:
+        console = Console()
+        if not locks:
+            console.print("[dim]No active locks[/]")
+            return
+
+        table = Table(title="[bold]Task Locks[/]")
+        table.add_column("Task", style="cyan")
+        table.add_column("Worker", style="green")
+        table.add_column("Age", style="yellow")
+        table.add_column("Status", style="blue")
+
+        for lock in sorted(locks, key=lambda lck: lck.started, reverse=True):
+            age = lock.age_hours()
+            status = "[red]EXPIRED[/]" if lock.is_expired() else "[green]ACTIVE[/]"
+            table.add_row(
+                lock.task_id,
+                lock.worker,
+                f"{age:.1f}h",
+                status,
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Total: {len(locks)} lock(s)[/]")
 
 
 if __name__ == "__main__":
