@@ -16,11 +16,14 @@ Tracking: ErikBjare/bob#240 Phase 3
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, asdict
+
+logger = logging.getLogger(__name__)
 
 
 # Default lock timeout in hours
@@ -60,7 +63,8 @@ class TaskLock:
             with open(path) as f:
                 data = json.load(f)
             return cls(**data)
-        except (json.JSONDecodeError, TypeError, KeyError):
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            logger.warning("Failed to parse lock file %s: %s", path, e)
             return None
 
     def to_file(self, path: Path) -> None:
@@ -118,7 +122,13 @@ def acquire_lock(
         force: Force acquire even if existing lock (steals lock)
 
     Returns:
-        (success, existing_lock): Tuple of success bool and existing lock if blocked
+        (success, existing_lock): Tuple of:
+            - success: True if lock was acquired, False if blocked
+            - existing_lock: The previous lock holder if:
+              - Lock was stolen via force=True (returns stolen lock)
+              - Lock was taken over from expired holder (returns expired lock)
+              - Blocked by another worker (returns blocking lock)
+              Returns None if no previous lock existed or re-acquiring own lock.
     """
     lock_path = get_lock_path(task_id, repo_root)
 
@@ -226,8 +236,11 @@ def cleanup_expired_locks(repo_root: Optional[Path] = None) -> list[TaskLock]:
     for lock_file in locks_dir.glob("*.lock"):
         lock = TaskLock.from_file(lock_file)
         if lock is not None and lock.is_expired():
-            lock_file.unlink()
-            removed.append(lock)
+            try:
+                lock_file.unlink()
+                removed.append(lock)
+            except OSError as e:
+                logger.warning("Failed to remove expired lock %s: %s", lock_file, e)
     return removed
 
 
