@@ -178,6 +178,9 @@ Save the downloaded JSON file to one of:
 - ~/.config/gptme/google_credentials.json (default)
 - Or set GOOGLE_CREDENTIALS_PATH environment variable
 
+[bold yellow]Security Note:[/bold yellow] Secure the credentials file after downloading:
+  chmod 600 ~/.config/gptme/google_credentials.json
+
 [bold]Step 3: Authorize[/bold]
 
 Run any command (e.g., `./google_drive.py recent`) and follow the
@@ -365,10 +368,12 @@ def list_folder(folder_id: str, max_results: int, as_json: bool) -> None:
     try:
         service = get_google_service("drive", "v3")
 
+        # Escape single quotes in folder_id to prevent query injection
+        escaped_folder_id = folder_id.replace("'", "\\'")
         results = (
             service.files()
             .list(
-                q=f"'{folder_id}' in parents",
+                q=f"'{escaped_folder_id}' in parents",
                 fields="files(id, name, mimeType, modifiedTime, webViewLink)",
                 orderBy="modifiedTime desc",
                 pageSize=max_results,
