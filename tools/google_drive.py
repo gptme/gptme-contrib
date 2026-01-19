@@ -99,10 +99,12 @@ def get_google_service(service_name: str = "drive", version: str = "v3"):
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
             creds = flow.run_local_server(port=0)
 
-        # Save the token
+        # Save the token with restricted permissions (owner read/write only)
         token_path.parent.mkdir(parents=True, exist_ok=True)
         with open(token_path, "w") as token_file:
             token_file.write(creds.to_json())
+        # Set restrictive permissions for security (0o600 = owner read/write only)
+        os.chmod(token_path, 0o600)
         console.print(f"[green]Token saved to {token_path}[/green]")
 
     return build(service_name, version, credentials=creds)
@@ -203,8 +205,10 @@ def search(query: str, max_results: int, as_json: bool) -> None:
         service = get_google_service("drive", "v3")
 
         # Build query for Google Docs
+        # Escape single quotes in query to prevent query injection
+        escaped_query = query.replace("'", "\\'")
         search_query = (
-            f"name contains '{query}' and "
+            f"name contains '{escaped_query}' and "
             f"mimeType = 'application/vnd.google-apps.document'"
         )
 
