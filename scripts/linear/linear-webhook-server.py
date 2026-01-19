@@ -718,7 +718,7 @@ def oauth_callback():
     """
     # Get the authorization code from the query string
     code = request.args.get("code")
-    state = request.args.get("state")
+    _state = request.args.get("state")  # TODO: Implement CSRF validation with state
     error = request.args.get("error")
 
     if error:
