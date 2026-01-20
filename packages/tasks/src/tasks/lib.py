@@ -302,3 +302,95 @@ def generate_task_content(
     )
 
     return "\n".join(frontmatter_lines) + "\n" + "\n".join(body_lines)
+
+
+def poll_github_notifications(
+    since: Optional[str] = None,
+    all_notifications: bool = False,
+) -> List[Dict[str, Any]]:
+    """Poll GitHub notifications for recent updates.
+
+    Used for light sync to identify which cached URLs need refreshing.
+
+    Args:
+        since: ISO timestamp to filter notifications after (optional)
+        all_notifications: If True, include already-read notifications
+
+    Returns:
+        List of notification dicts with keys: id, reason, updated_at, subject_type, subject_url, repo
+    """
+    cmd = [
+        "gh",
+        "api",
+        "notifications",
+        "--jq",
+        ".[] | {id: .id, reason: .reason, updated_at: .updated_at, subject_type: .subject.type, subject_url: .subject.url, repo: .repository.full_name}",
+    ]
+
+    if all_notifications:
+        cmd.extend(["--method", "GET"])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            logging.error(f"GitHub notifications API failed: {result.stderr}")
+            return []
+
+        # Parse JSONL output (one JSON object per line)
+        notifications = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                try:
+                    notif = json.loads(line)
+                    # Filter by since timestamp if provided
+                    if since and notif.get("updated_at", "") <= since:
+                        continue
+                    notifications.append(notif)
+                except json.JSONDecodeError:
+                    continue
+
+        return notifications
+    except subprocess.TimeoutExpired:
+        logging.error("GitHub notifications API timed out")
+        return []
+    except Exception as e:
+        logging.error(f"Error polling GitHub notifications: {e}")
+        return []
+
+
+def extract_urls_from_notification(notification: Dict[str, Any]) -> List[str]:
+    """Extract relevant URLs from a GitHub notification.
+
+    Converts the subject_url (API URL) to a browser URL that matches cache keys.
+
+    Args:
+        notification: Notification dict from poll_github_notifications
+
+    Returns:
+        List of browser URLs that should be refreshed in cache
+    """
+    urls: List[str] = []
+    subject_url = notification.get("subject_url", "")
+    repo = notification.get("repo", "")
+
+    if not subject_url or not repo:
+        return urls
+
+    # Convert API URL to browser URL
+    # API: https://api.github.com/repos/owner/repo/issues/123
+    # Browser: https://github.com/owner/repo/issues/123
+    if "/repos/" in subject_url:
+        # Extract the path after /repos/
+        parts = subject_url.split("/repos/", 1)
+        if len(parts) == 2:
+            path = parts[1]
+            browser_url = f"https://github.com/{path}"
+            urls.append(browser_url)
+
+            # For pull requests, also add the /pull/ variant
+            if "/pulls/" in path:
+                # Convert /pulls/ to /pull/ for browser URL
+                browser_url_alt = browser_url.replace("/pulls/", "/pull/")
+                urls.append(browser_url_alt)
+
+    return urls
