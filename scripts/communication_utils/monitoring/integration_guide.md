@@ -46,7 +46,7 @@ print(f"Avg duration: {stats['avg_duration']}s")
 
 ### Email System Integration
 
-**Location**: `gptme-contrib/scripts/email/lib.py`
+**Location**: `gptme-contrib/packages/gptmail/src/gptmail/lib.py`
 
 ```python
 from communication_utils.monitoring import get_logger, MetricsCollector

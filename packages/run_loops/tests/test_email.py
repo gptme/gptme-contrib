@@ -13,9 +13,11 @@ def workspace(tmp_path):
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
 
-    # Create email directory structure
-    email_dir = workspace_dir / "gptme-contrib/scripts/email"
+    # Create email directory structure (gptmail uses workspace/email/)
+    email_dir = workspace_dir / "email"
     email_dir.mkdir(parents=True)
+    (email_dir / "inbox").mkdir()
+    (email_dir / "sent").mkdir()
 
     return workspace_dir
 

@@ -3072,7 +3072,7 @@ def add(
 
     # Build frontmatter
     now = datetime.now(timezone.utc)
-    frontmatter_data = {
+    frontmatter_data: dict[str, str | list[str]] = {
         "state": state,
         "created": now.isoformat(),
         "priority": priority,

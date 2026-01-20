@@ -624,5 +624,224 @@ def check_completion_status(message_id: str) -> None:
         click.echo("No replies_state.json file found or invalid JSON")
 
 
+@cli.command()
+@click.argument("folder")
+@click.argument("dest_maildir")
+def export_maildir(folder: str, dest_maildir: str) -> None:
+    """Export messages from markdown to maildir format.
+
+    FOLDER: Folder to export (inbox, sent, drafts, archive, or 'all')
+    DEST_MAILDIR: Destination maildir directory path
+
+    Example:
+        gptmail export-maildir inbox ~/test-maildir
+        gptmail export-maildir all ~/test-maildir
+    """
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+
+    dest_path = Path(dest_maildir)
+    folders = ["inbox", "sent", "drafts", "archive"] if folder == "all" else [folder]
+
+    for f in folders:
+        click.echo(f"Exporting {f} to {dest_path}...")
+        try:
+            result = email.export_to_maildir(f, dest_path)
+            if "error" in result:
+                click.echo(f"  Error: {result['error']}", err=True)
+            else:
+                click.echo(
+                    f"  Success: {result['success']}, Failed: {result['failed']}, Skipped: {result['skipped']}"
+                )
+        except Exception as e:
+            click.echo(f"  Error exporting {f}: {e}", err=True)
+
+
+@cli.command()
+@click.argument("source_maildir")
+@click.argument("folder")
+def import_maildir(source_maildir: str, folder: str) -> None:
+    """Import messages from maildir to markdown format.
+
+    SOURCE_MAILDIR: Source maildir directory path
+    FOLDER: Destination folder (inbox, sent, drafts, archive, or 'all')
+
+    Example:
+        gptmail import-maildir ~/test-maildir inbox
+        gptmail import-maildir ~/test-maildir all
+    """
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+
+    source_path = Path(source_maildir)
+    if not source_path.exists():
+        click.echo(f"Error: Source directory does not exist: {source_path}", err=True)
+        return
+
+    folders = ["inbox", "sent", "drafts", "archive"] if folder == "all" else [folder]
+
+    for f in folders:
+        click.echo(f"Importing to {f} from {source_path}...")
+        try:
+            result = email.import_from_maildir(source_path, f)
+            if "error" in result:
+                click.echo(f"  Error: {result['error']}", err=True)
+            else:
+                click.echo(
+                    f"  Success: {result['success']}, Failed: {result['failed']}, Skipped: {result['skipped']}"
+                )
+        except Exception as e:
+            click.echo(f"  Error importing to {f}: {e}", err=True)
+
+
+@cli.command()
+@click.option(
+    "--threshold",
+    type=float,
+    default=0.5,
+    help="Complexity threshold (0.0-1.0, default 0.5)",
+)
+@click.option(
+    "--mark-complex",
+    is_flag=True,
+    help="Mark complex emails as no-reply-needed",
+)
+def check_complexity(threshold: float, mark_complex: bool) -> None:
+    """Check complexity of unreplied emails and optionally mark complex ones."""
+    import re
+    from email.parser import Parser
+    from email.policy import default as email_policy
+
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+
+    # Inline complexity detection
+    SENSITIVE_KEYWORDS = {
+        "financial",
+        "money",
+        "payment",
+        "invoice",
+        "contract",
+        "legal",
+        "lawsuit",
+        "attorney",
+        "court",
+        "confidential",
+        "private",
+        "sensitive",
+        "secret",
+        "personal",
+        "urgent",
+        "critical",
+        "emergency",
+    }
+
+    DECISION_PHRASES = [
+        r"should\s+we",
+        r"which\s+option",
+        r"need\s+to\s+decide",
+        r"what\s+do\s+you\s+think",
+        r"your\s+thoughts",
+        r"approve",
+        r"sign\s+off",
+    ]
+
+    def detect_complexity(msg, body: str):
+        """Detect email complexity. Returns (score, reasons)."""
+        reasons = []
+        score = 0.0
+
+        word_count = len(body.split())
+        if word_count > 500:
+            reasons.append(f"long email ({word_count} words)")
+            score += 0.2
+
+        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+        if len(paragraphs) > 5:
+            reasons.append(f"many paragraphs ({len(paragraphs)})")
+            score += 0.15
+
+        questions = body.count("?")
+        if questions > 3:
+            reasons.append(f"multiple questions ({questions})")
+            score += 0.25
+
+        body_lower = body.lower()
+        found_sensitive = [kw for kw in SENSITIVE_KEYWORDS if kw in body_lower]
+        if found_sensitive:
+            reasons.append(f"sensitive: {', '.join(found_sensitive[:2])}")
+            score += 0.3
+
+        if any(re.search(pattern, body_lower) for pattern in DECISION_PHRASES):
+            reasons.append("requires decision")
+            score += 0.25
+
+        to_addrs = msg.get_all("to", [])
+        cc_addrs = msg.get_all("cc", [])
+        total = len(to_addrs) + len(cc_addrs)
+        if total > 2:
+            reasons.append(f"multiple recipients ({total})")
+            score += 0.15
+
+        return min(score, 1.0), reasons
+
+    unreplied = email.get_unreplied_emails()
+
+    if not unreplied:
+        click.echo("No unreplied emails found.")
+        return
+
+    click.echo(f"\nComplexity Analysis (threshold: {threshold}):\n")
+    click.echo(f"{'Sender':<30} | {'Subject':<40} | {'Score':<6} | {'Status':<10}")
+    click.echo("-" * 100)
+
+    complex_count = 0
+    simple_count = 0
+
+    for msg_id, subject, sender in unreplied:
+        message_data = email.read_message(msg_id)
+        msg = Parser(policy=email_policy).parsestr(message_data)
+
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    payload = part.get_payload(decode=True)
+                    if payload and isinstance(payload, bytes):
+                        body = payload.decode("utf-8", errors="replace")
+                    break
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload and isinstance(payload, bytes):
+                body = payload.decode("utf-8", errors="replace")
+
+        complexity_score, reasons = detect_complexity(msg, body)
+        is_complex = complexity_score > threshold
+
+        status = "COMPLEX" if is_complex else "simple"
+        if is_complex:
+            complex_count += 1
+            if mark_complex:
+                email._mark_no_reply_needed(msg_id, f"complex email - {', '.join(reasons[:2])}")
+                status += " (marked)"
+        else:
+            simple_count += 1
+
+        sender_short = sender[:28] + ".." if len(sender) > 30 else sender
+        subject_short = subject[:38] + ".." if len(subject) > 40 else subject
+
+        click.echo(
+            f"{sender_short:<30} | {subject_short:<40} | {complexity_score:<6.2f} | {status:<10}"
+        )
+
+        if reasons:
+            click.echo(f"  Reasons: {', '.join(reasons)}")
+
+    click.echo(f"\nSummary: {simple_count} simple, {complex_count} complex")
+
+    if mark_complex and complex_count > 0:
+        click.echo(f"\nMarked {complex_count} complex emails as no-reply-needed.")
+
+
 if __name__ == "__main__":
     cli()

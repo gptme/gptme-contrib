@@ -26,7 +26,7 @@ Usage:
 """
 
 # Import stdlib email.message BEFORE sys.path manipulation
-# This caches the stdlib module and prevents shadowing by scripts/email/ directory
+# This ensures the stdlib module is cached and not shadowed by any local directories
 import email.message  # noqa: F401
 
 import sys
