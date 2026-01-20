@@ -15,12 +15,14 @@ Design doc: knowledge/technical-designs/task-state-improvements-design.md
 Tracking: ErikBjare/bob#240 Phase 3
 """
 
+import fcntl
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Iterator
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,59 @@ logger = logging.getLogger(__name__)
 
 # Default lock timeout in hours
 DEFAULT_LOCK_TIMEOUT_HOURS = 4
+
+
+@contextmanager
+def _atomic_lock_file(
+    path: Path, write: bool = False
+) -> Iterator[tuple[Optional[dict], Path]]:
+    """Context manager for atomic file operations with flock.
+
+    Uses fcntl.flock to ensure atomic read-modify-write operations,
+    preventing race conditions when multiple processes access the same lock file.
+
+    Args:
+        path: Path to the lock file
+        write: If True, prepare for writing (creates parent dirs)
+
+    Yields:
+        Tuple of (existing_data, path) where existing_data is the parsed JSON
+        content of the file or None if file is empty/invalid.
+
+    Note:
+        The flock is automatically released when the context exits.
+        For write operations, call path.write_text() or path.unlink() within
+        the context to ensure atomicity.
+    """
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Open file for read+write, creating if needed
+    # Use 'a+' mode to create file if it doesn't exist without truncating
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+
+        # Acquire exclusive lock (blocks until available)
+        # Use LOCK_NB for non-blocking if we want to fail fast
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        # Read existing content
+        existing_data = None
+        try:
+            content = os.pread(fd, 10000, 0).decode("utf-8").strip()
+            if content:
+                existing_data = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+        yield existing_data, path
+
+    finally:
+        if fd is not None:
+            # Release lock and close (flock released automatically on close)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 @dataclass
@@ -114,6 +169,9 @@ def acquire_lock(
 ) -> tuple[bool, Optional[TaskLock]]:
     """Attempt to acquire a lock on a task.
 
+    Uses fcntl.flock for atomic check-and-write operations, preventing race
+    conditions when multiple processes attempt to acquire the same lock.
+
     Args:
         task_id: The task identifier
         worker: Worker identifier (e.g., "bob-session-123")
@@ -132,37 +190,50 @@ def acquire_lock(
     """
     lock_path = get_lock_path(task_id, repo_root)
 
-    # Check for existing lock
-    existing = TaskLock.from_file(lock_path)
-    if existing is not None:
-        # Check if same worker (re-acquiring own lock)
-        if existing.worker == worker:
-            # Update the lock (refresh timestamp)
-            new_lock = TaskLock.create(task_id, worker, timeout_hours)
-            new_lock.to_file(lock_path)
-            return True, None
+    # Use atomic file operation with flock to prevent race conditions
+    with _atomic_lock_file(lock_path, write=True) as (existing_data, path):
+        # Parse existing lock if present
+        existing: Optional[TaskLock] = None
+        if existing_data:
+            try:
+                existing = TaskLock(**existing_data)
+            except (TypeError, KeyError) as e:
+                logger.warning("Failed to parse lock data %s: %s", path, e)
 
-        # Check if expired
-        if existing.is_expired():
-            # Expired lock - can take over
-            new_lock = TaskLock.create(task_id, worker, timeout_hours)
-            new_lock.to_file(lock_path)
-            return True, existing  # Return existing to show who had it
+        if existing is not None:
+            # Check if same worker (re-acquiring own lock)
+            if existing.worker == worker:
+                # Update the lock (refresh timestamp)
+                new_lock = TaskLock.create(task_id, worker, timeout_hours)
+                _write_lock_atomic(path, new_lock)
+                return True, None
 
-        # Valid lock held by another worker
-        if force:
-            # Force steal the lock
-            new_lock = TaskLock.create(task_id, worker, timeout_hours)
-            new_lock.to_file(lock_path)
-            return True, existing
-        else:
-            # Cannot acquire - blocked by another worker
-            return False, existing
+            # Check if expired
+            if existing.is_expired():
+                # Expired lock - can take over
+                new_lock = TaskLock.create(task_id, worker, timeout_hours)
+                _write_lock_atomic(path, new_lock)
+                return True, existing  # Return existing to show who had it
 
-    # No existing lock - acquire it
-    new_lock = TaskLock.create(task_id, worker, timeout_hours)
-    new_lock.to_file(lock_path)
-    return True, None
+            # Valid lock held by another worker
+            if force:
+                # Force steal the lock
+                new_lock = TaskLock.create(task_id, worker, timeout_hours)
+                _write_lock_atomic(path, new_lock)
+                return True, existing
+            else:
+                # Cannot acquire - blocked by another worker
+                return False, existing
+
+        # No existing lock - acquire it
+        new_lock = TaskLock.create(task_id, worker, timeout_hours)
+        _write_lock_atomic(path, new_lock)
+        return True, None
+
+
+def _write_lock_atomic(path: Path, lock: TaskLock) -> None:
+    """Write lock data atomically (assumes caller holds flock)."""
+    path.write_text(json.dumps(asdict(lock), indent=2))
 
 
 def release_lock(
@@ -172,6 +243,8 @@ def release_lock(
     force: bool = False,
 ) -> tuple[bool, Optional[str]]:
     """Release a lock on a task.
+
+    Uses fcntl.flock for atomic check-and-delete operations.
 
     Args:
         task_id: The task identifier
@@ -187,19 +260,36 @@ def release_lock(
     if not lock_path.exists():
         return True, "No lock existed"
 
-    existing = TaskLock.from_file(lock_path)
-    if existing is None:
-        # Invalid lock file - remove it
-        lock_path.unlink()
-        return True, "Removed invalid lock file"
+    # Use atomic file operation with flock
+    with _atomic_lock_file(lock_path, write=False) as (existing_data, path):
+        if existing_data is None:
+            # Invalid lock file - remove it
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return True, "Removed invalid lock file"
 
-    # Check ownership
-    if existing.worker != worker and not force:
-        return False, f"Lock held by {existing.worker}, not {worker}"
+        try:
+            existing = TaskLock(**existing_data)
+        except (TypeError, KeyError):
+            # Invalid lock data - remove it
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return True, "Removed invalid lock file"
 
-    # Release the lock
-    lock_path.unlink()
-    return True, None
+        # Check ownership
+        if existing.worker != worker and not force:
+            return False, f"Lock held by {existing.worker}, not {worker}"
+
+        # Release the lock
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return True, None
 
 
 def get_lock(task_id: str, repo_root: Optional[Path] = None) -> Optional[TaskLock]:
