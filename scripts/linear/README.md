@@ -415,7 +415,35 @@ If `Linger=no`, ask human to run: `sudo loginctl enable-linger <username>`
 
 ## ngrok URL Changed
 
-If using free ngrok, the URL changes on restart. Update the Webhook URL in Linear OAuth application settings.
+⚠️ **Free ngrok URLs change every restart.** When this happens, you must update **both**:
+
+1. **Linear OAuth Application settings** (Settings > API > OAuth Applications):
+   - Webhook URL
+   - OAuth Callback URL
+
+2. **Your .env file**:
+   - `LINEAR_CALLBACK_URL`
+
+**To minimize disruption:**
+
+1. **Use ngrok paid plan** ($8/month) - Get a static subdomain that never changes
+2. **Use Cloudflare Tunnel** (free) - Alternative to ngrok with stable URLs:
+   ```bash
+   # Install cloudflared
+   curl -L https://pkg.cloudflare.com/cloudflared-linux-amd64.deb -o cloudflared.deb
+   sudo dpkg -i cloudflared.deb
+
+   # Authenticate and create tunnel
+   cloudflared tunnel login
+   cloudflared tunnel create linear-webhook
+   cloudflared tunnel route dns linear-webhook your-subdomain.yourdomain.com
+
+   # Run tunnel (configure in systemd for persistence)
+   cloudflared tunnel run --url http://localhost:8081 linear-webhook
+   ```
+3. **Run ngrok as persistent service** - Fewer restarts means fewer URL changes
+
+**Future enhancement**: Linear's API could potentially be used to auto-update the webhook URL on ngrok restart. This would require storing the OAuth application ID and using the Linear Admin API.
 
 ---
 
