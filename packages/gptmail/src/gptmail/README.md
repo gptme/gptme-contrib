@@ -10,9 +10,9 @@ From your agent workspace root:
 # Set up email directories
 mkdir -p email/{inbox,sent,archive,drafts,filters}
 
-# Use the email system
-./gptme-contrib/scripts/email/cli.py compose recipient@example.com "Subject" "Message"
-./gptme-contrib/scripts/email/cli.py list
+# Use the email system (run as Python module)
+python -m gptmail compose recipient@example.com "Subject" "Message"
+python -m gptmail list
 ```
 
 ## Features
@@ -36,8 +36,8 @@ your-agent-workspace/
 │   ├── drafts/         # Draft messages
 │   └── filters/        # Email filtering rules
 └── gptme-contrib/      # This repository (as submodule)
-    └── scripts/
-        └── email/      # Email system code
+    └── packages/
+        └── gptmail/    # Email system package
 ```
 
 ## Configuration
@@ -58,14 +58,14 @@ See the full documentation in this directory for detailed setup instructions.
 
 ```bash
 # Compose and send
-./gptme-contrib/scripts/email/cli.py compose recipient@example.com "Project Update" "Status report..."
-./gptme-contrib/scripts/email/cli.py send <message-id>
+python -m gptmail compose recipient@example.com "Project Update" "Status report..."
+python -m gptmail send <message-id>
 
 # Read with threading
-./gptme-contrib/scripts/email/cli.py read <message-id> --thread
+python -m gptmail read <message-id> --thread
 
-# Auto-response watcher
-./gptme-contrib/scripts/email/watcher.py
+# Check for unreplied emails
+python -m gptmail unreplied
 ```
 
 This email system is part of the [gptme](https://github.com/gptme/gptme) ecosystem and designed to work with any AI agent workspace.
