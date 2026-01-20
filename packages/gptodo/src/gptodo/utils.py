@@ -356,9 +356,7 @@ def format_time_ago(dt: datetime) -> str:
         return dt.strftime("%Y-%m-%d")
 
 
-def has_new_activity(
-    updated_at: Optional[str], waiting_since: Optional[str | date]
-) -> bool:
+def has_new_activity(updated_at: Optional[str], waiting_since: Optional[str | date]) -> bool:
     """Check if there's been new activity since waiting_since.
 
     Args:
@@ -389,9 +387,7 @@ def has_new_activity(
             waiting_dt = datetime.combine(waiting_since, datetime.min.time())
         elif isinstance(waiting_since, str):
             if "T" in waiting_since:
-                waiting_dt = datetime.fromisoformat(
-                    waiting_since.replace("Z", "+00:00")
-                )
+                waiting_dt = datetime.fromisoformat(waiting_since.replace("Z", "+00:00"))
             else:
                 waiting_dt = datetime.fromisoformat(waiting_since)
         else:
@@ -483,9 +479,7 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
 
                 date.fromisoformat(metadata["created"])
             except ValueError:
-                issues.append(
-                    "Created date must be ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"
-                )
+                issues.append("Created date must be ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
 
     # Optional field validation
     if "priority" in metadata:
@@ -509,9 +503,7 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
     if "related" in metadata and not isinstance(metadata["related"], list):
         issues.append("Related must be a list")
 
-    if "discovered-from" in metadata and not isinstance(
-        metadata["discovered-from"], list
-    ):
+    if "discovered-from" in metadata and not isinstance(metadata["discovered-from"], list):
         issues.append("Discovered-from must be a list")
 
     return issues
@@ -895,9 +887,7 @@ def get_blocking_reasons(
     return reasons
 
 
-def resolve_tasks(
-    task_ids: List[str], tasks: List[TaskInfo], tasks_dir: Path
-) -> List[TaskInfo]:
+def resolve_tasks(task_ids: List[str], tasks: List[TaskInfo], tasks_dir: Path) -> List[TaskInfo]:
     """Resolve tasks by ID/path, supporting both task names and paths.
 
     Args:
@@ -1272,9 +1262,7 @@ def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
             # Linear states like "completed", "canceled" → CLOSED
             # Other states like "started", "backlog", "in_progress" → OPEN
             normalized_state = (
-                "CLOSED"
-                if raw_state.lower() in ("completed", "canceled", "done")
-                else "OPEN"
+                "CLOSED" if raw_state.lower() in ("completed", "canceled", "done") else "OPEN"
             )
             return {
                 "state": normalized_state,

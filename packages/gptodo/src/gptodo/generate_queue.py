@@ -196,9 +196,7 @@ class QueueGenerator:
 
                 # Extract title from content (first heading)
                 title = task_file.stem  # fallback to filename
-                content_lines = [
-                    line.strip() for line in post.content.split("\n") if line.strip()
-                ]
+                content_lines = [line.strip() for line in post.content.split("\n") if line.strip()]
                 for line in content_lines:
                     if line.startswith("# "):
                         title = line[2:].strip()
@@ -392,8 +390,7 @@ class QueueGenerator:
         all_tasks = file_tasks + github_issues
 
         print(
-            f"Found {len(file_tasks)} tasks from files, "
-            f"{len(github_issues)} from GitHub issues"
+            f"Found {len(file_tasks)} tasks from files, " f"{len(github_issues)} from GitHub issues"
         )
 
         # Get current run summary
