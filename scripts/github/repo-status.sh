@@ -52,7 +52,7 @@ if [ $# -gt 0 ]; then
     # Format: "owner/repo:label" or just "owner/repo" (label defaults to repo name)
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
-    
+
     i=0
     for arg in "$@"; do
         if [[ "$arg" == *":"* ]]; then
@@ -65,7 +65,7 @@ if [ $# -gt 0 ]; then
         ((i++))
     done
     wait  # Wait for all parallel checks to complete
-    
+
     # Print results in order
     for f in "$TMPDIR"/*.txt; do
         cat "$f"
