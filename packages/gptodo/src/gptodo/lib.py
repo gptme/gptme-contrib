@@ -165,18 +165,14 @@ def fetch_linear_issues(team: str, state: str, limit: int) -> List[Dict[str, Any
             state_info = issue.get("state", {})
             state_type = state_info.get("type", "").lower()
             # Map Linear state types to simple open/closed
-            issue_state = (
-                "closed" if state_type in ["completed", "canceled"] else "open"
-            )
+            issue_state = "closed" if state_type in ["completed", "canceled"] else "open"
 
             issues.append(
                 {
                     "number": issue["identifier"],
                     "title": issue["title"],
                     "state": issue_state,
-                    "labels": [
-                        lbl["name"] for lbl in issue.get("labels", {}).get("nodes", [])
-                    ],
+                    "labels": [lbl["name"] for lbl in issue.get("labels", {}).get("nodes", [])],
                     "url": issue["url"],
                     "body": (issue.get("description") or "")[:500],
                     "tracking_ref": issue["url"],
@@ -227,9 +223,7 @@ def map_priority_from_labels(labels: List[str]) -> Optional[str]:
         Priority string (high, medium, low) or None if no priority label found
     """
     labels_lower = [lbl.lower() for lbl in labels]
-    if any(
-        "high" in lbl or "critical" in lbl or "urgent" in lbl for lbl in labels_lower
-    ):
+    if any("high" in lbl or "critical" in lbl or "urgent" in lbl for lbl in labels_lower):
         return "high"
     if any("medium" in lbl for lbl in labels_lower):
         return "medium"
@@ -238,9 +232,7 @@ def map_priority_from_labels(labels: List[str]) -> Optional[str]:
     return None
 
 
-def generate_task_content(
-    issue: Dict[str, Any], source: str, priority: Optional[str]
-) -> str:
+def generate_task_content(issue: Dict[str, Any], source: str, priority: Optional[str]) -> str:
     """Generate task file content from issue data.
 
     Args:
