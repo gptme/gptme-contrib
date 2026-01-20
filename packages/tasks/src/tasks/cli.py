@@ -2981,5 +2981,142 @@ def list_all_locks(cleanup: bool, output_json: bool):
         console.print(f"\n[dim]Total: {len(locks)} lock(s)[/]")
 
 
+# =============================================================================
+# Add Command
+# =============================================================================
+
+
+@cli.command("add")
+@click.argument("title")
+@click.option(
+    "--priority",
+    type=click.Choice(["low", "medium", "high"]),
+    default="medium",
+    help="Task priority",
+)
+@click.option(
+    "--tags",
+    help="Comma-separated tags",
+)
+@click.option(
+    "--assigned-to",
+    default="bob",
+    help="Who the task is assigned to",
+)
+@click.option(
+    "--state",
+    type=click.Choice(["new", "active", "paused", "done", "cancelled", "someday"]),
+    default="new",
+    help="Initial task state",
+)
+@click.option(
+    "--type",
+    "task_type",
+    type=click.Choice(["action", "project"]),
+    default="action",
+    help="Task type (action=single-step, project=multi-step)",
+)
+def add(
+    title: str,
+    priority: str,
+    tags: Optional[str],
+    assigned_to: str,
+    state: str,
+    task_type: str,
+):
+    """Create a new task from title and optional stdin body.
+
+    The task filename is generated from the title by converting to lowercase
+    and replacing non-alphanumeric characters with hyphens.
+
+    If stdin is provided (piped), it becomes the task body.
+
+    Examples:
+        # Simple task
+        tasks.py add "Fix the login bug"
+
+        # With options
+        tasks.py add --priority high --tags infra,context "Improve context loading"
+
+        # With body from stdin
+        echo "Detailed description here" | tasks.py add "Task with body"
+
+        # Multi-line body
+        tasks.py add "Complex task" << 'EOF'
+        ## Subtasks
+        - [ ] First step
+        - [ ] Second step
+        EOF
+    """
+    import re
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Ensure tasks directory exists
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate slug from title
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower())
+    slug = slug.strip("-")[:50].rstrip("-")
+    filename = f"{slug}.md"
+    filepath = tasks_dir / filename
+
+    # Check for existing file with same name
+    if filepath.exists():
+        # Add timestamp suffix to make unique
+        timestamp = datetime.now().strftime("%H%M%S")
+        filename = f"{slug}-{timestamp}.md"
+        filepath = tasks_dir / filename
+
+    # Build frontmatter
+    now = datetime.now(timezone.utc)
+    frontmatter_data = {
+        "state": state,
+        "created": now.isoformat(),
+        "priority": priority,
+        "task_type": task_type,
+        "assigned_to": assigned_to,
+    }
+
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        if tag_list:
+            frontmatter_data["tags"] = tag_list
+
+    # Check for stdin input (body)
+    body = ""
+    # Check if stdin has data (non-blocking check)
+    if not sys.stdin.isatty():
+        # stdin is piped, read it
+        body = sys.stdin.read().strip()
+
+    # Build file content
+    lines = ["---"]
+    lines.append(f"state: {frontmatter_data['state']}")
+    lines.append(f"created: {frontmatter_data['created']}")
+    lines.append(f"priority: {frontmatter_data['priority']}")
+    lines.append(f"task_type: {frontmatter_data['task_type']}")
+    lines.append(f"assigned_to: {frontmatter_data['assigned_to']}")
+    if "tags" in frontmatter_data:
+        lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {title}")
+    lines.append("")
+
+    if body:
+        lines.append(body)
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    # Write file
+    filepath.write_text(content)
+
+    console.print(f"[green]✓ Created task:[/] {filepath}")
+
+
 if __name__ == "__main__":
     cli()
