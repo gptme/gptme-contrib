@@ -42,7 +42,7 @@ from tabulate import tabulate
 
 # Import utilities directly from utils
 # Using absolute imports (not relative) for uv script compatibility
-from tasks.utils import (
+from gptodo.utils import (
     # Data classes
     DirectoryConfig,
     TaskInfo,
@@ -75,7 +75,7 @@ from tasks.utils import (
 )
 
 # Import core business logic from lib
-from tasks.lib import (
+from gptodo.lib import (
     fetch_github_issues,
     fetch_linear_issues,
     generate_task_filename,
@@ -84,7 +84,7 @@ from tasks.lib import (
 )
 
 # Import locking functionality (Phase 3 of Issue #240)
-from tasks.locks import (
+from gptodo.locks import (
     acquire_lock,
     release_lock,
     list_locks,
@@ -169,9 +169,7 @@ def show(task_id):
     if task.requires:
         table.add_row("Requires", ", ".join(task.requires))
     if task.subtasks.total > 0:
-        table.add_row(
-            "Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed"
-        )
+        table.add_row("Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed")
     if task.issues:
         table.add_row("Issues", ", ".join(task.issues))
 
@@ -264,15 +262,11 @@ def list_(sort, active_only, context, output_json, output_jsonl):
         tasks = [task for task in tasks if context_tag in (task.tags or [])]
         if not tasks:
             if output_json:
-                print(
-                    f"No tasks found with context tag '{context_tag}'", file=sys.stderr
-                )
+                print(f"No tasks found with context tag '{context_tag}'", file=sys.stderr)
                 print(json.dumps({"tasks": [], "count": 0}, indent=2))
                 return
             if output_jsonl:
-                print(
-                    f"No tasks found with context tag '{context_tag}'", file=sys.stderr
-                )
+                print(f"No tasks found with context tag '{context_tag}'", file=sys.stderr)
                 return
             console.print(f"[yellow]No tasks found with context tag '{context_tag}'[/]")
             return
@@ -345,9 +339,7 @@ def list_(sort, active_only, context, output_json, output_jsonl):
                         dep_ids.append(str(name_to_enum_id[dep]))
                     else:
                         # Show task name and state for filtered out dependencies
-                        state_emoji = STATE_EMOJIS.get(
-                            dep_task.state or "untracked", "•"
-                        )
+                        state_emoji = STATE_EMOJIS.get(dep_task.state or "untracked", "•")
                         dep_ids.append(f"{dep} ({state_emoji})")
                 else:
                     dep_ids.append(f"{dep} (missing)")
@@ -396,9 +388,7 @@ def list_(sort, active_only, context, output_json, output_jsonl):
 
     # Print legend for tasks with dependencies
     if has_deps:
-        tasks_with_deps = [
-            (task, name_to_enum_id[task.name]) for task in tasks if task.requires
-        ]
+        tasks_with_deps = [(task, name_to_enum_id[task.name]) for task in tasks if task.requires]
         if tasks_with_deps:
             console.print("\nDependencies:")
             for task, enum_id in tasks_with_deps:
@@ -411,9 +401,7 @@ def list_(sort, active_only, context, output_json, output_jsonl):
                             dep_strs.append(f"{dep} ({name_to_enum_id[dep]})")
                         else:
                             # Show task name and state for filtered out dependencies
-                            state_emoji = STATE_EMOJIS.get(
-                                dep_task.state or "untracked", "•"
-                            )
+                            state_emoji = STATE_EMOJIS.get(dep_task.state or "untracked", "•")
                             dep_strs.append(f"{dep} ({state_emoji})")
                     else:
                         dep_strs.append(f"{dep} (missing)")
@@ -475,9 +463,7 @@ def print_status_section(
             state_info = f", {state_text}"
 
         # Print task info
-        console.print(
-            f"  {task.name}{subtask_str}{priority_str} ({task.created_ago}{state_info})"
-        )
+        console.print(f"  {task.name}{subtask_str}{priority_str} ({task.created_ago}{state_info})")
 
         # Show issues inline
         if task.issues:
@@ -488,9 +474,7 @@ def print_status_section(
         console.print(f"  ... and {remaining} more")
 
 
-def print_summary(
-    console: Console, results: Dict[str, List[TaskInfo]], config: DirectoryConfig
-):
+def print_summary(console: Console, results: Dict[str, List[TaskInfo]], config: DirectoryConfig):
     """Print summary statistics."""
     total = 0
     state_counts: Dict[str, int] = {}
@@ -520,9 +504,7 @@ def print_summary(
 
     # Print compact summary
     if summary_parts:
-        console.print(
-            f"\n{config.emoji} Summary: {total} total ({', '.join(summary_parts)})"
-        )
+        console.print(f"\n{config.emoji} Summary: {total} total ({', '.join(summary_parts)})")
 
 
 def check_directory(
@@ -535,9 +517,7 @@ def check_directory(
 
     # Print header with type-specific color
     style, _ = STATE_STYLES.get(config.states[0], ("white", "•"))
-    console.print(
-        f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n"
-    )
+    console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n")
 
     # Print sections in order
     if results["issues"]:
@@ -573,9 +553,7 @@ def check_directory(
     return results
 
 
-def print_total_summary(
-    console: Console, all_results: Dict[str, Dict[str, List[TaskInfo]]]
-):
+def print_total_summary(console: Console, all_results: Dict[str, Dict[str, List[TaskInfo]]]):
     """Print summary of all directory types."""
     table = Table(title="\n📊 Total Summary", show_header=False, title_style="bold")
     table.add_column("Category", style="bold")
@@ -782,9 +760,7 @@ def check(fix: bool, task_files: list[str]):
     # Check for circular dependencies
     for task in tasks_with_deps:
         if has_cycle(task.id, set(), set()):
-            cycle_issues.append(
-                f"Circular dependency detected involving task {task.id}"
-            )
+            cycle_issues.append(f"Circular dependency detected involving task {task.id}")
 
     # TODO: Implement link checking
     # for task in tasks:
@@ -915,9 +891,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
         "depends": {"type": "list"},  # Deprecated, use requires instead
-        "blocks": {
-            "type": "list"
-        },  # Deprecated, use requires instead (note: different semantics)
+        "blocks": {"type": "list"},  # Deprecated, use requires instead (note: different semantics)
         "requires": {"type": "list"},  # Required dependencies (canonical)
         "related": {"type": "list"},  # Related items (informational)
         "discovered-from": {"type": "list"},  # Tasks this was discovered from
@@ -959,9 +933,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     value = normalized
             if value not in field_spec["values"]:  # type: ignore[operator]
                 valid = ", ".join(field_spec["values"])  # type: ignore[arg-type]
-                console.print(
-                    f"[red]Invalid {field}: {value}. Valid values: {valid}[/]"
-                )
+                console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
                 return
         elif field_spec["type"] == "date":
             try:
@@ -984,9 +956,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
     if set_subtask:
         subtask_text, state = set_subtask
         if state not in ["done", "todo"]:
-            console.print(
-                f"[red]Invalid subtask state: {state}. Valid values: done, todo[/]"
-            )
+            console.print(f"[red]Invalid subtask state: {state}. Valid values: done, todo[/]")
             return
         changes.append(("set_subtask", subtask_text, state))
 
@@ -1069,9 +1039,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                         new = [x for x in new if x != value]
 
                 if new != current:
-                    task_changes.append(
-                        f"{field}: {', '.join(current)} -> {', '.join(new)}"
-                    )
+                    task_changes.append(f"{field}: {', '.join(current)} -> {', '.join(new)}")
             else:
                 # For set operations, only show the final value
                 set_ops = [v for op, v in field_ops if op == "set"]
@@ -1136,9 +1104,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             f.write(frontmatter.dumps(post))
 
     # Check if any tasks were marked as done and run completion hook
-    state_changes = [
-        (op, field, value) for op, field, value in changes if field == "state"
-    ]
+    state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
     if any(value == "done" for _, _, value in state_changes):
         for task in target_tasks:
             # Re-load task to get updated metadata
@@ -1151,13 +1117,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 hook_cmd = os.environ.get("HOOK_TASK_DONE")
                 if hook_cmd:
                     try:
-                        subprocess.run(
-                            [hook_cmd, task.id, task.name, str(repo_root)], check=False
-                        )
+                        subprocess.run([hook_cmd, task.id, task.name, str(repo_root)], check=False)
                     except Exception as e:
-                        console.print(
-                            f"[yellow]Note: Task completion hook error: {e}[/]"
-                        )
+                        console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
 
     # Show success message
     count = len(target_tasks)
@@ -1248,9 +1210,7 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
             rows.append([tag, str(count)])
 
     # Print table using tabulate with simple format
-    headers = (
-        ["Tag", "Count", "Tasks"] if (show_tasks or filter_tags) else ["Tag", "Count"]
-    )
+    headers = ["Tag", "Count", "Tasks"] if (show_tasks or filter_tags) else ["Tag", "Count"]
     console.print(tabulate(rows, headers=headers, tablefmt="plain"))
 
     # Print summary
@@ -1324,9 +1284,7 @@ def ready(state, output_json, output_jsonl, use_cache):
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
         if not issue_cache:
-            console.print(
-                "[yellow]Warning: Cache empty. Run 'tasks.py fetch' first.[/]"
-            )
+            console.print("[yellow]Warning: Cache empty. Run 'tasks.py fetch' first.[/]")
 
     # Filter by state first
     if state == "backlog":
@@ -1334,14 +1292,10 @@ def ready(state, output_json, output_jsonl, use_cache):
     elif state == "active":
         filtered_tasks = [task for task in all_tasks if task.state == "active"]
     else:  # both
-        filtered_tasks = [
-            task for task in all_tasks if task.state in ["backlog", "active"]
-        ]
+        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
 
     # Filter for ready (unblocked) tasks
-    ready_tasks = [
-        task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)
-    ]
+    ready_tasks = [task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)]
 
     if not ready_tasks:
         if output_json:
@@ -1352,9 +1306,7 @@ def ready(state, output_json, output_jsonl, use_cache):
             print("No ready tasks found", file=sys.stderr)
             return  # Empty output for JSONL
         console.print("[yellow]No ready tasks found![/]")
-        console.print(
-            "\n[dim]Tip: Try checking blocked tasks with --state to see dependencies[/]"
-        )
+        console.print("\n[dim]Tip: Try checking blocked tasks with --state to see dependencies[/]")
         return
 
     # Sort by priority (high to low) and then by creation date (oldest first)
@@ -1413,9 +1365,7 @@ def ready(state, output_json, output_jsonl, use_cache):
                 tracking_urls = tracking if isinstance(tracking, list) else [tracking]
                 for url in tracking_urls:
                     cached = issue_cache.get(url)
-                    if cached and has_new_activity(
-                        cached.get("updatedAt"), waiting_since
-                    ):
+                    if cached and has_new_activity(cached.get("updatedAt"), waiting_since):
                         activity_str = "[bold green]🔔 NEW[/]"
                         break
 
@@ -1429,9 +1379,7 @@ def ready(state, output_json, output_jsonl, use_cache):
         )
 
     console.print(table)
-    console.print(
-        "\n[dim]Run [bold]tasks.py next[/] to pick the top priority ready task[/]"
-    )
+    console.print("\n[dim]Run [bold]tasks.py next[/] to pick the top priority ready task[/]")
 
 
 @cli.command("next")
@@ -1504,9 +1452,7 @@ def next_(output_json, use_cache):
         return
 
     # Filter for ready (unblocked) tasks
-    ready_tasks = [
-        task for task in workable_tasks if is_task_ready(task, tasks_dict, issue_cache)
-    ]
+    ready_tasks = [task for task in workable_tasks if is_task_ready(task, tasks_dict, issue_cache)]
 
     if not ready_tasks:
         if output_json:
@@ -1524,9 +1470,7 @@ def next_(output_json, use_cache):
             return
         console.print("[yellow]No ready tasks found![/]")
         console.print("\n[dim]All new/active tasks are blocked by dependencies.[/]")
-        console.print(
-            "[dim]Run [bold]tasks.py ready --state both[/] to see all ready work[/]"
-        )
+        console.print("[dim]Run [bold]tasks.py ready --state both[/] to see all ready work[/]")
         return
 
     # Sort tasks by priority (high to low) and then by creation date (oldest first)
@@ -1544,17 +1488,13 @@ def next_(output_json, use_cache):
     if output_json:
         result = {
             "next_task": task_to_dict(next_task),
-            "alternatives": [
-                task_to_dict(t) for t in ready_tasks[1:4]
-            ],  # Top 3 alternatives
+            "alternatives": [task_to_dict(t) for t in ready_tasks[1:4]],  # Top 3 alternatives
         }
         print(json.dumps(result, indent=2))
         return
 
     # Show task using same format as show command
-    console.print(
-        f"\n[bold blue]🏃 Next Task:[/] (Priority: {next_task.priority or 'none'})"
-    )
+    console.print(f"\n[bold blue]🏃 Next Task:[/] (Priority: {next_task.priority or 'none'})")
     # Call show command directly instead of using callback
     show(next_task.name)
 
@@ -1642,11 +1582,7 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
                 f"No stale tasks found (threshold: {days} days, state: {state})",
                 file=sys.stderr,
             )
-            print(
-                json.dumps(
-                    {"stale_tasks": [], "count": 0, "days_threshold": days}, indent=2
-                )
-            )
+            print(json.dumps({"stale_tasks": [], "count": 0, "days_threshold": days}, indent=2))
             return
         if output_jsonl:
             print(
@@ -1654,9 +1590,7 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
                 file=sys.stderr,
             )
             return  # Empty output for JSONL when no tasks
-        console.print(
-            f"[green]No stale tasks found![/] (threshold: {days} days, state: {state})"
-        )
+        console.print(f"[green]No stale tasks found![/] (threshold: {days} days, state: {state})")
         return
 
     # Sort by modification date (oldest first)
@@ -1725,9 +1659,7 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
         )
 
     console.print(table)
-    console.print(
-        "\n[dim]Review these tasks for: completion, archival, or reassessment[/]"
-    )
+    console.print("\n[dim]Review these tasks for: completion, archival, or reassessment[/]")
     console.print("[dim]Run [bold]tasks.py show <id>[/] to inspect a task's details[/]")
 
 
@@ -1870,9 +1802,7 @@ def sync(update, output_json, use_cache, light, full):
     if use_cache and not cache_loaded:
         cache = load_cache(cache_path)
         if not cache:
-            console.print(
-                "[yellow]Warning: Cache is empty. Run 'tasks.py fetch' first.[/]"
-            )
+            console.print("[yellow]Warning: Cache is empty. Run 'tasks.py fetch' first.[/]")
     elif not use_cache:
         cache = {}
 
@@ -1938,12 +1868,16 @@ def sync(update, output_json, use_cache, light, full):
                 # Try to find state in cache using URL format
                 # Construct URL from parsed info
                 issue_type = "issues"  # Default to issues
-                cache_url = f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
+                cache_url = (
+                    f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
+                )
                 cached = cache.get(cache_url)
 
                 # Also try pull request URL
                 if not cached:
-                    cache_url = f"https://github.com/{issue_info['repo']}/pull/{issue_info['number']}"
+                    cache_url = (
+                        f"https://github.com/{issue_info['repo']}/pull/{issue_info['number']}"
+                    )
                     cached = cache.get(cache_url)
 
                 if cached:
@@ -1951,9 +1885,7 @@ def sync(update, output_json, use_cache, light, full):
 
             if issue_state is None and not use_cache:
                 # Fetch from GitHub API
-                issue_state = fetch_github_issue_state(
-                    issue_info["repo"], issue_info["number"]
-                )
+                issue_state = fetch_github_issue_state(issue_info["repo"], issue_info["number"])
 
         elif source == "linear":
             identifier = issue_info.get("identifier", "")
@@ -2021,9 +1953,7 @@ def sync(update, output_json, use_cache, light, full):
                     updated_at = cached.get("updatedAt")
             else:
                 # Fetch details including updatedAt
-                details = fetch_github_issue_details(
-                    issue_info["repo"], issue_info["number"]
-                )
+                details = fetch_github_issue_details(issue_info["repo"], issue_info["number"])
                 if details:
                     updated_at = details.get("updatedAt")
 
@@ -2060,9 +1990,7 @@ def sync(update, output_json, use_cache, light, full):
             "count": len(results),
             "in_sync": sum(1 for r in results if r.get("in_sync", False)),
             "out_of_sync": sum(1 for r in results if not r.get("in_sync", False)),
-            "with_new_activity": sum(
-                1 for r in results if r.get("new_activity", False)
-            ),
+            "with_new_activity": sum(1 for r in results if r.get("new_activity", False)),
         }
         if update:
             output["updated"] = sum(1 for r in results if r.get("updated", False))
@@ -2086,7 +2014,9 @@ def sync(update, output_json, use_cache, light, full):
         elif result.get("updated"):
             status = f"[blue]→ Updated to {result['new_state']}[/]"
         else:
-            status = f"[yellow]⚠ Out of sync (expected: {result.get('expected_state', 'unknown')})[/]"
+            status = (
+                f"[yellow]⚠ Out of sync (expected: {result.get('expected_state', 'unknown')})[/]"
+            )
 
         # Activity indicator - shows if there's new activity since waiting_since
         if result.get("new_activity"):
@@ -2107,13 +2037,9 @@ def sync(update, output_json, use_cache, light, full):
 
     console.print(table)
 
-    out_of_sync = sum(
-        1 for r in results if not r.get("in_sync", False) and not r.get("error")
-    )
+    out_of_sync = sum(1 for r in results if not r.get("in_sync", False) and not r.get("error"))
     if out_of_sync > 0 and not update:
-        console.print(
-            f"\n[dim]Run with --update to sync {out_of_sync} out-of-sync tasks[/]"
-        )
+        console.print(f"\n[dim]Run with --update to sync {out_of_sync} out-of-sync tasks[/]")
 
 
 @cli.command()
@@ -2216,9 +2142,7 @@ def plan(task_id: str, output_json: bool):
     for dep_name in target_task.requires:
         for task in all_tasks:
             if task.name == dep_name and task.state not in ["done", "cancelled"]:
-                unmet_dependencies.append(
-                    {"task": task.name, "state": task.state or "unknown"}
-                )
+                unmet_dependencies.append({"task": task.name, "state": task.state or "unknown"})
                 break
 
     # JSON output
@@ -2251,9 +2175,7 @@ def plan(task_id: str, output_json: bool):
 
     # Show unmet dependencies (blockers for this task)
     if unmet_dependencies:
-        console.print(
-            f"\n[bold red]⚠ Blocked by {len(unmet_dependencies)} unmet dependencies:[/]"
-        )
+        console.print(f"\n[bold red]⚠ Blocked by {len(unmet_dependencies)} unmet dependencies:[/]")
         for dep in unmet_dependencies:
             dep_emoji = STATE_EMOJIS.get(dep["state"], "•")
             console.print(f"  - {dep_emoji} {dep['task']} ({dep['state']})")
@@ -2366,9 +2288,7 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
             print(json.dumps({"fetched": 0, "cached": 0, "results": []}, indent=2))
             return
         console.print("[yellow]No external URLs found in tasks.[/]")
-        console.print(
-            "\n[dim]Add tracking, requires, or related URLs to task frontmatter.[/]"
-        )
+        console.print("\n[dim]Add tracking, requires, or related URLs to task frontmatter.[/]")
         return
 
     # Filter by cache age if not --all
@@ -2587,9 +2507,7 @@ def import_issues(
 
     # Warn about ignored options
     if source == "linear" and (label or assignee):
-        console.print(
-            "[yellow]Warning: --label and --assignee are not supported for Linear[/]"
-        )
+        console.print("[yellow]Warning: --label and --assignee are not supported for Linear[/]")
 
     # Ensure tasks directory exists
     tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -2615,9 +2533,7 @@ def import_issues(
 
     if not issues:
         if output_json:
-            print(
-                json.dumps({"imported": [], "count": 0, "message": "No issues found"})
-            )
+            print(json.dumps({"imported": [], "count": 0, "message": "No issues found"}))
             return
         console.print("[yellow]No issues found matching criteria[/]")
         return
@@ -2729,9 +2645,7 @@ def import_issues(
             console.print(f"  - {item['title'][:40]}: {item['reason']}")
 
     if not dry_run and imported:
-        console.print(
-            f"\n[green]✓ Created {len(imported)} task files in {tasks_dir}[/]"
-        )
+        console.print(f"\n[green]✓ Created {len(imported)} task files in {tasks_dir}[/]")
         console.print("[dim]Run 'tasks.py sync' to keep states synchronized[/]")
 
 
@@ -2755,13 +2669,9 @@ def import_issues(
     type=float,
     help=f"Lock timeout in hours (default: {DEFAULT_LOCK_TIMEOUT_HOURS})",
 )
-@click.option(
-    "--force", "-f", is_flag=True, help="Force acquire even if locked by another"
-)
+@click.option("--force", "-f", is_flag=True, help="Force acquire even if locked by another")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def lock_task(
-    task_id: str, worker: Optional[str], timeout: float, force: bool, output_json: bool
-):
+def lock_task(task_id: str, worker: Optional[str], timeout: float, force: bool, output_json: bool):
     """Acquire a lock on a task.
 
     Prevents multiple agents/processes from working on the same task.
@@ -2820,9 +2730,7 @@ def lock_task(
                 if force:
                     console.print(f"[yellow]⚠ Stole lock from {existing.worker}[/]")
                 else:
-                    console.print(
-                        f"[dim]Previous lock by {existing.worker} had expired[/]"
-                    )
+                    console.print(f"[dim]Previous lock by {existing.worker} had expired[/]")
             console.print(f"[green]✓ Locked task: {actual_task_id}[/]")
             console.print(f"[dim]  Worker: {worker}[/]")
             console.print(f"[dim]  Timeout: {timeout} hours[/]")
@@ -2831,9 +2739,7 @@ def lock_task(
             if existing:
                 age = existing.age_hours()
                 console.print(f"[yellow]  Locked by: {existing.worker}[/]")
-                console.print(
-                    f"[yellow]  Since: {existing.started} ({age:.1f}h ago)[/]"
-                )
+                console.print(f"[yellow]  Since: {existing.started} ({age:.1f}h ago)[/]")
                 console.print("[dim]  Use --force to steal the lock[/]")
             sys.exit(1)
 
@@ -2915,8 +2821,7 @@ def list_all_locks(cleanup: bool, output_json: bool):
                 json.dumps(
                     {
                         "removed": [
-                            {"task_id": lock.task_id, "worker": lock.worker}
-                            for lock in removed
+                            {"task_id": lock.task_id, "worker": lock.worker} for lock in removed
                         ],
                         "count": len(removed),
                     },

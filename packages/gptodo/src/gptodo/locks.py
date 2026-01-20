@@ -33,9 +33,7 @@ DEFAULT_LOCK_TIMEOUT_HOURS = 4
 
 
 @contextmanager
-def _atomic_lock_file(
-    path: Path, write: bool = False
-) -> Iterator[tuple[Optional[dict], Path]]:
+def _atomic_lock_file(path: Path, write: bool = False) -> Iterator[tuple[Optional[dict], Path]]:
     """Context manager for atomic file operations with flock.
 
     Uses fcntl.flock to ensure atomic read-modify-write operations,

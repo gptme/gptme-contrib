@@ -3,12 +3,21 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Simple wrapper script for tasks CLI.
+"""Wrapper script for gptodo CLI (tasks package).
 
-This script wraps the tasks package module to provide a consistent
-entry point across agent workspaces: ./scripts/tasks.py
+DEPRECATED: This script is deprecated in favor of the gptodo CLI.
+Install gptodo directly for better performance and standalone usage:
 
-All functionality lives in packages/tasks - this just forwards calls.
+    # Install as tool
+    uv tool install git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptodo
+
+    # Or from local checkout
+    uv pip install -e packages/gptodo
+
+    # Then use: gptodo <command>
+
+This wrapper will continue to work for backwards compatibility but may be
+removed in a future release.
 """
 
 import os
@@ -16,15 +25,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Print deprecation warning once per invocation
+if os.environ.get("_GPTODO_DEPRECATION_WARNED") != "1":
+    print(
+        "Warning: scripts/tasks.py is deprecated. Consider installing gptodo directly:",
+        file=sys.stderr,
+    )
+    print(
+        "  uv tool install git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptodo",
+        file=sys.stderr,
+    )
+    os.environ["_GPTODO_DEPRECATION_WARNED"] = "1"
+
 # Get the directory containing this script
 SCRIPT_DIR = Path(__file__).resolve().parent.absolute()
 GPTME_CONTRIB_ROOT = SCRIPT_DIR.parent
-# packages/tasks is relative to the gptme-contrib root
-TASKS_PKG_DIR = GPTME_CONTRIB_ROOT / "packages" / "tasks"
+# packages/gptodo (was tasks) is relative to the gptme-contrib root
+GPTODO_PKG_DIR = GPTME_CONTRIB_ROOT / "packages" / "gptodo"
 
-if not TASKS_PKG_DIR.exists():
+if not GPTODO_PKG_DIR.exists():
     print(
-        f"Error: tasks package directory not found at {TASKS_PKG_DIR}", file=sys.stderr
+        f"Error: gptodo package directory not found at {GPTODO_PKG_DIR}",
+        file=sys.stderr,
     )
     print(
         "This script must be run from within the gptme-contrib repository",
@@ -41,11 +63,11 @@ if __name__ == "__main__":
     env = os.environ.copy()
     env["TASKS_REPO_ROOT"] = original_cwd
 
-    # Forward all arguments to the tasks package module
-    # Run from packages/tasks directory so uv can find the module
+    # Forward all arguments to the gptodo package module
+    # Run from packages/gptodo directory so uv can find the module
     result = subprocess.run(
-        ["uv", "run", "python3", "-m", "tasks"] + sys.argv[1:],
-        cwd=str(TASKS_PKG_DIR),
+        ["uv", "run", "python3", "-m", "gptodo"] + sys.argv[1:],
+        cwd=str(GPTODO_PKG_DIR),
         env=env,
     )
     sys.exit(result.returncode)
