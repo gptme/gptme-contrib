@@ -14,6 +14,7 @@ Usage:
 
 import hashlib
 import hmac
+import html
 import json
 import os
 import subprocess
@@ -729,8 +730,8 @@ def oauth_callback():
         <head><title>Authorization Failed</title></head>
         <body style="font-family: sans-serif; padding: 40px; text-align: center;">
             <h1 style="color: #dc3545;">❌ Authorization Failed</h1>
-            <p>Error: {error}</p>
-            <p>{error_desc}</p>
+            <p>Error: {html.escape(error)}</p>
+            <p>{html.escape(error_desc)}</p>
             <p><a href="/">Back to home</a></p>
         </body>
         </html>
@@ -812,7 +813,7 @@ def oauth_callback():
             <body style="font-family: sans-serif; padding: 40px; text-align: center;">
                 <h1 style="color: #dc3545;">❌ Token Exchange Failed</h1>
                 <p>Status: {response.status_code}</p>
-                <p>Error: {response.text}</p>
+                <p>Error: {html.escape(response.text)}</p>
                 <p><a href="/">Back to home</a></p>
             </body>
             </html>
@@ -829,7 +830,7 @@ def oauth_callback():
             <head><title>Invalid Response</title></head>
             <body style="font-family: sans-serif; padding: 40px; text-align: center;">
                 <h1 style="color: #dc3545;">❌ Invalid Token Response</h1>
-                <p>Response: {data}</p>
+                <p>Response: {html.escape(str(data))}</p>
                 <p><a href="/">Back to home</a></p>
             </body>
             </html>
@@ -883,7 +884,7 @@ def oauth_callback():
         <head><title>Error</title></head>
         <body style="font-family: sans-serif; padding: 40px; text-align: center;">
             <h1 style="color: #dc3545;">❌ Error</h1>
-            <p>{type(e).__name__}: {e}</p>
+            <p>{html.escape(f"{type(e).__name__}: {e}")}</p>
             <p><a href="/">Back to home</a></p>
         </body>
         </html>
