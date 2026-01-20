@@ -14,6 +14,7 @@ Usage:
 
 import hashlib
 import hmac
+import html
 import json
 import os
 import subprocess
@@ -84,6 +85,7 @@ GPTME_TIMEOUT = 30 * 60  # 30 minutes
 
 # Linear API
 LINEAR_API = "https://api.linear.app/graphql"
+LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 TOKENS_FILE = Path(__file__).parent / ".tokens.json"
 
 # Session tracking for deduplication
@@ -707,15 +709,200 @@ def health():
     )
 
 
+@app.route("/oauth/callback", methods=["GET"])
+def oauth_callback():
+    """Handle OAuth callback from Linear.
+
+    This endpoint receives the authorization code from Linear after the user
+    authorizes the application, exchanges it for access/refresh tokens, and
+    saves them to the tokens file.
+    """
+    # Get the authorization code from the query string
+    code = request.args.get("code")
+    _state = request.args.get("state")  # TODO: Implement CSRF validation with state
+    error = request.args.get("error")
+
+    if error:
+        error_desc = request.args.get("error_description", "Unknown error")
+        return (
+            f"""
+        <html>
+        <head><title>Authorization Failed</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Authorization Failed</h1>
+            <p>Error: {html.escape(error)}</p>
+            <p>{html.escape(error_desc)}</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            400,
+        )
+
+    if not code:
+        return (
+            """
+        <html>
+        <head><title>Missing Code</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Missing Authorization Code</h1>
+            <p>No authorization code was provided in the callback.</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            400,
+        )
+
+    # Load OAuth credentials
+    client_id = os.environ.get("LINEAR_CLIENT_ID")
+    client_secret = os.environ.get("LINEAR_CLIENT_SECRET")
+    callback_url = os.environ.get("LINEAR_CALLBACK_URL")
+
+    if not client_id or not client_secret:
+        return (
+            """
+        <html>
+        <head><title>Configuration Error</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Configuration Error</h1>
+            <p>OAuth credentials not configured.</p>
+            <p>Set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in your .env file.</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            500,
+        )
+
+    if not callback_url:
+        return (
+            """
+        <html>
+        <head><title>Configuration Error</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Configuration Error</h1>
+            <p>Callback URL not configured.</p>
+            <p>Set LINEAR_CALLBACK_URL in your .env file.</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            500,
+        )
+
+    # Exchange the code for tokens
+    try:
+        response = httpx.post(
+            LINEAR_OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": callback_url,
+                "code": code,
+            },
+            timeout=30.0,
+        )
+
+        if response.status_code != 200:
+            return (
+                f"""
+            <html>
+            <head><title>Token Exchange Failed</title></head>
+            <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+                <h1 style="color: #dc3545;">❌ Token Exchange Failed</h1>
+                <p>Status: {response.status_code}</p>
+                <p>Error: {html.escape(response.text)}</p>
+                <p><a href="/">Back to home</a></p>
+            </body>
+            </html>
+            """,
+                500,
+            )
+
+        data = response.json()
+
+        if "access_token" not in data:
+            return (
+                f"""
+            <html>
+            <head><title>Invalid Response</title></head>
+            <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+                <h1 style="color: #dc3545;">❌ Invalid Token Response</h1>
+                <p>Response: {html.escape(str(data))}</p>
+                <p><a href="/">Back to home</a></p>
+            </body>
+            </html>
+            """,
+                500,
+            )
+
+        # Save tokens to file
+        tokens = {
+            "accessToken": data["access_token"],
+            "refreshToken": data.get("refresh_token"),
+            "expiresAt": time.time() * 1000 + data.get("expires_in", 315360000) * 1000,
+            "scope": data.get("scope", ""),
+            "tokenType": data.get("token_type", "Bearer"),
+        }
+
+        TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+        print(f"✓ OAuth tokens saved to {TOKENS_FILE}", file=sys.stderr)
+
+        return """
+        <html>
+        <head><title>Authorization Successful</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #28a745;">✅ Authorization Successful!</h1>
+            <p>OAuth tokens have been saved successfully.</p>
+            <p>You can now close this window.</p>
+            <p>The webhook server is ready to receive Linear events.</p>
+        </body>
+        </html>
+        """
+
+    except httpx.TimeoutException:
+        return (
+            """
+        <html>
+        <head><title>Timeout</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Request Timeout</h1>
+            <p>The token exchange request timed out.</p>
+            <p>Please try again.</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            500,
+        )
+    except Exception as e:
+        return (
+            f"""
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Error</h1>
+            <p>{html.escape(f"{type(e).__name__}: {e}")}</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            500,
+        )
+
+
 @app.route("/", methods=["GET"])
 def index():
     """Root endpoint."""
     return jsonify(
         {
             "service": "Linear Webhook Server",
-            "version": "2.0.0 (Python)",
+            "version": "2.1.0 (Python)",
             "endpoints": {
                 "/webhook": "POST - Linear webhook handler",
+                "/oauth/callback": "GET - OAuth callback handler",
                 "/health": "GET - Health check",
             },
         }
