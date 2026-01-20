@@ -15,15 +15,24 @@ and upstreamed to gptme-contrib for use by all gptme agents.
 
 ## Installation
 
-From workspace root:
+### Standalone (recommended for agents without uv workspace)
+
 ```bash
-uv pip install -e packages/gptmail
+# Using uv tool
+uv tool install git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptmail
+
+# Or using pipx
+pipx install git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptmail
 ```
 
-Or using the Makefile:
+### From workspace
+
 ```bash
-cd packages/gptmail
-make install
+# From workspace root
+uv pip install -e packages/gptmail
+
+# Or using the Makefile
+cd packages/gptmail && make install
 ```
 
 ## Usage
@@ -32,17 +41,22 @@ make install
 
 ```bash
 # Check for unreplied emails
-python -m gptmail check-unreplied
+gptmail check-unreplied
 
 # Read specific email with thread
-python -m gptmail read <MESSAGE_ID> --thread
+gptmail read <MESSAGE_ID> --thread
 
 # Compose a reply
-python -m gptmail reply <MESSAGE_ID> "Your reply message"
+gptmail reply <MESSAGE_ID> "Your reply message"
 
 # Send composed message
-python -m gptmail send <REPLY_MESSAGE_ID>
+gptmail send <REPLY_MESSAGE_ID>
+
+# See all commands
+gptmail --help
 ```
+
+Note: If installed in development mode, use `python -m gptmail` instead.
 
 ### Background Watcher
 
