@@ -1284,7 +1284,7 @@ def ready(state, output_json, output_jsonl, use_cache):
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
         if not issue_cache:
-            console.print("[yellow]Warning: Cache empty. Run 'tasks.py fetch' first.[/]")
+            console.print("[yellow]Warning: Cache empty. Run 'gptodo fetch' first.[/]")
 
     # Filter by state first
     if state == "backlog":
@@ -1379,7 +1379,7 @@ def ready(state, output_json, output_jsonl, use_cache):
         )
 
     console.print(table)
-    console.print("\n[dim]Run [bold]tasks.py next[/] to pick the top priority ready task[/]")
+    console.print("\n[dim]Run [bold]gptodo next[/] to pick the top priority ready task[/]")
 
 
 @cli.command("next")
@@ -1470,7 +1470,7 @@ def next_(output_json, use_cache):
             return
         console.print("[yellow]No ready tasks found![/]")
         console.print("\n[dim]All new/active tasks are blocked by dependencies.[/]")
-        console.print("[dim]Run [bold]tasks.py ready --state both[/] to see all ready work[/]")
+        console.print("[dim]Run [bold]gptodo ready --state both[/] to see all ready work[/]")
         return
 
     # Sort tasks by priority (high to low) and then by creation date (oldest first)
@@ -1531,12 +1531,12 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     By default shows active tasks not modified in 30+ days.
 
     Examples:
-        tasks.py stale                    # Active tasks unchanged for 30+ days
-        tasks.py stale --days 60          # Active tasks unchanged for 60+ days
-        tasks.py stale --state all        # All tasks regardless of state
-        tasks.py stale --state paused     # Only paused stale tasks
-        tasks.py stale --json             # Machine-readable output
-        tasks.py stale --jsonl            # One task per line (LLM-friendly)
+        gptodo stale                    # Active tasks unchanged for 30+ days
+        gptodo stale --days 60          # Active tasks unchanged for 60+ days
+        gptodo stale --state all        # All tasks regardless of state
+        gptodo stale --state paused     # Only paused stale tasks
+        gptodo stale --json             # Machine-readable output
+        gptodo stale --jsonl            # One task per line (LLM-friendly)
     """
     console = Console()
 
@@ -1660,7 +1660,7 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
 
     console.print(table)
     console.print("\n[dim]Review these tasks for: completion, archival, or reassessment[/]")
-    console.print("[dim]Run [bold]tasks.py show <id>[/] to inspect a task's details[/]")
+    console.print("[dim]Run [bold]gptodo show <id>[/] to inspect a task's details[/]")
 
 
 @cli.command("sync")
@@ -1802,7 +1802,7 @@ def sync(update, output_json, use_cache, light, full):
     if use_cache and not cache_loaded:
         cache = load_cache(cache_path)
         if not cache:
-            console.print("[yellow]Warning: Cache is empty. Run 'tasks.py fetch' first.[/]")
+            console.print("[yellow]Warning: Cache is empty. Run 'gptodo fetch' first.[/]")
     elif not use_cache:
         cache = {}
 
@@ -1916,7 +1916,7 @@ def sync(update, output_json, use_cache, light, full):
         if issue_state is None:
             source_name = "Linear" if source == "linear" else "GitHub"
             error_msg = (
-                "Issue not in cache (run 'tasks.py fetch' first)"
+                "Issue not in cache (run 'gptodo fetch' first)"
                 if use_cache
                 else f"Could not fetch issue state from {source_name}"
             )
@@ -2059,9 +2059,9 @@ def plan(task_id: str, output_json: bool):
     The TASK_ID can be the numeric ID or task name.
 
     Examples:
-        tasks.py plan 5                   # Impact analysis for task #5
-        tasks.py plan my-task-name        # By task name
-        tasks.py plan 5 --json            # Machine-readable output
+        gptodo plan 5                   # Impact analysis for task #5
+        gptodo plan my-task-name        # By task name
+        gptodo plan 5 --json            # Machine-readable output
     """
     console = Console()
 
@@ -2258,9 +2258,9 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
     Cache is stored in state/issue-cache.json.
 
     Examples:
-        tasks.py fetch                              # Fetch all external URLs from tasks
-        tasks.py fetch --all                        # Refresh all (ignore cache age)
-        tasks.py fetch https://github.com/o/r/issues/1  # Fetch specific URL
+        gptodo fetch                              # Fetch all external URLs from tasks
+        gptodo fetch --all                        # Refresh all (ignore cache age)
+        gptodo fetch https://github.com/o/r/issues/1  # Fetch specific URL
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2485,13 +2485,13 @@ def import_issues(
 
     Examples:
         # Import open issues from a GitHub repo
-        tasks.py import --source github --repo gptme/gptme --state open
+        gptodo import --source github --repo gptme/gptme --state open
 
         # Import issues with specific labels
-        tasks.py import --source github --repo gptme/gptme --label bug
+        gptodo import --source github --repo gptme/gptme --label bug
 
         # Import from Linear (requires LINEAR_API_KEY)
-        tasks.py import --source linear --team ENG
+        gptodo import --source linear --team ENG
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2646,7 +2646,7 @@ def import_issues(
 
     if not dry_run and imported:
         console.print(f"\n[green]✓ Created {len(imported)} task files in {tasks_dir}[/]")
-        console.print("[dim]Run 'tasks.py sync' to keep states synchronized[/]")
+        console.print("[dim]Run 'gptodo sync' to keep states synchronized[/]")
 
 
 # =============================================================================
@@ -2678,10 +2678,10 @@ def lock_task(task_id: str, worker: Optional[str], timeout: float, force: bool, 
     Locks expire after timeout (default 4 hours).
 
     Examples:
-        tasks.py lock my-task
-        tasks.py lock my-task --worker bob-session-123
-        tasks.py lock my-task --timeout 2.0
-        tasks.py lock my-task --force  # Steal lock from another worker
+        gptodo lock my-task
+        gptodo lock my-task --worker bob-session-123
+        gptodo lock my-task --timeout 2.0
+        gptodo lock my-task --force  # Steal lock from another worker
     """
     import socket
 
@@ -2760,9 +2760,9 @@ def unlock_task(task_id: str, worker: Optional[str], force: bool, output_json: b
     By default, only the lock owner can release. Use --force to override.
 
     Examples:
-        tasks.py unlock my-task
-        tasks.py unlock my-task --worker bob-session-123
-        tasks.py unlock my-task --force
+        gptodo unlock my-task
+        gptodo unlock my-task --worker bob-session-123
+        gptodo unlock my-task --force
     """
     import socket
 
@@ -2808,9 +2808,9 @@ def list_all_locks(cleanup: bool, output_json: bool):
     Use --cleanup to remove expired locks.
 
     Examples:
-        tasks.py locks
-        tasks.py locks --cleanup
-        tasks.py locks --json
+        gptodo locks
+        gptodo locks --cleanup
+        gptodo locks --json
     """
     repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
 
@@ -2938,16 +2938,16 @@ def add(
 
     Examples:
         # Simple task
-        tasks.py add "Fix the login bug"
+        gptodo add "Fix the login bug"
 
         # With options
-        tasks.py add --priority high --tags infra,context "Improve context loading"
+        gptodo add --priority high --tags infra,context "Improve context loading"
 
         # With body from stdin
-        echo "Detailed description here" | tasks.py add "Task with body"
+        echo "Detailed description here" | gptodo add "Task with body"
 
         # Multi-line body
-        tasks.py add "Complex task" << 'EOF'
+        gptodo add "Complex task" << 'EOF'
         ## Subtasks
         - [ ] First step
         - [ ] Second step
