@@ -143,7 +143,7 @@ cd ~/workspace/scripts/twitter
 
 - **Shared module**: `scripts/communication_utils/` (moved from email/)
 - **Twitter implementation**: `scripts/twitter/workflow.py` (partial)
-- **Email implementation**: `scripts/email/lib.py`, `scripts/email/watcher.py`
+- **Email implementation**: `packages/gptmail/src/gptmail/lib.py`, `packages/gptmail/src/gptmail/watcher.py`
 - **Status tracking**: This file (`scripts/twitter/MONITORING_STATUS.md`)
 
 ## Session 864 Summary

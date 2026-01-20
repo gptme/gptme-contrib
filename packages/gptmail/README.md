@@ -75,18 +75,17 @@ The package structure:
 
 ## Migration from scripts/email
 
-This package supersedes `gptme-contrib/scripts/email/`. Key differences:
+The `scripts/email/` directory has been removed. All functionality is now in this package (`packages/gptmail/`).
+
+Key improvements:
 - Proper Python package structure (src layout)
 - Part of uv workspace
-- Enhanced communication utilities
+- Enhanced communication utilities (auth, rate limiting, monitoring, state)
 - Better test coverage
+- Additional CLI commands (check-complexity, export-maildir, import-maildir)
 
-To migrate, replace:
+Usage:
 ```bash
-# Old (scripts/email)
-./gptme-contrib/scripts/email/cli.py check-unreplied
-
-# New (gptmail package)
 python -m gptmail check-unreplied
 # Or if installed: gptmail check-unreplied
 ```

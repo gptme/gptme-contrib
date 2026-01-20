@@ -10,9 +10,12 @@ From your agent workspace root:
 # Set up email directories
 mkdir -p email/{inbox,sent,archive,drafts,filters}
 
+# Install gptmail (from gptme-contrib)
+uv pip install -e gptme-contrib/packages/gptmail
+
 # Use the email system
-./gptme-contrib/scripts/email/cli.py compose recipient@example.com "Subject" "Message"
-./gptme-contrib/scripts/email/cli.py list
+python -m gptmail compose recipient@example.com "Subject" "Message"
+python -m gptmail list
 ```
 
 ## Features
@@ -22,6 +25,7 @@ mkdir -p email/{inbox,sent,archive,drafts,filters}
 - **Mail Client Compatibility**: Works with mutt, notmuch, and other standard tools
 - **Threading Support**: Automatic conversation threading
 - **Auto-Response**: Intelligent watcher for automated email handling
+- **Complexity Detection**: Automatic complexity analysis for routing decisions
 
 ## Directory Structure
 
@@ -36,8 +40,8 @@ your-agent-workspace/
 │   ├── drafts/         # Draft messages
 │   └── filters/        # Email filtering rules
 └── gptme-contrib/      # This repository (as submodule)
-    └── scripts/
-        └── email/      # Email system code
+    └── packages/
+        └── gptmail/    # Email system package
 ```
 
 ## Configuration
@@ -58,14 +62,21 @@ See the full documentation in this directory for detailed setup instructions.
 
 ```bash
 # Compose and send
-./gptme-contrib/scripts/email/cli.py compose recipient@example.com "Project Update" "Status report..."
-./gptme-contrib/scripts/email/cli.py send <message-id>
+python -m gptmail compose recipient@example.com "Project Update" "Status report..."
+python -m gptmail send <message-id>
 
 # Read with threading
-./gptme-contrib/scripts/email/cli.py read <message-id> --thread
+python -m gptmail read <message-id> --thread
+
+# Check email complexity
+python -m gptmail check-complexity --threshold 0.5
+
+# Export/import maildir
+python -m gptmail export-maildir inbox ~/backup-maildir
+python -m gptmail import-maildir ~/backup-maildir inbox
 
 # Auto-response watcher
-./gptme-contrib/scripts/email/watcher.py
+python -m gptmail.watcher
 ```
 
 This email system is part of the [gptme](https://github.com/gptme/gptme) ecosystem and designed to work with any AI agent workspace.

@@ -624,5 +624,135 @@ def check_completion_status(message_id: str) -> None:
         click.echo("No replies_state.json file found or invalid JSON")
 
 
+@cli.command()
+@click.option(
+    "--threshold",
+    "-t",
+    type=float,
+    default=0.6,
+    help="Complexity threshold (0.0-1.0, default: 0.6)",
+)
+@click.option(
+    "--mark-complex",
+    "-m",
+    is_flag=True,
+    help="Mark complex emails as requiring human review",
+)
+def check_complexity(threshold: float, mark_complex: bool) -> None:
+    """Check complexity of unreplied emails and optionally mark complex ones."""
+    from email.message import EmailMessage
+
+    from gptmail.complexity import ComplexityDetector
+
+    workspace_dir = get_workspace_dir()
+    email = AgentEmail(workspace_dir)
+    detector = ComplexityDetector()
+
+    unreplied = email.get_unreplied_emails()
+    if not unreplied:
+        click.echo("No unreplied emails to check.")
+        return
+
+    complex_count = 0
+    for msg_data in unreplied:
+        msg_id = msg_data.get("message_id", "unknown")
+        subject = msg_data.get("subject", "No Subject")
+        sender = msg_data.get("from", "Unknown")
+        body = msg_data.get("body", "")
+
+        # Create a minimal EmailMessage for the detector
+        msg = EmailMessage()
+        msg["Message-ID"] = msg_id
+        msg["Subject"] = subject
+        msg["From"] = sender
+
+        result = detector.detect(msg, body)
+
+        if result.score >= threshold:
+            complex_count += 1
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Subject: {subject}")
+            click.echo(f"From: {sender}")
+            click.echo(f"Complexity: {result.score:.2f}")
+            click.echo(f"Reasons: {', '.join(result.reasons) if result.reasons else 'None'}")
+
+            if mark_complex:
+                # Mark as needing human review
+                email.mark_no_reply_needed(
+                    msg_id, reason=f"Complex email (score: {result.score:.2f}) - needs human review"
+                )
+                click.echo("  -> Marked as requiring human review")
+
+    click.echo(
+        f"\n{complex_count} of {len(unreplied)} emails exceed complexity threshold ({threshold})"
+    )
+
+
+@cli.command()
+@click.argument("folder")
+@click.argument("dest_maildir")
+def export_maildir(folder: str, dest_maildir: str) -> None:
+    """Export messages from markdown to maildir format.
+
+    FOLDER: Folder to export (inbox, sent, drafts, archive, or 'all')
+    DEST_MAILDIR: Destination maildir directory path
+
+    Example:
+        gptmail export-maildir inbox ~/test-maildir
+        gptmail export-maildir all ~/test-maildir
+    """
+    workspace_dir = get_workspace_dir()
+    email_client = AgentEmail(workspace_dir)
+
+    dest_path = Path(dest_maildir)
+    folders = ["inbox", "sent", "drafts", "archive"] if folder == "all" else [folder]
+
+    for f in folders:
+        click.echo(f"Exporting {f} to {dest_path}...")
+        try:
+            result = email_client.export_to_maildir(f, dest_path)
+            if "error" in result:
+                click.echo(f"  Error: {result['error']}", err=True)
+            else:
+                click.echo(f"  Exported {result.get('count', 0)} messages")
+        except Exception as e:
+            click.echo(f"  Error exporting {f}: {e}", err=True)
+
+
+@cli.command()
+@click.argument("source_maildir")
+@click.argument("folder")
+def import_maildir(source_maildir: str, folder: str) -> None:
+    """Import messages from maildir to markdown format.
+
+    SOURCE_MAILDIR: Source maildir directory path
+    FOLDER: Destination folder (inbox, sent, drafts, archive, or 'all')
+
+    Example:
+        gptmail import-maildir ~/test-maildir inbox
+        gptmail import-maildir ~/test-maildir all
+    """
+    workspace_dir = get_workspace_dir()
+    email_client = AgentEmail(workspace_dir)
+
+    source_path = Path(source_maildir)
+    if not source_path.exists():
+        click.echo(f"Error: Source directory does not exist: {source_path}", err=True)
+        return
+
+    folders = ["inbox", "sent", "drafts", "archive"] if folder == "all" else [folder]
+
+    for f in folders:
+        click.echo(f"Importing from {source_path} to {f}...")
+        try:
+            result = email_client.import_from_maildir(source_path, f)
+            if "error" in result:
+                click.echo(f"  Error: {result['error']}", err=True)
+            else:
+                click.echo(f"  Imported {result.get('count', 0)} messages")
+        except Exception as e:
+            click.echo(f"  Error importing to {f}: {e}", err=True)
+
+
 if __name__ == "__main__":
     cli()

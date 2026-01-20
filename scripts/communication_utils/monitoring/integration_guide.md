@@ -9,7 +9,7 @@ This guide demonstrates how to integrate Phase 1 monitoring utilities (PlatformL
 ### Basic Logger Setup
 
 ```python
-from communication_utils.monitoring import get_logger
+from gptmail.communication_utils.monitoring import get_logger
 
 # Create platform-specific logger
 logger = get_logger("system", "email", log_dir=Path("logs/"))
@@ -23,7 +23,7 @@ logger.error("Failed to send", error="Connection timeout", retry_count=3)
 ### Basic Metrics Collection
 
 ```python
-from communication_utils.monitoring import MetricsCollector
+from gptmail.communication_utils.monitoring import MetricsCollector
 
 # Create collector
 metrics = MetricsCollector()
@@ -46,10 +46,10 @@ print(f"Avg duration: {stats['avg_duration']}s")
 
 ### Email System Integration
 
-**Location**: `gptme-contrib/scripts/email/lib.py`
+**Location**: `gptme-contrib/packages/gptmail/src/gptmail/lib.py`
 
 ```python
-from communication_utils.monitoring import get_logger, MetricsCollector
+from gptmail.communication_utils.monitoring import get_logger, MetricsCollector
 
 class EmailSystem:
     def __init__(self):
@@ -97,7 +97,7 @@ class EmailSystem:
 **Location**: `gptme-contrib/scripts/twitter/twitter.py`
 
 ```python
-from communication_utils.monitoring import get_logger, MetricsCollector
+from gptmail.communication_utils.monitoring import get_logger, MetricsCollector
 
 class TwitterSystem:
     def __init__(self):
@@ -144,7 +144,7 @@ class TwitterSystem:
 **Location**: `gptme-contrib/scripts/discord/discord_bot.py`
 
 ```python
-from communication_utils.monitoring import get_logger, MetricsCollector
+from gptmail.communication_utils.monitoring import get_logger, MetricsCollector
 
 class DiscordBot:
     def __init__(self):
@@ -202,7 +202,7 @@ View unified metrics across communication platforms.
 
 import argparse
 from pathlib import Path
-from communication_utils.monitoring import MetricsCollector
+from gptmail.communication_utils.monitoring import MetricsCollector
 
 # Import platform systems
 from email.lib import EmailSystem
