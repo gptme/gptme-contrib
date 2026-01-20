@@ -48,16 +48,27 @@ echo
 
 # If arguments provided, use them as repos
 if [ $# -gt 0 ]; then
-    # Process repos from arguments
+    # Process repos from arguments in parallel, collect output
     # Format: "owner/repo:label" or just "owner/repo" (label defaults to repo name)
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
+    
+    i=0
     for arg in "$@"; do
         if [[ "$arg" == *":"* ]]; then
             repo="${arg%:*}"
             label="${arg#*:}"
-            check_repo "$repo" "$label"
+            check_repo "$repo" "$label" > "$TMPDIR/$i.txt" 2>&1 &
         else
-            check_repo "$arg"
+            check_repo "$arg" > "$TMPDIR/$i.txt" 2>&1 &
         fi
+        ((i++))
+    done
+    wait  # Wait for all parallel checks to complete
+    
+    # Print results in order
+    for f in "$TMPDIR"/*.txt; do
+        cat "$f"
     done
 else
     # Try to use watched repos as fallback
