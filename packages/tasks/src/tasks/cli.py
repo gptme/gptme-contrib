@@ -57,7 +57,7 @@ from tasks.utils import (
     is_task_ready,
     resolve_tasks,
     StateChecker,
-    # Tracking and state
+    # Phase 4: Effective state computation (bob#240)
     parse_tracking_ref,
     fetch_github_issue_state,
     fetch_github_issue_details,
@@ -1749,11 +1749,27 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     is_flag=True,
     help="Use cached issue states instead of live API calls (run 'fetch' first)",
 )
-def sync(update, output_json, use_cache):
+@click.option(
+    "--light",
+    is_flag=True,
+    help="Light sync: poll notifications to invalidate stale cache, then sync",
+)
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Full sync: refresh all cached URLs regardless of age, then sync",
+)
+def sync(update, output_json, use_cache, light, full):
     """Sync task states with linked GitHub issues.
 
     Finds tasks with tracking field in frontmatter and compares
     their state with the linked GitHub issue state.
+
+    Sync modes (Phase 4 - bob#240):
+    --light: Poll GitHub notifications, invalidate relevant caches, refresh
+             affected URLs. Fast check for recent changes.
+    --full:  Refresh ALL external URLs regardless of cache age. Slower but
+             ensures complete cache freshness.
 
     Use --update to automatically update task states to match issue states.
     Use --json for machine-readable output.
@@ -1763,19 +1779,102 @@ def sync(update, output_json, use_cache):
     - OPEN issue -> task should be active/new
     - CLOSED issue -> task should be done
     """
+    from .lib import poll_github_notifications, extract_urls_from_notification
+
     console = Console()
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
+    cache_path = get_cache_path(repo_root)
 
-    # Load cache if requested
-    cache: Dict[str, Any] = {}
-    if use_cache:
-        cache_path = get_cache_path(repo_root)
+    # Handle light/full sync modes (Phase 4 - bob#240)
+    if light and full:
+        console.print("[red]Error: Cannot use --light and --full together[/]")
+        return
+
+    if light:
+        # Light sync: Poll notifications to invalidate stale cache entries
+        console.print("[cyan]Light sync: Polling GitHub notifications...[/]")
+        cache = load_cache(cache_path)
+
+        notifications = poll_github_notifications()
+        if notifications:
+            urls_to_refresh: set[str] = set()
+            for notif in notifications:
+                urls = extract_urls_from_notification(notif)
+                urls_to_refresh.update(urls)
+
+            # Invalidate cache entries for URLs with notifications
+            invalidated = 0
+            for url in urls_to_refresh:
+                if url in cache:
+                    del cache[url]
+                    invalidated += 1
+
+            if invalidated > 0:
+                console.print(f"[yellow]Invalidated {invalidated} cache entries[/]")
+                save_cache(cache_path, cache)
+
+            # Fetch fresh states for invalidated URLs
+            if urls_to_refresh:
+                console.print(f"[cyan]Refreshing {len(urls_to_refresh)} URLs...[/]")
+                for url in urls_to_refresh:
+                    state_info = fetch_url_state(url)
+                    if state_info:
+                        cache[url] = {
+                            "state": state_info["state"],
+                            "source": state_info.get("source", "unknown"),
+                            "last_fetched": datetime.now(timezone.utc).isoformat(),
+                            "updatedAt": state_info.get("updatedAt"),
+                        }
+                save_cache(cache_path, cache)
+        else:
+            console.print("[dim]No new notifications found[/]")
+
+        # Continue with sync using updated cache
+        use_cache = True
+
+    if full:
+        # Full sync: Refresh ALL external URLs
+        console.print("[cyan]Full sync: Refreshing all external URLs...[/]")
+        all_tasks_for_scan = load_tasks(tasks_dir)
+
+        all_urls: set[str] = set()
+        for task in all_tasks_for_scan:
+            task_urls = extract_external_urls(task)
+            all_urls.update(task_urls)
+
+        if all_urls:
+            console.print(f"[cyan]Fetching {len(all_urls)} URLs...[/]")
+            cache = load_cache(cache_path)
+
+            fetched = 0
+            for url in sorted(all_urls):
+                state_info = fetch_url_state(url)
+                if state_info:
+                    cache[url] = {
+                        "state": state_info["state"],
+                        "source": state_info.get("source", "unknown"),
+                        "last_fetched": datetime.now(timezone.utc).isoformat(),
+                        "updatedAt": state_info.get("updatedAt"),
+                    }
+                    fetched += 1
+
+            save_cache(cache_path, cache)
+            console.print(f"[green]Refreshed {fetched} URLs[/]")
+
+        # Continue with sync using refreshed cache
+        use_cache = True
+
+    # Load cache if requested (or if light/full already set it)
+    cache_loaded = "cache" in dir() and cache  # Check if cache was already loaded
+    if use_cache and not cache_loaded:
         cache = load_cache(cache_path)
         if not cache:
             console.print(
                 "[yellow]Warning: Cache is empty. Run 'tasks.py fetch' first.[/]"
             )
+    elif not use_cache:
+        cache = {}
 
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)

@@ -791,6 +791,110 @@ def is_task_ready(
     return True
 
 
+def compute_effective_state(
+    task: TaskInfo,
+    all_tasks: Dict[str, TaskInfo],
+    issue_cache: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Compute the effective state of a task including virtual 'blocked' state.
+
+    Effective state considers both the task's actual state AND its dependencies:
+    - If task state is 'done' or 'cancelled' → returns that state (terminal)
+    - If ANY required dependency (task or URL) is not resolved → returns 'blocked'
+    - Otherwise → returns the task's actual state
+
+    'blocked' is a virtual state that is never written to frontmatter.
+    It indicates the task cannot be worked on until dependencies resolve.
+
+    Args:
+        task: Task to compute effective state for
+        all_tasks: Dictionary mapping task names to TaskInfo objects
+        issue_cache: Optional cache of issue states for URL-based requires
+
+    Returns:
+        Effective state string (including virtual 'blocked' state)
+    """
+    # Terminal states are always returned as-is
+    if task.state in ("done", "cancelled"):
+        return task.state or "unknown"
+
+    # Check if task is blocked by dependencies
+    requires = task.requires
+    if not requires:
+        # No dependencies = actual state
+        return task.state or "unknown"
+
+    # Check each dependency
+    for req in requires:
+        if isinstance(req, str) and req.startswith("http"):
+            # URL-based dependency - check cache
+            if issue_cache:
+                cached = issue_cache.get(req)
+                if cached:
+                    # If URL is OPEN, task is blocked
+                    if cached.get("state") == "OPEN":
+                        return "blocked"
+                # If not in cache, assume not blocked (can't determine)
+            # Without cache, assume not blocked
+        else:
+            # Task-based dependency
+            dep_task = all_tasks.get(req)
+            if dep_task is None:
+                # Missing dependency = blocked
+                return "blocked"
+            if dep_task.state not in ("done", "cancelled"):
+                # Dependency not completed = blocked
+                return "blocked"
+
+    # All dependencies resolved = actual state
+    return task.state or "unknown"
+
+
+def get_blocking_reasons(
+    task: TaskInfo,
+    all_tasks: Dict[str, TaskInfo],
+    issue_cache: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Get list of reasons why a task is blocked.
+
+    Returns empty list if task is not blocked.
+
+    Args:
+        task: Task to check
+        all_tasks: Dictionary mapping task names to TaskInfo objects
+        issue_cache: Optional cache of issue states
+
+    Returns:
+        List of blocking reason strings
+    """
+    # Terminal states are never blocked
+    if task.state in ("done", "cancelled"):
+        return []
+
+    requires = task.requires
+    if not requires:
+        return []
+
+    reasons = []
+    for req in requires:
+        if isinstance(req, str) and req.startswith("http"):
+            # URL-based dependency
+            if issue_cache:
+                cached = issue_cache.get(req)
+                if cached and cached.get("state") == "OPEN":
+                    reasons.append(f"Waiting on: {req}")
+            # Without cache, can't determine
+        else:
+            # Task-based dependency
+            dep_task = all_tasks.get(req)
+            if dep_task is None:
+                reasons.append(f"Missing task: {req}")
+            elif dep_task.state not in ("done", "cancelled"):
+                reasons.append(f"Blocked by: {req} ({dep_task.state})")
+
+    return reasons
+
+
 def resolve_tasks(
     task_ids: List[str], tasks: List[TaskInfo], tasks_dir: Path
 ) -> List[TaskInfo]:
