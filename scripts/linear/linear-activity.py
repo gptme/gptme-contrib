@@ -139,6 +139,41 @@ LINEAR_OAUTH_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 # ============================================================================
 
 
+def validate_auth_environment() -> dict[str, str]:
+    """Validate all required environment variables for OAuth flow.
+
+    Returns:
+        Dict with validated credentials: client_id, client_secret, callback_url
+
+    Raises:
+        AuthenticationError: If any required credentials are missing
+    """
+    required_vars = {
+        "LINEAR_CLIENT_ID": "From Linear OAuth Application settings (Settings > API > OAuth Applications)",
+        "LINEAR_CLIENT_SECRET": "From Linear OAuth Application settings (Settings > API > OAuth Applications)",
+        "LINEAR_CALLBACK_URL": "Your ngrok URL + /oauth/callback (e.g., https://abc123.ngrok-free.app/oauth/callback)",
+    }
+
+    values = {}
+    missing = []
+
+    for var, description in required_vars.items():
+        value = os.environ.get(var)
+        if value:
+            values[var] = value
+        else:
+            missing.append(f"  - {var}: {description}")
+
+    if missing:
+        raise AuthenticationError(
+            "Missing required environment variables for OAuth:\n"
+            + "\n".join(missing)
+            + f"\n\nSet these in {ENV_FILE} (see .env.template for examples)"
+        )
+
+    return values
+
+
 def load_oauth_credentials() -> tuple[str, str]:
     """Load OAuth client credentials from environment.
 
@@ -254,16 +289,11 @@ def do_auth() -> None:
     Raises:
         AuthenticationError: If credentials are missing or auth fails
     """
-    client_id, client_secret = load_oauth_credentials()
-
-    # Get callback URL from env
-    callback_url = os.environ.get("LINEAR_CALLBACK_URL")
-    if not callback_url:
-        raise AuthenticationError(
-            "LINEAR_CALLBACK_URL required in .env\n"
-            "Set it to your ngrok HTTPS URL + /oauth/callback\n"
-            "Example: https://abc123.ngrok-free.app/oauth/callback"
-        )
+    # Validate all required env vars upfront (shows all missing at once)
+    env = validate_auth_environment()
+    client_id = env["LINEAR_CLIENT_ID"]
+    client_secret = env["LINEAR_CLIENT_SECRET"]
+    callback_url = env["LINEAR_CALLBACK_URL"]
 
     # Build authorization URL
     scopes = "read,write,app:mentionable,app:assignable,initiative:read,initiative:write,issues:create,comments:create"
