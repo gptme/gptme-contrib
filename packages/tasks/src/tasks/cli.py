@@ -2842,8 +2842,8 @@ def list_all_locks(cleanup: bool, output_json: bool):
                 {
                     "locks": [
                         {
-                            "task_id": lock.task_id,
-                            "worker": lock.worker,
+                            "task_id": lck.task_id,
+                            "worker": lck.worker,
                             "started": lck.started,
                             "timeout_hours": lck.timeout_hours,
                             "age_hours": round(lck.age_hours(), 2),

@@ -11,3 +11,6 @@ scripts/.env
 .venv/
 venv/
 .gptme/
+
+# Task lock files (runtime state)
+state/locks/
