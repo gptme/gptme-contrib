@@ -45,7 +45,7 @@ cat journal/most-recent-entry.md
 ### Phase 2: Task Selection (3-5 min)
 ```shell
 # Check task status and priorities
-./scripts/tasks.py status --compact
+gptodo status --compact
 
 # Check for GitHub notifications/issues
 gh issue list --assignee @me

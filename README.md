@@ -75,7 +75,7 @@ See [scripts/github/README.md](scripts/github/README.md) for detailed documentat
 
 ### Other
 
-- **tasks.py** - Task management utilities
+- **gptodo** - Task management utilities
 - **wordcount.py** - Word counting utilities
 - **perplexity.py** - Perplexity API integration
 

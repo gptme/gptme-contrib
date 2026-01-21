@@ -43,7 +43,7 @@ ls -la journal/ | tail -5
 grep -r "issue\|create\|TODO" journal/ | tail -10
 
 # Check active tasks for overlap
-./scripts/tasks.py status --compact
+gptodo status --compact
 ```
 
 ### 4. Verify Necessity
