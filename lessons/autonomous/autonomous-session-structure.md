@@ -31,7 +31,7 @@ Observable signals that structured approach is needed:
 - Spending too much time on setup vs. actual progress
 - Treating "waiting for response" as "blocked" (they're different!)
 - Claiming "all blocked" when TERTIARY work exists
-- Not using `tasks.py ready` to find available work
+- Not using `gptodo ready` to find available work
 
 ## Pattern
 
@@ -86,10 +86,10 @@ gh api notifications --jq '.[] | {reason, subject: .subject.title}'
 **TERTIARY**: Check workspace tasks for ready work
 ```shell
 # Find tasks ready for work (no unmet dependencies)
-./scripts/tasks.py ready --json | jq '.ready_tasks[:3]'
+gptodo ready --json | jq '.ready_tasks[:3]'
 
 # Or use compact status view
-./scripts/tasks.py status --compact
+gptodo status --compact
 ```
 
 **CRITICAL - Waiting vs Blocked**:
@@ -131,7 +131,7 @@ cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 ```
 
 **Format guidance**:
-- **Avoid state fields** like "OPEN/CLOSED" - they get outdated; use `tasks.py sync` to check external state
+- **Avoid state fields** like "OPEN/CLOSED" - they get outdated; use `gptodo sync` to check external state
 - **Rich in links** - issue URLs, PR links, documentation references
 - **Actionable next steps** - not "work on X" but "implement the foo function in bar.py"
 - **Evict completed items** - remove priorities after completion to keep queue focused
@@ -140,10 +140,10 @@ cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 
 *Git policy*: **Commit the queue** - provides audit trail of agent planning and enables coordination across sessions/agents. Queue changes should be committed with journal entries to track planning evolution.
 
-*Useful tasks.py commands*:
-- `tasks.py sync --json` - Compare task/issue states, find out-of-sync items
-- `tasks.py stale --days 30` - Surface neglected tasks for review
-- `tasks.py plan <task>` - Show task impact analysis before starting work
+*Useful gptodo commands*:
+- `gptodo sync --json` - Compare task/issue states, find out-of-sync items
+- `gptodo stale --days 30` - Surface neglected tasks for review
+- `gptodo plan <task>` - Show task impact analysis before starting work
 
 **Selection Rule**: Check all three sources. First unblocked work found gets executed.
 
@@ -154,9 +154,9 @@ cat state/queue-manual.md || echo "No work queue - continue to SECONDARY"
 4. Response will surface later via notifications
 
 ```shell
-# When task is waiting (not blocked), update metadata using tasks.py:
-./scripts/tasks.py edit <task-name> --set waiting_for "Response on PR #123"
-./scripts/tasks.py edit <task-name> --set waiting_since 2025-01-10
+# When task is waiting (not blocked), update metadata using gptodo:
+gptodo edit <task-name> --set waiting_for "Response on PR #123"
+gptodo edit <task-name> --set waiting_since 2025-01-10
 # Then proceed to next ready work
 ```
 
@@ -249,8 +249,8 @@ git push origin master
 
 **Phase 2** (4 min):
 - `gh issue list --assignee @me` → found GitHub issue from collaborator (SECONDARY)
-- `./scripts/tasks.py ready --json` → 4 ready tasks, highest priority: agent-hosting-patterns
-- `./scripts/tasks.py next --json` → recommends agent-hosting-patterns with reasoning
+- `gptodo ready --json` → 4 ready tasks, highest priority: agent-hosting-patterns
+- `gptodo next --json` → recommends agent-hosting-patterns with reasoning
 - Decision: Work on GitHub issue (SECONDARY takes priority over TERTIARY)
 
 **Phase 3** (22 min):

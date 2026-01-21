@@ -46,7 +46,7 @@ ls -1 journal/ | tail -3 | xargs -I {} sh -c 'echo "=== {} ==="; head -10 journa
 
 # 4. Active Task Context
 echo -e "\nActive tasks review:"
-./scripts/tasks.py status --compact
+gptodo status --compact
 
 echo "=== END RECENT ACTIONS REVIEW ==="
 ```

@@ -149,5 +149,5 @@ Following this pattern enables:
 - State filtering for issues
 
 ## Related
-- [gptme-contrib tasks.py import command](https://github.com/gptme/gptme-contrib) - Uses this pattern
+- [gptme-contrib gptodo import command](https://github.com/gptme/gptme-contrib) - Uses this pattern
 - [Linear GraphQL API docs](https://developers.linear.app/docs/graphql/working-with-the-graphql-api)
