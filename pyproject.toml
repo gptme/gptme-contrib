@@ -13,4 +13,4 @@ dev = [
 
 [tool.uv.workspace]
 members = ["packages/*", "plugins/*"]
-exclude = ["packages/__pycache__", "plugins/__pycache__"]
+exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks"]
