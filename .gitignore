@@ -14,3 +14,6 @@ venv/
 
 # Task lock files (runtime state)
 state/locks/
+
+# Stale directory from tasks->gptodo rename (PR #171)
+packages/tasks/
