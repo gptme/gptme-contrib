@@ -4,6 +4,13 @@ Collection of plugins for [gptme](https://github.com/ErikBjare/gptme).
 
 ## Available Plugins
 
+### 🎯 gptme-ace
+ACE (Agentic Context Engineering) context optimization plugin with hybrid retrieval, semantic matching, and context curation.
+
+**Use for**: Optimizing context for better agent performance, semantic search, context budget management.
+
+[Documentation](./gptme-ace/README.md)
+
 ### 🧠 gptme-attention-tracker
 Attention tracking and routing plugin combining history tracking and HOT/WARM/COLD tier management. Implements dynamic context management for both meta-learning and token optimization.
 
@@ -52,6 +59,13 @@ Language Server Protocol integration for enhanced code intelligence.
 **Use for**: Code completion, diagnostics, and navigation within gptme.
 
 [Documentation](./gptme-lsp/README.md)
+
+### 🔄 gptme-ralph
+Iterative execution plugin implementing Ralph loops for complex multi-step tasks with automatic iteration and convergence.
+
+**Use for**: Complex tasks requiring multiple iterations, self-correcting workflows, tasks that need refinement cycles.
+
+[Documentation](./gptme-ralph/README.md)
 
 ### 🔍 gptme-warpgrep
 Enhanced search capabilities with Warp-style filtering and presentation.

@@ -16,7 +16,7 @@ Plugins extend gptme's capabilities with custom tools and hooks. See [plugins/RE
 
 | Plugin | Description |
 |--------|-------------|
-| [ace](./plugins/ace/) | ACE-inspired context optimization |
+| [gptme-ace](./plugins/gptme-ace/) | ACE-inspired context optimization |
 | [gptme-attention-tracker](./plugins/gptme-attention-tracker/) | Attention routing + history tracking for context management |
 | [gptme-claude-code](./plugins/gptme-claude-code/) | Claude Code subagent integration |
 | [gptme-consortium](./plugins/gptme-consortium/) | Multi-model consensus decision-making |

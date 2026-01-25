@@ -729,7 +729,7 @@ wheels = [
 [[package]]
 name = "gptme-ace"
 version = "0.1.0"
-source = { editable = "plugins/ace" }
+source = { editable = "plugins/gptme-ace" }
 dependencies = [
     { name = "gptme" },
     { name = "pydantic" },
