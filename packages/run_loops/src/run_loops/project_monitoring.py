@@ -214,6 +214,12 @@ class ProjectMonitoringRun(BaseRunLoop):
                     is_new = True
 
                 if is_new:
+                    # Check if last comment is just mentioning someone else (e.g., "@greptileai review")
+                    if self._is_mention_of_someone_else(repo, pr_number):
+                        # Update state file to avoid re-checking, but don't create work item
+                        state_file.write_text(updated_at)
+                        continue
+
                     # Check spam prevention before adding work item
                     if self.should_post_comment(repo, pr_number, "update"):
                         # Update state file
@@ -362,6 +368,78 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         except Exception as e:
             self.logger.warning(f"Error checking last activity author: {e}")
+            return False
+
+    def _is_mention_of_someone_else(self, repo: str, pr_number: int) -> bool:
+        """Check if the last comment is just mentioning someone else.
+
+        Filters out comments like "@greptileai review" or "review @coderabbitai"
+        that are invoking other bots/users, not requesting work from this agent.
+
+        Args:
+            repo: Repository name (owner/repo)
+            pr_number: PR number
+
+        Returns:
+            True if last comment is a mention of someone other than self
+        """
+        try:
+            # Get last comment body
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "comments",
+                    "--jq",
+                    ".comments | sort_by(.createdAt) | last | .body",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode != 0 or not result.stdout.strip():
+                return False
+
+            body = result.stdout.strip()
+
+            # Check if comment is short (likely just a bot invocation)
+            # Long comments with mentions are probably real discussions
+            if len(body) > 100:
+                return False
+
+            # Check for @mention pattern at start or end
+            mention_pattern = re.compile(r"@([\w-]+)")
+            mentions = mention_pattern.findall(body)
+
+            if not mentions:
+                return False
+
+            # Check if body starts or ends with a mention
+            body_stripped = body.strip()
+            starts_with_mention = body_stripped.startswith("@")
+            ends_with_mention = bool(re.search(r"@[\w-]+\s*$", body_stripped))
+
+            if not (starts_with_mention or ends_with_mention):
+                return False
+
+            # If all mentions are to someone other than self, skip
+            # (allows comments that mention self along with others)
+            if self.author not in mentions:
+                self.logger.info(
+                    f"PR {repo}#{pr_number} last comment mentions others ({mentions}), not {self.author} - skipping"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            self.logger.warning(f"Error checking for mention of others: {e}")
             return False
 
     def _check_for_bot_reviews(
