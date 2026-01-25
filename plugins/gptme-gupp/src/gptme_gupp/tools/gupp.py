@@ -283,11 +283,12 @@ def hook_abandon(task_id: str, reason: str) -> str:
     hook["abandoned_at"] = _now()
     hook["abandon_reason"] = reason
 
-    # Move to archive
+    # Move to archive (use sanitized task_id for filename safety)
     archive_dir = _get_hooks_dir() / "archive"
     archive_dir.mkdir(exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    archive_path = archive_dir / f"{task_id}-{timestamp}.json"
+    safe_id = task_id.replace("/", "-").replace("\\", "-")
+    archive_path = archive_dir / f"{safe_id}-{timestamp}.json"
     archive_path.write_text(json.dumps(hook, indent=2))
 
     hook_file.unlink()
