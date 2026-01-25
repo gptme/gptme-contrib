@@ -8,16 +8,16 @@ Python packages for gptme agents.
 |---------|---------|---------|
 | **gptmail** | Email/message handling | `uv pip install -e packages/gptmail` |
 | **gptodo** | Task management and work queues | `uv pip install -e packages/gptodo` |
-| **gptme-lessons-extras** | Lesson format validation and analysis | `uv pip install -e packages/gptme-lessons-extras` |
-| **gptme-contrib-lib** | Shared utilities across packages | `uv pip install -e packages/gptme-contrib-lib` |
-| **gptme-runloops** | Autonomous run loop infrastructure | `uv pip install -e packages/gptme-runloops` |
+| **gptme_lessons_extras** | Lesson format validation and analysis | `uv pip install -e packages/gptme_lessons_extras` |
+| **gptme_contrib_lib** | Shared utilities across packages | `uv pip install -e packages/gptme_contrib_lib` |
+| **gptme_runloops** | Autonomous run loop infrastructure | `uv pip install -e packages/gptme_runloops` |
 
 ## Backward Compatibility
 
 Source-level symlinks are provided for backward compatibility with existing imports:
-- `from lessons import ...` works via `gptme-lessons-extras/src/lessons` symlink
-- `from lib import ...` works via `gptme-contrib-lib/src/lib` symlink
-- `from run_loops import ...` works via `gptme-runloops/src/run_loops` symlink
+- `from lessons import ...` works via `gptme_lessons_extras/src/lessons` symlink
+- `from lib import ...` works via `gptme_contrib_lib/src/lib` symlink
+- `from run_loops import ...` works via `gptme_runloops/src/run_loops` symlink
 
 ## Structure
 
