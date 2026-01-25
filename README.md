@@ -1,94 +1,86 @@
 # gptme-contrib
 
-Community-contributed tools and scripts for [gptme](https://github.com/ErikBjare/gptme).
+Community-contributed plugins, packages, scripts, and lessons for [gptme](https://github.com/ErikBjare/gptme).
 
 ## Overview
 
 This repository contains:
-- [Custom `tools/`](https://gptme.org/docs/custom_tool.html) that extend gptme's functionality
-- Standalone `scripts/` that can be used via the shell tool
-- Shared `lessons/` for agents
+- **[`plugins/`](./plugins/)** - Extend gptme with custom functionality ([gptme docs](https://gptme.org/docs/custom_tool.html))
+- **[`packages/`](./packages/)** - Reusable Python packages
+- **[`scripts/`](./scripts/)** - Standalone scripts for automation
+- **[`lessons/`](./lessons/)** - Shared lessons for prompts and workflows
 
-This repo is meant as a place for the community to share tools and scripts that they have created for gptme, but are not general/mature/stable enough to be included in the core gptme repository.
+## Plugins
 
-If you have a tool you'd like to share, please consider contributing it here!
+Plugins extend gptme's capabilities with custom tools and hooks. See [plugins/README.md](./plugins/README.md) for details.
+
+| Plugin | Description |
+|--------|-------------|
+| [ace](./plugins/ace/) | ACE-inspired context optimization |
+| [gptme-attention-tracker](./plugins/gptme-attention-tracker/) | Attention routing + history tracking for context management |
+| [gptme-claude-code](./plugins/gptme-claude-code/) | Claude Code subagent integration |
+| [gptme-consortium](./plugins/gptme-consortium/) | Multi-model consensus decision-making |
+| [gptme-gupp](./plugins/gptme-gupp/) | Work persistence for session continuity |
+| [gptme-hooks-examples](./plugins/gptme-hooks-examples/) | Example hook implementations |
+| [gptme-imagen](./plugins/gptme-imagen/) | Multi-provider image generation |
+| [gptme-lsp](./plugins/gptme-lsp/) | Language Server Protocol integration |
+| [gptme-warpgrep](./plugins/gptme-warpgrep/) | Enhanced search with Warp-style filtering |
+| [gptme-wrapped](./plugins/gptme-wrapped/) | Wrapped tool definitions for sandboxing |
+
+### Plugin Usage
+
+Add to your `gptme.toml`:
+
+```toml
+[plugins]
+paths = ["path/to/gptme-contrib/plugins"]
+enabled = ["gptme_attention_tracker", "gptme_imagen"]
+```
+
+## Packages
+
+Reusable Python packages. See [packages/README.md](./packages/README.md).
+
+| Package | Description |
+|---------|-------------|
+| [gptmail](./packages/gptmail/) | Universal email system for AI agents |
+| [gptodo](./packages/gptodo/) | Task management CLI and utilities |
+| [lessons](./packages/lessons/) | Lesson validation and tools |
+| [run_loops](./packages/run_loops/) | Agent run loop patterns |
+| [lib](./packages/lib/) | Shared utilities |
+
+## Scripts
+
+Standalone scripts for automation. See each directory's README for details.
+
+| Directory | Description |
+|-----------|-------------|
+| [github/](./scripts/github/) | GitHub context generation, repo status |
+| [twitter/](./scripts/twitter/) | Twitter automation and monitoring |
+| [discord/](./scripts/discord/) | Discord bot integration |
+| [bluesky/](./scripts/bluesky/) | Bluesky integration |
+
+## Lessons
+
+Shared lessons provide reusable prompts and workflow patterns. See [lessons/README.md](./lessons/README.md).
 
 ## Dependencies
 
-Some scripts in this repository require additional dependencies:
-
-- **uv**: Required for scripts with `#!/usr/bin/env -S uv run` shebangs
-  ```bash
-  pipx install uv
-  ```
-
-## Usage
-
-### Custom Tools
-
-No custom tools in this repository yet. Check back later!
-
-<!--
-```python
-# In your gptme config:
-TOOL_MODULES = "gptme.tools,gptme_contrib.tools"
-```
--->
-
-### Script Tools
-
-Scripts can be used directly via the shell tool:
+Some scripts require additional dependencies:
 
 ```bash
-# Make scripts executable
-chmod +x scripts/twitter.py
+# Required for scripts with uv run shebangs
+pipx install uv
 
-# Use ./ to respect shebang
-./scripts/twitter.py --help
+# Install all packages
+uv sync --all-packages
 ```
-
-## Available Scripts
-
-### GitHub Integration (scripts/github/)
-
-Scripts for GitHub context generation and repository management:
-
-- **context-gh.sh** - Generate comprehensive GitHub context (notifications, issues, PRs, CI status)
-- **repo-status.sh** - Check CI status across multiple repositories
-
-See [scripts/github/README.md](scripts/github/README.md) for detailed documentation.
-
-### Workspace Management
-
-- **state-status.py** - Multi-directory state viewer (tasks, tweets, email, etc.)
-- **search.py** - Enhanced workspace search with filtering
-
-### Social Media
-
-- **twitter/** - Twitter automation and monitoring
-- **bluesky/** - Bluesky integration
-- **discord/** - Discord bot
-
-### Communication
-
-- **email/** - Universal email system for AI agents
-
-### Other
-
-- **gptodo** - Task management utilities
-- **wordcount.py** - Word counting utilities
-- **perplexity.py** - Perplexity API integration
-
-## Structure
-
-- `tools/` - Custom tools for gptme
-- `scripts/` - Standalone script tools
-- `lessons/` - Shared lessons for prompts and workflows
-  - `lessons/workflow/` - Workflow lessons (e.g., git-workflow.md)
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines on contributing new tools.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines on contributing new tools, plugins, or lessons.
+
+Plugins and packages here are community-contributed and may not be as mature or stable as core gptme functionality. They're a great place to experiment and share!
 
 ## License
 

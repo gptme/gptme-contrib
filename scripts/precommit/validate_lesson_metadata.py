@@ -131,7 +131,7 @@ def find_lesson_files(repo_root: Path) -> list[Path]:
     if not lessons_dir.exists():
         return []
 
-    return list(lessons_dir.glob("**/*.md"))
+    return [f for f in lessons_dir.glob("**/*.md") if f.name != "README.md"]
 
 
 def main() -> int:
@@ -166,7 +166,7 @@ def main() -> int:
         for f in args:
             path = Path(f)
             # Check if file is under lessons/ directory and is markdown
-            if f.endswith(".md"):
+            if f.endswith(".md") and not f.endswith("README.md"):
                 try:
                     # Handle both absolute and relative paths
                     if path.is_absolute():
