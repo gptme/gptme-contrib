@@ -80,8 +80,8 @@ For long-running tasks, use `background=True`:
 result = analyze("Comprehensive security audit", background=True, timeout=1800)
 # Returns session ID
 
-check_session("cc_abc12345")  # Check progress
-kill_session("cc_abc12345")   # Cancel if needed
+check_session("claude_code_a1b2c3d4")  # Check progress
+kill_session("claude_code_a1b2c3d4")   # Cancel if needed
 ```
 
 ## Configuration
