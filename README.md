@@ -16,16 +16,16 @@ Plugins extend gptme's capabilities with custom tools and hooks. See [plugins/RE
 
 | Plugin | Description |
 |--------|-------------|
-| [gptme-attention-router](./plugins/gptme-attention-router/) | Attention-based context routing (HOT/WARM/COLD tiers) |
-| [gptme-attention-history](./plugins/gptme-attention-history/) | Attention history tracking for meta-learning |
+| [ace](./plugins/ace/) | ACE-inspired context optimization |
+| [gptme-attention-tracker](./plugins/gptme-attention-tracker/) | Attention routing + history tracking for context management |
 | [gptme-claude-code](./plugins/gptme-claude-code/) | Claude Code subagent integration |
 | [gptme-consortium](./plugins/gptme-consortium/) | Multi-model consensus decision-making |
 | [gptme-gupp](./plugins/gptme-gupp/) | Work persistence for session continuity |
+| [gptme-hooks-examples](./plugins/gptme-hooks-examples/) | Example hook implementations |
 | [gptme-imagen](./plugins/gptme-imagen/) | Multi-provider image generation |
 | [gptme-lsp](./plugins/gptme-lsp/) | Language Server Protocol integration |
-| [gptme-warp-grep](./plugins/gptme-warp-grep/) | Enhanced search with Warp-style filtering |
+| [gptme-warpgrep](./plugins/gptme-warpgrep/) | Enhanced search with Warp-style filtering |
 | [gptme-wrapped](./plugins/gptme-wrapped/) | Wrapped tool definitions for sandboxing |
-| [gptme-example-hooks](./plugins/gptme-example-hooks/) | Example hook implementations |
 
 ### Plugin Usage
 
@@ -34,7 +34,7 @@ Add to your `gptme.toml`:
 ```toml
 [plugins]
 paths = ["path/to/gptme-contrib/plugins"]
-enabled = ["gptme_attention_router", "gptme_imagen"]
+enabled = ["gptme_attention_tracker", "gptme_imagen"]
 ```
 
 ## Packages
