@@ -32,12 +32,12 @@ Multi-model consensus decision-making system that orchestrates multiple LLMs to 
 
 [Documentation](./gptme-consortium/README.md)
 
-### 🪝 gptme-example-hooks
+### 🪝 gptme-hooks-examples
 Example implementations of gptme hooks for customizing agent behavior.
 
 **Use for**: Learning how to create custom hooks, template for new hook development.
 
-[Documentation](./gptme-example-hooks/README.md)
+[Documentation](./gptme-hooks-examples/README.md)
 
 ### 📝 gptme-gupp
 Work persistence plugin for session continuity. Saves and restores work state across sessions.
@@ -60,12 +60,12 @@ Language Server Protocol integration for enhanced code intelligence.
 
 [Documentation](./gptme-lsp/README.md)
 
-### 🔍 gptme-warp-grep
+### 🔍 gptme-warpgrep
 Enhanced search capabilities with Warp-style filtering and presentation.
 
 **Use for**: Fast, intuitive code search with visual highlighting.
 
-[Documentation](./gptme-warp-grep/README.md)
+[Documentation](./gptme-warpgrep/README.md)
 
 ### 📦 gptme-wrapped
 Wrapped tool definitions for safer, constrained tool execution.

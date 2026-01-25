@@ -14,7 +14,7 @@ This example plugin demonstrates:
 7. **StopPropagation** usage
 
 ## Plugin Structure
-example-hooks/
+gptme-hooks-examples/
 ├── pyproject.toml           # Plugin metadata
 ├── README.md                # This file
 ├── src/
@@ -82,10 +82,10 @@ uv pip install -e .
 
 ```bash
 # pipx users (recommended)
-pipx inject gptme /path/to/example-hooks
+pipx inject gptme /path/to/gptme-hooks-examples
 
 # uv users
-uv tool install gptme --with /path/to/example-hooks
+uv tool install gptme --with /path/to/gptme-hooks-examples
 ```
 
 ## Usage

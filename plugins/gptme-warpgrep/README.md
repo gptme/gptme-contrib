@@ -1,4 +1,4 @@
-# gptme-warp-grep
+# gptme-warpgrep
 
 Agentic code search plugin for gptme using [Morph's warp-grep](https://docs.morphllm.com/sdk/components/warp-grep/direct).
 
@@ -16,10 +16,10 @@ Unlike simple grep, it:
 
 ```bash
 # Install the plugin
-pip install -e plugins/warp-grep
+pip install -e plugins/gptme-warpgrep
 
 # Or with uv
-uv pip install -e plugins/warp-grep
+uv pip install -e plugins/gptme-warpgrep
 ```
 
 ## Configuration
