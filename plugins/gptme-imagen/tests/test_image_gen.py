@@ -1,11 +1,11 @@
-"""Unit tests for gptme_image_gen plugin."""
+"""Unit tests for gptme_imagen plugin."""
 
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import (
+from gptme_imagen.tools.image_gen import (
     ImageResult,
     generate_image,
 )
@@ -24,7 +24,7 @@ class TestGenerateImage:
         # Change to temp directory
         monkeypatch.chdir(tmp_path)
 
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -42,7 +42,7 @@ class TestGenerateImage:
         """Test that relative paths are converted to absolute."""
         monkeypatch.chdir(tmp_path)
 
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             expected_path = tmp_path / "test.png"
             mock_gen.return_value = ImageResult(
                 provider="gemini",
@@ -62,7 +62,7 @@ class TestGenerateImage:
         """Test that absolute paths are preserved."""
         output_path = tmp_path / "test.png"
 
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",

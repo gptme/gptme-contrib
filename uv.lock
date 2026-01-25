@@ -18,7 +18,7 @@ members = [
     "gptme-contrib-workspace",
     "gptme-example-hooks",
     "gptme-gupp",
-    "gptme-image-gen",
+    "gptme-imagen",
     "gptme-lib",
     "gptme-lsp",
     "gptme-warp-grep",
@@ -657,7 +657,7 @@ wheels = [
 [[package]]
 name = "gptme-attention-history"
 version = "0.1.0"
-source = { editable = "plugins/attention-history" }
+source = { editable = "plugins/gptme-attention-history" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -679,7 +679,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-attention-router"
 version = "0.1.0"
-source = { editable = "plugins/attention-router" }
+source = { editable = "plugins/gptme-attention-router" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -701,7 +701,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-claude-code"
 version = "0.1.0"
-source = { editable = "plugins/claude-code" }
+source = { editable = "plugins/gptme-claude-code" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -712,7 +712,7 @@ requires-dist = [{ name = "gptme" }]
 [[package]]
 name = "gptme-consortium"
 version = "0.1.0"
-source = { editable = "plugins/consortium" }
+source = { editable = "plugins/gptme-consortium" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -755,7 +755,7 @@ dev = [
 [[package]]
 name = "gptme-example-hooks"
 version = "0.1.0"
-source = { editable = "plugins/example-hooks" }
+source = { editable = "plugins/gptme-example-hooks" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -797,9 +797,9 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-image-gen"
+name = "gptme-imagen"
 version = "0.1.0"
-source = { editable = "plugins/imagen" }
+source = { editable = "plugins/gptme-imagen" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -863,7 +863,7 @@ provides-extras = ["dev", "test"]
 [[package]]
 name = "gptme-lsp"
 version = "0.1.0"
-source = { editable = "plugins/lsp" }
+source = { editable = "plugins/gptme-lsp" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -885,7 +885,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-warp-grep"
 version = "0.1.0"
-source = { editable = "plugins/warp-grep" }
+source = { editable = "plugins/gptme-warp-grep" }
 dependencies = [
     { name = "gptme" },
     { name = "httpx" },
@@ -911,7 +911,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-wrapped"
 version = "0.1.0"
-source = { editable = "plugins/wrapped" }
+source = { editable = "plugins/gptme-wrapped" }
 dependencies = [
     { name = "gptme" },
 ]

@@ -1,4 +1,4 @@
-"""Integration tests for gptme_image_gen plugin.
+"""Integration tests for gptme_imagen plugin.
 
 These tests use real API calls and are marked as slow.
 They require API keys to be set in environment variables.
@@ -6,7 +6,7 @@ They require API keys to be set in environment variables.
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import ImageResult, generate_image
+from gptme_imagen.tools.image_gen import ImageResult, generate_image
 
 
 @pytest.mark.slow

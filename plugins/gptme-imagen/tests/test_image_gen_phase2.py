@@ -1,10 +1,10 @@
-"""Unit tests for Phase 2 enhancements to gptme_image_gen plugin."""
+"""Unit tests for Phase 2 enhancements to gptme_imagen plugin."""
 
 from unittest.mock import patch
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import (
+from gptme_imagen.tools.image_gen import (
     STYLE_PRESETS,
     ImageResult,
     _enhance_prompt,
@@ -17,7 +17,7 @@ class TestStylePresets:
 
     def test_style_preset_applied_to_prompt(self, tmp_path):
         """Test that style preset modifies prompt."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             # Capture the actual prompt passed to generator
             captured_prompt = None
 
@@ -52,7 +52,7 @@ class TestStylePresets:
         # Get style literals from type hint
         from typing import get_args
 
-        from gptme_image_gen.tools.image_gen import Style
+        from gptme_imagen.tools.image_gen import Style
 
         style_literals = get_args(Style)
 
@@ -63,7 +63,7 @@ class TestStylePresets:
 
     def test_no_style_leaves_prompt_unchanged(self, tmp_path):
         """Test that prompt is unchanged when no style specified."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             captured_prompt = None
 
             def capture_prompt(prompt, size, quality, output_path, images=None):
@@ -123,7 +123,7 @@ class TestPromptEnhancement:
 
     def test_enhance_parameter_integration(self, tmp_path):
         """Test that enhance=True triggers prompt enhancement."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             captured_prompt = None
 
             def capture_prompt(prompt, size, quality, output_path, images=None):
@@ -157,7 +157,7 @@ class TestProgressIndicators:
 
     def test_progress_shown_for_single_image(self, tmp_path, capsys):
         """Test progress indicator shown for single image."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -178,7 +178,7 @@ class TestProgressIndicators:
 
     def test_progress_shown_for_multiple_images(self, tmp_path, capsys):
         """Test progress indicators for multiple images."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.side_effect = [
                 ImageResult(
                     provider="gemini",
@@ -207,7 +207,7 @@ class TestProgressIndicators:
 
     def test_progress_disabled(self, tmp_path, capsys):
         """Test that show_progress=False disables indicators."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -228,7 +228,7 @@ class TestProgressIndicators:
 
     def test_progress_with_error(self, tmp_path, capsys):
         """Test progress indicators when generation fails."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.side_effect = [
                 ImageResult(
                     provider="gemini",
@@ -258,7 +258,7 @@ class TestEnhancedErrorMessages:
 
     def test_api_key_error_message(self, tmp_path):
         """Test that API key errors get helpful messages."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.side_effect = ValueError("API key not found")
 
             with pytest.raises(RuntimeError) as exc_info:
@@ -274,7 +274,7 @@ class TestEnhancedErrorMessages:
 
     def test_quota_error_message(self, tmp_path):
         """Test that quota errors get helpful messages."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.side_effect = ValueError("Quota exceeded")
 
             with pytest.raises(RuntimeError) as exc_info:
@@ -290,7 +290,7 @@ class TestEnhancedErrorMessages:
 
     def test_network_error_message(self, tmp_path):
         """Test that network errors get helpful messages."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.side_effect = ValueError("Network connection failed")
 
             with pytest.raises(RuntimeError) as exc_info:
@@ -310,7 +310,7 @@ class TestCombinedPhase2Features:
 
     def test_style_and_enhance_together(self, tmp_path):
         """Test that style and enhance work together."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             captured_prompt = None
 
             def capture_prompt(prompt, size, quality, output_path, images=None):
@@ -343,7 +343,7 @@ class TestCombinedPhase2Features:
 
     def test_all_phase2_features_with_phase1_features(self, tmp_path):
         """Test Phase 2 features work with Phase 1 count and view."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             with patch("gptme.tools.vision.view_image") as mock_view:
                 mock_gen.side_effect = [
                     ImageResult(

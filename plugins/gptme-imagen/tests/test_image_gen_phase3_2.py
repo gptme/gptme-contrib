@@ -1,11 +1,11 @@
-"""Unit tests for Phase 3.2 enhancements to gptme_image_gen plugin."""
+"""Unit tests for Phase 3.2 enhancements to gptme_imagen plugin."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import (
+from gptme_imagen.tools.image_gen import (
     ImageResult,
     batch_generate,
     compare_providers,
@@ -20,7 +20,7 @@ class TestBatchGenerate:
         """Test batch generation with multiple prompts."""
         prompts = ["sunset", "mountain", "city"]
 
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.side_effect = [
                 ImageResult(
                     provider="gemini",
@@ -42,7 +42,7 @@ class TestBatchGenerate:
         prompts = ["test1", "test2"]
         output_dir = str(tmp_path / "batch_output")
 
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.side_effect = [
                 ImageResult(
                     provider="gemini",
@@ -65,7 +65,7 @@ class TestBatchGenerate:
         """Test batch generation with view=True displays all images."""
         prompts = ["test"]
 
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             with patch("gptme.tools.vision.view_image") as mock_view:
                 mock_gen.return_value = ImageResult(
                     provider="gemini",
@@ -86,7 +86,7 @@ class TestCompareProviders:
 
     def test_compare_providers_default(self, tmp_path):
         """Test provider comparison with defaults (gemini, dalle)."""
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.side_effect = [
                 ImageResult(
                     provider="gemini",
@@ -111,7 +111,7 @@ class TestCompareProviders:
 
     def test_compare_providers_custom_list(self, tmp_path):
         """Test provider comparison with custom provider list."""
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.side_effect = [
                 ImageResult(
                     provider="dalle2",
@@ -141,7 +141,7 @@ class TestCompareProviders:
             )
 
         with patch(
-            "gptme_image_gen.tools.image_gen.generate_image", side_effect=mock_generate
+            "gptme_imagen.tools.image_gen.generate_image", side_effect=mock_generate
         ):
             results = compare_providers(
                 prompt="test", providers=["gemini", "dalle"], view=False

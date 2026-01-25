@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from gptme_image_gen.tools.cost_tracker import CostTracker, PROVIDER_COSTS
+from gptme_imagen.tools.cost_tracker import CostTracker, PROVIDER_COSTS
 
 
 @pytest.fixture
@@ -174,7 +174,7 @@ def test_get_generation_history_limit(tracker):
 
 def test_cost_tracker_singleton():
     """Test get_cost_tracker returns singleton instance."""
-    from gptme_image_gen.tools.cost_tracker import get_cost_tracker
+    from gptme_imagen.tools.cost_tracker import get_cost_tracker
 
     tracker1 = get_cost_tracker()
     tracker2 = get_cost_tracker()

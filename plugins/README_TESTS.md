@@ -4,11 +4,11 @@
 
 ```bash
 # Run all fast tests (unit tests only)
-uv run pytest plugins/ -m "not slow" --ignore=plugins/gptme_image_gen/tests/integration/
+uv run pytest plugins/ -m "not slow" --ignore=plugins/gptme_imagen/tests/integration/
 
 # Run per-plugin (recommended)
 uv run pytest plugins/gptme_consortium/tests/ -v
-uv run pytest plugins/gptme_image_gen/tests/ -v
+uv run pytest plugins/gptme_imagen/tests/ -v
 ```
 
 ## Test Types
@@ -34,7 +34,7 @@ export OPENAI_API_KEY="your-key"
 
 # Per plugin
 uv run pytest plugins/gptme_consortium/tests/integration/ -v
-uv run pytest plugins/gptme_image_gen/tests/integration/ -v
+uv run pytest plugins/gptme_imagen/tests/integration/ -v
 
 # Or with marker
 uv run pytest plugins/ -m slow -v
@@ -50,7 +50,7 @@ plugins/
 │       ├── test_consortium.py       # Unit tests (8 tests)
 │       └── integration/
 │           └── test_consortium_integration.py  # Integration tests (5 tests)
-└── gptme_image_gen/
+└── gptme_imagen/
     └── tests/
         ├── conftest.py              # Test configuration
         ├── test_image_gen.py        # Unit tests (5 tests)
@@ -139,11 +139,11 @@ These tests verify plugin interfaces and behavior without requiring complex API 
 ### Running Phase 4 Tests
 ```bash
 # Run all Phase 4 tests
-uv run pytest plugins/gptme_image_gen/tests/feature/test_features_simple.py
+uv run pytest plugins/gptme_imagen/tests/feature/test_features_simple.py
 uv run pytest plugins/gptme_consortium/tests/feature/test_features_simple.py
 
 # Run specific test class
-uv run pytest plugins/gptme_image_gen/tests/feature/test_features_simple.py::TestErrorHandling -v
+uv run pytest plugins/gptme_imagen/tests/feature/test_features_simple.py::TestErrorHandling -v
 ```
 
 ### Design Philosophy

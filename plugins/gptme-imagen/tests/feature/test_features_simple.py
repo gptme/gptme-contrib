@@ -6,7 +6,7 @@ Phase 1-2 already provide comprehensive unit/integration tests with real APIs.
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import ImageResult, generate_image
+from gptme_imagen.tools.image_gen import ImageResult, generate_image
 
 
 class TestErrorHandling:
@@ -31,7 +31,7 @@ class TestErrorHandling:
 
         # Mock _generate_dalle to raise the expected error
         with patch(
-            "gptme_image_gen.tools.image_gen._generate_dalle",
+            "gptme_imagen.tools.image_gen._generate_dalle",
             side_effect=ValueError("OPENAI_API_KEY environment variable not set"),
         ):
             with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
@@ -153,7 +153,7 @@ class TestDataStructures:
 
     def test_provider_type_definition(self):
         """Test Provider type is properly defined."""
-        from gptme_image_gen.tools.image_gen import Provider
+        from gptme_imagen.tools.image_gen import Provider
 
         # Provider should be a Literal type
         # This test just verifies it exists and can be imported

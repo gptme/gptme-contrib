@@ -10,21 +10,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import ImageResult, generate_image
+from gptme_imagen.tools.image_gen import ImageResult, generate_image
 
 
 # Fixture to provide common mocks
 @pytest.fixture
 def mock_gemini(tmp_path):
     """Mock Google Gemini API by mocking the internal _generate_gemini function."""
-    with patch(
-        "gptme_image_gen.tools.image_gen._generate_gemini"
-    ) as mock_generate_gemini:
+    with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_generate_gemini:
         # Create a fake image result
         def fake_generate(prompt, size, quality, output_path, images=None):
             from pathlib import Path
 
-            from gptme_image_gen.tools.image_gen import ImageResult
+            from gptme_imagen.tools.image_gen import ImageResult
 
             # Create actual file
             path = Path(output_path)
@@ -163,7 +161,7 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="Unknown provider"):
             generate_image(prompt="Test", provider="invalid_provider")
 
-    @patch("gptme_image_gen.tools.image_gen._generate_gemini")
+    @patch("gptme_imagen.tools.image_gen._generate_gemini")
     def test_missing_api_key_gemini(self, mock_generate):
         """Test error when Gemini API key missing."""
         # Mock will raise the API key error as the real function would
@@ -173,7 +171,7 @@ class TestErrorHandling:
         with pytest.raises(RuntimeError, match="GOOGLE_API_KEY"):
             generate_image(prompt="Test", provider="gemini")
 
-    @patch("gptme_image_gen.tools.image_gen._generate_dalle")
+    @patch("gptme_imagen.tools.image_gen._generate_dalle")
     def test_missing_api_key_dalle(self, mock_generate):
         """Test error when OpenAI API key missing."""
         mock_generate.side_effect = ValueError(
@@ -182,14 +180,14 @@ class TestErrorHandling:
         with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
             generate_image(prompt="Test", provider="dalle")
 
-    @patch("gptme_image_gen.tools.image_gen._generate_gemini")
+    @patch("gptme_imagen.tools.image_gen._generate_gemini")
     def test_api_failure_handling(self, mock_generate):
         """Test graceful handling of API failures."""
         mock_generate.side_effect = Exception("API Error")
         with pytest.raises(RuntimeError, match="API Error"):
             generate_image(prompt="Test", provider="gemini")
 
-    @patch("gptme_image_gen.tools.image_gen._generate_dalle")
+    @patch("gptme_imagen.tools.image_gen._generate_dalle")
     def test_missing_image_data(self, mock_generate, tmp_path):
         """Test error when API returns no image data."""
         mock_generate.side_effect = ValueError("No image data received from API")

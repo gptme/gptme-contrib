@@ -28,7 +28,7 @@ Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins
 ```toml
 [plugins]
 paths = ["path/to/plugins"]
-enabled = ["gptme_image_gen"]  # Optional: limit which plugins load
+enabled = ["gptme_imagen"]  # Optional: limit which plugins load
 ```
 
 Set up API keys:
@@ -235,7 +235,7 @@ All image generations are automatically tracked in a local SQLite database (`~/.
 ### Query Total Cost
 
 ```ipython
-from gptme_image_gen.tools.image_gen import get_total_cost
+from gptme_imagen.tools.image_gen import get_total_cost
 
 # Get total cost across all providers
 total = get_total_cost()
@@ -253,7 +253,7 @@ print(f"November cost: ${cost:.2f}")
 ### Cost Breakdown
 
 ```ipython
-from gptme_image_gen.tools.image_gen import get_cost_breakdown
+from gptme_imagen.tools.image_gen import get_cost_breakdown
 
 breakdown = get_cost_breakdown()
 for provider, cost in breakdown.items():
@@ -263,7 +263,7 @@ for provider, cost in breakdown.items():
 ### Generation History
 
 ```ipython
-from gptme_image_gen.tools.image_gen import get_generation_history
+from gptme_imagen.tools.image_gen import get_generation_history
 
 history = get_generation_history(limit=10)
 for gen in history:

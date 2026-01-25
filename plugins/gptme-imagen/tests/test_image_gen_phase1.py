@@ -1,10 +1,10 @@
-"""Unit tests for Phase 1 enhancements to gptme_image_gen plugin."""
+"""Unit tests for Phase 1 enhancements to gptme_imagen plugin."""
 
 from unittest.mock import patch
 
 import pytest
 
-from gptme_image_gen.tools.image_gen import ImageResult, generate_image
+from gptme_imagen.tools.image_gen import ImageResult, generate_image
 
 
 class TestMultipleImageGeneration:
@@ -22,7 +22,7 @@ class TestMultipleImageGeneration:
 
     def test_single_image_count_one(self, tmp_path):
         """Test that count=1 returns single ImageResult (backward compatible)."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -39,7 +39,7 @@ class TestMultipleImageGeneration:
 
     def test_multiple_images_count_three(self, tmp_path):
         """Test that count=3 generates 3 images and returns list."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             # Mock will be called 3 times
             mock_gen.side_effect = [
                 ImageResult(
@@ -63,7 +63,7 @@ class TestMultipleImageGeneration:
         """Test that multiple images get numbered paths."""
         monkeypatch.chdir(tmp_path)
 
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             # Capture the paths passed to mock
             paths_used = []
 
@@ -90,7 +90,7 @@ class TestMultipleImageGeneration:
 
     def test_error_handling_in_loop(self, tmp_path):
         """Test that error in generation provides context about which image failed."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             # First call succeeds, second fails
             mock_gen.side_effect = [
                 ImageResult(
@@ -113,7 +113,7 @@ class TestViewIntegration:
 
     def test_view_disabled_by_default(self, tmp_path):
         """Test that view=False (default) doesn't call view_image."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -131,7 +131,7 @@ class TestViewIntegration:
         """Test that view=True calls view_image for single image."""
         test_path = tmp_path / "test.png"
 
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -147,7 +147,7 @@ class TestViewIntegration:
 
     def test_view_multiple_images(self, tmp_path):
         """Test that view=True calls view_image for each generated image."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             paths = [tmp_path / f"test_{i}.png" for i in range(3)]
             mock_gen.side_effect = [
                 ImageResult(
@@ -170,7 +170,7 @@ class TestViewIntegration:
 
     def test_view_graceful_fallback_import_error(self, tmp_path):
         """Test that ImportError in view_image is handled gracefully."""
-        with patch("gptme_image_gen.tools.image_gen._generate_gemini") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen._generate_gemini") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",
@@ -193,9 +193,9 @@ class TestExecuteFunction:
 
     def test_execute_single_image_output(self, tmp_path):
         """Test execute function formats single image output correctly."""
-        from gptme_image_gen.tools.image_gen import _execute_generate_image
+        from gptme_imagen.tools.image_gen import _execute_generate_image
 
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test prompt",
@@ -213,9 +213,9 @@ class TestExecuteFunction:
 
     def test_execute_multiple_images_output(self, tmp_path):
         """Test execute function formats multiple images output correctly."""
-        from gptme_image_gen.tools.image_gen import _execute_generate_image
+        from gptme_imagen.tools.image_gen import _execute_generate_image
 
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.return_value = [
                 ImageResult(
                     provider="gemini",
@@ -235,9 +235,9 @@ class TestExecuteFunction:
 
     def test_execute_view_indicator(self, tmp_path):
         """Test that execute shows view indicator when view=True."""
-        from gptme_image_gen.tools.image_gen import _execute_generate_image
+        from gptme_imagen.tools.image_gen import _execute_generate_image
 
-        with patch("gptme_image_gen.tools.image_gen.generate_image") as mock_gen:
+        with patch("gptme_imagen.tools.image_gen.generate_image") as mock_gen:
             mock_gen.return_value = ImageResult(
                 provider="gemini",
                 prompt="test",

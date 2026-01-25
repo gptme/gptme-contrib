@@ -1,4 +1,4 @@
-"""Pytest configuration for gptme_image_gen tests."""
+"""Pytest configuration for gptme_imagen tests."""
 
 import os
 
