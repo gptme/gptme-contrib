@@ -35,10 +35,14 @@ def _get_hooks_dir() -> Path:
     return hooks_dir
 
 
+def _sanitize_task_id(task_id: str) -> str:
+    """Sanitize task_id for safe use in filenames."""
+    return task_id.replace("/", "-").replace("\\", "-")
+
+
 def _hook_path(task_id: str) -> Path:
     """Get path for a hook file."""
-    safe_id = task_id.replace("/", "-").replace("\\", "-")
-    return _get_hooks_dir() / f"{safe_id}.json"
+    return _get_hooks_dir() / f"{_sanitize_task_id(task_id)}.json"
 
 
 def _now() -> str:
@@ -287,8 +291,7 @@ def hook_abandon(task_id: str, reason: str) -> str:
     archive_dir = _get_hooks_dir() / "archive"
     archive_dir.mkdir(exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    safe_id = task_id.replace("/", "-").replace("\\", "-")
-    archive_path = archive_dir / f"{safe_id}-{timestamp}.json"
+    archive_path = archive_dir / f"{_sanitize_task_id(task_id)}-{timestamp}.json"
     archive_path.write_text(json.dumps(hook, indent=2))
 
     hook_file.unlink()
