@@ -13,7 +13,7 @@ Year-end analytics for your gptme usage - inspired by Spotify Wrapped.
 ## Installation
 
 ```bash
-pip install -e plugins/wrapped
+pip install -e plugins/gptme-wrapped
 ```
 
 ## Configuration

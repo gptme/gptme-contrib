@@ -108,7 +108,7 @@ pip install gptme-lsp
 Or install from source:
 
 ```bash
-cd plugins/lsp
+cd plugins/gptme-lsp
 pip install -e .
 ```
 
@@ -137,7 +137,7 @@ gptme "lsp rename src/utils.py:15:5 new_function_name"
 
 ```bash
 # Run tests
-cd plugins/lsp
+cd plugins/gptme-lsp
 make test
 
 # Type check
