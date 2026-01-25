@@ -46,7 +46,7 @@ def test_project_monitoring_custom_org(workspace):
     assert run.author == "custom-author"
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_discover_repositories_success(mock_run, workspace):
     """Test successful repository discovery."""
     # Mock gh repo list response
@@ -65,7 +65,7 @@ def test_discover_repositories_success(mock_run, workspace):
     assert "gptme/gptme-webui" in repos
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_discover_repositories_failure(mock_run, workspace):
     """Test repository discovery failure."""
     # Mock gh command failure
@@ -81,13 +81,13 @@ def test_discover_repositories_failure(mock_run, workspace):
     assert repos == []
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_should_post_comment_first_time(workspace):
     """Test posting comment for first time."""
     run = ProjectMonitoringRun(workspace)
 
     # Mock gh pr view to return updated time
-    with patch("run_loops.project_monitoring.subprocess.run") as mock_run:
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="2025-11-25T10:00:00Z",
@@ -115,7 +115,7 @@ def test_should_post_comment_duplicate(workspace):
     state_file.write_text(f"update {prev_time} 2025-11-25T09:00:00Z")
 
     # Mock gh pr view to return same updated time (no changes)
-    with patch("run_loops.project_monitoring.subprocess.run") as mock_run:
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="2025-11-25T09:00:00Z",
@@ -139,7 +139,7 @@ def test_should_post_comment_pr_updated(workspace):
     state_file.write_text(f"update {prev_time} 2025-11-25T09:00:00Z")
 
     # Mock gh pr view to return newer updated time (PR has changes)
-    with patch("run_loops.project_monitoring.subprocess.run") as mock_run:
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="2025-11-25T11:00:00Z",  # Newer than state file
@@ -163,7 +163,7 @@ def test_should_post_comment_type_changed(workspace):
     state_file.write_text(f"update {prev_time} 2025-11-25T10:00:00Z")
 
     # Mock gh pr view
-    with patch("run_loops.project_monitoring.subprocess.run") as mock_run:
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="2025-11-25T10:00:00Z",
@@ -187,7 +187,7 @@ def test_should_post_comment_stale(workspace):
     state_file.write_text(f"update {prev_time} 2025-11-25T10:00:00Z")
 
     # Mock gh pr view
-    with patch("run_loops.project_monitoring.subprocess.run") as mock_run:
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="2025-11-25T10:00:00Z",
@@ -199,7 +199,7 @@ def test_should_post_comment_stale(workspace):
         assert should_post is True
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_pr_updates_new_pr(mock_run, workspace):
     """Test detecting new PR updates."""
     # Mock gh pr list response
@@ -228,7 +228,7 @@ def test_check_pr_updates_new_pr(mock_run, workspace):
     assert work_items[0].repo == "gptme/gptme"
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_pr_updates_no_change(mock_run, workspace):
     """Test PR with no updates."""
     # Mock gh pr list response
@@ -259,7 +259,7 @@ def test_check_pr_updates_no_change(mock_run, workspace):
     assert len(work_items) == 0
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_ci_failures(mock_run, workspace):
     """Test detecting CI failures."""
     # Mock gh pr list response with failing checks
@@ -290,7 +290,7 @@ def test_check_ci_failures(mock_run, workspace):
     assert work_items[0].number == 123
 
 
-@patch("run_loops.project_monitoring.subprocess.run")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_assigned_issues(mock_run, workspace):
     """Test detecting assigned issues."""
     # Mock gh issue list response
@@ -351,7 +351,7 @@ def test_generate_prompt_with_work(workspace):
     assert "RED" in prompt
 
 
-@patch("run_loops.base.execute_gptme")
+@patch("gptme_runloops.base.execute_gptme")
 def test_execute_with_work(mock_execute, workspace):
     """Test execute when work is found."""
     # Mock gptme execution - use ExecutionResult

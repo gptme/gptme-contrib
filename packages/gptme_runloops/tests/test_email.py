@@ -32,7 +32,7 @@ def test_email_run_init(workspace):
     assert run.lock_wait is False
 
 
-@patch("run_loops.base.git_pull_with_retry")
+@patch("gptme_runloops.base.git_pull_with_retry")
 def test_pre_run_success(mock_git_pull, workspace):
     """Test pre_run performs git pull (email sync moved to has_work)."""
     mock_git_pull.return_value = True
@@ -45,7 +45,7 @@ def test_pre_run_success(mock_git_pull, workspace):
     mock_git_pull.assert_called_once()
 
 
-@patch("run_loops.email.subprocess.run")
+@patch("gptme_runloops.email.subprocess.run")
 def test_has_work_no_emails(mock_run, workspace):
     """Test has_work returns False when no unreplied emails."""
     # Mock responses: mbsync success, gptmail sync success, check-unreplied returns 0 (no emails)
@@ -59,7 +59,7 @@ def test_has_work_no_emails(mock_run, workspace):
     assert mock_run.call_count >= 3
 
 
-@patch("run_loops.email.subprocess.run")
+@patch("gptme_runloops.email.subprocess.run")
 def test_has_work_with_emails(mock_run, workspace):
     """Test has_work returns True when unreplied emails exist."""
 
@@ -81,7 +81,7 @@ def test_has_work_with_emails(mock_run, workspace):
     assert run._work_description is not None
 
 
-@patch("run_loops.email.subprocess.run")
+@patch("gptme_runloops.email.subprocess.run")
 def test_has_work_mbsync_failure(mock_run, workspace):
     """Test has_work continues checking even if mbsync fails."""
 
@@ -101,7 +101,7 @@ def test_has_work_mbsync_failure(mock_run, workspace):
     assert result is False
 
 
-@patch("run_loops.base.execute_gptme")
+@patch("gptme_runloops.base.execute_gptme")
 def test_execute_runs_gptme(mock_execute, workspace):
     """Test execute calls gptme (has_work already confirmed emails exist)."""
     from gptme_runloops.utils.execution import ExecutionResult

@@ -36,7 +36,15 @@ class TestCLIIntegration:
     def test_autonomous_cli_help(self):
         """Test autonomous command help shows correct information."""
         result = subprocess.run(
-            ["uv", "run", "python3", "-m", "run_loops.cli", "autonomous", "--help"],
+            [
+                "uv",
+                "run",
+                "python3",
+                "-m",
+                "gptme_runloops.cli",
+                "autonomous",
+                "--help",
+            ],
             capture_output=True,
             text=True,
             timeout=10,
@@ -48,7 +56,7 @@ class TestCLIIntegration:
     def test_email_cli_help(self):
         """Test email command help shows correct information."""
         result = subprocess.run(
-            ["uv", "run", "python3", "-m", "run_loops.cli", "email", "--help"],
+            ["uv", "run", "python3", "-m", "gptme_runloops.cli", "email", "--help"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -60,7 +68,15 @@ class TestCLIIntegration:
     def test_monitoring_cli_help(self):
         """Test monitoring command help shows correct information."""
         result = subprocess.run(
-            ["uv", "run", "python3", "-m", "run_loops.cli", "monitoring", "--help"],
+            [
+                "uv",
+                "run",
+                "python3",
+                "-m",
+                "gptme_runloops.cli",
+                "monitoring",
+                "--help",
+            ],
             capture_output=True,
             text=True,
             timeout=10,
@@ -147,10 +163,26 @@ class TestCLIIntegration:
     def test_cli_command_performance(self, test_workspace: Path):
         """Test CLI command execution performance (help commands)."""
         commands = [
-            ["uv", "run", "python3", "-m", "run_loops.cli", "--help"],
-            ["uv", "run", "python3", "-m", "run_loops.cli", "autonomous", "--help"],
-            ["uv", "run", "python3", "-m", "run_loops.cli", "email", "--help"],
-            ["uv", "run", "python3", "-m", "run_loops.cli", "monitoring", "--help"],
+            ["uv", "run", "python3", "-m", "gptme_runloops.cli", "--help"],
+            [
+                "uv",
+                "run",
+                "python3",
+                "-m",
+                "gptme_runloops.cli",
+                "autonomous",
+                "--help",
+            ],
+            ["uv", "run", "python3", "-m", "gptme_runloops.cli", "email", "--help"],
+            [
+                "uv",
+                "run",
+                "python3",
+                "-m",
+                "gptme_runloops.cli",
+                "monitoring",
+                "--help",
+            ],
         ]
 
         for cmd in commands:
@@ -231,7 +263,7 @@ class TestShellScriptComparison:
                 "run",
                 "python3",
                 "-m",
-                "run_loops.cli",
+                "gptme_runloops.cli",
                 "autonomous",
                 "--workspace",
                 str(workspace),

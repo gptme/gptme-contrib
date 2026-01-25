@@ -34,8 +34,8 @@ def test_autonomous_run_cycle():
 
         # Mock external calls
         with (
-            patch("run_loops.base.git_pull_with_retry") as mock_pull,
-            patch("run_loops.base.execute_gptme") as mock_execute,
+            patch("gptme_runloops.base.git_pull_with_retry") as mock_pull,
+            patch("gptme_runloops.base.execute_gptme") as mock_execute,
         ):
             mock_pull.return_value = True
             mock_execute.return_value = ExecutionResult(exit_code=0)
