@@ -11,16 +11,17 @@ resolution-markers = [
 [manifest]
 members = [
     "gptmail",
-    "gptme-attention-tracker",
+    "gptme-attention-history",
+    "gptme-attention-router",
     "gptme-claude-code",
     "gptme-consortium",
     "gptme-contrib-workspace",
-    "gptme-gupp",
-    "gptme-hooks-examples",
-    "gptme-imagen",
+    "gptme-example-hooks",
+    "gptme-image-gen",
     "gptme-lib",
     "gptme-lsp",
-    "gptme-warpgrep",
+    "gptme-ralph-loop",
+    "gptme-warp-grep",
     "gptme-wrapped",
     "gptodo",
     "lessons",
@@ -654,9 +655,31 @@ wheels = [
 ]
 
 [[package]]
-name = "gptme-attention-tracker"
+name = "gptme-attention-history"
 version = "0.1.0"
-source = { editable = "plugins/gptme-attention-tracker" }
+source = { editable = "plugins/attention-history" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", specifier = ">=0.27.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
+    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
+]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-attention-router"
+version = "0.1.0"
+source = { editable = "plugins/attention-router" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -678,7 +701,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-claude-code"
 version = "0.1.0"
-source = { editable = "plugins/gptme-claude-code" }
+source = { editable = "plugins/claude-code" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -689,7 +712,7 @@ requires-dist = [{ name = "gptme" }]
 [[package]]
 name = "gptme-consortium"
 version = "0.1.0"
-source = { editable = "plugins/gptme-consortium" }
+source = { editable = "plugins/consortium" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -730,9 +753,9 @@ dev = [
 ]
 
 [[package]]
-name = "gptme-gupp"
+name = "gptme-example-hooks"
 version = "0.1.0"
-source = { editable = "plugins/gptme-gupp" }
+source = { editable = "plugins/example-hooks" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -752,31 +775,9 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-hooks-examples"
+name = "gptme-image-gen"
 version = "0.1.0"
-source = { editable = "plugins/gptme-hooks-examples" }
-dependencies = [
-    { name = "gptme" },
-]
-
-[package.optional-dependencies]
-test = [
-    { name = "pytest" },
-    { name = "pytest-mock" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "gptme", specifier = ">=0.27.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
-    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
-]
-provides-extras = ["test"]
-
-[[package]]
-name = "gptme-imagen"
-version = "0.1.0"
-source = { editable = "plugins/gptme-imagen" }
+source = { editable = "plugins/imagen" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -840,7 +841,7 @@ provides-extras = ["dev", "test"]
 [[package]]
 name = "gptme-lsp"
 version = "0.1.0"
-source = { editable = "plugins/gptme-lsp" }
+source = { editable = "plugins/lsp" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -860,9 +861,14 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-warpgrep"
+name = "gptme-ralph-loop"
 version = "0.1.0"
-source = { editable = "plugins/gptme-warpgrep" }
+source = { editable = "plugins/ralph-loop" }
+
+[[package]]
+name = "gptme-warp-grep"
+version = "0.1.0"
+source = { editable = "plugins/warp-grep" }
 dependencies = [
     { name = "gptme" },
     { name = "httpx" },
@@ -888,7 +894,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-wrapped"
 version = "0.1.0"
-source = { editable = "plugins/gptme-wrapped" }
+source = { editable = "plugins/wrapped" }
 dependencies = [
     { name = "gptme" },
 ]
