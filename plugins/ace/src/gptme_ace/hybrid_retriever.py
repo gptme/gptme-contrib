@@ -189,15 +189,23 @@ class HybridLessonMatcher:
         results = []
         for lesson in candidates:
             # Get lesson ID and metadata
-            lesson_id = self.embedder._lesson_to_id(lesson.path)
+            # Handle both Path and string types for lesson.path
+            from pathlib import Path
+
+            lesson_path = (
+                Path(lesson.path) if isinstance(lesson.path, str) else lesson.path
+            )
+            lesson_id = self.embedder._lesson_to_id(lesson_path)
             metadata = self.embedder.metadata.get(lesson_id, {})
 
             # Skip if no embedding
             if lesson_id not in self.embedder.metadata:
                 continue
 
-            # Get embedding from FAISS index
-            idx = list(self.embedder.metadata.keys()).index(lesson_id)
+            # Get embedding from FAISS index using stored index position
+            idx = metadata.get("index")
+            if idx is None:
+                continue
             lesson_embed = self.embedder.index.reconstruct(idx)
 
             # Compute all 5 components

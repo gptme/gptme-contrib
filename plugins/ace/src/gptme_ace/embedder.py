@@ -849,15 +849,17 @@ class LessonEmbedder:
         # Search for similar lessons
         if FAISS_AVAILABLE:
             distances, indices = self.index.search(query_vector, len(self.metadata))
-            # Convert L2 distances to cosine similarity
-            similarities = 1 - (distances[0] / 2)
+            # Convert L2 distance to similarity score (consistent with find_similar)
+            similarities = 1.0 / (1.0 + distances[0])
         else:
             # Numpy fallback: compute cosine similarity manually
             lesson_ids_list = list(self.metadata.keys())
             similarities = []
             for lesson_id in lesson_ids_list:
                 meta = self.metadata[lesson_id]
-                existing_emb = np.array(meta["embedding"])
+                # Get embedding from index using stored index position
+                idx = meta["index"]
+                existing_emb = self.index[idx]
                 # Cosine similarity
                 sim = np.dot(embedding, existing_emb) / (
                     np.linalg.norm(embedding) * np.linalg.norm(existing_emb)

@@ -163,8 +163,22 @@ class GptmeHybridMatcher:
         # Convert results to dict format for logging
         lessons_data = []
         for result in results:
+            # Safely access lesson ID with multiple fallbacks
+            lesson_id = "unknown"
+            if (
+                hasattr(result.lesson, "metadata")
+                and result.lesson.metadata is not None
+            ):
+                lesson_id = (
+                    getattr(result.lesson.metadata, "id", None)
+                    or getattr(result.lesson.metadata, "lesson_id", None)
+                    or "unknown"
+                )
+            elif hasattr(result.lesson, "path"):
+                # Fall back to path-based ID
+                lesson_id = str(getattr(result.lesson, "path", "unknown"))
             lesson_data = {
-                "id": getattr(result.lesson.metadata, "id", "unknown"),
+                "id": lesson_id,
                 "score": result.score,
                 "matched_by": result.matched_by,
             }

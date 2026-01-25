@@ -10,7 +10,7 @@ Usage:
     tracker.log_retrieval(session_id, query, lessons, method="hybrid")
 
     calculator = MetricsCalculator(tracker)
-    metrics = calculator.compute_metrics()
+    metrics = calculator.compute_all_metrics()
 """
 
 import json
