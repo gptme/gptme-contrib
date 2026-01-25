@@ -25,12 +25,12 @@ Multi-model consensus decision-making system that orchestrates multiple LLMs to 
 
 [Documentation](./consortium/README.md)
 
-### 🔍 cc-analyze
-Claude Code analysis subagent plugin. Spawn focused Claude Code analysis tasks from within gptme.
+### 🤖 claude-code
+Full Claude Code integration plugin. Spawn Claude Code subagents from within gptme for analysis, Q&A, bug fixes, and implementation.
 
-**Use for**: Security audits, code reviews, test coverage analysis.
+**Use for**: Security audits, code reviews, codebase Q&A, bug fixes, feature implementation.
 
-[Documentation](./cc-analyze/README.md)
+[Documentation](./claude-code/README.md)
 
 ### 🎨 imagen
 Multi-provider image generation supporting Google Gemini (Imagen), OpenAI DALL-E, and more with a unified interface.
