@@ -461,7 +461,8 @@ for i in $(seq 1 $MAX_ITER); do
 
     # Run the agent with spec + plan as context
     if [ "$BACKEND" = "claude" ]; then
-        timeout $TIMEOUT claude -p "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
+        # Use --dangerously-skip-permissions and --tools default for non-interactive execution
+        timeout $TIMEOUT claude -p --dangerously-skip-permissions --tools default "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
     else
         timeout $TIMEOUT gptme -n "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
     fi
