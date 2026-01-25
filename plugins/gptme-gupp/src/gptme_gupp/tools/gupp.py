@@ -249,7 +249,9 @@ def hook_status(stale_threshold_hours: int = 24) -> str:
         lines.append(f"- **Priority**: {priority}")
         lines.append(f"- **Next Action**: {next_action}")
         if context:
-            lines.append(f"- **Context**: {context[:200]}...")
+            # Truncate context if needed (UTF-8 safe, only add ellipsis when truncating)
+            context_display = f"{context[:200]}..." if len(context) > 200 else context
+            lines.append(f"- **Context**: {context_display}")
         lines.append(f"- **Updated**: {updated_str}")
 
         if is_stale:
