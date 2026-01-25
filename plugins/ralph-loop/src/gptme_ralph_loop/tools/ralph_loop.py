@@ -417,6 +417,15 @@ def _run_background_loop(
     step_timeout: int,
 ) -> str:
     """Run the loop in a background tmux session."""
+    # Check if tmux is available
+    if shutil.which("tmux") is None:
+        return (
+            "Error: tmux is not installed or not in PATH.\n"
+            "Please install tmux to use background loop execution.\n"
+            "On Ubuntu/Debian: sudo apt install tmux\n"
+            "On macOS: brew install tmux"
+        )
+
     session_id = f"ralph_loop_{uuid.uuid4().hex[:8]}"
 
     # Create a wrapper script that runs the loop
@@ -438,16 +447,7 @@ for i in $(seq 1 $MAX_ITER); do
         break
     fi
 
-    # Build prompt by combining spec + plan + current step
-    PROMPT=$(cat << 'ENDPROMPT'
-Read the spec file: $SPEC_FILE
-Read the plan file: $PLAN_FILE
-Complete the next unchecked step in the plan.
-After completing, mark the step with [x] in the plan file.
-ENDPROMPT
-)
-
-    # Run the agent
+    # Run the agent with spec + plan as context
     if [ "$BACKEND" = "claude" ]; then
         timeout $TIMEOUT claude -p "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
     else
