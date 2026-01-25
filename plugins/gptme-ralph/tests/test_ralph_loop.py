@@ -2,7 +2,7 @@
 
 import pytest
 
-from gptme_ralph_loop.tools.ralph_loop import (
+from gptme_ralph.tools.ralph_loop import (
     Plan,
     PlanStep,
     create_plan,
@@ -212,5 +212,5 @@ class TestIntegration:
         )
 
         # This would require the actual backend
-        # from gptme_ralph_loop.tools.ralph_loop import run_loop
+        # from gptme_ralph.tools.ralph_loop import run_loop
         # result = run_loop("spec.md", "plan.md", workspace=str(tmp_path))

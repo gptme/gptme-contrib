@@ -1,13 +1,13 @@
 [project]
-name = "gptme-ralph-loop"
+name = "gptme-ralph"
 version = "0.1.0"
-description = "Ralph Loop plugin for gptme - iterative execution with context reset"
+description = "Ralph plugin for gptme - iterative execution with context reset"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.entry-points."gptme.plugins"]
-gptme_ralph_loop = "gptme_ralph_loop:tool"
+gptme_ralph = "gptme_ralph:tool"
 
 [build-system]
 requires = ["hatchling"]

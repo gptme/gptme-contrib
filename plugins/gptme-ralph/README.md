@@ -1,4 +1,4 @@
-# gptme-ralph-loop
+# gptme-ralph
 
 A gptme plugin implementing the **Ralph Loop** pattern - iterative execution with context reset between steps.
 
@@ -18,8 +18,8 @@ This keeps the agent's context fresh and focused, preventing the quality degrada
 ```bash
 # Add to your gptme.toml
 [plugins]
-enabled = ["gptme_ralph_loop"]
-paths = ["path/to/gptme-contrib/plugins/ralph-loop/src"]
+enabled = ["gptme_ralph"]
+paths = ["path/to/gptme-contrib/plugins/gptme-ralph/src"]
 ```
 
 ## Usage
@@ -27,7 +27,7 @@ paths = ["path/to/gptme-contrib/plugins/ralph-loop/src"]
 ### Basic Loop
 
 ```python
-from gptme_ralph_loop import run_loop, create_plan
+from gptme_ralph import run_loop, create_plan
 
 # Create a plan file
 create_plan("Build a REST API with user authentication", "api_plan.md")
@@ -147,7 +147,6 @@ This prevents the context from filling up with old tool outputs, failed attempts
 ## References
 
 - [Ralph Wiggum Loops YouTube Video](https://youtu.be/I7azCAgoUHc)
-- [11 Tips for AI Coding](https://www.reddit.com/r/ClaudeAI/comments/ralph_loops)
 - Related: [gptme LLM resume/compact feature](https://gptme.org/docs/)
 
 ## License
