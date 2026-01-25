@@ -210,7 +210,16 @@ def _run_iteration(
         return False, f"Error: {backend} CLI not found"
 
     if backend == "claude":
-        cmd = ["claude", "-p", prompt]
+        # Use --tools default to enable tool execution in print mode
+        # Use --dangerously-skip-permissions for non-interactive execution
+        cmd = [
+            "claude",
+            "-p",
+            "--dangerously-skip-permissions",
+            "--tools",
+            "default",
+            prompt,
+        ]
     else:
         # gptme in non-interactive mode
         cmd = ["gptme", "-n", prompt]
