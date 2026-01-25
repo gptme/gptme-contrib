@@ -27,13 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pytest-cov pytest-timeout
           # Install plugin dependencies
-          pip install -e plugins/imagen
-          pip install -e plugins/consortium
+          pip install -e plugins/gptme-imagen
+          pip install -e plugins/gptme-consortium
+          pip install -e plugins/gptme-attention-tracker
 
       - name: Run unit tests
         run: |
-          pytest plugins/consortium/tests/test_consortium.py -v -m "not slow" --timeout=30
-          pytest plugins/imagen/tests/test_image_gen_phase1.py -v -m "not slow" --timeout=30
+          pytest plugins/gptme-consortium/tests/test_consortium.py -v -m "not slow" --timeout=30
+          pytest plugins/gptme-imagen/tests/test_image_gen_phase1.py -v -m "not slow" --timeout=30
 
       - name: Run integration tests (with API keys)
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
@@ -42,13 +43,13 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: |
-          pytest plugins/consortium/tests/integration/ -v --timeout=120
-          pytest plugins/imagen/tests/integration/ -v --timeout=120
+          pytest plugins/gptme-consortium/tests/integration/ -v --timeout=120
+          pytest plugins/gptme-imagen/tests/integration/ -v --timeout=120
 
       - name: Run coverage (unit tests only)
         run: |
-          pytest plugins/consortium/tests/test_consortium.py -v -m "not slow" --cov=plugins/consortium --cov-report=xml --cov-report=term
-          pytest plugins/imagen/tests/test_image_gen_phase1.py -v -m "not slow" --cov=plugins/imagen --cov-append --cov-report=xml --cov-report=term
+          pytest plugins/gptme-consortium/tests/test_consortium.py -v -m "not slow" --cov=plugins/gptme-consortium --cov-report=xml --cov-report=term
+          pytest plugins/gptme-imagen/tests/test_image_gen_phase1.py -v -m "not slow" --cov=plugins/gptme-imagen --cov-append --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
