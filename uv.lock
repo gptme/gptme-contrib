@@ -13,7 +13,7 @@ members = [
     "gptmail",
     "gptme-attention-history",
     "gptme-attention-router",
-    "gptme-cc-analyze",
+    "gptme-claude-code",
     "gptme-consortium",
     "gptme-contrib-workspace",
     "gptme-example-hooks",
@@ -698,26 +698,15 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-cc-analyze"
+name = "gptme-claude-code"
 version = "0.1.0"
-source = { editable = "plugins/cc-analyze" }
+source = { editable = "plugins/claude-code" }
 dependencies = [
     { name = "gptme" },
 ]
 
-[package.optional-dependencies]
-test = [
-    { name = "pytest" },
-    { name = "pytest-mock" },
-]
-
 [package.metadata]
-requires-dist = [
-    { name = "gptme", specifier = ">=0.27.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
-    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
-]
-provides-extras = ["test"]
+requires-dist = [{ name = "gptme" }]
 
 [[package]]
 name = "gptme-consortium"

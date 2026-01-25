@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gptme-claude-code"
+version = "0.1.0"
+description = "Claude Code plugin for gptme - spawn Claude Code subagents for coding tasks"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "gptme",
+]
+
+[project.entry-points."gptme.plugins"]
+gptme_claude_code = "gptme_claude_code:tool"
+
+[tool.setuptools.packages.find]
+where = ["src"]
