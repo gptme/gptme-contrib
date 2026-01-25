@@ -84,5 +84,5 @@ print("WARM:", [f["path"] for f in tiers["WARM"]])
 
 ## Related
 
-- [gptme-attention-history](../attention-history/) - Track what was in context
+- [gptme-attention-history](../gptme-attention-history/) - Track what was in context
 - [Claude Cognitive](https://github.com/GMaN1911/claude-cognitive) - Original inspiration

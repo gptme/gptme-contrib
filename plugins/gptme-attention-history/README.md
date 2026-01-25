@@ -106,4 +106,4 @@ Understand context decisions:
 
 ## Related
 
-- [gptme-attention-router](../attention-router/) - Dynamic context routing
+- [gptme-attention-router](../gptme-attention-router/) - Dynamic context routing
