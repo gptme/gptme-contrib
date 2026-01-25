@@ -112,4 +112,3 @@ Expected savings with attention routing:
 ## Related
 
 - [gptme documentation](https://gptme.org)
-- [Context optimization patterns](../../knowledge/context/)
