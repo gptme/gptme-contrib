@@ -29,6 +29,7 @@ jobs:
           # Install plugin dependencies
           pip install -e plugins/gptme-imagen
           pip install -e plugins/gptme-consortium
+          pip install -e plugins/gptme-attention-tracker
 
       - name: Run unit tests
         run: |

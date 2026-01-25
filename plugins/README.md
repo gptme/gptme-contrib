@@ -4,19 +4,12 @@ Collection of plugins for [gptme](https://github.com/ErikBjare/gptme).
 
 ## Available Plugins
 
-### 🧠 gptme-attention-router
-Attention-based context routing with HOT/WARM/COLD tiers. Implements dynamic context management inspired by Claude Cognitive.
+### 🧠 gptme-attention-tracker
+Attention tracking and routing plugin combining history tracking and HOT/WARM/COLD tier management. Implements dynamic context management for both meta-learning and token optimization.
 
-**Use for**: Reducing token usage by dynamically loading context based on relevance.
+**Use for**: Reducing token usage by dynamically loading context based on relevance, analyzing context patterns, improving keyword matching.
 
-[Documentation](./gptme-attention-router/README.md)
-
-### 📊 gptme-attention-history
-Attention history tracking for meta-learning. Queryable record of what was in context during each session.
-
-**Use for**: Analyzing context patterns, finding underutilized files, improving keyword matching.
-
-[Documentation](./gptme-attention-history/README.md)
+[Documentation](./gptme-attention-tracker/README.md)
 
 ### 🤖 gptme-claude-code
 Full Claude Code integration plugin. Spawn Claude Code subagents from within gptme for analysis, Q&A, bug fixes, and implementation.
@@ -81,7 +74,7 @@ Add to your gptme.toml:
 ```toml
 [plugins]
 paths = ["path/to/gptme-contrib/plugins"]
-enabled = ["gptme_attention_router", "gptme_attention_history"]
+enabled = ["gptme_attention_tracker"]
 ```
 
 ## Plugin Naming Convention

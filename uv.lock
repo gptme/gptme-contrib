@@ -11,17 +11,16 @@ resolution-markers = [
 [manifest]
 members = [
     "gptmail",
-    "gptme-attention-history",
-    "gptme-attention-router",
+    "gptme-attention-tracker",
     "gptme-claude-code",
     "gptme-consortium",
     "gptme-contrib-workspace",
-    "gptme-example-hooks",
     "gptme-gupp",
+    "gptme-hooks-examples",
     "gptme-imagen",
     "gptme-lib",
     "gptme-lsp",
-    "gptme-warp-grep",
+    "gptme-warpgrep",
     "gptme-wrapped",
     "gptodo",
     "lessons",
@@ -655,31 +654,9 @@ wheels = [
 ]
 
 [[package]]
-name = "gptme-attention-history"
+name = "gptme-attention-tracker"
 version = "0.1.0"
-source = { editable = "plugins/gptme-attention-history" }
-dependencies = [
-    { name = "gptme" },
-]
-
-[package.optional-dependencies]
-test = [
-    { name = "pytest" },
-    { name = "pytest-mock" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "gptme", specifier = ">=0.27.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
-    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
-]
-provides-extras = ["test"]
-
-[[package]]
-name = "gptme-attention-router"
-version = "0.1.0"
-source = { editable = "plugins/gptme-attention-router" }
+source = { editable = "plugins/gptme-attention-tracker" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -753,9 +730,9 @@ dev = [
 ]
 
 [[package]]
-name = "gptme-example-hooks"
+name = "gptme-gupp"
 version = "0.1.0"
-source = { editable = "plugins/gptme-example-hooks" }
+source = { editable = "plugins/gptme-gupp" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -775,9 +752,9 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-gupp"
+name = "gptme-hooks-examples"
 version = "0.1.0"
-source = { editable = "plugins/gptme-gupp" }
+source = { editable = "plugins/gptme-hooks-examples" }
 dependencies = [
     { name = "gptme" },
 ]
@@ -883,9 +860,9 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-warp-grep"
+name = "gptme-warpgrep"
 version = "0.1.0"
-source = { editable = "plugins/gptme-warp-grep" }
+source = { editable = "plugins/gptme-warpgrep" }
 dependencies = [
     { name = "gptme" },
     { name = "httpx" },
