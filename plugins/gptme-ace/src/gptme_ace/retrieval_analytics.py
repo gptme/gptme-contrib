@@ -4,7 +4,7 @@ This module provides tracking, metrics, and A/B testing for lesson retrieval
 to validate Phase 5 hybrid retrieval improvements.
 
 Usage:
-    from ace.retrieval_analytics import RetrievalTracker, MetricsCalculator
+    from gptme_ace.retrieval_analytics import RetrievalTracker, MetricsCalculator
 
     tracker = RetrievalTracker()
     tracker.log_retrieval(session_id, query, lessons, method="hybrid")
