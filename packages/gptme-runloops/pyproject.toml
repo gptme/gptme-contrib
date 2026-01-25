@@ -1,5 +1,5 @@
 [project]
-name = "run-loops"
+name = "gptme-runloops"
 version = "0.1.0"
 description = "Python-based run loop framework for autonomous AI agent operation"
 requires-python = ">=3.10"

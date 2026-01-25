@@ -1,5 +1,5 @@
 [project]
-name = "gptme-lib"
+name = "gptme-contrib-lib"
 version = "0.1.0"
 description = "Shared library code for gptme agents"
 requires-python = ">=3.10"
