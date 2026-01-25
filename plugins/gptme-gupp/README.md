@@ -31,7 +31,7 @@ The plugin provides these functions for the `ipython` tool:
 hook_start("task-id", "Context summary", "Next action to take")
 
 # Update progress during work
-hook_update("task-id", step="Step 2", next_action="What to do next")
+hook_update("task-id", current_step="Step 2", next_action="What to do next")
 
 # List pending hooks
 hooks = hook_list()

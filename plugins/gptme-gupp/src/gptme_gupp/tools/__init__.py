@@ -7,6 +7,7 @@ from .gupp import (
     hook_start,
     hook_status,
     hook_update,
+    tool,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "hook_list",
     "hook_status",
     "hook_abandon",
+    "tool",
 ]

@@ -10,7 +10,16 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+# Conditional import for ToolSpec - allows testing without gptme installed
+if TYPE_CHECKING:
+    from gptme.tools.base import ToolSpec
+else:
+    try:
+        from gptme.tools.base import ToolSpec
+    except ImportError:
+        ToolSpec = None  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -178,13 +187,12 @@ def hook_list() -> list[dict[str, Any]]:
             logger.warning(f"Error reading hook file {hook_file}: {e}")
 
     # Sort by priority (high first) then by updated_at (recent first)
+    # Use two-step stable sort: first by time descending, then by priority
     priority_order = {"high": 0, "medium": 1, "low": 2}
-    hooks.sort(
-        key=lambda h: (
-            priority_order.get(h.get("priority", "medium"), 1),
-            h.get("updated_at", ""),
-        )
-    )
+    # First sort by updated_at descending (recent first)
+    hooks.sort(key=lambda h: h.get("updated_at", ""), reverse=True)
+    # Then stable sort by priority (high first) - preserves time order within groups
+    hooks.sort(key=lambda h: priority_order.get(h.get("priority", "medium"), 1))
 
     return hooks
 
@@ -286,3 +294,59 @@ def hook_abandon(task_id: str, reason: str) -> str:
     logger.info(f"Abandoned hook: {task_id} - {reason}")
 
     return f"✅ Hook abandoned: {task_id}\n   Reason: {reason}"
+
+
+# Tool specification for gptme (only created if gptme is installed)
+tool = None
+if ToolSpec is not None:
+    tool = ToolSpec(
+        name="gupp",
+        desc="Work persistence across session boundaries using the GUPP pattern",
+        instructions="""
+Use this tool to track work across session boundaries.
+
+**Core Principle (GUPP)**: "If there is work on your hook, YOU MUST RUN IT"
+
+**Functions available:**
+
+| Function | Purpose |
+|----------|---------|
+| `hook_start(task_id, context, next_action)` | Create a new work hook |
+| `hook_update(task_id, current_step, next_action)` | Update hook progress |
+| `hook_complete(task_id)` | Mark work as complete |
+| `hook_list()` | Get all pending hooks |
+| `hook_status()` | Formatted status summary |
+| `hook_abandon(task_id, reason)` | Abandon with reason |
+
+**Workflow:**
+
+1. **At session start**: Call `hook_status()` to check for pending work
+2. **Starting work**: Call `hook_start()` to create a hook
+3. **During work**: Call `hook_update()` to track progress
+4. **On completion**: Call `hook_complete()` to clean up
+5. **If abandoning**: Call `hook_abandon()` with reason
+
+**Example:**
+```python
+# Check for pending work
+print(hook_status())
+
+# Start new work
+hook_start("fix-auth-bug", "User login failing", "Debug auth middleware")
+
+# Update progress
+hook_update("fix-auth-bug", current_step="Step 2", next_action="Add tests")
+
+# Complete when done
+hook_complete("fix-auth-bug")
+```
+        """,
+        functions=[
+            hook_start,
+            hook_update,
+            hook_complete,
+            hook_list,
+            hook_status,
+            hook_abandon,
+        ],
+    )
