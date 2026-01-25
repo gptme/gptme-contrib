@@ -184,12 +184,15 @@ You are working on step {step.number}: {step.description}
 1. Focus ONLY on completing step {step.number}
 2. Make the minimal changes needed to complete this step
 3. Test your changes if applicable
-4. When done, update the plan file to mark this step complete
+4. **CRITICAL**: When done, edit the plan file to mark this step as complete:
+   - Open the plan file and change `- [ ] Step {step.number}...` to `- [x] Step {step.number}...`
+   - Use the patch or save tool to update the checkbox from `[ ]` to `[x]`
 5. Do NOT work on other steps - stop after completing this one
 
 ## Important
 
-- Progress is tracked in the plan file
+- Progress is tracked by checkboxes in the plan file ([ ] = pending, [x] = done)
+- You MUST update the plan file's checkbox to mark completion - DO NOT use internal todo tools
 - After you complete this step, the loop will continue with fresh context
 - Make sure to save/commit your work before the step ends
 """
