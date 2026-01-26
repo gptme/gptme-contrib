@@ -5,7 +5,7 @@
 # - gptme-ace, gptme-attention-tracker: tests never ran in CI
 # - gptme-imagen: only test_image_gen_phase1.py was tested before, full dir fails
 # - gptme-claude-code, gptme-lsp, gptme-warpgrep: tests never ran in CI
-EXCLUDE_PLUGINS := gptme-attention-tracker gptme-claude-code gptme-imagen gptme-lsp gptme-warpgrep
+EXCLUDE_PLUGINS := gptme-claude-code gptme-imagen gptme-lsp gptme-warpgrep
 
 # Dynamic discovery - find all directories with Makefile (skip symlinks)
 PACKAGE_DIRS := $(shell find packages -maxdepth 1 -mindepth 1 -type d ! -type l ! -name '__pycache__' 2>/dev/null)
