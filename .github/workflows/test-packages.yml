@@ -7,12 +7,31 @@ on:
     branches: [ main, master ]
 
 jobs:
+  # Discovery job - outputs package matrix dynamically
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.discover.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Discover packages
+        id: discover
+        run: |
+          # Find all packages with Makefiles (skip symlinks and __pycache__)
+          packages=$(find packages -maxdepth 1 -mindepth 1 -type d ! -type l ! -name '__pycache__' -exec test -f {}/Makefile \; -print | xargs -n1 basename | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "packages=$packages" >> $GITHUB_OUTPUT
+          echo "Discovered packages: $packages"
+
+  # Test each package in parallel
   test:
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
+        package: ${{ fromJson(needs.discover.outputs.packages) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -29,10 +48,11 @@ jobs:
         run: |
           uv sync --all-packages
 
-      - name: Run package tests
+      - name: Run tests for ${{ matrix.package }}
         run: |
-          make test-packages
+          make -C packages/${{ matrix.package }} test
 
+  # Typecheck all packages (single job, not parallelized per-package)
   typecheck:
     runs-on: ubuntu-latest
     steps:
