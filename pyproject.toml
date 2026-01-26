@@ -13,7 +13,11 @@ dev = [
 
 [tool.uv.workspace]
 members = ["packages/*", "plugins/*"]
-exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks"]
+# Exclude old package paths (now symlinks to new names for backward compatibility)
+# packages/lessons -> gptme-lessons-extras
+# packages/lib -> gptme-contrib-lib
+# packages/run_loops -> gptme-runloops
+exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "packages/lessons", "packages/lib", "packages/run_loops"]
 
 [tool.mypy]
 # Exclude packages with hyphenated names from mypy
