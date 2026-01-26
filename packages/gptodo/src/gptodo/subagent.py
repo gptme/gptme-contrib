@@ -10,6 +10,7 @@ Session data stored in state/sessions/ directory (gitignored).
 
 import json
 import logging
+import shlex
 import subprocess
 import uuid
 from dataclasses import dataclass, asdict
@@ -135,16 +136,21 @@ def spawn_agent(
         tmux_name = f"gptodo_{session_id}"
         session.tmux_session = tmux_name
 
+        # Escape shell arguments to prevent injection
+        safe_prompt = shlex.quote(prompt)
+        safe_output = shlex.quote(str(output_file))
+        safe_workspace = shlex.quote(str(workspace))
+
         if backend == "gptme":
             shell_cmd = (
-                f'gptme -n "{prompt}" > {output_file} 2>&1; echo "EXIT_CODE=$?" >> {output_file}'
+                f'gptme -n {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
             )
         else:
-            shell_cmd = f'claude -p --dangerously-skip-permissions --tools default "{prompt}" > {output_file} 2>&1; echo "EXIT_CODE=$?" >> {output_file}'
+            shell_cmd = f'claude -p --dangerously-skip-permissions --tools default {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
 
         # Start tmux session
         result = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", tmux_name, f"cd {workspace} && {shell_cmd}"],
+            ["tmux", "new-session", "-d", "-s", tmux_name, f"cd {safe_workspace} && {shell_cmd}"],
             capture_output=True,
             text=True,
         )
