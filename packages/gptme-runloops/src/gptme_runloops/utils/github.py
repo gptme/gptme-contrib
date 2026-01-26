@@ -150,7 +150,7 @@ class CommentLoopDetector:
         now = datetime.now()
 
         # Load existing state
-        state = {"comments": []}
+        state: dict[str, list[dict[str, object]]] = {"comments": []}
         if state_file.exists():
             try:
                 state = json.loads(state_file.read_text())
@@ -160,7 +160,9 @@ class CommentLoopDetector:
         # Clean old entries outside window
         cutoff = now.timestamp() - (self.LOOP_WINDOW_HOURS * 3600)
         state["comments"] = [
-            c for c in state.get("comments", []) if c.get("timestamp", 0) > cutoff
+            c
+            for c in state.get("comments", [])
+            if float(c.get("timestamp", 0)) > cutoff  # type: ignore[arg-type]
         ]
 
         # Count identical comments in window
@@ -230,7 +232,7 @@ def get_review_threads(repo: str, pr_number: int) -> list[dict]:
         )
 
         if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout)
+            return list(json.loads(result.stdout))
     except Exception:
         pass
 
