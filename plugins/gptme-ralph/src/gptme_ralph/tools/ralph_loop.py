@@ -184,12 +184,15 @@ You are working on step {step.number}: {step.description}
 1. Focus ONLY on completing step {step.number}
 2. Make the minimal changes needed to complete this step
 3. Test your changes if applicable
-4. When done, update the plan file to mark this step complete
+4. **CRITICAL**: When done, edit the plan file to mark this step as complete:
+   - Open the plan file and change `- [ ] Step {step.number}...` to `- [x] Step {step.number}...`
+   - Use the patch or save tool to update the checkbox from `[ ]` to `[x]`
 5. Do NOT work on other steps - stop after completing this one
 
 ## Important
 
-- Progress is tracked in the plan file
+- Progress is tracked by checkboxes in the plan file ([ ] = pending, [x] = done)
+- You MUST update the plan file's checkbox to mark completion - DO NOT use internal todo tools
 - After you complete this step, the loop will continue with fresh context
 - Make sure to save/commit your work before the step ends
 """
@@ -210,7 +213,16 @@ def _run_iteration(
         return False, f"Error: {backend} CLI not found"
 
     if backend == "claude":
-        cmd = ["claude", "-p", prompt]
+        # Use --tools default to enable tool execution in print mode
+        # Use --dangerously-skip-permissions for non-interactive execution
+        cmd = [
+            "claude",
+            "-p",
+            "--dangerously-skip-permissions",
+            "--tools",
+            "default",
+            prompt,
+        ]
     else:
         # gptme in non-interactive mode
         cmd = ["gptme", "-n", prompt]
@@ -449,7 +461,8 @@ for i in $(seq 1 $MAX_ITER); do
 
     # Run the agent with spec + plan as context
     if [ "$BACKEND" = "claude" ]; then
-        timeout $TIMEOUT claude -p "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
+        # Use --dangerously-skip-permissions and --tools default for non-interactive execution
+        timeout $TIMEOUT claude -p --dangerously-skip-permissions --tools default "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
     else
         timeout $TIMEOUT gptme -n "$(cat $SPEC_FILE)\\n\\n$(cat $PLAN_FILE)\\n\\nComplete the next unchecked step, then mark it done in the plan file."
     fi
