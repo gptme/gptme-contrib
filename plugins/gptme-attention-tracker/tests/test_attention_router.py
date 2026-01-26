@@ -10,14 +10,14 @@ def temp_state_file(tmp_path):
     """Create temporary state file."""
     state_file = tmp_path / ".gptme" / "attention_state.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    with patch("gptme_attention_router.tools.attention_router.STATE_FILE", state_file):
+    with patch("gptme_attention_tracker.tools.attention_router.STATE_FILE", state_file):
         yield state_file
 
 
 @pytest.fixture
 def reset_state():
     """Reset global state before each test."""
-    from gptme_attention_router.tools import attention_router
+    from gptme_attention_tracker.tools import attention_router
 
     attention_router._state = None
     yield
@@ -26,7 +26,7 @@ def reset_state():
 
 def test_register_file(temp_state_file, reset_state):
     """Test registering a file for tracking."""
-    from gptme_attention_router.tools.attention_router import register_file, get_score
+    from gptme_attention_tracker.tools.attention_router import register_file, get_score
 
     result = register_file(
         "test/file.md", keywords=["test", "example"], pinned=True, initial_score=0.6
@@ -38,7 +38,7 @@ def test_register_file(temp_state_file, reset_state):
 
 def test_unregister_file(temp_state_file, reset_state):
     """Test unregistering a file."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         unregister_file,
         get_score,
@@ -53,7 +53,7 @@ def test_unregister_file(temp_state_file, reset_state):
 
 def test_process_turn_decay(temp_state_file, reset_state):
     """Test that scores decay on process_turn when applied immediately."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_score,
@@ -69,7 +69,7 @@ def test_process_turn_decay(temp_state_file, reset_state):
 
 def test_process_turn_deferred(temp_state_file, reset_state):
     """Test that updates are deferred by default."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_score,
@@ -93,7 +93,7 @@ def test_process_turn_deferred(temp_state_file, reset_state):
 
 def test_process_turn_activation(temp_state_file, reset_state):
     """Test keyword activation on process_turn with immediate apply."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_score,
@@ -109,7 +109,7 @@ def test_process_turn_activation(temp_state_file, reset_state):
 
 def test_flush_pending_updates(temp_state_file, reset_state):
     """Test flushing pending updates."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         flush_pending_updates,
@@ -142,7 +142,7 @@ def test_flush_pending_updates(temp_state_file, reset_state):
 
 def test_flush_no_pending(temp_state_file, reset_state):
     """Test flushing when no pending updates."""
-    from gptme_attention_router.tools.attention_router import flush_pending_updates
+    from gptme_attention_tracker.tools.attention_router import flush_pending_updates
 
     result = flush_pending_updates()
     assert result["status"] == "no_pending_updates"
@@ -150,7 +150,7 @@ def test_flush_no_pending(temp_state_file, reset_state):
 
 def test_batch_threshold_auto_flush(temp_state_file, reset_state):
     """Test that batch threshold triggers automatic flush."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_score,
@@ -175,7 +175,7 @@ def test_batch_threshold_auto_flush(temp_state_file, reset_state):
 
 def test_get_tiers(temp_state_file, reset_state):
     """Test tier assignment."""
-    from gptme_attention_router.tools.attention_router import register_file, get_tiers
+    from gptme_attention_tracker.tools.attention_router import register_file, get_tiers
 
     register_file("hot/file.md", initial_score=0.9)
     register_file("warm/file.md", initial_score=0.5)
@@ -190,7 +190,7 @@ def test_get_tiers(temp_state_file, reset_state):
 
 def test_pinned_file_minimum(temp_state_file, reset_state):
     """Test that pinned files never fall below WARM."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_score,
@@ -208,7 +208,7 @@ def test_pinned_file_minimum(temp_state_file, reset_state):
 
 def test_coactivation(temp_state_file, reset_state):
     """Test co-activation boosting."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_score,
@@ -229,7 +229,7 @@ def test_coactivation(temp_state_file, reset_state):
 
 def test_get_context_recommendation(temp_state_file, reset_state):
     """Test context recommendation."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         get_context_recommendation,
     )
@@ -248,7 +248,7 @@ def test_get_context_recommendation(temp_state_file, reset_state):
 
 def test_set_score(temp_state_file, reset_state):
     """Test manually setting score."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         set_score,
         get_score,
@@ -263,7 +263,7 @@ def test_set_score(temp_state_file, reset_state):
 
 def test_set_score_invalid(temp_state_file, reset_state):
     """Test setting invalid score."""
-    from gptme_attention_router.tools.attention_router import set_score
+    from gptme_attention_tracker.tools.attention_router import set_score
 
     result = set_score("nonexistent/file.md", 0.5)
     assert "Error" in result
@@ -271,7 +271,7 @@ def test_set_score_invalid(temp_state_file, reset_state):
 
 def test_reset_state(temp_state_file, reset_state):
     """Test resetting state."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         reset_state as do_reset,
         get_status,
@@ -286,7 +286,7 @@ def test_reset_state(temp_state_file, reset_state):
 
 def test_get_status_includes_pending(temp_state_file, reset_state):
     """Test that status includes pending update info."""
-    from gptme_attention_router.tools.attention_router import (
+    from gptme_attention_tracker.tools.attention_router import (
         register_file,
         process_turn,
         get_status,
@@ -304,7 +304,7 @@ def test_get_status_includes_pending(temp_state_file, reset_state):
 
 def test_tool_spec_exists():
     """Test that tool spec is properly defined."""
-    from gptme_attention_router.tools.attention_router import tool
+    from gptme_attention_tracker.tools.attention_router import tool
 
     assert tool.name == "attention_router"
     assert tool.functions is not None
