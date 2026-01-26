@@ -21,8 +21,11 @@ def test_import_hybrid_config():
     assert config.tool_bonus == 0.20
 
 
-def test_import_hybrid_matcher():
+def test_import_hybrid_matcher(monkeypatch):
     """Test that GptmeHybridMatcher can be imported."""
+    # Ensure env var is unset for predictable test behavior
+    monkeypatch.delenv("GPTME_LESSONS_HYBRID", raising=False)
+
     from gptme_ace import GptmeHybridMatcher
 
     # Should be able to instantiate without embedder
