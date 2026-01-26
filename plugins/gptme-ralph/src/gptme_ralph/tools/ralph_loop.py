@@ -259,7 +259,7 @@ def run_loop(
     spec_file: str,
     plan_file: str,
     workspace: str | None = None,
-    backend: str = "claude",
+    backend: str = "gptme",
     max_iterations: int = 50,
     step_timeout: int = 600,
     background: bool = False,

@@ -92,7 +92,7 @@ Run a Ralph Loop with the given spec and plan.
 - `spec_file`: Path to the specification/PRD file
 - `plan_file`: Path to the implementation plan (markdown with checkboxes)
 - `workspace`: Working directory (default: current)
-- `backend`: "claude" or "gptme" (default: "claude")
+- `backend`: "claude" or "gptme" (default: "gptme")
 - `max_iterations`: Maximum loop iterations (default: 50)
 - `step_timeout`: Timeout per step in seconds (default: 600)
 - `background`: Run in tmux session (default: False)
