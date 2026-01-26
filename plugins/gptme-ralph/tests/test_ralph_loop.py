@@ -228,3 +228,121 @@ class TestIntegration:
         # This would require the actual backend
         # from gptme_ralph.tools.ralph_loop import run_loop
         # result = run_loop("spec.md", "plan.md", workspace=str(tmp_path))
+
+
+class TestCreateSpec:
+    """Tests for the create_spec function."""
+
+    def test_create_spec_creates_file(self, tmp_path):
+        """Test that create_spec creates a spec file."""
+        from gptme_ralph.tools.ralph_loop import create_spec
+
+        result = create_spec(
+            "Build a REST API",
+            output_file="spec.md",
+            workspace=str(tmp_path),
+        )
+
+        assert "Spec created" in result
+        spec_file = tmp_path / "spec.md"
+        assert spec_file.exists()
+
+    def test_create_spec_includes_task(self, tmp_path):
+        """Test that spec includes the task description."""
+        from gptme_ralph.tools.ralph_loop import create_spec
+
+        task = "Implement user authentication with JWT"
+        create_spec(task, workspace=str(tmp_path))
+
+        content = (tmp_path / "spec.md").read_text()
+        assert task in content
+        assert "Requirements" in content
+
+
+class TestCreateProject:
+    """Tests for the create_project function."""
+
+    def test_create_project_creates_both_files(self, tmp_path):
+        """Test that create_project creates spec and plan files."""
+        from gptme_ralph.tools.ralph_loop import create_project
+
+        # Use use_llm=False to skip LLM call in tests
+        spec_path, plan_path = create_project(
+            "Build a CLI tool",
+            workspace=str(tmp_path),
+            use_llm=False,
+        )
+
+        assert (tmp_path / "spec.md").exists()
+        assert (tmp_path / "plan.md").exists()
+        assert "spec.md" in spec_path
+        assert "plan.md" in plan_path
+
+    def test_create_project_returns_tuple(self, tmp_path):
+        """Test that create_project returns a tuple of paths."""
+        from gptme_ralph.tools.ralph_loop import create_project
+
+        result = create_project(
+            "Build something",
+            workspace=str(tmp_path),
+            use_llm=False,
+        )
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+
+class TestExtractPlanFromOutput:
+    """Tests for the _extract_plan_from_output helper."""
+
+    def test_extract_simple_plan(self):
+        """Test extracting a simple plan."""
+        from gptme_ralph.tools.ralph_loop import _extract_plan_from_output
+
+        output = """# Implementation Plan
+
+- [ ] Step 1: Create the file
+- [ ] Step 2: Add logic
+- [ ] Step 3: Test
+"""
+        result = _extract_plan_from_output(output)
+        assert result is not None
+        assert "- [ ] Step 1" in result
+        assert "- [ ] Step 3" in result
+
+    def test_extract_plan_with_preamble(self):
+        """Test extracting plan when there's text before it."""
+        from gptme_ralph.tools.ralph_loop import _extract_plan_from_output
+
+        output = """Here's the plan for your task:
+
+# Implementation Plan
+
+- [ ] Step 1: Create the file
+- [ ] Step 2: Add logic
+"""
+        result = _extract_plan_from_output(output)
+        assert result is not None
+        assert "# Implementation Plan" in result
+        assert "- [ ] Step 1" in result
+
+    def test_extract_plan_returns_none_for_invalid(self):
+        """Test that invalid output returns None."""
+        from gptme_ralph.tools.ralph_loop import _extract_plan_from_output
+
+        # No checkboxes
+        result = _extract_plan_from_output("Just some text without any plan format")
+        assert result is None
+
+    def test_extract_plan_handles_completed_checkboxes(self):
+        """Test extracting plan with completed items."""
+        from gptme_ralph.tools.ralph_loop import _extract_plan_from_output
+
+        output = """# Plan
+
+- [x] Step 1: Done
+- [ ] Step 2: Pending
+"""
+        result = _extract_plan_from_output(output)
+        assert result is not None
+        assert "- [x] Step 1" in result

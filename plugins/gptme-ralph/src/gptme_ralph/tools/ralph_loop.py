@@ -628,6 +628,301 @@ Task: {task_description}
     return f"Plan created at: {output_path}\n\nEdit the plan to add specific steps, then run the loop."
 
 
+def create_spec(
+    task_description: str,
+    output_file: str = "spec.md",
+    workspace: str | None = None,
+) -> str:
+    """
+    Create a spec/PRD file from a task description.
+
+    This is a helper to bootstrap a Ralph Loop by generating a spec file.
+
+    Args:
+        task_description: Description of what to implement
+        output_file: Where to save the spec (default: spec.md)
+        workspace: Working directory (defaults to current)
+
+    Returns:
+        Path to the created spec file
+
+    Example:
+        create_spec("Build a REST API with CRUD operations for users")
+    """
+    work_dir = Path(workspace) if workspace else Path.cwd()
+    output_path = work_dir / output_file
+
+    spec_template = f"""# Project Specification
+
+## Overview
+
+{task_description}
+
+## Requirements
+
+- Implement the functionality described above
+- Follow best practices for the domain
+- Write clean, maintainable code
+- Include appropriate error handling
+
+## Acceptance Criteria
+
+- All specified functionality works correctly
+- Code is well-structured and documented
+- Tests pass (if applicable)
+
+## Notes
+
+- This spec was auto-generated from the task description
+- Add more detailed requirements as needed
+- Reference this file during implementation
+"""
+
+    output_path.write_text(spec_template)
+    return f"Spec created at: {output_path}"
+
+
+def create_project(
+    task_description: str,
+    workspace: str | None = None,
+    use_llm: bool = True,
+    backend: str = "gptme",
+    model: str | None = None,
+) -> tuple[str, str]:
+    """
+    Bootstrap a Ralph Loop project with both spec and plan files.
+
+    This is the recommended way to start a new Ralph Loop project.
+    It creates both a spec file and a task-specific plan in one call.
+
+    Args:
+        task_description: Description of what to implement
+        workspace: Working directory (defaults to current)
+        use_llm: If True, use LLM to generate task-specific plan steps (default: True)
+        backend: Backend for LLM plan generation ('gptme' or 'claude')
+        model: Model to use for plan generation (defaults to backend's default)
+
+    Returns:
+        Tuple of (spec_path, plan_path)
+
+    Example:
+        spec, plan = create_project("Build a REST API with authentication")
+        run_loop(spec, plan)
+    """
+    work_dir = Path(workspace) if workspace else Path.cwd()
+
+    # Create spec file
+    spec_path = work_dir / "spec.md"
+    create_spec(task_description, "spec.md", workspace)
+
+    # Create plan file
+    plan_path = work_dir / "plan.md"
+
+    if use_llm:
+        # Generate task-specific plan using LLM
+        plan_content = _generate_plan_with_llm(
+            task_description, backend, model, work_dir
+        )
+        if plan_content:
+            plan_path.write_text(plan_content)
+        else:
+            # Fall back to template if LLM generation fails
+            create_plan(task_description, "plan.md", 5, workspace)
+    else:
+        # Use template-based plan
+        create_plan(task_description, "plan.md", 5, workspace)
+
+    return (str(spec_path), str(plan_path))
+
+
+def _generate_plan_with_llm(
+    task_description: str,
+    backend: str,
+    model: str | None,
+    work_dir: Path,
+) -> str | None:
+    """
+    Generate a task-specific implementation plan using an LLM.
+
+    Args:
+        task_description: What to implement
+        backend: 'gptme' or 'claude'
+        model: Model to use (or None for default)
+        work_dir: Working directory
+
+    Returns:
+        Plan content as markdown string, or None if generation fails
+    """
+    prompt = f"""Generate an implementation plan for the following task:
+
+{task_description}
+
+Create a plan with 3-7 specific, actionable steps. Each step should be:
+- Concrete and verifiable
+- Achievable in a focused work session
+- Building towards the complete solution
+
+Format the plan as a markdown file with:
+1. A title heading
+2. Checkbox items for each step (using - [ ] format)
+3. Brief notes section if needed
+
+Example format:
+# Implementation Plan: [Brief Title]
+
+- [ ] Step 1: [Specific action]
+- [ ] Step 2: [Specific action]
+- [ ] Step 3: [Specific action]
+
+## Notes
+- [Any important considerations]
+
+Output ONLY the plan content, nothing else."""
+
+    try:
+        if backend == "gptme":
+            return _generate_plan_gptme(prompt, model, work_dir)
+        elif backend == "claude":
+            return _generate_plan_claude(prompt, model, work_dir)
+        else:
+            logger.warning(f"Unknown backend {backend}, falling back to template")
+            return None
+    except Exception as e:
+        logger.warning(f"Failed to generate plan with LLM: {e}")
+        return None
+
+
+def _generate_plan_gptme(
+    prompt: str,
+    model: str | None,
+    work_dir: Path,
+) -> str | None:
+    """Generate plan using gptme backend."""
+    cmd = ["gptme", "--non-interactive", "-y"]
+
+    if model:
+        cmd.extend(["-m", model])
+
+    # Create temporary conversation for plan generation
+    temp_name = f"ralph-plan-gen-{uuid.uuid4().hex[:8]}"
+    cmd.extend(["--name", temp_name])
+
+    # Add the prompt
+    cmd.append(prompt)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,  # 2 minute timeout for plan generation
+        )
+
+        if result.returncode == 0:
+            # Extract plan from output - look for markdown plan format
+            output = result.stdout
+            plan = _extract_plan_from_output(output)
+            if plan:
+                return plan
+
+        logger.warning(f"gptme plan generation returned: {result.returncode}")
+        return None
+
+    except subprocess.TimeoutExpired:
+        logger.warning("gptme plan generation timed out")
+        return None
+    except Exception as e:
+        logger.warning(f"gptme plan generation failed: {e}")
+        return None
+
+
+def _generate_plan_claude(
+    prompt: str,
+    model: str | None,
+    work_dir: Path,
+) -> str | None:
+    """Generate plan using claude backend."""
+    # Check for Claude CLI
+    if not shutil.which("claude"):
+        logger.warning("Claude CLI not found for plan generation")
+        return None
+
+    cmd = ["claude", "-p"]
+    if model:
+        cmd.extend(["-m", model])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode == 0:
+            # Claude output should be the plan directly
+            plan = _extract_plan_from_output(result.stdout)
+            if plan:
+                return plan
+
+        logger.warning(f"Claude plan generation returned: {result.returncode}")
+        return None
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Claude plan generation timed out")
+        return None
+    except Exception as e:
+        logger.warning(f"Claude plan generation failed: {e}")
+        return None
+
+
+def _extract_plan_from_output(output: str) -> str | None:
+    """
+    Extract plan content from LLM output.
+
+    Looks for markdown plan format with checkboxes.
+    """
+    lines = output.strip().split("\n")
+
+    # Find the start of the plan (heading or first checkbox)
+    plan_start = None
+    for i, line in enumerate(lines):
+        if line.startswith("# ") or line.strip().startswith("- [ ]"):
+            plan_start = i
+            break
+
+    if plan_start is None:
+        return None
+
+    # Collect lines until we hit something that's clearly not part of the plan
+    plan_lines = []
+
+    for line in lines[plan_start:]:
+        # Stop if we hit obvious non-plan content
+        if line.startswith("```") and plan_lines:
+            # Code block after plan content - stop
+            break
+        if line.startswith("Human:") or line.startswith("Assistant:"):
+            # Conversation markers - stop
+            break
+
+        plan_lines.append(line)
+
+    if not plan_lines:
+        return None
+
+    plan_content = "\n".join(plan_lines).strip()
+
+    # Validate it looks like a plan (has checkboxes)
+    if "- [ ]" not in plan_content and "- [x]" not in plan_content:
+        return None
+
+    return plan_content
+
+
 # Tool specification for gptme
 if ToolSpec is not None:
     tool = ToolSpec(
@@ -649,7 +944,9 @@ Ralph Loop plugin for iterative execution with fresh context.
 1. **run_loop(spec_file, plan_file)** - Start the iterative loop
 2. **check_loop(session_id)** - Check background loop progress
 3. **stop_loop(session_id)** - Stop a background loop
-4. **create_plan(task)** - Generate initial plan file
+4. **create_plan(task)** - Generate initial plan file (generic template)
+5. **create_spec(task)** - Generate spec/PRD file from task description
+6. **create_project(task)** - Bootstrap project with spec + LLM-generated plan (recommended)
 
 **When to use Ralph Loop:**
 - Multi-step implementation tasks
@@ -660,8 +957,13 @@ Ralph Loop plugin for iterative execution with fresh context.
 **Examples:**
 
 ```python
-# Create a plan
-create_plan("Build a REST API with authentication")
+# Recommended: Use create_project for full setup with LLM-generated plan
+spec, plan = create_project("Build a REST API with authentication")
+run_loop(spec, plan)
+
+# Or create files separately
+create_spec("Build a REST API with authentication")
+create_plan("Build a REST API with authentication")  # generic template
 
 # Run the loop (foreground)
 run_loop("spec.md", "plan.md")
@@ -674,7 +976,21 @@ check_loop("ralph_loop_abc123")
 ```
         """,
         examples="""
-### Create and Run a Loop
+### Create and Run a Loop (Recommended)
+
+> User: I need to implement a user authentication system
+> Assistant: I'll bootstrap the project with spec and LLM-generated plan.
+```ipython
+spec, plan = create_project("Implement user authentication with JWT tokens")
+```
+> System: Spec created at: spec.md
+> System: ('spec.md', 'plan.md')
+> Assistant: Project bootstrapped. Now let me run the loop.
+```ipython
+run_loop(spec, plan, backend="gptme")
+```
+
+### Create and Run a Loop (Manual)
 
 > User: I need to implement a user authentication system
 > Assistant: I'll create a plan and start the Ralph Loop.
@@ -704,7 +1020,14 @@ run_loop("refactor_spec.md", "refactor_plan.md", background=True, max_iterations
 check_loop("ralph_loop_a1b2c3d4")
 ```
         """,
-        functions=[run_loop, check_loop, stop_loop, create_plan],
+        functions=[
+            run_loop,
+            check_loop,
+            stop_loop,
+            create_plan,
+            create_spec,
+            create_project,
+        ],
     )
 else:
     tool = None  # type: ignore
