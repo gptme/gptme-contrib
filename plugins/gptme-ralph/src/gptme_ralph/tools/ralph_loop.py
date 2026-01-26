@@ -220,17 +220,19 @@ def _run_iteration(
     if backend == "claude":
         # Use --tools default to enable tool execution in print mode
         # Use --dangerously-skip-permissions for non-interactive execution
+        # Note: claude -p requires input via stdin, not as positional argument
         cmd = [
             "claude",
             "-p",
             "--dangerously-skip-permissions",
             "--tools",
             "default",
-            prompt,
         ]
+        stdin_input = prompt
     else:
         # gptme in non-interactive mode
         cmd = ["gptme", "-n", prompt]
+        stdin_input = None
 
     try:
         result = subprocess.run(
@@ -239,6 +241,7 @@ def _run_iteration(
             capture_output=True,
             text=True,
             timeout=timeout,
+            input=stdin_input,
         )
 
         output = result.stdout
@@ -467,7 +470,9 @@ for i in $(seq 1 $MAX_ITER); do
     # Run the agent with spec + plan as context
     if [ "$BACKEND" = "claude" ]; then
         # Use --dangerously-skip-permissions and --tools default for non-interactive execution
-        timeout $TIMEOUT claude -p --dangerously-skip-permissions --tools default "$(cat $SPEC_FILE)
+        # Note: claude -p requires input via stdin, not as positional argument
+        cat <<PROMPT_EOF | timeout $TIMEOUT claude -p --dangerously-skip-permissions --tools default
+$(cat $SPEC_FILE)
 
 Plan file: $PLAN_FILE
 
@@ -478,7 +483,8 @@ TASK: Complete the next unchecked step ([ ]) in the plan above.
 CRITICAL: After completing the step, you MUST update $PLAN_FILE directly:
 - Change the checkbox from [ ] to [x] for the completed step
 - Use patch or save tool on $PLAN_FILE - DO NOT use internal todo tools
-- The loop detects completion by reading checkboxes from the file"
+- The loop detects completion by reading checkboxes from the file
+PROMPT_EOF
     else
         timeout $TIMEOUT gptme -n "$(cat $SPEC_FILE)
 
