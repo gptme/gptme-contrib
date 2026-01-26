@@ -4,82 +4,129 @@ Tests configuration, error handling, and edge cases.
 Phase 1-2 already provide comprehensive unit/integration tests.
 """
 
+from unittest.mock import patch
+
 from gptme_consortium.tools.consortium import ConsortiumResult, query_consortium
 
 
 class TestConfiguration:
     """Test configuration and parameter handling."""
 
-    def test_default_models_used(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_default_models_used(self, mock_synthesize, mock_query):
         """Test that default frontier models are used when not specified."""
-        # Should use default models
-        # Will fail on actual API calls but configuration is valid
-        try:
-            query_consortium(question="Test")
-        except Exception:
-            pass  # Expected - no actual model APIs available
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
+        result = query_consortium(question="Test")
+        # Should use 5 default frontier models
+        assert len(result.models_used) == 5
+        assert mock_query.call_count == 5
 
-    def test_custom_models_accepted(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_custom_models_accepted(self, mock_synthesize, mock_query):
         """Test that custom model lists are accepted."""
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
         custom_models = ["model1", "model2"]
+        result = query_consortium(question="Test", models=custom_models)
+        assert result.models_used == custom_models
+        assert mock_query.call_count == 2
 
-        try:
-            query_consortium(question="Test", models=custom_models)
-        except Exception:
-            pass  # Expected - model APIs not available
-
-    def test_arbiter_parameter_accepted(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_arbiter_parameter_accepted(self, mock_synthesize, mock_query):
         """Test that custom arbiter model is accepted."""
-        try:
-            query_consortium(question="Test", arbiter="custom/arbiter-model")
-        except Exception:
-            pass  # Expected - model API not available
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
+        result = query_consortium(question="Test", arbiter="custom/arbiter-model")
+        assert result.arbiter_model == "custom/arbiter-model"
 
-    def test_confidence_threshold_accepted(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_confidence_threshold_accepted(self, mock_synthesize, mock_query):
         """Test that confidence threshold parameter is accepted."""
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
         thresholds = [0.5, 0.7, 0.8, 0.9]
-
         for threshold in thresholds:
-            try:
-                query_consortium(question="Test", confidence_threshold=threshold)
-            except Exception:
-                pass  # Expected - model APIs not available
+            result = query_consortium(question="Test", confidence_threshold=threshold)
+            assert result is not None
 
 
 class TestEdgeCases:
     """Test edge cases and unusual inputs."""
 
-    def test_very_long_question(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_very_long_question(self, mock_synthesize, mock_query):
         """Test that very long questions are accepted."""
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
         long_question = "What should I do? " * 1000
+        result = query_consortium(question=long_question)
+        assert result.question == long_question
 
-        try:
-            query_consortium(question=long_question)
-        except Exception:
-            pass  # Expected - model APIs not available
-
-    def test_unicode_in_question(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_unicode_in_question(self, mock_synthesize, mock_query):
         """Test Unicode characters in questions."""
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
         unicode_question = "Test 测试 тест テスト 🤔❓"
+        result = query_consortium(question=unicode_question)
+        assert result.question == unicode_question
 
-        try:
-            query_consortium(question=unicode_question)
-        except Exception:
-            pass  # Expected - model APIs not available
-
-    def test_empty_question(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_empty_question(self, mock_synthesize, mock_query):
         """Test handling of empty question."""
-        try:
-            query_consortium(question="")
-        except Exception:
-            pass  # Expected - model APIs not available or validation
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
+        result = query_consortium(question="")
+        assert result.question == ""
 
-    def test_single_model(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_single_model(self, mock_synthesize, mock_query):
         """Test consortium with single model (edge case)."""
-        try:
-            query_consortium(question="Test", models=["single-model"])
-        except Exception:
-            pass  # Expected - model API not available
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 1.0,
+            "reasoning": "Single model",
+        }
+        result = query_consortium(question="Test", models=["single-model"])
+        assert len(result.models_used) == 1
 
 
 class TestDataStructures:
@@ -115,8 +162,16 @@ class TestDataStructures:
 class TestProviderOptions:
     """Test provider-specific options."""
 
-    def test_model_list_variations(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_model_list_variations(self, mock_synthesize, mock_query):
         """Test different model list sizes are accepted."""
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
         model_lists = [
             ["model1"],
             ["model1", "model2"],
@@ -125,21 +180,25 @@ class TestProviderOptions:
         ]
 
         for models in model_lists:
-            try:
-                query_consortium(question="Test", models=models)
-            except Exception:
-                pass  # Expected - model APIs not available
+            result = query_consortium(question="Test", models=models)
+            assert len(result.models_used) == len(models)
 
-    def test_confidence_threshold_range(self):
+    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._synthesize_consensus")
+    def test_confidence_threshold_range(self, mock_synthesize, mock_query):
         """Test confidence thresholds across valid range."""
+        mock_query.return_value = "Test response"
+        mock_synthesize.return_value = {
+            "consensus": "Test answer",
+            "confidence": 0.8,
+            "reasoning": "Test reasoning",
+        }
         # Test edge values
         thresholds = [0.0, 0.1, 0.5, 0.8, 0.95, 1.0]
 
         for threshold in thresholds:
-            try:
-                query_consortium(question="Test", confidence_threshold=threshold)
-            except Exception:
-                pass  # Expected - model APIs not available
+            result = query_consortium(question="Test", confidence_threshold=threshold)
+            assert result is not None
 
 
 class TestIntegration:

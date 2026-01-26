@@ -7,12 +7,31 @@ on:
     branches: [ main, master ]
 
 jobs:
+  # Discovery job - outputs plugin matrix dynamically using Makefile (single source of truth)
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.discover.outputs.plugins }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Discover plugins with tests
+        id: discover
+        run: |
+          # Use Makefile for plugin discovery (single source of truth)
+          plugins=$(make ci-list-plugins-json)
+          echo "plugins=$plugins" >> $GITHUB_OUTPUT
+          echo "Discovered plugins: $plugins"
+
+  # Test each plugin in parallel
   test:
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
+        plugin: ${{ fromJson(needs.discover.outputs.plugins) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -24,39 +43,85 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python3 -m pip install --upgrade pip
           pip install pytest pytest-cov pytest-timeout
-          # Install plugin dependencies
-          pip install -e plugins/gptme-imagen
-          pip install -e plugins/gptme-consortium
-          pip install -e plugins/gptme-attention-tracker
-          pip install -e plugins/gptme-ralph
+          pip install -e plugins/${{ matrix.plugin }}
 
-      - name: Run unit tests
+      - name: Run unit tests for ${{ matrix.plugin }}
         run: |
-          pytest plugins/gptme-consortium/tests/test_consortium.py -v -m "not slow" --timeout=30
-          pytest plugins/gptme-imagen/tests/test_image_gen_phase1.py -v -m "not slow" --timeout=30
-          pytest plugins/gptme-ralph/tests/ -v -m "not slow" --timeout=30
+          pytest plugins/${{ matrix.plugin }}/tests -v -m "not slow" --timeout=30
 
-      - name: Run integration tests (with API keys)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+  # Integration tests (only on master push, with API keys)
+  integration-tests:
+    needs: discover
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJson(needs.discover.outputs.plugins) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install pytest pytest-timeout
+          pip install -e plugins/${{ matrix.plugin }}
+
+      - name: Run integration tests for ${{ matrix.plugin }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: |
-          pytest plugins/gptme-consortium/tests/integration/ -v --timeout=120
-          pytest plugins/gptme-imagen/tests/integration/ -v --timeout=120
+          if [ -d "plugins/${{ matrix.plugin }}/tests/integration" ]; then
+            pytest plugins/${{ matrix.plugin }}/tests/integration -v --timeout=120
+          else
+            echo "No integration tests found for ${{ matrix.plugin }}"
+          fi
 
-      - name: Run coverage (unit tests only)
+  # Coverage report (combined for all plugins)
+  coverage:
+    needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
         run: |
-          pytest plugins/gptme-consortium/tests/test_consortium.py -v -m "not slow" --cov=plugins/gptme-consortium --cov-report=xml --cov-report=term
-          pytest plugins/gptme-imagen/tests/test_image_gen_phase1.py -v -m "not slow" --cov=plugins/gptme-imagen --cov-append --cov-report=xml --cov-report=term
-          pytest plugins/gptme-ralph/tests/ -v -m "not slow" --cov=plugins/gptme-ralph --cov-append --cov-report=xml --cov-report=term
+          python3 -m pip install --upgrade pip
+          pip install pytest pytest-cov pytest-timeout
+          # Install all plugins
+          for plugin in plugins/*/; do
+            if [ -f "$plugin/pyproject.toml" ]; then
+              pip install -e "$plugin"
+            fi
+          done
+
+      - name: Run coverage
+        run: |
+          # Find all plugins with tests and run coverage
+          for plugin in plugins/*/; do
+            if [ -d "$plugin/tests" ]; then
+              pytest "$plugin/tests" -v -m "not slow" --cov="$plugin" --cov-append --cov-report=xml --cov-report=term --timeout=30 || true
+            fi
+          done
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
           flags: unittests
-          name: codecov-${{ matrix.python-version }}
+          name: codecov-plugins

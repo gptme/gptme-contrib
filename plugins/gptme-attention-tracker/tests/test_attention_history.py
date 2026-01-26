@@ -12,7 +12,7 @@ def temp_history_file(tmp_path):
     history_file = tmp_path / ".gptme" / "attention_history.jsonl"
     history_file.parent.mkdir(parents=True, exist_ok=True)
     with patch(
-        "gptme_attention_history.tools.attention_history.HISTORY_FILE", history_file
+        "gptme_attention_tracker.tools.attention_history.HISTORY_FILE", history_file
     ):
         yield history_file
 
@@ -20,7 +20,7 @@ def temp_history_file(tmp_path):
 @pytest.fixture
 def reset_session():
     """Reset session before each test."""
-    from gptme_attention_history.tools import attention_history
+    from gptme_attention_tracker.tools import attention_history
 
     attention_history._current_session_id = None
     yield
@@ -29,7 +29,7 @@ def reset_session():
 
 def test_record_turn(temp_history_file, reset_session):
     """Test recording a turn."""
-    from gptme_attention_history.tools.attention_history import record_turn
+    from gptme_attention_tracker.tools.attention_history import record_turn
 
     result = record_turn(
         turn_number=1,
@@ -51,7 +51,7 @@ def test_record_turn(temp_history_file, reset_session):
 
 def test_query_session(temp_history_file, reset_session):
     """Test querying session history."""
-    from gptme_attention_history.tools.attention_history import (
+    from gptme_attention_tracker.tools.attention_history import (
         record_turn,
         query_session,
         start_new_session,
@@ -67,7 +67,7 @@ def test_query_session(temp_history_file, reset_session):
 
 def test_query_file(temp_history_file, reset_session):
     """Test querying file statistics."""
-    from gptme_attention_history.tools.attention_history import record_turn, query_file
+    from gptme_attention_tracker.tools.attention_history import record_turn, query_file
 
     record_turn(turn_number=1, hot_files=["tracked.md"])
     record_turn(turn_number=2, hot_files=["tracked.md"])
@@ -81,7 +81,7 @@ def test_query_file(temp_history_file, reset_session):
 
 def test_query_coactivation(temp_history_file, reset_session):
     """Test co-activation analysis."""
-    from gptme_attention_history.tools.attention_history import (
+    from gptme_attention_tracker.tools.attention_history import (
         record_turn,
         query_coactivation,
     )
@@ -103,7 +103,7 @@ def test_query_coactivation(temp_history_file, reset_session):
 
 def test_query_keyword_effectiveness(temp_history_file, reset_session):
     """Test keyword effectiveness analysis."""
-    from gptme_attention_history.tools.attention_history import (
+    from gptme_attention_tracker.tools.attention_history import (
         record_turn,
         query_keyword_effectiveness,
     )
@@ -121,7 +121,7 @@ def test_query_keyword_effectiveness(temp_history_file, reset_session):
 
 def test_get_summary(temp_history_file, reset_session):
     """Test getting summary statistics."""
-    from gptme_attention_history.tools.attention_history import (
+    from gptme_attention_tracker.tools.attention_history import (
         record_turn,
         get_summary,
         start_new_session,
@@ -143,7 +143,7 @@ def test_get_summary(temp_history_file, reset_session):
 
 def test_clear_history(temp_history_file, reset_session):
     """Test clearing history."""
-    from gptme_attention_history.tools.attention_history import (
+    from gptme_attention_tracker.tools.attention_history import (
         record_turn,
         clear_history,
         get_summary,
@@ -158,7 +158,7 @@ def test_clear_history(temp_history_file, reset_session):
 
 def test_start_new_session(temp_history_file, reset_session):
     """Test starting new session."""
-    from gptme_attention_history.tools.attention_history import (
+    from gptme_attention_tracker.tools.attention_history import (
         start_new_session,
         record_turn,
         query_session,
@@ -173,7 +173,7 @@ def test_start_new_session(temp_history_file, reset_session):
 
 def test_tool_spec_exists():
     """Test that tool spec is properly defined."""
-    from gptme_attention_history.tools.attention_history import tool
+    from gptme_attention_tracker.tools.attention_history import tool
 
     assert tool.name == "attention_history"
     assert tool.functions is not None

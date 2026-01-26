@@ -169,7 +169,7 @@ class TestGenerateVariation:
         with pytest.raises(FileNotFoundError, match="Image not found"):
             generate_variation(image_path="nonexistent.png", provider="dalle2")
 
-    def test_generate_variation_single(self, tmp_path):
+    def test_generate_variation_single(self, tmp_path, mock_api_keys):
         """Test single variation generation returns ImageResult."""
         test_image = tmp_path / "test.png"
         test_image.write_bytes(b"fake image data")
@@ -193,7 +193,7 @@ class TestGenerateVariation:
                 assert not isinstance(result, list)
                 assert result.provider == "dalle2"
 
-    def test_generate_variation_multiple(self, tmp_path):
+    def test_generate_variation_multiple(self, tmp_path, mock_api_keys):
         """Test multiple variations return list of ImageResults."""
         test_image = tmp_path / "test.png"
         test_image.write_bytes(b"fake image data")
