@@ -46,15 +46,16 @@ echo "  Created: $LOG_DIR"
 # Function to install plist
 install_plist() {
     local template="$1"
-    local target="$LAUNCHD_DIR/$(basename "$template")"
-    
+    local target
+    target="$LAUNCHD_DIR/$(basename "$template")"
+
     echo -e "${YELLOW}Installing: $(basename "$template")${NC}"
-    
+
     # Copy and customize plist
     sed -e "s|/Users/YOUR_USERNAME|$HOME|g" \
         -e "s|\$HOME/gptme-agent|$AGENT_WORKSPACE|g" \
         "$template" > "$target"
-    
+
     echo "  Installed: $target"
 }
 
