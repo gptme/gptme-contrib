@@ -798,7 +798,7 @@ def _generate_plan_gptme(
     work_dir: Path,
 ) -> str | None:
     """Generate plan using gptme backend."""
-    cmd = ["gptme", "--non-interactive", "-y"]
+    cmd = ["gptme", "-n", "-y"]
 
     if model:
         cmd.extend(["-m", model])
