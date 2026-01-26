@@ -1,113 +1,59 @@
 # gptme-contrib Packages
 
-This directory contains Python packages providing utilities and shared code for gptme agents.
+Python packages for gptme agents.
 
-## Package Structure
+## Packages
 
-Each package follows the modern Python "src layout":
+| Package | Purpose | Install |
+|---------|---------|---------|
+| **gptmail** | Email/message handling | `uv pip install -e packages/gptmail` |
+| **gptodo** | Task management and work queues | `uv pip install -e packages/gptodo` |
+| **gptme_lessons_extras** | Lesson format validation and analysis | `uv pip install -e packages/gptme-lessons-extras` |
+| **gptme_contrib_lib** | Shared utilities across packages | `uv pip install -e packages/gptme-contrib-lib` |
+| **gptme_runloops** | Autonomous run loop infrastructure | `uv pip install -e packages/gptme-runloops` |
+
+## Backward Compatibility
+
+Source-level symlinks are provided for backward compatibility with existing imports:
+- `from lessons import ...` works via `gptme-lessons-extras/src/lessons` symlink
+- `from lib import ...` works via `gptme-contrib-lib/src/lib` symlink
+- `from run_loops import ...` works via `gptme-runloops/src/run_loops` symlink
+
+## Structure
 
 ```text
-package-name/
-├── pyproject.toml          # Package configuration
-├── README.md              # Package documentation
-├── src/
-│   └── package_name/      # Source code
-│       ├── __init__.py
-│       └── *.py
-└── tests/                 # Package tests
-    └── test_*.py
-```
-
-## Available Packages
-
-### lib - Shared Library Code
-
-**Location**: `packages/lib/`
-
-Provides core utilities used across gptme agent systems:
-
-- **Input Orchestrator**: Multi-source coordination (GitHub, Email, Webhooks, Scheduler)
-- **Configuration Management**: Agent-specific settings and environment handling
-- **Monitoring**: Logging and status tracking for autonomous operations
-- **Rate Limiting**: API rate limit management
-
-**Key Modules**:
-- `lib.orchestrator`: Main orchestration service
-- `lib.input_sources`: Abstract input source definitions
-- `lib.input_source_impl`: Concrete implementations (GitHub, Email, etc.)
-- `lib.config`: Configuration loading and validation
-- `lib.rate_limiter`: Rate limit enforcement
-- `lib.monitoring`: Logging and monitoring utilities
-
-**Usage**:
-```python
-from lib.orchestrator import InputOrchestrator, OrchestratorConfig
-
-config = OrchestratorConfig(...)
-orchestrator = InputOrchestrator(config)
-await orchestrator.run_once()
+packages/package-name/
+├── pyproject.toml    # Config
+├── src/package_name/ # Source (new name)
+├── src/old_name/     # Symlink to package_name (backward compat)
+└── tests/            # Tests
 ```
 
 ## Development
 
-### Installing Packages
+```shell
+# Install workspace
+uv sync --all-packages
 
-From workspace root:
-```bash
-# Install all packages
-uv sync
-
-# Install specific package in development mode
-uv pip install -e packages/lib
-```
-
-### Running Tests
-
-```bash
-# Run tests for specific package
-uv run pytest packages/lib/tests
+# Run package tests
+uv run pytest packages/gptodo/tests
 
 # Run all tests
-uv run pytest packages/*/tests
+make test
+
+# Type check
+make typecheck
 ```
 
-### Adding Dependencies
+## Adding Dependencies
 
-Add dependencies to the specific package's `pyproject.toml`:
+Edit `packages/NAME/pyproject.toml`, then:
 
-```toml
-[project]
-dependencies = [
-    "requests>=2.28",
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest>=8.0",
-]
-```
-
-Then sync the workspace:
-```bash
+```shell
 uv sync
 ```
 
-## Package Guidelines
+## References
 
-1. **Minimal Dependencies**: Keep package dependencies lean
-2. **Clear Purpose**: Each package should have a focused responsibility
-3. **Documentation**: Include README and docstrings
-4. **Testing**: Provide test coverage for core functionality
-5. **Type Hints**: Use type annotations throughout
-
-## Migration History
-
-These packages were originally developed in a gptme agent workspace and migrated to gptme-contrib to enable reuse across all gptme agents.
-
-**Original Locations**:
-- `lib` → from `agent/packages/lib/`
-
-## Related
-
-- [gptme-agent-template](https://github.com/gptme/gptme-agent-template) - Template for creating new agents
-- [gptme](https://github.com/gptme/gptme) - Core gptme framework
+- [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/)
+- Root [pyproject.toml](../pyproject.toml) - workspace configuration

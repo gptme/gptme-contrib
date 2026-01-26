@@ -45,9 +45,9 @@ Reusable Python packages. See [packages/README.md](./packages/README.md).
 |---------|-------------|
 | [gptmail](./packages/gptmail/) | Universal email system for AI agents |
 | [gptodo](./packages/gptodo/) | Task management CLI and utilities |
-| [lessons](./packages/lessons/) | Lesson validation and tools |
-| [run_loops](./packages/run_loops/) | Agent run loop patterns |
-| [lib](./packages/lib/) | Shared utilities |
+| [gptme_lessons_extras](./packages/gptme-lessons-extras/) | Lesson validation and tools |
+| [gptme_runloops](./packages/gptme-runloops/) | Agent run loop patterns |
+| [gptme_contrib_lib](./packages/gptme-contrib-lib/) | Shared utilities |
 
 ## Scripts
 
