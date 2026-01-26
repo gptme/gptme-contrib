@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -27,6 +28,28 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import httpx
+
+
+# Configure structured logging
+def setup_logging() -> logging.Logger:
+    """Set up structured logging with file and console handlers."""
+    logger = logging.getLogger("linear-webhook")
+    logger.setLevel(logging.DEBUG)
+
+    # Console handler with concise format
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.INFO)
+    console_fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    console_handler.setFormatter(console_fmt)
+    logger.addHandler(console_handler)
+
+    return logger
+
+
+# Initialize logger early
+log = setup_logging()
 
 # Load environment from .env file
 ENV_FILE = Path(__file__).parent / ".env"
@@ -107,6 +130,16 @@ NOTIFICATIONS_DIR.mkdir(parents=True, exist_ok=True)
 WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Add file handler now that LOGS_DIR is defined
+_file_handler = logging.FileHandler(LOGS_DIR / "webhook-server.log")
+_file_handler.setLevel(logging.DEBUG)
+_file_fmt = logging.Formatter(
+    "%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+_file_handler.setFormatter(_file_fmt)
+log.addHandler(_file_handler)
+
 # Path to the linear-activity.py CLI
 LINEAR_ACTIVITY_CLI = Path(__file__).parent / "linear-activity.py"
 
@@ -131,7 +164,7 @@ def ensure_valid_token() -> bool:
             return True
 
         # Token is expired, try to refresh
-        print("Token expired, attempting refresh...", file=sys.stderr)
+        log.warning("Token expired, attempting refresh...")
         refresh_result = subprocess.run(
             ["uv", "run", str(LINEAR_ACTIVITY_CLI), "refresh"],
             capture_output=True,
@@ -140,17 +173,17 @@ def ensure_valid_token() -> bool:
         )
 
         if refresh_result.returncode == 0:
-            print("✓ Token refreshed successfully", file=sys.stderr)
+            log.info("Token refreshed successfully")
             return True
 
-        print(f"Failed to refresh token: {refresh_result.stderr}", file=sys.stderr)
+        log.error(f"Failed to refresh token: {refresh_result.stderr}")
         return False
 
     except subprocess.TimeoutExpired:
-        print("Token check/refresh timed out", file=sys.stderr)
+        log.error("Token check/refresh timed out")
         return False
     except Exception as e:
-        print(f"Error checking/refreshing token: {e}", file=sys.stderr)
+        log.error(f"Error checking/refreshing token: {e}")
         return False
 
 
@@ -174,7 +207,7 @@ def get_access_token() -> str | None:
 def verify_signature(payload: bytes, signature: str) -> bool:
     """Verify webhook signature using HMAC-SHA256."""
     if not signature or not WEBHOOK_SECRET:
-        print("Missing signature or webhook secret", file=sys.stderr)
+        log.warning("Missing signature or webhook secret")
         return False
 
     expected = hmac.new(WEBHOOK_SECRET.encode(), payload, hashlib.sha256).hexdigest()
@@ -186,9 +219,16 @@ def store_notification(payload: dict) -> Path:
     """Store webhook payload for logging."""
     timestamp = datetime.now(timezone.utc).isoformat()
     event_type = payload.get("type", "unknown")
+    action = payload.get("action", "unknown")
     random_suffix = os.urandom(4).hex()
     filename = f"{int(time.time() * 1000)}-{random_suffix}-{event_type}.json"
     filepath = NOTIFICATIONS_DIR / filename
+
+    # Extract key identifiers for logging
+    session_id = payload.get("agentSession", {}).get("id", "no-session")
+    issue_id = (
+        payload.get("agentSession", {}).get("issue", {}).get("identifier", "no-issue")
+    )
 
     notification = {
         "timestamp": timestamp,
@@ -197,7 +237,9 @@ def store_notification(payload: dict) -> Path:
     }
 
     filepath.write_text(json.dumps(notification, indent=2))
-    print(f"Stored notification: {filename}")
+    log.info(
+        f"WEBHOOK_STORED | type={event_type} action={action} session={session_id} issue={issue_id} file={filename}"
+    )
     return filepath
 
 
@@ -207,7 +249,9 @@ def emit_activity(
     """Emit an activity to a Linear agent session."""
     token = get_access_token()
     if not token:
-        print("No access token available", file=sys.stderr)
+        log.error(
+            f"SESSION_ACTIVITY_FAILED | session={session_id} type={activity_type} reason=no_access_token"
+        )
         return False
 
     mutation = """
@@ -245,14 +289,26 @@ def emit_activity(
         result = response.json()
 
         if result.get("data", {}).get("agentActivityCreate", {}).get("success"):
-            print(f"Emitted {activity_type} activity to session {session_id}")
+            activity_id = (
+                result.get("data", {})
+                .get("agentActivityCreate", {})
+                .get("agentActivity", {})
+                .get("id", "unknown")
+            )
+            log.info(
+                f"SESSION_ACTIVITY_SENT | session={session_id} type={activity_type} activity_id={activity_id}"
+            )
             return True
 
-        print(f"Failed to emit activity: {result}", file=sys.stderr)
+        log.error(
+            f"SESSION_ACTIVITY_FAILED | session={session_id} type={activity_type} result={result}"
+        )
         return False
 
     except Exception as e:
-        print(f"Error emitting activity: {e}", file=sys.stderr)
+        log.error(
+            f"SESSION_ACTIVITY_ERROR | session={session_id} type={activity_type} error={e}"
+        )
         return False
 
 
@@ -262,9 +318,13 @@ def create_worktree(session_id: str) -> Path:
     worktree_path = WORKTREE_BASE / worktree_name
     branch_name = worktree_name
 
+    log.debug(f"SESSION_WORKTREE_START | session={session_id} path={worktree_path}")
+
     # Remove existing worktree if present
     if worktree_path.exists():
-        print(f"Removing existing worktree: {worktree_path}")
+        log.info(
+            f"SESSION_WORKTREE_CLEANUP | session={session_id} path={worktree_path}"
+        )
         subprocess.run(
             ["git", "worktree", "remove", "-f", str(worktree_path)],
             cwd=AGENT_WORKSPACE,
@@ -280,8 +340,9 @@ def create_worktree(session_id: str) -> Path:
     )
     fetch_failed = fetch_result.returncode != 0
     if fetch_failed:
-        print(f"Warning: git fetch failed: {fetch_result.stderr}", file=sys.stderr)
-        print("Continuing with local branch...", file=sys.stderr)
+        log.warning(
+            f"SESSION_GIT_FETCH_FAILED | session={session_id} error={fetch_result.stderr.strip()}"
+        )
 
     # Create worktree - use local branch if fetch failed, origin otherwise
     base_ref = DEFAULT_BRANCH if fetch_failed else f"origin/{DEFAULT_BRANCH}"
@@ -301,23 +362,31 @@ def create_worktree(session_id: str) -> Path:
     )
 
     if worktree_result.returncode != 0:
+        log.error(
+            f"SESSION_WORKTREE_FAILED | session={session_id} error={worktree_result.stderr.strip()}"
+        )
         raise RuntimeError(f"git worktree add failed: {worktree_result.stderr}")
 
     # Verify worktree was actually created
     if not worktree_path.exists():
+        log.error(
+            f"SESSION_WORKTREE_MISSING | session={session_id} path={worktree_path}"
+        )
         raise RuntimeError(
             f"git worktree add reported success but directory not created: {worktree_path}"
         )
 
     # Initialize submodules
-    print("Initializing submodules...")
+    log.debug(f"SESSION_SUBMODULES_INIT | session={session_id}")
     subprocess.run(
         ["git", "submodule", "update", "--init", "--recursive"],
         cwd=str(worktree_path),  # Convert Path to string explicitly
         check=True,
     )
 
-    print(f"✓ Created worktree: {worktree_path}")
+    log.info(
+        f"SESSION_WORKTREE_CREATED | session={session_id} path={worktree_path} branch={branch_name}"
+    )
     return worktree_path
 
 
@@ -328,6 +397,8 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
     the commit is in origin/main before cleaning up.
     """
     branch_name = f"linear-session-{session_id}"
+
+    log.debug(f"SESSION_CLEANUP_START | session={session_id} path={worktree_path}")
 
     # Fetch latest from origin
     subprocess.run(
@@ -345,7 +416,7 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
     )
 
     if worktree_commit.returncode != 0:
-        print("⚠ Could not get commit from worktree", file=sys.stderr)
+        log.warning(f"SESSION_CLEANUP_NO_COMMIT | session={session_id}")
         return
 
     commit_sha = worktree_commit.stdout.strip()
@@ -359,9 +430,13 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
     )
 
     if f"origin/{DEFAULT_BRANCH}" in check_merged.stdout:
-        print(f"✓ Commit {commit_sha[:8]} verified in origin/{DEFAULT_BRANCH}")
+        log.info(
+            f"SESSION_MERGE_VERIFIED | session={session_id} commit={commit_sha[:8]} branch=origin/{DEFAULT_BRANCH}"
+        )
     else:
-        print(f"⚠ Commit {commit_sha[:8]} NOT found in origin/{DEFAULT_BRANCH}")
+        log.warning(
+            f"SESSION_NOT_MERGED | session={session_id} commit={commit_sha[:8]} branch={branch_name}"
+        )
         emit_activity(
             session_id,
             f"⚠ Work not merged to {DEFAULT_BRANCH}. Branch `{branch_name}` commit {commit_sha[:8]} not in origin/{DEFAULT_BRANCH}. Please merge and push manually.",
@@ -383,9 +458,11 @@ def cleanup_worktree(session_id: str, worktree_path: Path):
                 cwd=AGENT_WORKSPACE,
                 capture_output=True,
             )
-            print(f"✓ Cleaned up worktree and branch for session {session_id}")
+            log.info(
+                f"SESSION_CLEANUP_COMPLETE | session={session_id} branch={branch_name}"
+            )
     except Exception as e:
-        print(f"Error cleaning up worktree: {e}", file=sys.stderr)
+        log.error(f"SESSION_CLEANUP_ERROR | session={session_id} error={e}")
 
 
 def build_gptme_prompt(session_data: dict) -> str:
@@ -472,11 +549,13 @@ Posting comments via GraphQL API does NOT close the session - only `response` do
 
 def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
     """Spawn gptme in the worktree with logging."""
-    print(f"Spawning gptme in {worktree_path}...")
-
     # Create log file for this session
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_file = LOGS_DIR / f"{timestamp}-{session_id}.log"
+
+    log.info(
+        f"SESSION_GPTME_SPAWN | session={session_id} worktree={worktree_path} log_file={log_file}"
+    )
 
     try:
         with open(log_file, "w") as f:
@@ -499,16 +578,22 @@ def spawn_gptme(worktree_path: Path, prompt: str, session_id: str) -> int:
             f.write(f"Finished: {datetime.now(timezone.utc).isoformat()}\n")
             f.write(f"Exit code: {result.returncode}\n")
 
-        print(f"Session log: {log_file}")
+        log.info(
+            f"SESSION_GPTME_COMPLETE | session={session_id} exit_code={result.returncode} log_file={log_file}"
+        )
         return result.returncode
     except subprocess.TimeoutExpired:
-        print("gptme timed out", file=sys.stderr)
+        log.error(
+            f"SESSION_GPTME_TIMEOUT | session={session_id} timeout={GPTME_TIMEOUT}s log_file={log_file}"
+        )
         with open(log_file, "a") as f:
             f.write(f"\n{'=' * 50}\n")
             f.write(f"TIMEOUT after {GPTME_TIMEOUT} seconds\n")
         return 1
     except Exception as e:
-        print(f"Error spawning gptme: {e}", file=sys.stderr)
+        log.error(
+            f"SESSION_GPTME_ERROR | session={session_id} error={e} log_file={log_file}"
+        )
         with open(log_file, "a") as f:
             f.write(f"\n{'=' * 50}\n")
             f.write(f"ERROR: {e}\n")
@@ -521,21 +606,23 @@ def process_agent_session_event(payload: dict, filepath: Path):
     session_id = agent_session.get("id")
     action = payload.get("action")
     prompt_context = payload.get("promptContext", "")
+    issue = agent_session.get("issue", {})
+    issue_identifier = issue.get("identifier", "unknown")
+    issue_title = issue.get("title", "Unknown")
 
     if not session_id:
-        print("No session ID in payload", file=sys.stderr)
+        log.error("SESSION_NO_ID | payload missing session ID")
         return
+
+    log.info(
+        f'SESSION_RECEIVED | session={session_id} action={action} issue={issue_identifier} title="{issue_title}"'
+    )
 
     # CRITICAL: Validate token BEFORE doing any work
     # If we can't respond to Linear, there's no point spawning a session
     if not ensure_valid_token():
-        print(
-            f"ERROR: Cannot process session {session_id} - no valid token available!",
-            file=sys.stderr,
-        )
-        print(
-            "Webhook stored but session NOT spawned. Fix token and restart service.",
-            file=sys.stderr,
+        log.error(
+            f"SESSION_TOKEN_INVALID | session={session_id} issue={issue_identifier} - cannot proceed without valid token"
         )
         # Mark notification as failed for later retry
         try:
@@ -545,12 +632,16 @@ def process_agent_session_event(payload: dict, filepath: Path):
             notification["error_time"] = datetime.now(timezone.utc).isoformat()
             filepath.write_text(json.dumps(notification, indent=2))
         except Exception as e:
-            print(f"Failed to update notification file: {e}", file=sys.stderr)
+            log.error(
+                f"SESSION_NOTIFICATION_UPDATE_FAILED | session={session_id} error={e}"
+            )
         return
 
     # Deduplication
     if session_id in processed_sessions:
-        print(f"Session {session_id} already processed, skipping")
+        log.info(
+            f"SESSION_DUPLICATE | session={session_id} - already processed, skipping"
+        )
         return
 
     processed_sessions.add(session_id)
@@ -562,23 +653,21 @@ def process_agent_session_event(payload: dict, filepath: Path):
 
     threading.Thread(target=cleanup_session, daemon=True).start()
 
-    print(f"Processing AgentSessionEvent: {action} for session {session_id}")
+    log.info(
+        f"SESSION_PROCESSING | session={session_id} issue={issue_identifier} action={action}"
+    )
 
     # Emit acknowledgment
-    issue = agent_session.get("issue", {})
     emit_activity(
         session_id,
-        f"👋 Acknowledged! Starting work on {issue.get('identifier', 'this issue')}...",
+        f"👋 Acknowledged! Starting work on {issue_identifier}...",
         "thought",
     )
-    print(f"✓ Emitted acknowledgment for session {session_id}")
+    log.info(f"SESSION_ACKNOWLEDGED | session={session_id} issue={issue_identifier}")
 
     # Get or create session lock
     if session_id not in session_locks:
         session_locks[session_id] = threading.Lock()
-
-    # Get issue identifier for tracking
-    issue_identifier = issue.get("identifier", "unknown")
 
     with session_locks[session_id]:
         worktree_path = None
@@ -588,11 +677,9 @@ def process_agent_session_event(payload: dict, filepath: Path):
                 if issue_identifier in active_issues:
                     old_session_id, old_worktree_path = active_issues[issue_identifier]
                     if old_worktree_path.exists():
-                        print(
-                            f"Found existing worktree for {issue_identifier} from session {old_session_id}"
+                        log.info(
+                            f"SESSION_EXISTING_WORKTREE | session={session_id} issue={issue_identifier} old_session={old_session_id}"
                         )
-                        print("Checking if previous work was merged...")
-
                         # Verify and clean up old worktree (no auto-merge - agent is responsible)
                         cleanup_worktree(old_session_id, old_worktree_path)
 
@@ -615,6 +702,10 @@ def process_agent_session_event(payload: dict, filepath: Path):
             }
             prompt = build_gptme_prompt(session_data)
 
+            log.info(
+                f"SESSION_SPAWNING | session={session_id} issue={issue_identifier} worktree={worktree_path}"
+            )
+
             # Spawn gptme
             exit_code = spawn_gptme(worktree_path, prompt, session_id)
 
@@ -622,10 +713,14 @@ def process_agent_session_event(payload: dict, filepath: Path):
             log_ref = f"logs/linear-sessions/*-{session_id}.log"
 
             if exit_code == 0:
-                print(f"✓ Session {session_id} completed successfully")
+                log.info(
+                    f"SESSION_SUCCESS | session={session_id} issue={issue_identifier} exit_code={exit_code}"
+                )
                 # gptme should have sent its own response, but ensure session closes
             else:
-                print(f"✗ Session {session_id} failed with exit code {exit_code}")
+                log.error(
+                    f"SESSION_FAILED | session={session_id} issue={issue_identifier} exit_code={exit_code}"
+                )
                 emit_activity(
                     session_id,
                     f"Session failed with exit code {exit_code}. Log: {log_ref}",
@@ -639,7 +734,9 @@ def process_agent_session_event(payload: dict, filepath: Path):
                 )
 
         except Exception as e:
-            print(f"Error processing session: {e}", file=sys.stderr)
+            log.exception(
+                f"SESSION_EXCEPTION | session={session_id} issue={issue_identifier} error={e}"
+            )
             log_ref = f"logs/linear-sessions/*-{session_id}.log"
             emit_activity(session_id, f"Fatal error: {str(e)}", "error")
             # Send response to close the session
@@ -669,30 +766,44 @@ def webhook():
 
     # Verify signature
     if not verify_signature(raw_body, signature):
-        print("Invalid webhook signature", file=sys.stderr)
+        log.warning(
+            "WEBHOOK_SIGNATURE_INVALID | rejecting request with invalid signature"
+        )
         return "Invalid signature", 401
 
     payload = request.get_json()
 
     if not payload:
+        log.warning("WEBHOOK_INVALID_PAYLOAD | empty or invalid JSON payload")
         return "Invalid payload", 400
 
     event_type = payload.get("type", "unknown")
     action = payload.get("action", "unknown")
+    session_id = payload.get("agentSession", {}).get("id", "no-session")
+    issue_id = (
+        payload.get("agentSession", {}).get("issue", {}).get("identifier", "no-issue")
+    )
 
-    print(f"Received webhook: {event_type} - {action}")
+    log.info(
+        f"WEBHOOK_RECEIVED | type={event_type} action={action} session={session_id} issue={issue_id}"
+    )
 
     # Store notification
     filepath = store_notification(payload)
 
     # Process AgentSessionEvent asynchronously
     if event_type == "AgentSessionEvent":
+        log.info(f"WEBHOOK_PROCESSING_ASYNC | session={session_id} spawning thread")
         thread = threading.Thread(
             target=process_agent_session_event,
             args=(payload, filepath),
             daemon=True,
         )
         thread.start()
+    else:
+        log.debug(
+            f"WEBHOOK_IGNORED | type={event_type} action={action} - not an AgentSessionEvent"
+        )
 
     return "OK", 200
 
@@ -911,16 +1022,18 @@ def index():
 
 def main():
     if not WEBHOOK_SECRET:
-        print(
-            "Error: LINEAR_WEBHOOK_SECRET environment variable required",
-            file=sys.stderr,
+        log.error(
+            "STARTUP_FAILED | LINEAR_WEBHOOK_SECRET environment variable required"
         )
-        print("Set it in .env file or environment", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Linear webhook server running on port {PORT}")
-    print(f"Notifications directory: {NOTIFICATIONS_DIR}")
-    print(f"Webhook endpoint: http://localhost:{PORT}/webhook")
+    log.info(f"STARTUP | port={PORT} agent={AGENT_NAME}")
+    log.info(f"STARTUP | workspace={AGENT_WORKSPACE}")
+    log.info(f"STARTUP | worktree_base={WORKTREE_BASE}")
+    log.info(f"STARTUP | notifications_dir={NOTIFICATIONS_DIR}")
+    log.info(f"STARTUP | logs_dir={LOGS_DIR}")
+    log.info(f"STARTUP | log_file={LOGS_DIR / 'webhook-server.log'}")
+    log.info(f"STARTUP | webhook_endpoint=http://localhost:{PORT}/webhook")
 
     app.run(host="0.0.0.0", port=PORT, debug=False)
 
