@@ -9,38 +9,34 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <!-- Update this path to your agent workspace -->
-        <string>cd $HOME/gptme-agent && ./scripts/runs/autonomous/project-monitoring.sh 2>&1 | head -1000</string>
+        <!-- The setup script will replace AGENT_WORKSPACE with actual path -->
+        <string>cd AGENT_WORKSPACE && ./scripts/runs/launchd/project-monitoring.sh --workspace AGENT_WORKSPACE 2>&1 | head -5000</string>
     </array>
 
-    <!-- Working directory (update to your workspace) -->
+    <!-- Working directory (setup script replaces AGENT_WORKSPACE) -->
     <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/gptme-agent</string>
+    <string>AGENT_WORKSPACE</string>
 
     <!-- Schedule: Every 5 minutes -->
     <key>StartInterval</key>
     <integer>300</integer>
 
-    <!-- Timeout: 30 minutes for project monitoring -->
+    <!-- Timeout: 30 minutes -->
     <key>TimeoutSeconds</key>
     <integer>1800</integer>
 
-    <!-- Logging configuration -->
+    <!-- Logging configuration (setup script replaces USER_HOME) -->
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/Library/Logs/gptme-agent/project-monitoring.log</string>
+    <string>USER_HOME/Library/Logs/gptme-agent/project-monitoring.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/Library/Logs/gptme-agent/project-monitoring.error.log</string>
+    <string>USER_HOME/Library/Logs/gptme-agent/project-monitoring.error.log</string>
 
     <!-- Environment variables -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <!-- GitHub CLI needs auth token -->
-        <!--
-        <key>GITHUB_TOKEN</key>
-        <string>ghp_...</string>
-        -->
+        <!-- GitHub CLI needs auth - can set GITHUB_TOKEN here or use gh auth -->
     </dict>
 
     <!-- Don't run at load -->

@@ -9,20 +9,17 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <!-- Update this path to your agent workspace -->
-        <string>cd $HOME/gptme-agent && ./scripts/runs/autonomous/autonomous-run.sh</string>
+        <!-- The setup script will replace AGENT_WORKSPACE with actual path -->
+        <string>cd AGENT_WORKSPACE && ./scripts/runs/launchd/autonomous-run.sh --workspace AGENT_WORKSPACE 2>&1 | head -10000</string>
     </array>
 
-    <!-- Working directory (update to your workspace) -->
+    <!-- Working directory (setup script replaces AGENT_WORKSPACE) -->
     <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/gptme-agent</string>
+    <string>AGENT_WORKSPACE</string>
 
-    <!-- Schedule: Weekdays hourly 6am-8pm, weekends every 2 hours -->
-    <!-- Note: launchd doesn't support day-of-week filtering, so we run hourly -->
-    <!-- The autonomous script should handle scheduling logic if needed -->
+    <!-- Schedule: Every hour at minute 0 during typical working hours (6am-8pm) -->
     <key>StartCalendarInterval</key>
     <array>
-        <!-- Every hour at minute 0 during typical working hours -->
         <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
         <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
         <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
@@ -40,56 +37,36 @@
         <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
     </array>
 
-    <!-- Timeout: 1 hour (matches systemd TimeoutSec=3600) -->
+    <!-- Timeout: 1 hour -->
     <key>TimeoutSeconds</key>
     <integer>3600</integer>
 
-    <!-- Logging configuration -->
+    <!-- Logging configuration (setup script replaces USER_HOME) -->
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/Library/Logs/gptme-agent/autonomous.log</string>
+    <string>USER_HOME/Library/Logs/gptme-agent/autonomous.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/Library/Logs/gptme-agent/autonomous.error.log</string>
+    <string>USER_HOME/Library/Logs/gptme-agent/autonomous.error.log</string>
 
-    <!-- Environment variables (customize as needed) -->
+    <!-- Environment variables -->
     <key>EnvironmentVariables</key>
     <dict>
         <!-- Ensure PATH includes common tool locations -->
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <!-- Uncomment and set your API keys, or source from .env file in script -->
-        <!--
-        <key>ANTHROPIC_API_KEY</key>
-        <string>sk-ant-...</string>
-        <key>OPENAI_API_KEY</key>
-        <string>sk-...</string>
-        -->
+        <!-- API keys can be set here or in shell profile -->
+        <!-- The script sources ~/.profile, ~/.bash_profile, ~/.zshrc -->
     </dict>
 
-    <!-- Run at load (useful for immediate testing) -->
+    <!-- Don't run at load -->
     <key>RunAtLoad</key>
     <false/>
 
-    <!-- Keep alive settings -->
-    <!-- Set to false for scheduled oneshot jobs -->
+    <!-- Oneshot job, don't keep alive -->
     <key>KeepAlive</key>
     <false/>
 
-    <!-- Nice value (lower priority) -->
+    <!-- Lower priority -->
     <key>Nice</key>
     <integer>10</integer>
-
-    <!-- Resource limits (optional, uncomment if needed) -->
-    <!--
-    <key>SoftResourceLimits</key>
-    <dict>
-        <key>NumberOfFiles</key>
-        <integer>1024</integer>
-    </dict>
-    <key>HardResourceLimits</key>
-    <dict>
-        <key>NumberOfFiles</key>
-        <integer>2048</integer>
-    </dict>
-    -->
 </dict>
 </plist>
