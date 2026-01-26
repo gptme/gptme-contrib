@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gptme.agent-autonomous</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <!-- Update this path to your agent workspace -->
+        <string>cd $HOME/gptme-agent && ./scripts/runs/autonomous/autonomous-run.sh</string>
+    </array>
+
+    <!-- Working directory (update to your workspace) -->
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/gptme-agent</string>
+
+    <!-- Schedule: Weekdays hourly 6am-8pm, weekends every 2 hours -->
+    <!-- Note: launchd doesn't support day-of-week filtering, so we run hourly -->
+    <!-- The autonomous script should handle scheduling logic if needed -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <!-- Every hour at minute 0 during typical working hours -->
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <!-- Timeout: 1 hour (matches systemd TimeoutSec=3600) -->
+    <key>TimeoutSeconds</key>
+    <integer>3600</integer>
+
+    <!-- Logging configuration -->
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/gptme-agent/autonomous.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/gptme-agent/autonomous.error.log</string>
+
+    <!-- Environment variables (customize as needed) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Ensure PATH includes common tool locations -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- Uncomment and set your API keys, or source from .env file in script -->
+        <!--
+        <key>ANTHROPIC_API_KEY</key>
+        <string>sk-ant-...</string>
+        <key>OPENAI_API_KEY</key>
+        <string>sk-...</string>
+        -->
+    </dict>
+
+    <!-- Run at load (useful for immediate testing) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Keep alive settings -->
+    <!-- Set to false for scheduled oneshot jobs -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Nice value (lower priority) -->
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <!-- Resource limits (optional, uncomment if needed) -->
+    <!--
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>1024</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>2048</integer>
+    </dict>
+    -->
+</dict>
+</plist>
