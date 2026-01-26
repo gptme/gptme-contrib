@@ -137,7 +137,7 @@ class TestBuildPrompt:
         plan = Plan(title="Test", steps=[PlanStep(1, "Step 1")])
         step = plan.steps[0]
 
-        prompt = _build_prompt(spec, plan, step)
+        prompt = _build_prompt(spec, plan, step, plan_file_path="test_plan.md")
 
         assert "This is the specification." in prompt
         assert "Step 1" in prompt
@@ -155,11 +155,25 @@ class TestBuildPrompt:
         )
         step = plan.steps[1]
 
-        prompt = _build_prompt(spec, plan, step)
+        prompt = _build_prompt(spec, plan, step, plan_file_path="plan.md")
 
         assert "My Plan" in prompt
         assert "First step" in prompt
         assert "Second step" in prompt
+
+    def test_build_prompt_includes_plan_file_path(self):
+        """Test that the prompt includes the plan file path for checkbox updates."""
+        spec = "Test spec"
+        plan = Plan(title="Test Plan", steps=[PlanStep(1, "Step 1")])
+        step = plan.steps[0]
+
+        prompt = _build_prompt(spec, plan, step, plan_file_path="/workspace/plan.md")
+
+        # Verify the plan file path is explicitly mentioned
+        assert "/workspace/plan.md" in prompt
+        # Verify checkbox update pattern is explained
+        assert "- [ ]" in prompt or "[ ]" in prompt
+        assert "- [x]" in prompt or "[x]" in prompt
 
 
 class TestCreatePlan:
