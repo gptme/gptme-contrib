@@ -16,7 +16,7 @@ dev = [
 ]
 
 [project.scripts]
-run-loops = "run_loops.cli:main"
+run-loops = "gptme_runloops.cli:main"
 
 [build-system]
 requires = ["hatchling"]
