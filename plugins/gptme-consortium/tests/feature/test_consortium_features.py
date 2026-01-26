@@ -31,12 +31,13 @@ class TestModelCombinations:
 
         result = query_consortium(question="Test question")
 
-        # Should use default frontier models
-        assert len(result.models_used) == 4
-        assert "anthropic/claude-sonnet-4-5" in result.models_used
+        # Should use default frontier models (5 models including Perplexity)
+        assert len(result.models_used) == 5
+        assert "anthropic/claude-opus-4-5" in result.models_used
         assert "openai/gpt-5.1" in result.models_used
-        assert "google/gemini-3-pro" in result.models_used
+        assert "gemini/gemini-3-pro-preview" in result.models_used
         assert "xai/grok-4" in result.models_used
+        assert "openrouter/perplexity/sonar-pro" in result.models_used
 
     @patch("gptme_consortium.tools.consortium._query_single_model")
     @patch("gptme_consortium.tools.consortium._synthesize_consensus")
@@ -184,15 +185,21 @@ class TestConfidenceThreshold:
 class TestErrorHandling:
     """Test error handling for various failure scenarios."""
 
-    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._retry_with_backoff")
     @patch("gptme_consortium.tools.consortium._synthesize_consensus")
-    def test_single_model_failure(self, mock_synthesize, mock_query):
+    def test_single_model_failure(self, mock_synthesize, mock_retry):
         """Test handling when one model fails."""
-        mock_query.side_effect = [
-            "Response 1",
-            Exception("API Error"),
-            "Response 3",
-        ]
+        # Mock _retry_with_backoff to just call the function once (no retries)
+        # This allows us to control exactly what each model call returns
+        responses = iter(["Response 1", Exception("API Error"), "Response 3"])
+
+        def passthrough_no_retry(func, **kwargs):
+            result = next(responses)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        mock_retry.side_effect = passthrough_no_retry
         mock_synthesize.return_value = {
             "consensus": "Best effort consensus",
             "confidence": 0.6,
@@ -205,11 +212,12 @@ class TestErrorHandling:
         assert "Error: API Error" in result.responses["m2"]
         assert result.consensus == "Best effort consensus"
 
-    @patch("gptme_consortium.tools.consortium._query_single_model")
+    @patch("gptme_consortium.tools.consortium._retry_with_backoff")
     @patch("gptme_consortium.tools.consortium._synthesize_consensus")
-    def test_all_models_fail(self, mock_synthesize, mock_query):
+    def test_all_models_fail(self, mock_synthesize, mock_retry):
         """Test handling when all models fail."""
-        mock_query.side_effect = Exception("API Down")
+        # Mock retry to immediately raise without retrying
+        mock_retry.side_effect = Exception("API Down")
         mock_synthesize.return_value = {
             "consensus": "Unable to reach consensus",
             "confidence": 0.0,
