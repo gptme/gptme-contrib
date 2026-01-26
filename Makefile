@@ -68,27 +68,11 @@ test-plugins:  ## Run tests for all plugins with test directories
 # CI Helper targets (for GitHub Actions matrix)
 # ============================================================
 
-ci-list-packages-json:  ## Output packages as JSON for CI matrix
-	@echo '{"package": ['
-	@first=1; for pkg in $(PACKAGE_DIRS); do \
-		if [ -f "$$pkg/Makefile" ]; then \
-			[ $$first -eq 1 ] || echo ','; \
-			first=0; \
-			echo -n "\"$$(basename $$pkg)\""; \
-		fi \
-	done
-	@echo ']}'
+ci-list-packages-json:  ## Output packages as JSON array for CI matrix
+	@for pkg in $(PACKAGE_DIRS); do if [ -f "$$pkg/Makefile" ]; then basename $$pkg; fi; done | jq -R -s -c 'split("\n") | map(select(length > 0))'
 
-ci-list-plugins-json:  ## Output plugins with tests as JSON for CI matrix
-	@echo '{"plugin": ['
-	@first=1; for plugin in $(PLUGIN_DIRS); do \
-		if [ -d "$$plugin/tests" ]; then \
-			[ $$first -eq 1 ] || echo ','; \
-			first=0; \
-			echo -n "\"$$(basename $$plugin)\""; \
-		fi \
-	done
-	@echo ']}'
+ci-list-plugins-json:  ## Output plugins with tests as JSON array for CI matrix
+	@for plugin in $(PLUGIN_DIRS); do if [ -d "$$plugin/tests" ]; then basename $$plugin; fi; done | jq -R -s -c 'split("\n") | map(select(length > 0))'
 
 check-names:  ## Validate naming patterns (no instance names in template)
 	@bash scripts/precommit/check-names.sh

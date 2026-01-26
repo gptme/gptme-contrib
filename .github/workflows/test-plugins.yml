@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  # Discovery job - outputs plugin matrix dynamically
+  # Discovery job - outputs plugin matrix dynamically using Makefile (single source of truth)
   discover:
     runs-on: ubuntu-latest
     outputs:
@@ -18,8 +18,8 @@ jobs:
       - name: Discover plugins with tests
         id: discover
         run: |
-          # Find all plugins with tests directory (skip symlinks)
-          plugins=$(find plugins -maxdepth 1 -mindepth 1 -type d ! -type l -exec test -d {}/tests \; -print | xargs -n1 basename | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          # Use Makefile for plugin discovery (single source of truth)
+          plugins=$(make ci-list-plugins-json)
           echo "plugins=$plugins" >> $GITHUB_OUTPUT
           echo "Discovered plugins: $plugins"
 

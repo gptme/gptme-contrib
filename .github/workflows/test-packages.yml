@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  # Discovery job - outputs package matrix dynamically
+  # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
   discover:
     runs-on: ubuntu-latest
     outputs:
@@ -18,8 +18,8 @@ jobs:
       - name: Discover packages
         id: discover
         run: |
-          # Find all packages with Makefiles (skip symlinks and __pycache__)
-          packages=$(find packages -maxdepth 1 -mindepth 1 -type d ! -type l ! -name '__pycache__' -exec test -f {}/Makefile \; -print | xargs -n1 basename | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          # Use Makefile for package discovery (single source of truth)
+          packages=$(make ci-list-packages-json)
           echo "packages=$packages" >> $GITHUB_OUTPUT
           echo "Discovered packages: $packages"
 
