@@ -834,7 +834,7 @@ provides-extras = ["test"]
 [[package]]
 name = "gptme-contrib-lib"
 version = "0.1.0"
-source = { editable = "packages/gptme_contrib_lib" }
+source = { editable = "packages/gptme-contrib-lib" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -963,7 +963,7 @@ provides-extras = ["test", "gemini", "dalle"]
 [[package]]
 name = "gptme-lessons-extras"
 version = "0.1.0"
-source = { editable = "packages/gptme_lessons_extras" }
+source = { editable = "packages/gptme-lessons-extras" }
 dependencies = [
     { name = "click" },
     { name = "gptme" },
@@ -1020,7 +1020,7 @@ source = { editable = "plugins/gptme-ralph" }
 [[package]]
 name = "gptme-runloops"
 version = "0.1.0"
-source = { editable = "packages/gptme_runloops" }
+source = { editable = "packages/gptme-runloops" }
 dependencies = [
     { name = "click" },
     { name = "pyyaml" },

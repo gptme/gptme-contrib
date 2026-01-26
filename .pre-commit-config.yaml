@@ -38,7 +38,7 @@ repos:
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
     pass_filenames: true
-    exclude: ^(packages/(gptme_lessons_extras|gptme_runloops|gptme_contrib_lib|gptodo|gptmail)/|plugins/)
+    exclude: ^(packages/(gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail)/|plugins/)
 - repo: local
   hooks:
   - id: check-markdown-links

@@ -19,7 +19,7 @@ exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks"]
 # Exclude renamed packages from mypy until internal imports are updated
 # These use symlink-based imports that require proper package installation
 exclude = [
-    "^packages/gptme_contrib_lib",
-    "^packages/gptme_lessons_extras",
-    "^packages/gptme_runloops",
+    "^packages/gptme-contrib-lib",
+    "^packages/gptme-lessons-extras",
+    "^packages/gptme-runloops",
 ]
