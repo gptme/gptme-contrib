@@ -103,10 +103,18 @@ def auto_unblock_tasks(
             waiting_for = post.metadata.get("waiting_for", "")
             if isinstance(waiting_for, str) and completed_id in waiting_for:
                 # Only clear if this was the only thing being waited on
-                # If multiple things, just note that one resolved
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                changes_made.append("cleared waiting_for")
+                # Check for exact match (with optional whitespace)
+                waiting_for_stripped = waiting_for.strip()
+                if waiting_for_stripped == completed_id:
+                    # Exact match - clear both fields
+                    post.metadata.pop("waiting_for", None)
+                    post.metadata.pop("waiting_since", None)
+                    changes_made.append("cleared waiting_for")
+                else:
+                    # Partial match - task ID is mentioned but there's more text
+                    # This could be multiple tasks or descriptive text like "PR #123 review"
+                    # Don't clear, but note the dependency was resolved
+                    changes_made.append(f"dependency {completed_id} resolved (still waiting)")
 
             # Check if task is now fully unblocked using the existing task object
             # Update requires from the modified metadata

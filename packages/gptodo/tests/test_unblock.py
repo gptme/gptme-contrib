@@ -177,3 +177,81 @@ class TestAutoUnblockTasks:
         unblocked_names = {u[0] for u in unblocked}
         assert "task-c" in unblocked_names
         assert "task-d" in unblocked_names
+
+    def test_partial_match_waiting_for_not_cleared(self, tmp_path):
+        """waiting_for is NOT cleared when it contains more than just the task ID."""
+        tasks_dir = tmp_path
+
+        # Create task files - task-b is waiting for "task-a and PR #123"
+        create_task_file(tasks_dir, "task-a", {"state": "done"})
+        task_b_path = create_task_file(
+            tasks_dir,
+            "task-b",
+            {
+                "state": "active",
+                "waiting_for": "task-a and PR #123 review",
+                "waiting_since": "2025-01-01",
+            },
+        )
+
+        # Create task info objects
+        task_a = create_task_info("task-a", tasks_dir / "task-a.md", state="done")
+        task_b = create_task_info(
+            "task-b",
+            task_b_path,
+            state="active",
+            metadata={"waiting_for": "task-a and PR #123 review", "waiting_since": "2025-01-01"},
+        )
+
+        # Run auto-unblock
+        unblocked = auto_unblock_tasks(["task-a"], [task_a, task_b], tasks_dir)
+
+        # Verify results - should note dependency resolved but NOT clear waiting_for
+        assert len(unblocked) == 1
+        assert unblocked[0][0] == "task-b"
+        assert "dependency task-a resolved" in unblocked[0][1]
+        assert "still waiting" in unblocked[0][1]
+
+        # Verify file still has waiting_for (not cleared)
+        post = frontmatter.load(task_b_path)
+        assert "waiting_for" in post.metadata
+        assert post.metadata["waiting_for"] == "task-a and PR #123 review"
+        assert "waiting_since" in post.metadata
+
+    def test_exact_match_with_whitespace_is_cleared(self, tmp_path):
+        """waiting_for with whitespace around task ID is still cleared."""
+        tasks_dir = tmp_path
+
+        # Create task files - task-b has whitespace around waiting_for
+        create_task_file(tasks_dir, "task-a", {"state": "done"})
+        task_b_path = create_task_file(
+            tasks_dir,
+            "task-b",
+            {
+                "state": "active",
+                "waiting_for": "  task-a  ",  # Extra whitespace
+                "waiting_since": "2025-01-01",
+            },
+        )
+
+        # Create task info objects
+        task_a = create_task_info("task-a", tasks_dir / "task-a.md", state="done")
+        task_b = create_task_info(
+            "task-b",
+            task_b_path,
+            state="active",
+            metadata={"waiting_for": "  task-a  ", "waiting_since": "2025-01-01"},
+        )
+
+        # Run auto-unblock
+        unblocked = auto_unblock_tasks(["task-a"], [task_a, task_b], tasks_dir)
+
+        # Verify results - should clear since it's an exact match after stripping
+        assert len(unblocked) == 1
+        assert unblocked[0][0] == "task-b"
+        assert "cleared waiting_for" in unblocked[0][1]
+
+        # Verify file was updated
+        post = frontmatter.load(task_b_path)
+        assert "waiting_for" not in post.metadata
+        assert "waiting_since" not in post.metadata
