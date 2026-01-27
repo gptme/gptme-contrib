@@ -19,6 +19,7 @@ SCRIPTS_DIR = Path(__file__).parent.parent
 sys.path.append(str(SCRIPTS_DIR))
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -247,17 +248,23 @@ async def async_step(
     # add ephemeral discord context message
     current_log = await add_discord_context(log)
 
+    # Capture the current context (which has the default model set from init())
+    # This is needed because run_in_executor doesn't propagate ContextVars to thread pool workers
+    ctx = contextvars.copy_context()
+
     while True:
         try:
-            # init tools in async thread
-            await loop.run_in_executor(None, lambda: init_tools(list(tool_allowlist)))
+            # init tools in async thread with copied context
+            await loop.run_in_executor(
+                None, lambda: ctx.run(init_tools, list(tool_allowlist))
+            )
 
             # debug
             # print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
 
-            messages = await loop.run_in_executor(
-                None,
-                lambda: list(
+            # Run step within the copied context to ensure ContextVars are available
+            def run_step():
+                return list(
                     step(
                         current_log,
                         stream=True,
@@ -266,8 +273,9 @@ async def async_step(
                         workspace=workspace_root,
                         model=settings.model,
                     )
-                ),
-            )
+                )
+
+            messages = await loop.run_in_executor(None, lambda: ctx.run(run_step))
             for msg in messages:
                 yield msg
                 # Update current log with the new message
