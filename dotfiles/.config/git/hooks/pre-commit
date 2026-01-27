@@ -114,8 +114,11 @@ echo -e "${GREEN}Running pre-commit checks...${NC}"
 
 # Run pre-commit checks on staged files only
 # Capture output to avoid spamming context with passed/skipped hooks
+# NOTE: Temporarily disable set -e so we can capture exit code even on failure
+set +e
 PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
 PRECOMMIT_EXIT=$?
+set -e
 
 if [ $PRECOMMIT_EXIT -eq 0 ]; then
     echo -e "${GREEN}✓ All pre-commit checks passed${NC}"
@@ -138,8 +141,11 @@ else
     echo -e "${GREEN}Auto-staged modified files. Re-running pre-commit...${NC}"
 
     # Re-run pre-commit on staged files
+    # NOTE: Temporarily disable set -e so we can capture exit code even on failure
+    set +e
     PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
     PRECOMMIT_EXIT=$?
+    set -e
 
     if [ $PRECOMMIT_EXIT -eq 0 ]; then
         echo -e "${GREEN}✓ All pre-commit checks passed after auto-staging${NC}"
