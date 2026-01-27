@@ -1377,6 +1377,39 @@ class AgentEmail:
                 return set()
         return set()
 
+    def _prune_sync_state(
+        self, folder: str, processed_files: set[str], maildir_folder: Path
+    ) -> set[str]:
+        """Prune stale entries from sync state.
+
+        Removes entries for maildir files that no longer exist, preventing
+        unbounded state growth. Returns the pruned set.
+        """
+        if not processed_files:
+            return processed_files
+
+        # Build set of currently existing maildir filenames (normalized)
+        existing_maildir_files: set[str] = set()
+        for subdir in ["cur", "new"]:
+            subdir_path = maildir_folder / subdir
+            if subdir_path.exists():
+                for msg_path in subdir_path.glob("*"):
+                    if msg_path.name != ".gitkeep":
+                        # Normalize filename by stripping flags
+                        normalized = msg_path.name.split(":")[0]
+                        existing_maildir_files.add(normalized)
+
+        # Remove entries that no longer exist
+        stale_entries = processed_files - existing_maildir_files
+        if stale_entries:
+            pruned = processed_files - stale_entries
+            print(
+                f"Pruned {len(stale_entries)} stale entries from sync state "
+                "(files no longer in maildir)"
+            )
+            return pruned
+        return processed_files
+
     def _save_sync_state(self, folder: str, processed_files: set[str]) -> None:
         """Save set of processed maildir filenames."""
         import json
@@ -1584,8 +1617,9 @@ class AgentEmail:
                     processed_files.add(maildir_filename)
                     continue
 
-        # Save sync state for incremental optimization
-        if len(processed_files) > initial_processed_count:
+        # Prune stale entries and save sync state for incremental optimization
+        processed_files = self._prune_sync_state(folder, processed_files, maildir_folder)
+        if len(processed_files) != initial_processed_count:
             self._save_sync_state(folder, processed_files)
 
         # Report results with optimization stats
