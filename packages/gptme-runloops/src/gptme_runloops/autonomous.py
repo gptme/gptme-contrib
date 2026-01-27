@@ -1,5 +1,6 @@
 """Autonomous run loop implementation."""
 
+import os
 from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
@@ -29,6 +30,39 @@ class AutonomousRun(BaseRunLoop):
             lock_wait=False,  # Don't wait for lock
         )
 
+    def _get_friction_section(self) -> str:
+        """Get friction analysis section if triggered.
+
+        Returns:
+            Friction analysis guidance if BOB_FRICTION_TRIGGER is set,
+            empty string otherwise.
+        """
+        if os.environ.get("BOB_FRICTION_TRIGGER") != "true":
+            return ""
+
+        return """
+## 🔴 FRICTION ANALYSIS TRIGGERED
+
+**Session threshold reached** - Run friction analysis before normal work.
+
+**Required Action (Step 0)**:
+```shell
+# Run friction analysis on recent sessions
+uv run python -m metaproductivity.friction --last-n-sessions 20 --with-alerts --format summary
+```
+
+**Then**:
+1. Review the friction report output
+2. If actionable patterns found → create GitHub issue or address immediately
+3. Record friction analysis in session counter:
+   ```shell
+   uv run python -m metaproductivity.session_counter --record-friction
+   ```
+4. Continue with normal workflow (Steps 1-3)
+
+**Purpose**: Identify and address autonomous operation blockers before they compound.
+"""
+
     def generate_prompt(self) -> str:
         """Generate prompt for autonomous run.
 
@@ -39,13 +73,21 @@ class AutonomousRun(BaseRunLoop):
         template_file = self.workspace / "scripts/runs/autonomous/autonomous-prompt.txt"
 
         if template_file.exists():
-            # Use existing template
-            return template_file.read_text()
+            # Use existing template, append friction section if triggered
+            template = template_file.read_text()
+            friction_section = self._get_friction_section()
+            if friction_section:
+                # Insert friction section before the main workflow
+                return template + "\n" + friction_section
+            return template
+
+        # Get friction section if triggered
+        friction_section = self._get_friction_section()
 
         # Fallback: generate basic prompt
         return generate_base_prompt(
             run_type="autonomous",
-            additional_sections="""
+            additional_sections=f"""{friction_section}
 ## Required Workflow
 
 **Step 1**: Quick Loose Ends Check (2-5 min max)
