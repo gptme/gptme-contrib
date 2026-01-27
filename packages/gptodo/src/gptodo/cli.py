@@ -23,6 +23,7 @@ Features:
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1145,7 +1146,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, auto_unbl
                             updated_fields = []
 
                             # Clear waiting_for if it mentions the completed task
-                            if task.name in waiting_for:
+                            # Use word boundary match to avoid false positives
+                            # (e.g., "task-1" should not match "task-10")
+                            if waiting_for and re.search(
+                                rf"\b{re.escape(task.name)}\b", waiting_for
+                            ):
                                 dep_post.metadata.pop("waiting_for", None)
                                 dep_post.metadata.pop("waiting_since", None)
                                 updated_fields.append("waiting_for")
