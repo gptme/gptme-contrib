@@ -1480,6 +1480,8 @@ class AgentEmail:
                     # Check for duplicates by content/metadata (prevents Gmail Message-ID reassignment duplicates)
                     if self._is_duplicate_message(email_msg, folder):
                         skipped += 1
+                        # Mark as processed to avoid re-checking on next sync
+                        processed_files.add(maildir_filename)
                         print(
                             f"Skipping duplicate message (different Message-ID): {message_id[:50]}..."
                         )
