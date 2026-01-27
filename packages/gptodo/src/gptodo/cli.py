@@ -57,6 +57,8 @@ from gptodo.utils import (
     is_task_ready,
     resolve_tasks,
     StateChecker,
+    # Auto-unblocking (Issue #206)
+    compute_auto_unblock,
     # Phase 4: Effective state computation (bob#240)
     parse_tracking_ref,
     fetch_github_issue_state,
@@ -835,7 +837,12 @@ def check(fix: bool, task_files: list[str]):
     type=(str, str),
     help="Set subtask state (subtask_text, state). State must be 'done' or 'todo'",
 )
-def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
+@click.option(
+    "--auto-unblock/--no-auto-unblock",
+    default=True,
+    help="Automatically update dependent tasks when marking done (default: enabled)",
+)
+def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, auto_unblock):
     """Edit task metadata.
 
     Examples:
@@ -1103,15 +1110,18 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         with open(task.path, "w") as f:
             f.write(frontmatter.dumps(post))
 
-    # Check if any tasks were marked as done and run completion hook
+    # Check if any tasks were marked as done and run completion hook + auto-unblock
     state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
     if any(value == "done" for _, _, value in state_changes):
+        # Reload all tasks to get updated state for dependency checking
+        all_tasks = load_tasks(tasks_dir)
+        all_tasks_dict = {task.name: task for task in all_tasks}
+
         for task in target_tasks:
             # Re-load task to get updated metadata
             post = frontmatter.load(task.path)
             if post.metadata.get("state") == "done":
                 # Run task completion hook if configured via env var
-                import os
                 import subprocess
 
                 hook_cmd = os.environ.get("HOOK_TASK_DONE")
@@ -1120,6 +1130,40 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                         subprocess.run([hook_cmd, task.id, task.name, str(repo_root)], check=False)
                     except Exception as e:
                         console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
+
+                # Auto-unblock dependent tasks (Issue #206)
+                if auto_unblock:
+                    unblocked = compute_auto_unblock(task.name, all_tasks_dict)
+                    if unblocked:
+                        console.print(
+                            f"\n[bold cyan]📋 Auto-unblocking {len(unblocked)} dependent task(s):[/]"
+                        )
+                        for dep_task in unblocked:
+                            # Clear waiting_for if it references the completed task
+                            dep_post = frontmatter.load(dep_task.path)
+                            waiting_for = dep_post.metadata.get("waiting_for", "")
+                            updated_fields = []
+
+                            # Clear waiting_for if it mentions the completed task
+                            if task.name in waiting_for:
+                                dep_post.metadata.pop("waiting_for", None)
+                                dep_post.metadata.pop("waiting_since", None)
+                                updated_fields.append("waiting_for")
+
+                            # If task was in 'waiting' state, transition to 'active'
+                            if dep_task.state == "waiting":
+                                dep_post.metadata["state"] = "active"
+                                updated_fields.append("state → active")
+
+                            # Save if any changes were made
+                            if updated_fields:
+                                with open(dep_task.path, "w") as f:
+                                    f.write(frontmatter.dumps(dep_post))
+                                console.print(
+                                    f"  [green]✓[/] {dep_task.name} (updated: {', '.join(updated_fields)})"
+                                )
+                            else:
+                                console.print(f"  [green]✓[/] {dep_task.name} (now ready)")
 
     # Show success message
     count = len(target_tasks)

@@ -1273,3 +1273,62 @@ def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
         return None
 
     return None
+
+
+def find_dependent_tasks(
+    task_name: str,
+    all_tasks: Dict[str, TaskInfo],
+) -> List[TaskInfo]:
+    """Find all tasks that depend on a given task.
+
+    Performs reverse dependency lookup - finds tasks that have the given task
+    in their `requires` field.
+
+    Args:
+        task_name: The task name to search for in dependencies
+        all_tasks: Dictionary mapping task names to TaskInfo objects
+
+    Returns:
+        List of TaskInfo objects that depend on the given task
+    """
+    dependent_tasks = []
+    for task in all_tasks.values():
+        if task_name in task.requires:
+            dependent_tasks.append(task)
+    return dependent_tasks
+
+
+def compute_auto_unblock(
+    completed_task_name: str,
+    all_tasks: Dict[str, TaskInfo],
+    issue_cache: Optional[Dict[str, Any]] = None,
+) -> List[TaskInfo]:
+    """Compute which tasks would be unblocked by completing a task.
+
+    When a task is marked done, this function finds dependent tasks that:
+    1. Have the completed task in their `requires`
+    2. Would now be ready (all dependencies satisfied) after completion
+
+    Args:
+        completed_task_name: Name of the task that was completed
+        all_tasks: Dictionary mapping task names to TaskInfo objects
+        issue_cache: Optional cache of issue states for URL-based requires
+
+    Returns:
+        List of TaskInfo objects that are now unblocked
+    """
+    # Find tasks that depend on the completed task
+    dependent_tasks = find_dependent_tasks(completed_task_name, all_tasks)
+
+    # Filter to tasks that are now ready
+    unblocked = []
+    for task in dependent_tasks:
+        # Skip already completed/cancelled tasks
+        if task.state in ("done", "cancelled"):
+            continue
+        # Check if now ready (simulating the completed task as done)
+        # Since we're called after the task is marked done, is_task_ready should work
+        if is_task_ready(task, all_tasks, issue_cache):
+            unblocked.append(task)
+
+    return unblocked
