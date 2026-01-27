@@ -61,7 +61,7 @@ class EmailRun(BaseRunLoop):
                 ["uv", "run", "python3", "-m", "gptmail", "sync-maildir"],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,  # Increased from 30s - large mailboxes (11k+ emails) need more time
                 cwd=self.workspace,
             )
             if result.returncode == 0:
