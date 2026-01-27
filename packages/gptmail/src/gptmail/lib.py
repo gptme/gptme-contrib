@@ -1373,7 +1373,7 @@ class AgentEmail:
                 with open(state_path) as f:
                     data = json.load(f)
                     return set(data.get("processed_files", []))
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, OSError):
                 return set()
         return set()
 
@@ -1382,8 +1382,11 @@ class AgentEmail:
         import json
 
         state_path = self._get_sync_state_path(folder)
-        with open(state_path, "w") as f:
-            json.dump({"processed_files": sorted(processed_files)}, f)
+        try:
+            with open(state_path, "w") as f:
+                json.dump({"processed_files": sorted(processed_files)}, f)
+        except OSError as e:
+            print(f"Warning: Could not save sync state: {e}")
 
     def sync_from_maildir(self, folder: str) -> None:
         """Sync messages from external maildir to markdown format.
@@ -1440,7 +1443,8 @@ class AgentEmail:
 
                 # OPTIMIZATION 1: Skip already-processed maildir files entirely
                 # This avoids reading/parsing 11k files on subsequent syncs
-                maildir_filename = msg_path.name
+                # Normalize filename by stripping flags (files move from new/ to cur/ with flags like :2,S)
+                maildir_filename = msg_path.name.split(":")[0]
                 if maildir_filename in processed_files:
                     already_processed += 1
                     continue
