@@ -477,9 +477,18 @@ def build_gptme_prompt(session_data: dict) -> str:
 
     return f"""# Linear Agent Session: {session_id}
 
+## 🎯 YOUR IMMEDIATE TASK
+
 You have been {action} in Linear issue {issue.get("identifier", "unknown")}: {issue.get("title", "Unknown")}
 
+**IMPORTANT**: Look for the `<primary-directive-thread>` below - this contains the comment/request you should respond to.
+- The `<primary-directive-thread>` is what the user is asking RIGHT NOW
+- The `<issue>` description is background context only
+- Do NOT try to complete the entire issue unless the triggering comment specifically asks for that
+- Respond to what the USER ASKED in the `<primary-directive-thread>`
+
 ## Context from Linear
+
 {prompt_context}
 
 ## Your Tools
