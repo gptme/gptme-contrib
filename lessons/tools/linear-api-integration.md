@@ -6,12 +6,27 @@ match:
     - "linear graphql"
     - "linear-activity"
     - "LINEAR_API_KEY"
+    - "list linear issues"
+    - "query linear"
 category: tools
 ---
 # Linear API Integration
 
 ## Rule
-Use `linear-activity.py` CLI for common operations. Fall back to GraphQL API only when CLI doesn't support the operation.
+**ALWAYS filter by state when listing issues** to exclude completed/canceled work. Use `linear-activity.py` CLI for common operations; fall back to GraphQL API for listing issues with filters.
+
+## Critical: State Filtering is MANDATORY
+
+⚠️ **When listing Linear issues, ALWAYS filter out completed/canceled states.**
+
+Without state filtering, you will recommend work that's already done, wasting everyone's time.
+
+```python
+# MANDATORY: Include state filter in ALL issue queries
+"filter": {
+    "state": {"type": {"nin": ["completed", "canceled"]}}
+}
+```
 
 ## Context
 When fetching issues, teams, or other data from Linear.
@@ -124,21 +139,80 @@ Example:
 [Erik Bjäreholt](https://linear.app/superuserlabs/settings/account/ace04b67-c8dc-432f-a00d-85953cc14e13) can you review this?
 ```
 
-## State Filter Example
+## Listing Issues with Proper Filtering
+
+**⚠️ The CLI does not have a `list-issues` command. Use GraphQL for listing issues.**
+
 ```python
-# Open issues only
+import json
+from pathlib import Path
+import urllib.request
+
+# Load OAuth token (same as CLI uses)
+tokens_file = Path("scripts/linear/.tokens.json")
+tokens = json.loads(tokens_file.read_text())
+access_token = tokens.get("accessToken") or tokens.get("access_token")
+
+# ALWAYS include state filter to exclude completed/canceled
+query = """
+query($first: Int!, $filter: IssueFilter) {
+    issues(first: $first, filter: $filter, orderBy: updatedAt) {
+        nodes {
+            identifier
+            title
+            state { name type }
+            assignee { name email }
+        }
+    }
+}
+"""
+
 variables = {
-    "teamKey": team,
-    "first": limit,
-    "filter": {"state": {"type": {"nin": ["completed", "canceled"]}}}
+    "first": 50,
+    "filter": {
+        "team": {"key": {"eq": "SUDO"}},
+        "assignee": {"email": {"eq": "someone@example.com"}},  # Optional
+        "state": {"type": {"nin": ["completed", "canceled"]}}  # MANDATORY!
+    }
 }
 
+req = urllib.request.Request(
+    "https://api.linear.app/graphql",
+    data=json.dumps({"query": query, "variables": variables}).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {access_token}",
+    },
+)
+
+with urllib.request.urlopen(req, timeout=30) as response:
+    data = json.loads(response.read().decode())
+    issues = data["data"]["issues"]["nodes"]
+    for issue in issues:
+        print(f"{issue['identifier']}: {issue['title']} ({issue['state']['name']})")
+```
+
+## Warning: Linear/GitHub State Sync
+
+⚠️ **Linear issue states may be out of sync with GitHub PRs.**
+
+An issue might show "In Review" in Linear even after its PR was merged in GitHub.
+When recommending work:
+1. Filter by state (excludes explicitly closed issues)
+2. Cross-check with GitHub PRs if task mentions a specific PR
+3. Note any discrepancies in your recommendations
+
+## Quick State Filter Reference
+
+```python
+# Open issues only (ALWAYS use this for recommendations)
+"filter": {"state": {"type": {"nin": ["completed", "canceled"]}}}
+
 # Closed issues only
-variables = {
-    "teamKey": team,
-    "first": limit,
-    "filter": {"state": {"type": {"in": ["completed", "canceled"]}}}
-}
+"filter": {"state": {"type": {"in": ["completed", "canceled"]}}}
+
+# Specific states (use state IDs from get-states command)
+"filter": {"state": {"id": {"eq": "state-uuid-here"}}}
 ```
 
 ## Outcome
