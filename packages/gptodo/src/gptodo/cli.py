@@ -92,6 +92,8 @@ from gptodo.locks import (
     DEFAULT_LOCK_TIMEOUT_HOURS,
 )
 
+from gptodo.unblock import auto_unblock_tasks
+
 
 # Keep console instance for CLI output
 console = Console()
@@ -1106,10 +1108,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
     # Check if any tasks were marked as done and run completion hook
     state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
     if any(value == "done" for _, _, value in state_changes):
+        completed_task_ids = []
         for task in target_tasks:
             # Re-load task to get updated metadata
             post = frontmatter.load(task.path)
             if post.metadata.get("state") == "done":
+                completed_task_ids.append(task.id)
+
                 # Run task completion hook if configured via env var
                 import os
                 import subprocess
@@ -1120,6 +1125,16 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                         subprocess.run([hook_cmd, task.id, task.name, str(repo_root)], check=False)
                     except Exception as e:
                         console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
+
+        # Auto-unblock dependent tasks
+        if completed_task_ids:
+            # Reload all tasks to get fresh state
+            all_tasks = load_tasks(tasks_dir)
+            unblocked = auto_unblock_tasks(completed_task_ids, all_tasks, tasks_dir)
+            if unblocked:
+                console.print("\n[cyan]📋 Auto-unblocked:[/]")
+                for task_name, action in unblocked:
+                    console.print(f"  [green]✓[/] {task_name} ({action})")
 
     # Show success message
     count = len(target_tasks)
