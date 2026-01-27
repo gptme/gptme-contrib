@@ -34,10 +34,15 @@ Complete workflow for addressing review feedback efficiently:
 
 ### Step 1: List unresolved threads (compact output)
 ```shell
-# Filter to unresolved only
-gh pr-review threads list <pr> --unresolved
+# Using PR URL (auto-detects repo)
+gh pr-review threads list https://github.com/owner/repo/pull/123 --unresolved
+
+# Or using PR number (requires --repo)
+gh pr-review threads list --repo owner/repo 123 --unresolved
 # Output: [{"threadId":"PRRT_xyz...","isResolved":false,"path":"file.py","line":50}]
 ```
+
+**Note**: When using numeric PR selectors, `--repo owner/repo` is required. PR URLs work without it.
 
 ### Step 2: Fix issues and commit
 ```shell
@@ -49,17 +54,18 @@ git push
 ### Step 3: Reply to threads + resolve (single toolcall!)
 ```shell
 # Reply to threads using the extension (cleaner than gh api)
-gh pr-review comments reply <pr> --thread-id "PRRT_thread1" --body "✅ Fixed in commit abc123"
-gh pr-review comments reply <pr> --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
-gh pr-review comments reply <pr> --thread-id "PRRT_thread3" --body "⚠️ Not addressing: low priority"
+# Use --repo owner/repo with numeric PRs, or use PR URLs directly
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread1" --body "✅ Fixed in commit abc123"
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "⚠️ Not addressing: low priority"
 
 # Then resolve all threads
-gh pr-review threads resolve <pr> --thread-id "PRRT_thread1"
-gh pr-review threads resolve <pr> --thread-id "PRRT_thread2"
-gh pr-review threads resolve <pr> --thread-id "PRRT_thread3"
+gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread1"
+gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread2"
+gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread3"
 
 # Verify all resolved
-gh pr-review threads list <pr> --unresolved
+gh pr-review threads list --repo owner/repo 123 --unresolved
 # Should return empty []
 ```
 
