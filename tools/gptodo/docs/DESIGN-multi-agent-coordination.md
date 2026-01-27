@@ -1,118 +1,90 @@
 ---
 title: Multi-Agent Task Coordination Design
-version: 0.1.0
+version: 0.2.0
 status: draft
 tracking: https://github.com/ErikBjare/bob/issues/263
 author: Bob
 created: 2026-01-27
+updated: 2026-01-27
 ---
 
 # Multi-Agent Task Coordination Design
 
-This document proposes extensions to gptodo for coordinating work across multiple concurrent agent instances, inspired by Claude Code's swarm orchestration approach.
+This document proposes **minimal extensions** to gptodo for coordinating work across multiple concurrent agent instances. The goal is to leverage gptodo's **existing robust infrastructure** and add only what's genuinely missing.
 
-## Overview
+## Key Finding: gptodo Already Has Most of This
 
-**Problem**: Multiple agents working on the same codebase need coordination to:
-- Avoid duplicate work on the same task
-- Enable parallel execution of independent tasks
-- Provide real-time visibility into agent status
-- Enable auto-unblocking when dependencies complete
+**Investigation completed 2026-01-27**: Before proposing new features, we analyzed gptodo's existing codebase and found comprehensive multi-agent coordination infrastructure already implemented:
 
-**Solution**: File-based coordination using gptodo's existing YAML frontmatter format, extended with agent assignment and locking metadata.
+### Already Implemented ✅
+
+| Feature | Implementation | Location |
+|---------|---------------|----------|
+| **Dependency tracking** | `requires`, `blocks`, `waiting_for`, `related` fields | `utils.py` TaskInfo |
+| **Auto-unblocking** | `auto_unblock_tasks()` - clears waiting_for when deps complete | `unblock.py` |
+| **File-based locking** | `fcntl.flock()` atomic locks | `locks.py` |
+| **Lock CLI** | `gptodo lock`, `unlock`, `locks` commands | `cli.py` |
+| **Lock timeout** | Default 4 hours with auto-cleanup | `TaskLock` dataclass |
+| **Ready detection** | `gptodo ready` - finds tasks with no unmet dependencies | `cli.py` |
+| **Lock expiry** | `is_expired()`, `cleanup_expired_locks()` | `locks.py` |
+| **Task state machine** | backlog → todo → active → waiting → done | `utils.py` |
+
+### What We're Actually Adding
+
+The genuine gaps are **much smaller** than initially proposed:
+
+| Gap | Description | Complexity |
+|-----|-------------|------------|
+| Agent registry | Track which agents exist and their status | Small |
+| Parallel hints | Frontmatter fields for parallelizable tasks | Small |
+| Swarm orchestration | spawned_from/spawned_tasks for fan-out patterns | Medium |
+| Enhanced `ready` | Show parallelization info in ready output | Small |
 
 ## Design Principles
 
-1. **File-based over server**: All coordination state lives in files (git-trackable, NFS-compatible)
-2. **gptodo format superset**: Extend existing YAML frontmatter, don't invent new format
-3. **Lock-free where possible**: Use atomic file operations, prefer optimistic coordination
-4. **Observable**: OTel integration for visibility into agent activity
+1. **Leverage existing code**: Don't reinvent gptodo's locking/unblocking
+2. **gptodo format superset**: Extend existing YAML frontmatter
+3. **All fields optional**: Backward compatible with existing tasks
+4. **File-based coordination**: No server required (NFS-compatible)
 
-## Task Format Extensions
+## Extended YAML Frontmatter
 
-### Extended YAML Frontmatter
+### New Fields Only
 
 ```yaml
 ---
-# Existing gptodo fields (unchanged)
-state: active             # backlog, todo, active, waiting, done, cancelled
+# Existing gptodo fields (NO CHANGES)
+state: active
 created: 2026-01-27T10:00:00Z
-priority: high            # high, medium, low
+priority: high
 tags: [feature, api]
-requires: [other-task]    # Blocking dependencies
+requires: [other-task]     # Already exists
+blocks: [dependent-task]   # Already exists
+waiting_for: some-thing    # Already exists
 
-# NEW: Agent coordination fields
-assigned_to: bob-session-abc123    # Which agent instance owns this task
+# NEW: Agent assignment (extends existing locking)
+assigned_to: bob-session-abc123    # Which agent instance owns this
 assigned_at: 2026-01-27T10:05:00Z  # When assignment started
-lock_timeout_hours: 4              # Auto-release if no heartbeat
+lock_timeout_hours: 4              # Override default (existing field in locks)
 
 # NEW: Parallel execution hints
 parallelizable: true               # Can run concurrently with other work
-isolation: worktree                # none, worktree, container (how to isolate)
+isolation: worktree                # none, worktree, container
 worktree_path: worktree/feature-x  # If using worktree isolation
 
 # NEW: Swarm coordination
-spawned_from: parent-task-id       # Parent task that spawned this subtask
-spawned_tasks: [subtask-1, subtask-2]  # Child tasks created by this task
-coordination_mode: sequential     # sequential, parallel, fan-out-fan-in
+spawned_from: parent-task-id       # Parent task that spawned this
+spawned_tasks: [sub-1, sub-2]      # Child tasks created
+coordination_mode: parallel        # sequential, parallel, fan-out-fan-in
 ---
 ```
 
 ### Backward Compatibility
 
-All new fields are optional. Existing tasks work unchanged:
-- Missing `assigned_to` → task is unassigned
+All new fields are optional:
+- Missing `assigned_to` → task unassigned (use existing lock mechanism)
 - Missing `parallelizable` → defaults to false (conservative)
-- Missing `isolation` → defaults to none
-
-## File-Based Locking
-
-### Lock Files (existing gptodo pattern)
-
-Location: `state/locks/{task-id}.lock`
-
-```json
-{
-  "task_id": "implement-feature-x",
-  "worker": "bob-session-abc123",
-  "started": "2026-01-27T10:05:00Z",
-  "timeout_hours": 4,
-  "heartbeat": "2026-01-27T10:15:00Z",
-  "pid": 12345
-}
-```
-
-### Lock Lifecycle
-1. **Acquire**: Agent attempts to create lock file atomically
-2. **Heartbeat**: Agent updates `heartbeat` timestamp periodically (every 5 min)
-3. **Release**: Agent deletes lock file on task completion
-4. **Timeout**: Stale locks (no heartbeat > timeout) are auto-released
-
-### Atomic Lock Acquisition
-
-Using `fcntl.flock()` for cross-process safety (already in gptodo):
-
-```python
-def acquire_lock(task_id: str, worker: str, timeout_hours: float = 4) -> bool:
-    """Attempt to acquire lock atomically."""
-    lock_path = Path(f"state/locks/{task_id}.lock")
-    with _atomic_lock_file(lock_path, write=True) as (existing, path):
-        if existing:
-            # Check if lock is stale
-            heartbeat = datetime.fromisoformat(existing["heartbeat"])
-            if datetime.utcnow() - heartbeat < timedelta(hours=existing["timeout_hours"]):
-                return False  # Lock held by another worker
-        # Write new lock
-        lock_data = {
-            "task_id": task_id,
-            "worker": worker,
-            "started": datetime.utcnow().isoformat() + "Z",
-            "timeout_hours": timeout_hours,
-            "heartbeat": datetime.utcnow().isoformat() + "Z",
-        }
-        path.write_text(json.dumps(lock_data, indent=2))
-        return True
-```
+- Missing `spawned_from` → standalone task
 
 ## Agent Status Registry
 
@@ -129,25 +101,49 @@ Location: `state/agents/{agent-id}.status`
   "current_task": "implement-feature-x",
   "tasks_completed": 3,
   "status": "working",
-  "workspace": "/home/bob/bob",
-  "worktree": "worktree/feature-x"
+  "workspace": "/home/bob/bob"
 }
 ```
 
 ### Status Values
 - `starting`: Agent initializing
-- `idle`: No task assigned, looking for work
-- `working`: Actively working on task
-- `waiting`: Blocked on dependency/review
-- `stopping`: Graceful shutdown in progress
+- `idle`: Looking for work
+- `working`: Actively on task
+- `waiting`: Blocked on dependency
+- `stopping`: Graceful shutdown
+
+### Integration with Existing Locks
+
+The agent registry **complements** existing task locks:
+- **Task locks** (`state/locks/`) → Which task is being worked on
+- **Agent status** (`state/agents/`) → Which agents exist and their status
+
+```python
+# Agent startup
+def register_agent(agent_id: str, workspace: str):
+    status_path = Path(f"state/agents/{agent_id}.status")
+    status_path.write_text(json.dumps({
+        "agent_id": agent_id,
+        "started": datetime.utcnow().isoformat() + "Z",
+        "status": "starting",
+        "workspace": workspace,
+    }))
+
+# Uses EXISTING lock mechanism for task assignment
+def claim_task(task_id: str, agent_id: str):
+    # Use gptodo's existing acquire_lock!
+    from gptodo.locks import acquire_lock
+    return acquire_lock(task_id, agent_id)
+```
 
 ## Swarm Orchestration
 
-### Spawning Subtasks
+### Fan-Out Pattern (NEW)
 
-When a task is too large, an agent can spawn parallel subtasks:
+When a task is too large, an agent spawns subtasks:
 
 ```yaml
+# Parent task
 ---
 state: active
 title: Implement API endpoints
@@ -155,114 +151,35 @@ coordination_mode: fan-out-fan-in
 spawned_tasks:
   - implement-auth-endpoint
   - implement-users-endpoint
-  - implement-items-endpoint
 ---
 ```
 
-Each spawned task:
 ```yaml
+# Spawned subtask
 ---
 state: todo
 spawned_from: implement-api-endpoints
 isolation: worktree
+parallelizable: true
 ---
 ```
 
-### Fan-Out-Fan-In Pattern
-1. **Fan-Out**: Primary agent decomposes task into subtasks
-2. **Parallel Execution**: Multiple agents work on subtasks concurrently
-3. **Completion Tracking**: Parent monitors spawned_tasks for completion
-4. **Fan-In**: When all subtasks done → parent task auto-progresses
-5. **Result Aggregation**: Parent collects outputs from all subtasks
+### Completion Flow (Leverages Existing Auto-Unblock)
 
-### Sequential vs Parallel Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `sequential` | Tasks execute one after another | Dependent changes |
-| `parallel` | Tasks execute simultaneously | Independent features |
-| `fan-out-fan-in` | Decompose, parallel execute, aggregate | Large features |
-
-## Worktree Isolation
-
-For parallel work on same repo, use git worktrees:
-
-```shell
-# Agent creates isolated worktree for task
-git worktree add worktree/feature-x -b feature-x origin/master
-
-# Task metadata references worktree
-worktree_path: worktree/feature-x
-isolation: worktree
-
-# On completion, agent creates PR and cleans up
-gh pr create --base master --head feature-x
-git worktree remove worktree/feature-x
-```
-
-**Benefits**:
-- Multiple agents work on same repo without conflicts
-- Each task has isolated branch/directory
-- Natural PR workflow for review
-- Clean separation of concerns
-
-## Auto-Unblocking Flow
-
-When a task completes, gptodo's existing auto-unblock triggers:
+When subtasks complete, gptodo's **existing** `auto_unblock_tasks()` handles propagation:
 
 ```python
-def on_task_complete(task_id: str):
-    """Called when task state → done."""
-    # 1. Find dependent tasks
-    dependents = find_dependent_tasks(task_id, all_tasks)
+def on_subtask_complete(subtask_id: str, parent_id: str):
+    """Called when spawned subtask completes."""
+    parent = load_task(parent_id)
+    remaining = [t for t in parent.spawned_tasks
+                 if load_task(t).state != "done"]
 
-    # 2. Check if now unblocked
-    for task in dependents:
-        if is_task_ready(task, all_tasks):
-            # Clear waiting_for if it pointed to completed task
-            if task.metadata.get("waiting_for") == task_id:
-                clear_waiting_for(task)
-            # Optionally: Update state from waiting → todo
-            if task.state == "waiting":
-                update_task_state(task.path, "todo")
-            print(f"✅ Unblocked: {task.name}")
+    if not remaining:
+        # All subtasks done - parent can progress
+        # This triggers existing auto-unblock for anything waiting on parent
+        update_task_state(parent, "done")
 ```
-
-## OTel Observability Integration
-
-### Spans for Agent Activity
-
-```python
-with tracer.start_as_current_span("agent.task.execute") as span:
-    span.set_attribute("task.id", task_id)
-    span.set_attribute("agent.id", agent_id)
-    span.set_attribute("task.state", task.state)
-    span.set_attribute("task.priority", task.priority)
-
-    # Work execution...
-
-    span.set_attribute("task.outcome", "completed")
-```
-
-### Key Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gptodo.tasks.active` | Gauge | Currently active tasks |
-| `gptodo.agents.active` | Gauge | Currently running agents |
-| `gptodo.locks.held` | Gauge | Currently held locks |
-| `gptodo.tasks.completed` | Counter | Total tasks completed |
-| `gptodo.coordination.conflicts` | Counter | Lock acquisition failures |
-
-### Trace Attributes
-
-Standard attributes for all gptodo spans:
-- `task.id`: Task identifier
-- `task.state`: Current state
-- `agent.id`: Agent instance identifier
-- `agent.type`: Agent type (bob, alice, etc.)
-- `coordination.mode`: sequential/parallel/fan-out
-- `isolation.type`: none/worktree/container
 
 ## CLI Extensions
 
@@ -271,101 +188,106 @@ Standard attributes for all gptodo spans:
 ```shell
 # Show agent status dashboard
 gptodo agents
-
-# Assign task to specific agent
-gptodo assign <task> --to <agent-id>
+# Output:
+# AGENT               STATUS    TASK                    UPTIME
+# bob-session-abc123  working   implement-feature-x     2h 15m
+# bob-session-def456  idle      -                       45m
 
 # Spawn subtasks from parent
-gptodo spawn <parent-task> --subtasks "task1,task2,task3" --mode parallel
-
-# Check what's blocking a task
-gptodo blocking <task>
-
-# Force release stale lock
-gptodo unlock <task> --force
+gptodo spawn <parent> --subtasks "task1,task2" --mode parallel
 
 # Show coordination graph
 gptodo graph --format mermaid
 ```
 
-### Enhanced `ready` Command
+### Enhanced Existing Commands
 
 ```shell
-# Show ready tasks with agent assignment info
+# Ready command now shows parallelization info
 gptodo ready --json
 {
   "ready_tasks": [
     {
-      "id": "implement-feature-y",
+      "id": "feature-y",
       "priority": "high",
-      "assigned_to": null,
       "parallelizable": true,
       "isolation": "worktree"
     }
-  ],
-  "blocked_tasks": [
-    {
-      "id": "integrate-features",
-      "blocked_by": ["implement-feature-x", "implement-feature-y"]
-    }
   ]
 }
+
+# Locks command (ALREADY EXISTS) continues to work
+gptodo locks
+# Shows existing lock state
 ```
 
 ## Implementation Phases
 
-### Phase 1: Core Coordination (MVP)
-- [ ] Extended YAML frontmatter schema
-- [ ] Agent registration and heartbeat
-- [ ] Lock timeout and auto-release
-- [ ] Basic `gptodo agents` command
+### Phase 1: Agent Registry (MVP)
+- [ ] `state/agents/` directory and status files
+- [ ] Agent heartbeat mechanism (using existing pattern from locks)
+- [ ] `gptodo agents` command
+- [ ] Cleanup stale agent registrations
 
-### Phase 2: Parallel Execution
-- [ ] Worktree isolation support
-- [ ] `parallelizable` field handling
-- [ ] `gptodo assign` command
-- [ ] Conflict detection and reporting
+### Phase 2: Frontmatter Extensions
+- [ ] Add `parallelizable`, `isolation`, `worktree_path` to schema
+- [ ] Update `gptodo ready` to include parallelization info
+- [ ] Validate new fields in pre-commit
 
-### Phase 3: Swarm Orchestration
-- [ ] `spawned_from` / `spawned_tasks` tracking
+### Phase 3: Swarm Coordination
+- [ ] Add `spawned_from`, `spawned_tasks`, `coordination_mode`
 - [ ] `gptodo spawn` command
-- [ ] Fan-out-fan-in coordination
-- [ ] Completion aggregation
+- [ ] Completion aggregation (fan-in)
+- [ ] `gptodo graph` visualization
 
-### Phase 4: Observability
-- [ ] OTel span instrumentation
-- [ ] Metrics export
-- [ ] Coordination dashboard
-- [ ] Alert on stale locks/stuck agents
+### Phase 4: OTel Observability (Optional)
+- [ ] Span instrumentation for agent activity
+- [ ] Metrics export (tasks active, locks held, etc.)
 
-## Comparison with Claude Code Swarm
+## What We're NOT Building
 
-| Feature | Claude Code Swarm | gptodo Multi-Agent |
-|---------|------------------|-------------------|
-| Coordination | Server-based | File-based |
-| Lock Storage | In-memory | `state/locks/` files |
-| Agent Registry | Central server | `state/agents/` files |
-| Task Format | Custom JSON | YAML frontmatter (gptodo) |
-| Observability | Proprietary | OpenTelemetry |
-| Git Integration | Via tools | Native (worktrees) |
+These were in the initial design but are **already provided by gptodo**:
 
-**Key Difference**: gptodo uses file-based coordination that works across NFS, enables git tracking of state, and requires no central server.
+| Feature | Why Not Needed |
+|---------|----------------|
+| Task locking mechanism | ✅ `locks.py` with `fcntl.flock` |
+| Lock timeout/expiry | ✅ `TaskLock.is_expired()` |
+| Lock CLI | ✅ `gptodo lock/unlock/locks` |
+| Dependency tracking | ✅ `requires`, `blocks` fields |
+| Auto-unblocking | ✅ `unblock.py` |
+| Ready detection | ✅ `gptodo ready` |
+| Task state machine | ✅ Established states |
+
+## Worktree Isolation
+
+For parallel work on same repo, use git worktrees:
+
+```shell
+# Agent creates isolated worktree
+git worktree add worktree/feature-x -b feature-x origin/master
+
+# Task metadata references it
+worktree_path: worktree/feature-x
+isolation: worktree
+
+# On completion, create PR and cleanup
+gh pr create --base master --head feature-x
+git worktree remove worktree/feature-x
+```
 
 ## Open Questions
 
-1. **NFS locking**: Does fcntl.flock work reliably on NFS? May need fallback to atomic rename pattern.
+1. **NFS locking**: Does `fcntl.flock` work reliably on NFS? May need atomic rename fallback.
 
-2. **Heartbeat frequency**: 5 minutes reasonable? Balance between freshness and overhead.
+2. **Heartbeat frequency**: 5 minutes? Balance freshness vs overhead.
 
-3. **Spawn depth**: Should we limit how deep task spawning can go? (2-3 levels?)
+3. **Spawn depth limit**: Limit fan-out depth to 2-3 levels?
 
-4. **Cross-repo coordination**: How to handle tasks spanning multiple repositories?
-
-5. **Agent discovery**: How do agents find each other? Shared state directory?
+4. **Cross-repo tasks**: How to coordinate across multiple repositories?
 
 ## References
 
-- [Claude Code Swarm Orchestration](https://github.com/cline/cline) - Inspiration for patterns
-- gptodo existing locking: `packages/gptodo/src/gptodo/locks.py`
+- gptodo locks: `packages/gptodo/src/gptodo/locks.py`
 - gptodo auto-unblock: `packages/gptodo/src/gptodo/unblock.py`
+- gptodo TaskInfo: `packages/gptodo/src/gptodo/utils.py`
 - [Issue #263](https://github.com/ErikBjare/bob/issues/263) - Feature discussion
