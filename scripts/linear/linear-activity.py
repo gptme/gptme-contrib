@@ -802,6 +802,172 @@ def get_notifications() -> list[dict[str, Any]]:
     return unread
 
 
+def list_users() -> list[dict[str, Any]]:
+    """List all users in the workspace.
+
+    Returns:
+        List of user dictionaries with id, name, email
+    """
+    query = """
+    query ListUsers {
+      users {
+        nodes {
+          id
+          name
+          displayName
+          email
+          active
+        }
+      }
+    }
+    """
+    data = _graphql_request(query)
+    users: list[dict[str, Any]] = data.get("users", {}).get("nodes", [])
+
+    print(f"Users in workspace ({len(users)}):\n")
+    for user in sorted(users, key=lambda u: u.get("name", "")):
+        active = "✓" if user.get("active") else "✗"
+        email = user.get("email", "")
+        print(f"  {active} {user['name']}: {user['id']}")
+        if email:
+            print(f"      Email: {email}")
+
+    return users
+
+
+def get_user_issues(user: str, include_completed: bool = False) -> list[dict[str, Any]]:
+    """Get issues assigned to a specific user.
+
+    Args:
+        user: User name (partial match) or user ID
+        include_completed: If True, include completed/canceled issues
+
+    Returns:
+        List of issue dictionaries
+
+    Raises:
+        NotFoundError: If no matching user is found
+        ValidationError: If multiple users match the name
+    """
+    # First, find the user
+    users_query = """
+    query ListUsers {
+      users {
+        nodes {
+          id
+          name
+          displayName
+        }
+      }
+    }
+    """
+    data = _graphql_request(users_query)
+    users = data.get("users", {}).get("nodes", [])
+
+    # Try to find user by ID first, then by name (case-insensitive partial match)
+    matching_user = None
+    user_lower = user.lower()
+
+    # Check for exact ID match
+    for u in users:
+        if u["id"] == user:
+            matching_user = u
+            break
+
+    # If not found by ID, try name matching
+    if not matching_user:
+        matches = [
+            u
+            for u in users
+            if user_lower in u.get("name", "").lower()
+            or user_lower in u.get("displayName", "").lower()
+        ]
+        if len(matches) == 0:
+            raise NotFoundError(f"No user found matching '{user}'")
+        if len(matches) > 1:
+            names = ", ".join(m["name"] for m in matches)
+            raise ValidationError(f"Multiple users match '{user}': {names}")
+        matching_user = matches[0]
+
+    user_id = matching_user["id"]
+    user_name = matching_user["name"]
+
+    # Build filter for issues
+    state_filter = ""
+    if not include_completed:
+        state_filter = (
+            ', filter: { state: { type: { nin: ["completed", "canceled"] } } }'
+        )
+
+    issues_query = f"""
+    query GetUserIssues($userId: String!) {{
+      user(id: $userId) {{
+        name
+        assignedIssues(first: 100{state_filter}) {{
+          nodes {{
+            identifier
+            title
+            state {{ name type }}
+            priority
+            dueDate
+            team {{ key name }}
+            url
+          }}
+        }}
+      }}
+    }}
+    """
+    data = _graphql_request(issues_query, {"userId": user_id})
+    user_data = data.get("user")
+
+    if not user_data:
+        raise NotFoundError(f"User {user_id} not found")
+
+    issues: list[dict[str, Any]] = user_data.get("assignedIssues", {}).get("nodes", [])
+
+    # Group by team
+    by_team: dict[str, list[dict]] = {}
+    for issue in issues:
+        team_key = issue["team"]["key"]
+        if team_key not in by_team:
+            by_team[team_key] = []
+        by_team[team_key].append(issue)
+
+    # Priority display mapping
+    priority_map = {
+        1: "🔴 Urgent",
+        2: "🟠 High",
+        3: "🟡 Medium",
+        4: "⚪ Low",
+        None: "   No priority",
+    }
+
+    status = "all" if include_completed else "open"
+    print(f"Issues assigned to {user_name} ({len(issues)} {status}):\n")
+
+    if not issues:
+        print("  No issues found.")
+        return issues
+
+    for team_key in sorted(by_team.keys()):
+        team_issues = by_team[team_key]
+        team_name = team_issues[0]["team"]["name"] if team_issues else team_key
+        print(f"## {team_key} ({team_name})")
+
+        # Sort by priority (None/0 last)
+        for issue in sorted(team_issues, key=lambda x: x.get("priority") or 99):
+            priority = priority_map.get(issue.get("priority"), "   No priority")
+            state = issue["state"]["name"]
+            due = f" (due: {issue['dueDate']})" if issue.get("dueDate") else ""
+            print(f"  {priority}")
+            print(f"    {issue['identifier']}: {issue['title']}")
+            print(f"    State: {state}{due}")
+            print(f"    {issue['url']}")
+            print()
+
+    return issues
+
+
 def update_issue(
     identifier: str, state_id: str | None = None, assignee_id: str | None = None
 ) -> dict[str, Any]:
@@ -956,6 +1122,10 @@ def print_help() -> None:
     print("  get-notifications                   - Get unread notifications")
     print("  update-issue <id> --state=ID        - Update issue state")
     print("  add-comment <identifier> <body>     - Add comment to issue")
+    print("  list-users                          - List all users in workspace")
+    print(
+        "  user-issues <user> [--all]          - Get issues assigned to user (name or ID)"
+    )
     print("\nToken Commands:")
     print("  auth                                - Initial OAuth authorization")
     print("  refresh                             - Refresh OAuth token")
@@ -983,6 +1153,8 @@ def main() -> int:
         "get-notifications",
         "update-issue",
         "add-comment",
+        "list-users",
+        "user-issues",
     }
 
     # Show help if no args or -h/--help requested
@@ -1056,6 +1228,18 @@ def main() -> int:
             identifier = sys.argv[2]
             body = " ".join(sys.argv[3:])
             add_comment(identifier, body)
+            return 0
+
+        if command == "list-users":
+            list_users()
+            return 0
+
+        if command == "user-issues":
+            if len(sys.argv) < 3:
+                raise ValidationError("Usage: user-issues <user> [--all]")
+            user = sys.argv[2]
+            include_all = "--all" in sys.argv[3:]
+            get_user_issues(user, include_completed=include_all)
             return 0
 
         # Activity commands require session_id and message
