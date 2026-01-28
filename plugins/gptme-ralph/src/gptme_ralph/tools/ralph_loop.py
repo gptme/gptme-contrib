@@ -901,8 +901,8 @@ def _extract_plan_from_output(output: str) -> str | None:
         ):
             return True
 
-        # Context loading messages
-        if stripped.startswith("Loading") or stripped.startswith("Loaded"):
+        # Context loading messages (specific gptme patterns, not generic)
+        if stripped.startswith("Loading context") or stripped.startswith("Loaded "):
             return True
         if "context" in stripped.lower() and "loading" in stripped.lower():
             return True
@@ -961,7 +961,7 @@ def _extract_plan_from_output(output: str) -> str | None:
     plan_lines = []
     consecutive_empty = 0
 
-    for line in lines[plan_start:]:
+    for idx, line in enumerate(lines[plan_start:], start=plan_start):
         # Skip noise lines
         if is_noise_line(line):
             continue
@@ -978,7 +978,7 @@ def _extract_plan_from_output(output: str) -> str | None:
         if stripped.startswith("```") and plan_lines:
             # Check if this is a code block inside the plan (notes section)
             # or end of plan content
-            remaining = "\n".join(lines[lines.index(line) :])
+            remaining = "\n".join(lines[idx:])
             if "```" in remaining[3:50]:  # Closing fence nearby
                 # Small code block - might be part of notes, skip it
                 continue
