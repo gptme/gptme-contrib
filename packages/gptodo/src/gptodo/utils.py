@@ -15,7 +15,7 @@ import logging
 import re
 import subprocess
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import (
@@ -259,6 +259,16 @@ class TaskInfo:
     subtasks: SubtaskCount
     issues: List[str]
     metadata: Dict
+    # Multi-agent coordination fields (Phase 2)
+    parallelizable: bool = False  # Can run concurrently with other work
+    isolation: Optional[str] = None  # none, worktree, container
+    worktree_path: Optional[str] = None  # If using worktree isolation
+    assigned_to: Optional[str] = None  # Which agent instance owns this
+    assigned_at: Optional[datetime] = None  # When assignment started
+    lock_timeout_hours: Optional[int] = None  # Override default lock timeout
+    spawned_from: Optional[str] = None  # Parent task that spawned this
+    spawned_tasks: List[str] = field(default_factory=list)  # Child tasks
+    coordination_mode: Optional[str] = None  # sequential, parallel, fan-out-fan-in
 
     @property
     def id(self) -> str:
@@ -448,15 +458,15 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
         "created": (str, datetime),  # Can be string or datetime
     }
 
-    for field, expected_type in required_fields.items():
-        if field not in metadata:
-            issues.append(f"Missing required field: {field}")
+    for field_name, expected_type in required_fields.items():
+        if field_name not in metadata:
+            issues.append(f"Missing required field: {field_name}")
         elif isinstance(expected_type, tuple):
-            if not isinstance(metadata[field], expected_type):
+            if not isinstance(metadata[field_name], expected_type):
                 type_names = " or ".join(t.__name__ for t in expected_type)
-                issues.append(f"Field {field} must be {type_names}")
-        elif not isinstance(metadata[field], expected_type):
-            issues.append(f"Field {field} must be {expected_type.__name__}")
+                issues.append(f"Field {field_name} must be {type_names}")
+        elif not isinstance(metadata[field_name], expected_type):
+            issues.append(f"Field {field_name} must be {expected_type.__name__}")
 
     # Validate state value
     if "state" in metadata:
@@ -654,6 +664,16 @@ def load_tasks(
             # Priority: requires > depends (blocks is separate)
             effective_requires = requires_list if requires_list else depends_list
 
+            # Parse assigned_at timestamp if present
+            assigned_at = None
+            if metadata.get("assigned_at"):
+                try:
+                    assigned_at = parse_datetime_field(metadata.get("assigned_at"))
+                    if assigned_at and assigned_at.tzinfo:
+                        assigned_at = assigned_at.astimezone().replace(tzinfo=None)
+                except (ValueError, TypeError):
+                    pass  # Leave as None if parsing fails
+
             task = TaskInfo(
                 path=file,
                 name=file.stem,
@@ -670,6 +690,16 @@ def load_tasks(
                 subtasks=subtasks,
                 issues=issues,
                 metadata=metadata,
+                # Multi-agent coordination fields (Phase 2)
+                parallelizable=bool(metadata.get("parallelizable", False)),
+                isolation=metadata.get("isolation"),
+                worktree_path=metadata.get("worktree_path"),
+                assigned_to=metadata.get("assigned_to"),
+                assigned_at=assigned_at,
+                lock_timeout_hours=metadata.get("lock_timeout_hours"),
+                spawned_from=metadata.get("spawned_from"),
+                spawned_tasks=metadata.get("spawned_tasks", []),
+                coordination_mode=metadata.get("coordination_mode"),
             )
             tasks.append(task)
 
@@ -719,6 +749,16 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
             "total": task.subtasks.total,
         },
         "has_issues": task.has_issues,
+        # Multi-agent coordination fields
+        "parallelizable": task.parallelizable,
+        "isolation": task.isolation,
+        "worktree_path": task.worktree_path,
+        "assigned_to": task.assigned_to,
+        "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
+        "lock_timeout_hours": task.lock_timeout_hours,
+        "spawned_from": task.spawned_from,
+        "spawned_tasks": task.spawned_tasks,
+        "coordination_mode": task.coordination_mode,
     }
 
 
