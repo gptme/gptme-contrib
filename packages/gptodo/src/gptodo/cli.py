@@ -104,6 +104,13 @@ from gptodo.subagent import (
     cleanup_sessions,
 )
 
+# Import agent registry (Phase 1 of multi-agent coordination)
+from gptodo.agents import (
+    list_agents,
+    cleanup_stale_agents,
+    DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
+)
+
 
 # Keep console instance for CLI output
 console = Console()
@@ -3050,7 +3057,9 @@ def add(
 
 # =============================================================================
 # Sub-Agent Commands (Issue #255: Multi-Agent Collaboration)
-# =============================================================================
+#
+
+======================================================================
 
 
 @cli.command("spawn")
@@ -3173,7 +3182,8 @@ Focus on making progress on this task. When done, summarize what you accomplishe
 
     if background:
         console.print(f"  tmux session: {session.tmux_session}")
-        console.print(f"\nMonitor with: [cyan]gptodo output {session.session_id}[/]")
+        console.print(f"
+Monitor with: [cyan]gptodo output {session.session_id}[/]")
         console.print(f"Kill with: [cyan]gptodo kill {session.session_id}[/]")
     else:
         console.print(f"  Status: {session.status}")
@@ -3319,6 +3329,130 @@ def cleanup_sessions_cmd(older_than: int):
     repo_root = find_repo_root(Path.cwd())
     count = cleanup_sessions(repo_root, older_than)
     console.print(f"[green]✓ Cleaned up {count} session(s)[/]")
+=======
+@cli.command("agents")
+@click.option("--cleanup", is_flag=True, help="Remove stale agent registrations")
+@click.option("--all", "show_all", is_flag=True, help="Include stale agents")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--timeout",
+    type=int,
+    default=DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
+    help=f"Heartbeat timeout in minutes (default: {DEFAULT_HEARTBEAT_TIMEOUT_MINUTES})",
+)
+def list_all_agents(cleanup: bool, show_all: bool, output_json: bool, timeout: int):
+    """List all registered agents.
+
+    Shows which agents are active and their current status.
+    Use --cleanup to remove stale agent registrations.
+
+    Examples:
+        gptodo agents
+        gptodo agents --cleanup
+        gptodo agents --all
+        gptodo agents --json
+    """
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+
+    if cleanup:
+        removed = cleanup_stale_agents(repo_root, timeout)
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "removed": removed,
+                        "count": len(removed),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console = Console()
+            if removed:
+                console.print(f"[green]✓ Removed {len(removed)} stale agent(s)[/]")
+                for agent_id in removed:
+                    console.print(f"[dim]  - {agent_id}[/]")
+            else:
+                console.print("[dim]No stale agents to remove[/]")
+        return
+
+    agents = list_agents(repo_root, include_stale=show_all, timeout_minutes=timeout)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "agent_id": agent.agent_id,
+                            "instance_type": agent.instance_type,
+                            "status": agent.status,
+                            "current_task": agent.current_task,
+                            "tasks_completed": agent.tasks_completed,
+                            "started": agent.started,
+                            "last_heartbeat": agent.last_heartbeat,
+                            "stale": agent.is_stale(timeout),
+                            "workspace": agent.workspace,
+                        }
+                        for agent in agents
+                    ],
+                    "count": len(agents),
+                },
+                indent=2,
+            )
+        )
+    else:
+        console = Console()
+        if not agents:
+            console.print("[dim]No registered agents[/]")
+            return
+
+        table = Table(title="[bold]Registered Agents[/]")
+        table.add_column("Agent ID", style="cyan")
+        table.add_column("Status", style="green")
+        table.add_column("Current Task", style="yellow")
+        table.add_column("Completed", style="blue")
+        table.add_column("Uptime", style="magenta")
+        table.add_column("Health", style="white")
+
+        for agent in agents:
+            # Calculate uptime
+            try:
+                started = datetime.fromisoformat(agent.started.replace("Z", "+00:00"))
+                uptime = datetime.now(timezone.utc) - started
+                hours = int(uptime.total_seconds() // 3600)
+                minutes = int((uptime.total_seconds() % 3600) // 60)
+                uptime_str = f"{hours}h {minutes}m"
+            except (ValueError, TypeError):
+                uptime_str = "?"
+
+            # Health status
+            if agent.is_stale(timeout):
+                health = "[red]STALE[/]"
+            else:
+                health = "[green]HEALTHY[/]"
+
+            # Status with color
+            status_colors = {
+                "starting": "yellow",
+                "idle": "blue",
+                "working": "green",
+                "waiting": "yellow",
+                "stopping": "red",
+            }
+            status_color = status_colors.get(agent.status, "white")
+            status_str = f"[{status_color}]{agent.status}[/]"
+
+            table.add_row(
+                agent.agent_id,
+                status_str,
+                agent.current_task or "-",
+                str(agent.tasks_completed),
+                uptime_str,
+                health,
+            )
+
+        console.print(table)
 
 
 if __name__ == "__main__":
