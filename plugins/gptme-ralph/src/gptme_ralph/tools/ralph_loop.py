@@ -884,30 +884,117 @@ def _extract_plan_from_output(output: str) -> str | None:
     Extract plan content from LLM output.
 
     Looks for markdown plan format with checkboxes.
+    Filters out gptme subprocess noise (token counts, context loading, etc).
     """
     lines = output.strip().split("\n")
 
-    # Find the start of the plan (heading or first checkbox)
+    # Filter out gptme-specific noise patterns
+    def is_noise_line(line: str) -> bool:
+        """Check if line is gptme subprocess noise."""
+        stripped = line.strip()
+
+        # Token/cost information
+        if stripped.startswith("Tokens:") or stripped.startswith("Cost:"):
+            return True
+        if "tokens" in stripped.lower() and any(
+            x in stripped for x in ["input", "output", "total", "cached"]
+        ):
+            return True
+
+        # Context loading messages
+        if stripped.startswith("Loading") or stripped.startswith("Loaded"):
+            return True
+        if "context" in stripped.lower() and "loading" in stripped.lower():
+            return True
+
+        # System/tool markers
+        if stripped.startswith("System:") or stripped.startswith("Tool:"):
+            return True
+        if stripped.startswith(">>>") or stripped.startswith("<<<"):
+            return True
+
+        # Shell prompt patterns
+        if stripped.startswith("$ ") or stripped.startswith("bob@"):
+            return True
+
+        # gptme-specific markers
+        if "gptme" in stripped.lower() and any(
+            x in stripped.lower() for x in ["version", "model", "starting", "session"]
+        ):
+            return True
+
+        return False
+
+    # Find the start of the plan - look for plan-specific heading patterns
     plan_start = None
     for i, line in enumerate(lines):
-        if line.startswith("# ") or line.strip().startswith("- [ ]"):
+        if is_noise_line(line):
+            continue
+
+        stripped = line.strip()
+
+        # Strong plan markers - prefer these
+        if stripped.startswith("# Implementation Plan"):
             plan_start = i
             break
+        if stripped.startswith("# Plan:") or stripped.startswith("# Plan "):
+            plan_start = i
+            break
+
+        # Generic plan heading (must be h1 with plan-related word)
+        if stripped.startswith("# ") and any(
+            word in stripped.lower()
+            for word in ["plan", "steps", "implementation", "tasks"]
+        ):
+            plan_start = i
+            break
+
+        # Fallback: first checkbox line (but only if we haven't found heading)
+        if plan_start is None and stripped.startswith("- [ ]"):
+            plan_start = i
+            # Don't break - keep looking for a proper heading
 
     if plan_start is None:
         return None
 
     # Collect lines until we hit something that's clearly not part of the plan
     plan_lines = []
+    consecutive_empty = 0
 
     for line in lines[plan_start:]:
-        # Stop if we hit obvious non-plan content
-        if line.startswith("```") and plan_lines:
-            # Code block after plan content - stop
+        # Skip noise lines
+        if is_noise_line(line):
+            continue
+
+        stripped = line.strip()
+
+        # Stop on conversation markers (gptme output format)
+        if stripped.startswith("Human:") or stripped.startswith("Assistant:"):
             break
-        if line.startswith("Human:") or line.startswith("Assistant:"):
-            # Conversation markers - stop
+        if stripped.startswith("User:") or stripped.startswith("System:"):
             break
+
+        # Stop on code blocks that appear after plan content
+        if stripped.startswith("```") and plan_lines:
+            # Check if this is a code block inside the plan (notes section)
+            # or end of plan content
+            remaining = "\n".join(lines[lines.index(line) :])
+            if "```" in remaining[3:50]:  # Closing fence nearby
+                # Small code block - might be part of notes, skip it
+                continue
+            break
+
+        # Stop on obvious end markers
+        if stripped.startswith("---") and len(stripped) >= 3 and plan_lines:
+            break
+
+        # Track empty lines - too many in a row suggests end of plan
+        if stripped == "":
+            consecutive_empty += 1
+            if consecutive_empty > 3:
+                break
+        else:
+            consecutive_empty = 0
 
         plan_lines.append(line)
 
