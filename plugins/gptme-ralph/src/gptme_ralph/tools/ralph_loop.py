@@ -719,13 +719,11 @@ def create_project(
     plan_path = work_dir / "plan.md"
 
     if use_llm:
-        # Generate task-specific plan using LLM
+        # Generate task-specific plan using LLM with direct file save
         plan_content = _generate_plan_with_llm(
-            task_description, backend, model, work_dir
+            task_description, backend, model, work_dir, plan_path
         )
-        if plan_content:
-            plan_path.write_text(plan_content)
-        else:
+        if not plan_content:
             # Fall back to template if LLM generation fails
             create_plan(task_description, "plan.md", 5, workspace)
     else:
@@ -740,6 +738,7 @@ def _generate_plan_with_llm(
     backend: str,
     model: str | None,
     work_dir: Path,
+    output_file: Path | None = None,
 ) -> str | None:
     """
     Generate a task-specific implementation plan using an LLM.
@@ -749,6 +748,7 @@ def _generate_plan_with_llm(
         backend: 'gptme' or 'claude'
         model: Model to use (or None for default)
         work_dir: Working directory
+        output_file: If provided, save plan directly to this file (gptme backend)
 
     Returns:
         Plan content as markdown string, or None if generation fails
@@ -781,7 +781,7 @@ Output ONLY the plan content, nothing else."""
 
     try:
         if backend == "gptme":
-            return _generate_plan_gptme(prompt, model, work_dir)
+            return _generate_plan_gptme(prompt, model, work_dir, output_file)
         elif backend == "claude":
             return _generate_plan_claude(prompt, model, work_dir)
         else:
@@ -796,8 +796,21 @@ def _generate_plan_gptme(
     prompt: str,
     model: str | None,
     work_dir: Path,
+    output_file: Path | None = None,
 ) -> str | None:
-    """Generate plan using gptme backend."""
+    """Generate plan using gptme backend.
+
+    Uses --tools save to have gptme write directly to the output file,
+    avoiding the need to parse plan content from subprocess stdout.
+
+    Alternative approach (not implemented): A -p option similar to Claude Code
+    that only prints the last response, which would also simplify extraction.
+    """
+    # If output file provided, use direct save approach
+    if output_file is not None:
+        return _generate_plan_gptme_direct_save(prompt, model, work_dir, output_file)
+
+    # Fallback: parse from stdout (for backward compatibility)
     cmd = ["gptme", "-n", "-y"]
 
     if model:
@@ -827,6 +840,76 @@ def _generate_plan_gptme(
                 return plan
 
         logger.warning(f"gptme plan generation returned: {result.returncode}")
+        return None
+
+    except subprocess.TimeoutExpired:
+        logger.warning("gptme plan generation timed out")
+        return None
+    except Exception as e:
+        logger.warning(f"gptme plan generation failed: {e}")
+        return None
+
+
+def _generate_plan_gptme_direct_save(
+    prompt: str,
+    model: str | None,
+    work_dir: Path,
+    output_file: Path,
+) -> str | None:
+    """Generate plan using gptme with direct file save.
+
+    This approach uses --tools save to restrict gptme to only the save tool,
+    and prompts it to save the plan directly to the output file.
+    This eliminates the need to parse plan content from noisy subprocess output.
+    """
+    # Construct prompt that instructs gptme to save directly
+    save_prompt = f"""{prompt}
+
+IMPORTANT: Save your plan directly to the file: {output_file}
+Use the save tool to write the plan. Do not just output it - save it to the file."""
+
+    cmd = ["gptme", "-n", "-y", "--tools", "save"]
+
+    if model:
+        cmd.extend(["-m", model])
+
+    # Create temporary conversation for plan generation
+    temp_name = f"ralph-plan-gen-{uuid.uuid4().hex[:8]}"
+    cmd.extend(["--name", temp_name])
+
+    # Add the prompt
+    cmd.append(save_prompt)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,  # 2 minute timeout for plan generation
+        )
+
+        # Check if the file was created
+        if output_file.exists():
+            content = output_file.read_text().strip()
+            # Validate it looks like a plan (has checkboxes)
+            if "- [ ]" in content or "- [x]" in content:
+                logger.info(f"Plan saved directly to {output_file}")
+                return content
+            else:
+                logger.warning(
+                    f"File {output_file} created but doesn't look like a plan"
+                )
+                # Clean up invalid file
+                output_file.unlink()
+                return None
+
+        # File not created - log details for debugging
+        logger.warning(
+            f"gptme did not create plan file (returncode={result.returncode})"
+        )
+        if result.stderr:
+            logger.debug(f"gptme stderr: {result.stderr[:500]}")
         return None
 
     except subprocess.TimeoutExpired:
