@@ -12,10 +12,10 @@ match:
 # gh-pr-review Extension for Review Thread Management
 
 ## Rule
-Use the `gh-pr-review` extension to list and resolve PR review threads after addressing feedback.
+Use the `gh-pr-review` extension to manage PR review threads: **comment + resolve** when the issue is resolved (pushed fix OR explained why it's not an issue), **comment only** when seeking clarification or deferring.
 
 ## Context
-When working on PRs with review comments that need to be resolved after implementing fixes.
+When working on PRs with review comments that need responses or fixes.
 
 ## Installation
 ```shell
@@ -54,19 +54,23 @@ git push
 ### Step 3: Reply to threads + resolve (single toolcall!)
 ```shell
 # Reply to threads using the extension (cleaner than gh api)
+# Resolve the threads with pushed fixes
 # Use --repo owner/repo with numeric PRs, or use PR URLs directly
 gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread1" --body "✅ Fixed in commit abc123"
-gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
-gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "⚠️ Not addressing: low priority"
-
-# Then resolve all threads
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread1"
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread2"
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "This is intentional - the API expects nullable here for backwards compat"
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread3"
+# Thread3 resolved: no code change, but explained why current behavior is correct
 
-# Verify all resolved
+# If you need clarification, comment only (no resolve):
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread4" --body "Could you share an example of where this would cause issues?"
+# Thread4 stays open - waiting for reviewer response
+
+# Verify
 gh pr-review threads list --repo owner/repo 123 --unresolved
-# Should return empty []
+# Should return only thread4 (pending clarification)
 ```
 
 **Why use `gh pr-review comments reply`?** Cleaner than raw `gh api` - the extension handles GraphQL thread IDs natively and produces minimal output.
@@ -78,27 +82,31 @@ gh pr-review threads list --repo owner/repo 123 --unresolved
 - `comments reply [pr] --thread-id <id> --body <text>` - Reply to a review thread
 
 ## Anti-Patterns
-**Don't resolve without addressing:**
+**Don't resolve without a fix:**
 ```shell
-# ❌ WRONG: Resolve without fix or reply
-gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"
+# ❌ WRONG: Resolve without pushing a fix
+gh pr-review comments reply <pr> --thread-id "PRRT_xyz" --body "Good point, will consider"
+gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"  # NO! Didn't fix anything
 
-# ❌ WRONG: Using verbose gh api instead of extension
-gh api repos/owner/repo/pulls/123/comments/<id>/replies -f body="Fixed"
-# Returns ~30 fields of verbose output!
+# ❌ WRONG: Resolve without any reply
+gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"
 ```
 
-**Do this instead:**
+**Correct patterns:**
 ```shell
-# ✅ CORRECT: Fix, reply using extension, then resolve
+# ✅ CORRECT: Pushed fix → comment + resolve
 git commit -m "fix: address review feedback"
 git push
-
-# Reply using the extension (cleaner, minimal output)
-gh pr-review comments reply <pr> --thread-id "PRRT_xyz" --body "✅ Fixed"
-
-# Then resolve
+gh pr-review comments reply <pr> --thread-id "PRRT_xyz" --body "✅ Fixed in abc123"
 gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"
+
+# ✅ CORRECT: Explained as non-issue → comment + resolve
+gh pr-review comments reply <pr> --thread-id "PRRT_abc" --body "This is intentional for backwards compat, see design doc"
+gh pr-review threads resolve <pr> --thread-id "PRRT_abc"
+
+# ✅ CORRECT: Need clarification → comment only, NO resolve
+gh pr-review comments reply <pr> --thread-id "PRRT_def" --body "Could you elaborate on the expected behavior here?"
+# Thread stays open - waiting for response
 ```
 
 ## Outcome
