@@ -100,10 +100,23 @@ class EmailRun(BaseRunLoop):
                 self.logger.info("No unreplied emails found")
                 return False
             elif result.returncode == 1:
-                # Parse output to get email count for description
+                # Parse output to get email count and first email info
                 output = result.stdout.strip()
-                self._work_description = f"unreplied emails: {output[:100]}"
-                self.logger.info(f"Found unreplied emails: {output[:100]}")
+                lines = output.split("\n")
+                # First line has count, data rows start after header (line 2) and separator (line 3)
+                count_line = lines[0] if lines else "emails found"
+                # Get first data row (skip header and separator)
+                first_email = lines[3].strip() if len(lines) > 3 else ""
+                # Extract sender and subject from the data row
+                if first_email and "|" in first_email:
+                    parts = [p.strip() for p in first_email.split("|")]
+                    sender = parts[0] if parts else ""
+                    subject = parts[1][:30] if len(parts) > 1 else ""
+                    desc = f"{count_line} - {sender}: {subject}..."
+                else:
+                    desc = count_line
+                self._work_description = desc
+                self.logger.info(f"Found {desc}")
                 return True
             else:
                 self.logger.warning(f"Unexpected exit code: {result.returncode}")
