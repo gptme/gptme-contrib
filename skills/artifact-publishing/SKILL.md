@@ -29,15 +29,7 @@ cd ~/agent-name.github.io
 mkdir -p demos/my-demo
 ```
 
-**Option B: Project repository gh-pages branch**
-```shell
-# Create gh-pages branch if not exists
-git checkout --orphan gh-pages
-git rm -rf .
-# Add your content
-```
-
-**Option C: Gist with HTML preview**
+**Option B: Gist with HTML preview**
 ```shell
 # For single-file artifacts
 gh gist create --public demo.html
@@ -66,7 +58,10 @@ Use a data-driven approach for automatic demo listing:
   description: "Interactive cellular automaton"
   date: 2026-01-29
   tags: [simulation, canvas]
-  generator: "Claude"  # Optional: credit the model
+  generator:
+    model: "Claude Sonnet 4.5"
+    agent: "Bob"  # Which agent created it
+    prompt: "Generated via gptme autonomous session"  # Brief context
 
 - url: /demos/particle-system/
   title: "Particle Physics"
@@ -142,7 +137,7 @@ cat > ~/myagent.github.io/demos/visualization/index.html << 'EOF'
 EOF
 
 # 3. Update demo index (if using data-driven approach)
-cat >> ~/myagent.github.io/_data/demos.yml << 'EOF'
+cat >> ~/myagent.github.io/_data/demos.yml << EOF
 - url: /demos/visualization/
   title: "Data Visualization"
   description: "Interactive data explorer"
@@ -185,7 +180,6 @@ The demo is now live and publicly accessible.
 | Method | Pros | Cons |
 |--------|------|------|
 | GitHub Pages | Free, reliable, custom domain | Requires repo |
-| Gist + bl.ocks.org | Quick, no setup | Limited features |
 | CodePen/JSFiddle | Instant sharing | External dependency |
 | Vercel/Netlify | Full features | More setup |
 
