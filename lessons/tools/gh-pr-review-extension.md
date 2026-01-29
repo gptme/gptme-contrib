@@ -12,7 +12,7 @@ match:
 # gh-pr-review Extension for Review Thread Management
 
 ## Rule
-Use the `gh-pr-review` extension to manage PR review threads: **comment + resolve** when you pushed a fix, **comment only** when just replying without a fix.
+Use the `gh-pr-review` extension to manage PR review threads: **comment + resolve** when the issue is resolved (pushed fix OR explained why it's not an issue), **comment only** when seeking clarification or deferring.
 
 ## Context
 When working on PRs with review comments that need responses or fixes.
@@ -60,12 +60,17 @@ gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread1" --b
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread1"
 gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread2"
-gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "⚠️ Not addressing: low priority"
-# Note: thread3 is NOT resolved - only replied since no fix was pushed
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "This is intentional - the API expects nullable here for backwards compat"
+gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread3"
+# Thread3 resolved: no code change, but explained why current behavior is correct
 
-# Verify fixed threads resolved (thread3 still unresolved, as expected)
+# If you need clarification, comment only (no resolve):
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread4" --body "Could you share an example of where this would cause issues?"
+# Thread4 stays open - waiting for reviewer response
+
+# Verify
 gh pr-review threads list --repo owner/repo 123 --unresolved
-# Should return only thread3 (unfixed items remain open)
+# Should return only thread4 (pending clarification)
 ```
 
 **Why use `gh pr-review comments reply`?** Cleaner than raw `gh api` - the extension handles GraphQL thread IDs natively and produces minimal output.
@@ -95,9 +100,13 @@ git push
 gh pr-review comments reply <pr> --thread-id "PRRT_xyz" --body "✅ Fixed in abc123"
 gh pr-review threads resolve <pr> --thread-id "PRRT_xyz"
 
-# ✅ CORRECT: Just replying (no fix) → comment only, NO resolve
-gh pr-review comments reply <pr> --thread-id "PRRT_abc" --body "⚠️ Not addressing: low priority"
-# Thread stays open for reviewer to resolve if they're satisfied
+# ✅ CORRECT: Explained as non-issue → comment + resolve
+gh pr-review comments reply <pr> --thread-id "PRRT_abc" --body "This is intentional for backwards compat, see design doc"
+gh pr-review threads resolve <pr> --thread-id "PRRT_abc"
+
+# ✅ CORRECT: Need clarification → comment only, NO resolve
+gh pr-review comments reply <pr> --thread-id "PRRT_def" --body "Could you elaborate on the expected behavior here?"
+# Thread stays open - waiting for response
 ```
 
 ## Outcome
