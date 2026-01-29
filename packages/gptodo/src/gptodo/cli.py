@@ -3064,8 +3064,6 @@ def add(
 # Sub-Agent Commands (Issue #255: Multi-Agent Collaboration)
 #
 
-======================================================================
-
 
 @cli.command("spawn")
 @click.argument("task_id")
@@ -3187,8 +3185,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
 
     if background:
         console.print(f"  tmux session: {session.tmux_session}")
-        console.print(f"
-Monitor with: [cyan]gptodo output {session.session_id}[/]")
+        console.print(f"Monitor with: [cyan]gptodo output {session.session_id}[/]")
         console.print(f"Kill with: [cyan]gptodo kill {session.session_id}[/]")
     else:
         console.print(f"  Status: {session.status}")
@@ -3334,7 +3331,8 @@ def cleanup_sessions_cmd(older_than: int):
     repo_root = find_repo_root(Path.cwd())
     count = cleanup_sessions(repo_root, older_than)
     console.print(f"[green]✓ Cleaned up {count} session(s)[/]")
-=======
+
+
 @cli.command("agents")
 @click.option("--cleanup", is_flag=True, help="Remove stale agent registrations")
 @click.option("--all", "show_all", is_flag=True, help="Include stale agents")
