@@ -220,10 +220,6 @@ async def async_step(
     # Start metrics tracking
     op = metrics.start_operation("gptme_step", "discord")
 
-    def confirm_func(msg: str) -> bool:
-        # Auto-confirm all tool executions in Discord
-        return True
-
     # Get channel settings
     settings = get_settings(channel_id)
 
@@ -268,7 +264,6 @@ async def async_step(
                     step(
                         current_log,
                         stream=True,
-                        confirm=confirm_func,
                         tool_format="markdown",
                         workspace=workspace_root,
                         model=settings.model,
