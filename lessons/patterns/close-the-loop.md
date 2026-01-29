@@ -94,13 +94,21 @@ Following this pattern results in:
 
 ## Examples
 
-The principle applies broadly:
-- Quality gates that auto-fix before humans see issues
-- Automated tests that verify correctness before review
-- Self-healing workflows that retry with fixes
-- Approval criteria that auto-proceed when met
+The principle applies broadly. See these lessons for specific implementations:
 
-For specific git/CI workflow patterns, see existing workflow lessons.
+**Quality Gates (Code quality before human review)**:
+- [Greptile PR Reviews](../tools/greptile-pr-reviews.md) - Automated code review: fix issues → re-trigger review → achieve 5/5 → proceed
+
+**Communication Loops (Complete feedback cycles)**:
+- [Communication Loop Closure](../workflow/communication-loop-closure-patterns.md) - Every completed action gets a response in the original location
+- [Memory Failure Prevention](../workflow/memory-failure-prevention.md) - Check for incomplete loops at session start
+
+**Development Workflow (CI/Pre-commit automation)**:
+- [Git Workflow](../workflow/git-workflow.md) - Pre-commit hooks auto-fix before humans see issues
+- [Git Worktree Workflow](../workflow/git-worktree-workflow.md) - Includes pre-commit setup for quality gates
+
+**Session Structure (Autonomous completion)**:
+- [Autonomous Session Structure](../autonomous/autonomous-session-structure.md) - 4-phase approach with built-in completion verification
 
 ## Related
 - [Issue #282](https://github.com/ErikBjare/bob/issues/282) - Origin of this pattern
