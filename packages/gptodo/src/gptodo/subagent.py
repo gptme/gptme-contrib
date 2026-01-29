@@ -99,6 +99,7 @@ def spawn_agent(
     background: bool = False,
     workspace: Optional[Path] = None,
     timeout: int = 600,
+    model: Optional[str] = None,
 ) -> AgentSession:
     """Spawn a sub-agent to work on a task.
 
@@ -110,6 +111,7 @@ def spawn_agent(
         background: If True, run in tmux session
         workspace: Working directory for the agent
         timeout: Timeout in seconds (for foreground only)
+        model: Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)
 
     Returns:
         AgentSession with status and session_id
@@ -142,10 +144,10 @@ def spawn_agent(
         safe_workspace = shlex.quote(str(workspace))
 
         if backend == "gptme":
-            shell_cmd = (
-                f'gptme -n {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
-            )
+            model_arg = f"--model {shlex.quote(model)}" if model else ""
+            shell_cmd = f'gptme -n {model_arg} {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
         else:
+            # Claude backend doesn't support model selection
             shell_cmd = f'claude -p --dangerously-skip-permissions --tools default {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
 
         # Start tmux session
@@ -164,8 +166,12 @@ def spawn_agent(
 
     # Foreground execution
     if backend == "gptme":
-        cmd = ["gptme", "-n", prompt]
+        cmd = ["gptme", "-n"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt)
     else:
+        # Claude backend doesn't support model selection
         cmd = ["claude", "-p", "--dangerously-skip-permissions", "--tools", "default", prompt]
 
     try:

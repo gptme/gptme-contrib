@@ -3081,6 +3081,13 @@ def add(
     help="Run in background (tmux)",
 )
 @click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)",
+)
+@click.option(
     "--timeout",
     type=int,
     default=600,
@@ -3092,6 +3099,7 @@ def spawn_cmd(
     agent_type: str,
     backend: str,
     background: bool,
+    model: Optional[str],
     timeout: int,
 ):
     """Spawn a sub-agent to work on a task.
@@ -3103,6 +3111,7 @@ def spawn_cmd(
         gptodo spawn my-task --background
         gptodo spawn my-task --backend claude --type explore
         gptodo spawn my-task -p "Custom instructions..."
+        gptodo spawn my-task --model openrouter/moonshotai/kimi-k2.5@moonshotai
     """
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
@@ -3139,6 +3148,8 @@ Focus on making progress on this task. When done, summarize what you accomplishe
 
     console.print(f"[cyan]Spawning {agent_type} agent for task:[/] {task.name}")
     console.print(f"  Backend: {backend}")
+    if model:
+        console.print(f"  Model: {model}")
     console.print(f"  Background: {background}")
 
     from typing import cast, Literal
@@ -3151,6 +3162,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         background=background,
         workspace=repo_root,
         timeout=timeout,
+        model=model,
     )
 
     if session.status == "failed":
