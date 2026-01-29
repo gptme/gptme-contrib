@@ -170,7 +170,9 @@ def spawn_agent(
 
         # Use bash -l to ensure login shell behavior (sources .profile/.bashrc)
         # This ensures PATH and other environment variables are properly set
-        full_cmd = f"bash -l -c {shlex.quote(f'cd {workspace} && {env_setup}{shell_cmd}')}"
+        # Note: workspace must be shell-quoted inside the command to handle paths with spaces
+        safe_workspace = shlex.quote(str(workspace))
+        full_cmd = f"bash -l -c {shlex.quote(f'cd {safe_workspace} && {env_setup}{shell_cmd}')}"
 
         # Start tmux session
         result = subprocess.run(
