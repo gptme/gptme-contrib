@@ -10,6 +10,7 @@ Session data stored in state/sessions/ directory (gitignored).
 
 import json
 import logging
+import os
 import shlex
 import subprocess
 import uuid
@@ -141,7 +142,6 @@ def spawn_agent(
         # Escape shell arguments to prevent injection
         safe_prompt = shlex.quote(prompt)
         safe_output = shlex.quote(str(output_file))
-        safe_workspace = shlex.quote(str(workspace))
 
         if backend == "gptme":
             model_arg = f"--model {shlex.quote(model)}" if model else ""
@@ -150,9 +150,31 @@ def spawn_agent(
             # Claude backend doesn't support model selection
             shell_cmd = f'claude -p --dangerously-skip-permissions --tools default {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
 
+        # Build environment exports for critical API keys
+        # These may not be inherited by tmux detached sessions
+        env_exports = []
+        for key in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "PATH",
+            "HOME",
+            "GPTME_MODEL",
+        ]:
+            value = os.environ.get(key)
+            if value:
+                # Export the variable inside the tmux session
+                env_exports.append(f"export {key}={shlex.quote(value)}")
+
+        env_setup = "; ".join(env_exports) + "; " if env_exports else ""
+
+        # Use bash -l to ensure login shell behavior (sources .profile/.bashrc)
+        # This ensures PATH and other environment variables are properly set
+        full_cmd = f"bash -l -c {shlex.quote(f'cd {workspace} && {env_setup}{shell_cmd}')}"
+
         # Start tmux session
         result = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", tmux_name, f"cd {safe_workspace} && {shell_cmd}"],
+            ["tmux", "new-session", "-d", "-s", tmux_name, full_cmd],
             capture_output=True,
             text=True,
         )
