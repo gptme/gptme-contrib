@@ -1,0 +1,195 @@
+---
+name: artifact-publishing
+description: |
+  Workflow for publishing HTML artifacts (demos, visualizations, interactive content) to the web.
+  Enables agents to share work products publicly via GitHub Pages or similar hosting.
+---
+
+# Artifact Publishing
+
+Publish rich work products (HTML demos, visualizations, interactive tools) to make agent work visible and shareable.
+
+## When to Use
+
+- Created an interactive HTML demo or visualization
+- Built a tool that others should be able to try
+- Want to share work beyond just code commits
+- Need a public URL for a deliverable
+
+## Core Workflow
+
+### 1. Choose Publishing Target
+
+**Option A: Personal GitHub Pages site** (recommended for agents with their own identity)
+```shell
+# Clone or navigate to your .github.io repository
+cd ~/agent-name.github.io
+
+# Create demo in demos/ directory
+mkdir -p demos/my-demo
+```
+
+**Option B: Project repository gh-pages branch**
+```shell
+# Create gh-pages branch if not exists
+git checkout --orphan gh-pages
+git rm -rf .
+# Add your content
+```
+
+**Option C: Gist with HTML preview**
+```shell
+# For single-file artifacts
+gh gist create --public demo.html
+# Use rawcdn.githack.com or similar for preview
+```
+
+### 2. Structure the Artifact
+
+Place artifacts in a predictable location:
+demos/
+├── my-demo/
+│   └── index.html       # Main entry point
+├── visualization/
+│   ├── index.html
+│   └── data.json        # Supporting data
+└── index.html           # Optional: demo listing page
+
+### 3. Create Demo Index (Recommended)
+
+Use a data-driven approach for automatic demo listing:
+
+**_data/demos.yml** (if using Jekyll):
+```yaml
+- url: /demos/game-of-life/
+  title: "Conway's Game of Life"
+  description: "Interactive cellular automaton"
+  date: 2026-01-29
+  tags: [simulation, canvas]
+  generator: "Claude"  # Optional: credit the model
+
+- url: /demos/particle-system/
+  title: "Particle Physics"
+  description: "Interactive particle visualizer"
+  date: 2026-01-29
+  tags: [physics, interactive]
+```
+
+**demos.html** or **demos.pug** template reads from data and renders the list automatically.
+
+### 4. Commit and Push
+
+```shell
+# Stage artifact files
+git add demos/my-demo/
+
+# Commit with descriptive message
+git commit -m "feat(demos): add interactive game of life"
+
+# Push to trigger GitHub Pages deployment
+git push origin main
+```
+
+### 5. Verify Deployment
+
+```shell
+# Wait for GitHub Pages to deploy (usually < 2 minutes)
+# Then verify the live URL
+curl -I https://username.github.io/demos/my-demo/
+```
+
+## Best Practices
+
+### Self-Contained Artifacts
+- Single HTML file with embedded CSS/JS when possible
+- No external dependencies that might break
+- Works offline after loading
+
+### Responsive Design
+- Mobile-friendly layouts
+- Touch support for interactive elements
+- Reasonable file sizes
+
+### Metadata & Attribution
+- Include model/agent credit in UI or comments
+- Date of creation
+- Link back to source repository if applicable
+
+### Accessibility
+- Semantic HTML
+- Keyboard navigation for interactive elements
+- Reasonable color contrast
+
+## Example: Complete Publishing Flow
+
+```shell
+# 1. Create the artifact directory
+mkdir -p ~/myagent.github.io/demos/visualization/
+
+# 2. Save the HTML artifact
+cat > ~/myagent.github.io/demos/visualization/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Data Visualization</title>
+    <!-- Embedded styles and scripts -->
+</head>
+<body>
+    <!-- Interactive content -->
+</body>
+</html>
+EOF
+
+# 3. Update demo index (if using data-driven approach)
+cat >> ~/myagent.github.io/_data/demos.yml << 'EOF'
+- url: /demos/visualization/
+  title: "Data Visualization"
+  description: "Interactive data explorer"
+  date: $(date +%Y-%m-%d)
+EOF
+
+# 4. Commit and push
+cd ~/myagent.github.io
+git add demos/visualization/ _data/demos.yml
+git commit -m "feat(demos): add data visualization"
+git push
+
+# 5. Report completion
+echo "✅ Published at: https://myagent.github.io/demos/visualization/"
+```
+
+## Communication Pattern
+
+After publishing, close the loop with stakeholders:
+
+```markdown
+## ✅ Artifact Published
+
+**URL**: https://agent.github.io/demos/my-demo/
+**Type**: Interactive visualization
+**Features**: [Brief feature list]
+
+The demo is now live and publicly accessible.
+```
+
+## Integration with Workflow
+
+1. **During work**: Create artifact as you build
+2. **On completion**: Publish to hosting target
+3. **In response**: Include live URL in PR/issue comments
+4. **For visibility**: Link from blog posts, social media, or documentation
+
+## Alternatives
+
+| Method | Pros | Cons |
+|--------|------|------|
+| GitHub Pages | Free, reliable, custom domain | Requires repo |
+| Gist + bl.ocks.org | Quick, no setup | Limited features |
+| CodePen/JSFiddle | Instant sharing | External dependency |
+| Vercel/Netlify | Full features | More setup |
+
+## Related
+
+- [Progressive Disclosure](../progressive-disclosure/SKILL.md) - Documentation patterns
+- [Code Review Helper](../code-review-helper/SKILL.md) - For reviewing artifact code
