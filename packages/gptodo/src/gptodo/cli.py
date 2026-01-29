@@ -612,7 +612,7 @@ def print_summary(console: Console, results: Dict[str, List[TaskInfo]], config: 
     # Add regular states first
     for state in config.states:
         if count := state_counts.get(state, 0):
-            style, state_text = STATE_STYLES.get(state, ("white", state))
+            style, state_text = STATE_STYLES.get(state, ("white", "•"))
             emoji = STATE_EMOJIS.get(state, "•")
             summary_parts.append(f"{count} {emoji}")
 
@@ -2084,6 +2084,12 @@ def sync(update, output_json, use_cache, light, full):
 
         if source == "github":
             if use_cache:
+                # Try to find updatedAt in cache using URL format
+                # Construct URL from parsed info
+                issue_type = "issues"  # Default to issues
+                cache_url = (
+                    f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
+                )
                 cached = cache.get(cache_url)  # Cache keyed by full URL
                 if cached:
                     updated_at = cached.get("updatedAt")
@@ -2219,24 +2225,24 @@ def plan(task_id: str, output_json: bool):
     enum_id_to_task = {i: task for i, task in enumerate(tasks_by_date, 1)}
 
     # Resolve task_id to actual task
-    target_task = None
+    task = None
 
     # Try as numeric ID first
     try:
         numeric_id = int(task_id)
         if numeric_id in enum_id_to_task:
-            target_task = enum_id_to_task[numeric_id]
+            task = enum_id_to_task[numeric_id]
     except ValueError:
         pass
 
     # Try as task name
-    if target_task is None:
-        for task in all_tasks:
-            if task.name == task_id or task.name == task_id.replace("-", "_"):
-                target_task = task
+    if task is None:
+        for t in all_tasks:
+            if t.name == task_id or t.name == task_id.replace("-", "_"):
+                task = t
                 break
 
-    if target_task is None:
+    if task is None:
         if output_json:
             print(json.dumps({"error": f"Task '{task_id}' not found"}, indent=2))
             raise SystemExit(1)
@@ -2245,9 +2251,9 @@ def plan(task_id: str, output_json: bool):
 
     # Find all tasks that depend on this task (reverse dependency lookup)
     dependent_tasks = []
-    for task in all_tasks:
-        if target_task.name in task.requires:
-            dependent_tasks.append(task)
+    for t in all_tasks:
+        if task.name in t.requires:
+            dependent_tasks.append(t)
 
     # Calculate impact score
     # Scoring:
@@ -2275,19 +2281,19 @@ def plan(task_id: str, output_json: bool):
 
     # Check if this task has unmet dependencies itself
     unmet_dependencies = []
-    for dep_name in target_task.requires:
-        for task in all_tasks:
-            if task.name == dep_name and task.state not in ["done", "cancelled"]:
-                unmet_dependencies.append({"task": task.name, "state": task.state or "unknown"})
+    for dep_name in task.requires:
+        for t in all_tasks:
+            if t.name == dep_name and t.state not in ["done", "cancelled"]:
+                unmet_dependencies.append({"task": t.name, "state": t.state or "unknown"})
                 break
 
     # JSON output
     if output_json:
         result = {
-            "task": target_task.name,
-            "task_id": name_to_enum_id[target_task.name],
-            "state": target_task.state or "unknown",
-            "priority": target_task.priority or "none",
+            "task": task.name,
+            "task_id": name_to_enum_id[task.name],
+            "state": task.state or "unknown",
+            "priority": task.priority or "none",
             "impact_analysis": {
                 "score": round(impact_score, 1),
                 "would_unblock": len(dependent_tasks),
@@ -2302,12 +2308,12 @@ def plan(task_id: str, output_json: bool):
         return
 
     # Rich console output
-    target_id = name_to_enum_id[target_task.name]
-    state_emoji = STATE_EMOJIS.get(target_task.state or "untracked", "•")
+    target_id = name_to_enum_id[task.name]
+    state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
 
-    console.print(f"\n[bold cyan]Impact Analysis: {target_task.name}[/] (#{target_id})")
-    console.print(f"State: {state_emoji} {target_task.state or 'unknown'}")
-    console.print(f"Priority: {target_task.priority or 'none'}")
+    console.print(f"\n[bold cyan]Impact Analysis: {task.name}[/] (#{target_id})")
+    console.print(f"State: {state_emoji} {task.state or 'unknown'}")
+    console.print(f"Priority: {task.priority or 'none'}")
 
     # Show unmet dependencies (blockers for this task)
     if unmet_dependencies:
@@ -3164,47 +3170,7 @@ def add(
 #
 
 
-@cli.command("spawn")
-@click.argument("task_id")
-@click.option(
-    "--prompt",
-    "-p",
-    type=str,
-    help="Custom prompt for the agent (default: derived from task)",
-)
-@click.option(
-    "--type",
-    "agent_type",
-    type=click.Choice(["general", "explore", "plan", "execute"]),
-    default="general",
-    help="Type of agent to spawn",
-)
-@click.option(
-    "--backend",
-    type=click.Choice(["gptme", "claude"]),
-    default="gptme",
-    help="Which backend to use",
-)
-@click.option(
-    "--background",
-    "-b",
-    is_flag=True,
-    help="Run in background (tmux)",
-)
-@click.option(
-    "--model",
-    "-m",
-    type=str,
-    default=None,
-    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)",
-)
-@click.option(
-    "--timeout",
-    type=int,
-    default=600,
-    help="Timeout in seconds (foreground only)",
-)
-def spawn_cmd(
+def _execute_task_agent(
     task_id: str,
     prompt: Optional[str],
     agent_type: str,
@@ -3213,17 +3179,7 @@ def spawn_cmd(
     model: Optional[str],
     timeout: int,
 ):
-    """Spawn a sub-agent to work on a task.
-
-    Launches a gptme or claude subprocess to work on the specified task.
-    Can run in foreground (blocking) or background (tmux).
-
-    Examples:
-        gptodo spawn my-task --background
-        gptodo spawn my-task --backend claude --type explore
-        gptodo spawn my-task -p "Custom instructions..."
-        gptodo spawn my-task --model openrouter/moonshotai/kimi-k2.5@moonshotai
-    """
+    """Shared logic for run and spawn commands."""
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
@@ -3257,11 +3213,13 @@ def spawn_cmd(
 
 Focus on making progress on this task. When done, summarize what you accomplished."""
 
-    console.print(f"[cyan]Spawning {agent_type} agent for task:[/] {task.name}")
+    action = "Spawning" if background else "Running"
+    console.print(f"[cyan]{action} {agent_type} agent for task:[/] {task.name}")
     console.print(f"  Backend: {backend}")
     if model:
         console.print(f"  Model: {model}")
-    console.print(f"  Background: {background}")
+    if background:
+        console.print(f"  Background: {background}")
 
     from typing import cast, Literal
 
@@ -3277,10 +3235,12 @@ Focus on making progress on this task. When done, summarize what you accomplishe
     )
 
     if session.status == "failed":
-        console.print(f"[red]✗ Failed to spawn agent:[/] {session.error}")
+        console.print(f"[red]✗ Failed to {action.lower()} agent:[/] {session.error}")
         return
 
-    console.print(f"[green]✓ Agent spawned:[/] {session.session_id}")
+    console.print(
+        f"[green]✓ Agent {'spawned' if background else 'completed'}:[/] {session.session_id}"
+    )
 
     if background:
         console.print(f"  tmux session: {session.tmux_session}")
@@ -3290,6 +3250,149 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         console.print(f"  Status: {session.status}")
         if session.error:
             console.print(f"  Error: {session.error}")
+
+
+@cli.command("run")
+@click.argument("task_id")
+@click.option(
+    "--prompt",
+    "-p",
+    type=str,
+    help="Custom prompt for the agent (default: derived from task)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="general",
+    help="Type of agent behavior",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout in seconds",
+)
+def run_cmd(
+    task_id: str,
+    prompt: Optional[str],
+    agent_type: str,
+    backend: str,
+    model: Optional[str],
+    timeout: int,
+):
+    """Run a task synchronously (foreground).
+
+    Executes the task and waits for completion. Use this when you want to:
+    - Work on a task and wait for results
+    - Run tasks that don't need background execution
+    - Get immediate feedback on task progress
+
+    For background/parallel execution, use 'gptodo spawn' instead.
+
+    Examples:
+        gptodo run my-task
+        gptodo run my-task --model openrouter/moonshotai/kimi-k2.5
+        gptodo run my-task --backend claude --type explore
+    """
+    _execute_task_agent(
+        task_id=task_id,
+        prompt=prompt,
+        agent_type=agent_type,
+        backend=backend,
+        background=False,
+        model=model,
+        timeout=timeout,
+    )
+
+
+@cli.command("spawn")
+@click.argument("task_id")
+@click.option(
+    "--prompt",
+    "-p",
+    type=str,
+    help="Custom prompt for the agent (default: derived from task)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="general",
+    help="Type of agent to spawn",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--foreground",
+    "-f",
+    is_flag=True,
+    help="Run in foreground instead of background (consider using 'run' command)",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout in seconds (foreground only)",
+)
+def spawn_cmd(
+    task_id: str,
+    prompt: Optional[str],
+    agent_type: str,
+    backend: str,
+    foreground: bool,
+    model: Optional[str],
+    timeout: int,
+):
+    """Spawn a sub-agent in background (tmux).
+
+    Launches a gptme or claude subprocess and returns immediately.
+    Use this when you want to:
+    - Delegate work to a sub-agent while continuing other work
+    - Run multiple tasks in parallel
+    - Execute long-running tasks asynchronously
+
+    For synchronous execution, use 'gptodo run' instead.
+
+    Examples:
+        gptodo spawn my-task
+        gptodo spawn my-task --model openrouter/moonshotai/kimi-k2.5
+        gptodo spawn my-task --backend claude --type explore
+        gptodo spawn my-task -f  # Foreground mode (prefer 'run' command)
+    """
+    _execute_task_agent(
+        task_id=task_id,
+        prompt=prompt,
+        agent_type=agent_type,
+        backend=backend,
+        background=not foreground,
+        model=model,
+        timeout=timeout,
+    )
 
 
 @cli.command("sessions")
@@ -3557,15 +3660,12 @@ def list_all_agents(cleanup: bool, show_all: bool, output_json: bool, timeout: i
         console.print(table)
 
 
-if __name__ == "__main__":
-    cli()
-
-
-@cli.command("spawn")
+@cli.command("subtask")
 @click.argument("parent_id")
 @click.option(
-    "--subtask",
-    "-s",
+    "--name",
+    "-n",
+    "subtask_names",
     multiple=True,
     required=True,
     help="Subtask name (can specify multiple times)",
@@ -3588,18 +3688,21 @@ if __name__ == "__main__":
     default=None,
     help="Priority for all subtasks",
 )
-def spawn(
-    parent_id: str, subtask: tuple[str, ...], mode: str, isolation: str, priority: str | None
+def subtask_cmd(
+    parent_id: str, subtask_names: tuple[str, ...], mode: str, isolation: str, priority: str | None
 ):
-    """Spawn subtasks from a parent task.
+    """Create subtasks from a parent task.
 
     Creates new task files with spawned_from set to the parent task,
     and updates the parent task's spawned_tasks and coordination_mode.
 
+    This is for task decomposition, NOT for spawning agents.
+    For agent spawning, use 'gptodo spawn' or 'gptodo run'.
+
     Examples:
-        gptodo spawn implement-api --subtask auth-endpoint --subtask users-endpoint
-        gptodo spawn big-task -s subtask-1 -s subtask-2 --mode sequential
-        gptodo spawn feature-x -s part-a -s part-b --isolation worktree
+        gptodo subtask big-task -n subtask-1 -n subtask-2
+        gptodo subtask implement-api -n auth-endpoint -n users-endpoint
+        gptodo subtask feature-x -n part-a -n part-b --mode fan-out-fan-in
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -3624,7 +3727,7 @@ def spawn(
 
     # Create subtask files
     created_tasks = []
-    for subtask_name in subtask:
+    for subtask_name in subtask_names:
         # Sanitize subtask name to filename
         filename = subtask_name.lower().replace(" ", "-").replace("_", "-")
         if not filename.endswith(".md"):
@@ -3638,7 +3741,7 @@ def spawn(
 
         # Create frontmatter for new subtask
         now = datetime.now(timezone.utc)
-        frontmatter = {
+        fm = {
             "state": "todo",
             "created": now.isoformat(),
             "spawned_from": parent_task.id,
@@ -3646,14 +3749,14 @@ def spawn(
         }
 
         if isolation != "none":
-            frontmatter["isolation"] = isolation
+            fm["isolation"] = isolation
 
         if priority:
-            frontmatter["priority"] = priority
+            fm["priority"] = priority
 
         # Write subtask file
         content = "---\n"
-        for key, value in frontmatter.items():
+        for key, value in fm.items():
             if isinstance(value, bool):
                 content += f"{key}: {str(value).lower()}\n"
             else:
@@ -3675,7 +3778,7 @@ def spawn(
     # Update parent task's spawned_tasks and coordination_mode
     _update_parent_task(parent_task.path, created_tasks, mode)
 
-    console.print(f"\n[bold green]Spawned {len(created_tasks)} subtasks from {parent_task.id}[/]")
+    console.print(f"\n[bold green]Created {len(created_tasks)} subtasks from {parent_task.id}[/]")
     console.print(f"  Coordination mode: {mode}")
     console.print(f"  Isolation: {isolation}")
 
@@ -3722,161 +3825,5 @@ def _update_parent_task(parent_path: Path, new_subtasks: list[str], coordination
     parent_path.write_text(new_content)
 
 
-@cli.command("graph")
-@click.option(
-    "--format",
-    "output_format",
-    type=click.Choice(["text", "mermaid"]),
-    default="text",
-    help="Output format",
-)
-@click.option("--task", "task_id", help="Focus on specific task and its relationships")
-def graph(output_format: str, task_id: str | None):
-    """Show task coordination graph.
-
-    Displays relationships between tasks including:
-    - Dependencies (requires/depends)
-    - Spawn relationships (spawned_from/spawned_tasks)
-    - Related tasks
-
-    Examples:
-        gptodo graph
-        gptodo graph --format mermaid
-        gptodo graph --task implement-api
-    """
-    console = Console()
-    repo_root = find_repo_root(Path.cwd())
-    tasks_dir = repo_root / "tasks"
-
-    tasks = load_tasks(tasks_dir)
-    if not tasks:
-        console.print("[red]No tasks found[/]")
-        return
-
-    # Build task lookup
-    task_map = {t.id: t for t in tasks}
-
-    if output_format == "mermaid":
-        _print_mermaid_graph(console, tasks, task_map, task_id)
-    else:
-        _print_text_graph(console, tasks, task_map, task_id)
-
-
-def _print_text_graph(console: Console, tasks: list, task_map: dict, focus_task: str | None):
-    """Print text representation of task graph."""
-    from rich.tree import Tree
-
-    if focus_task:
-        if focus_task not in task_map:
-            console.print(f"[red]Task not found: {focus_task}[/]")
-            return
-        tasks = [task_map[focus_task]]
-        # Add related tasks
-        task = task_map[focus_task]
-        related_ids = set(task.requires + task.related + task.spawned_tasks)
-        if task.spawned_from:
-            related_ids.add(task.spawned_from)
-        tasks.extend([task_map[tid] for tid in related_ids if tid in task_map])
-
-    # Find root tasks (no spawned_from, not spawned by others)
-    spawned_ids = set()
-    for t in tasks:
-        spawned_ids.update(t.spawned_tasks)
-
-    root_tasks = [t for t in tasks if not t.spawned_from and t.id not in spawned_ids]
-
-    if not root_tasks:
-        root_tasks = tasks[:10]  # Just show first 10 if no clear roots
-
-    tree = Tree("[bold]Task Coordination Graph[/]")
-
-    def add_task_node(parent_tree, task, visited: set):
-        if task.id in visited:
-            parent_tree.add(f"[dim]{task.id} (circular ref)[/]")
-            return
-        visited.add(task.id)
-
-        # Task node with state indicator
-        state_colors = {
-            "done": "green",
-            "active": "cyan",
-            "todo": "yellow",
-            "waiting": "magenta",
-            "backlog": "dim",
-        }
-        color = state_colors.get(task.state, "white")
-        mode_str = f" [{task.coordination_mode}]" if task.coordination_mode else ""
-        node = parent_tree.add(f"[{color}]{task.id}[/] ({task.state}){mode_str}")
-
-        # Add spawned tasks as children
-        for child_id in task.spawned_tasks:
-            if child_id in task_map:
-                add_task_node(node, task_map[child_id], visited.copy())
-            else:
-                node.add(f"[red]{child_id} (not found)[/]")
-
-        # Show dependencies inline
-        if task.requires:
-            deps = ", ".join(task.requires)
-            node.add(f"[dim]requires: {deps}[/]")
-
-    for root in root_tasks:
-        add_task_node(tree, root, set())
-
-    console.print(tree)
-
-
-def _print_mermaid_graph(console: Console, tasks: list, task_map: dict, focus_task: str | None):
-    """Print Mermaid diagram of task graph."""
-    lines = ["```mermaid", "graph TD"]
-
-    # Filter tasks if focused
-    if focus_task:
-        if focus_task not in task_map:
-            console.print(f"[red]Task not found: {focus_task}[/]")
-            return
-        task = task_map[focus_task]
-        relevant_ids = {focus_task}
-        relevant_ids.update(task.requires)
-        relevant_ids.update(task.related)
-        relevant_ids.update(task.spawned_tasks)
-        if task.spawned_from:
-            relevant_ids.add(task.spawned_from)
-        tasks = [t for t in tasks if t.id in relevant_ids]
-
-    # Add nodes
-    for task in tasks:
-        label = task.id.replace("-", "_")
-        lines.append(f"    {label}[{task.id}]")
-
-    # Add edges
-    for task in tasks:
-        label = task.id.replace("-", "_")
-
-        # Spawn relationships (solid arrow)
-        for child_id in task.spawned_tasks:
-            if child_id in task_map:
-                child_label = child_id.replace("-", "_")
-                lines.append(f"    {label} --> {child_label}")
-
-        # Dependencies (dashed arrow)
-        for dep_id in task.requires:
-            if dep_id in task_map:
-                dep_label = dep_id.replace("-", "_")
-                lines.append(f"    {dep_label} -.-> {label}")
-
-    # Add styling
-    lines.append("")
-    lines.append("    classDef done fill:#90EE90")
-    lines.append("    classDef active fill:#87CEEB")
-    lines.append("    classDef todo fill:#FFE4B5")
-    lines.append("    classDef waiting fill:#DDA0DD")
-
-    for task in tasks:
-        label = task.id.replace("-", "_")
-        if task.state in ["done", "active", "todo", "waiting"]:
-            lines.append(f"    class {label} {task.state}")
-
-    lines.append("```")
-
-    console.print("\n".join(lines))
+if __name__ == "__main__":
+    cli()
