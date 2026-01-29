@@ -94,6 +94,16 @@ from gptodo.locks import (
 
 from gptodo.unblock import auto_unblock_tasks
 
+# Import subagent functionality (Issue #255: Multi-Agent Collaboration)
+from gptodo.subagent import (
+    spawn_agent,
+    list_sessions,
+    check_session,
+    get_session_output,
+    kill_session,
+    cleanup_sessions,
+)
+
 
 # Keep console instance for CLI output
 console = Console()
@@ -3036,6 +3046,279 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
+
+
+# =============================================================================
+# Sub-Agent Commands (Issue #255: Multi-Agent Collaboration)
+# =============================================================================
+
+
+@cli.command("spawn")
+@click.argument("task_id")
+@click.option(
+    "--prompt",
+    "-p",
+    type=str,
+    help="Custom prompt for the agent (default: derived from task)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="general",
+    help="Type of agent to spawn",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--background",
+    "-b",
+    is_flag=True,
+    help="Run in background (tmux)",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout in seconds (foreground only)",
+)
+def spawn_cmd(
+    task_id: str,
+    prompt: Optional[str],
+    agent_type: str,
+    backend: str,
+    background: bool,
+    model: Optional[str],
+    timeout: int,
+):
+    """Spawn a sub-agent to work on a task.
+
+    Launches a gptme or claude subprocess to work on the specified task.
+    Can run in foreground (blocking) or background (tmux).
+
+    Examples:
+        gptodo spawn my-task --background
+        gptodo spawn my-task --backend claude --type explore
+        gptodo spawn my-task -p "Custom instructions..."
+        gptodo spawn my-task --model openrouter/moonshotai/kimi-k2.5@moonshotai
+    """
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Find the task
+    tasks = load_tasks(tasks_dir)
+    task = None
+
+    if task_id.isdigit():
+        tasks.sort(key=lambda t: t.created)
+        idx = int(task_id) - 1
+        if 0 <= idx < len(tasks):
+            task = tasks[idx]
+    else:
+        task_name = task_id[:-3] if task_id.endswith(".md") else task_id
+        matching = [t for t in tasks if t.name == task_name]
+        if matching:
+            task = matching[0]
+
+    if not task:
+        console.print(f"[red]Error: Task '{task_id}' not found[/]")
+        return
+
+    # Build prompt from task if not provided
+    if not prompt:
+        post = frontmatter.load(task.path)
+        prompt = f"""Work on this task:
+
+# {task.name}
+
+{post.content}
+
+Focus on making progress on this task. When done, summarize what you accomplished."""
+
+    console.print(f"[cyan]Spawning {agent_type} agent for task:[/] {task.name}")
+    console.print(f"  Backend: {backend}")
+    if model:
+        console.print(f"  Model: {model}")
+    console.print(f"  Background: {background}")
+
+    from typing import cast, Literal
+
+    session = spawn_agent(
+        task_id=task.name,
+        prompt=prompt,
+        agent_type=cast(Literal["general", "explore", "plan", "execute"], agent_type),
+        backend=cast(Literal["gptme", "claude"], backend),
+        background=background,
+        workspace=repo_root,
+        timeout=timeout,
+        model=model,
+    )
+
+    if session.status == "failed":
+        console.print(f"[red]✗ Failed to spawn agent:[/] {session.error}")
+        return
+
+    console.print(f"[green]✓ Agent spawned:[/] {session.session_id}")
+
+    if background:
+        console.print(f"  tmux session: {session.tmux_session}")
+        console.print(f"\nMonitor with: [cyan]gptodo output {session.session_id}[/]")
+        console.print(f"Kill with: [cyan]gptodo kill {session.session_id}[/]")
+    else:
+        console.print(f"  Status: {session.status}")
+        if session.error:
+            console.print(f"  Error: {session.error}")
+
+
+@cli.command("sessions")
+@click.option(
+    "--status",
+    "-s",
+    type=click.Choice(["running", "completed", "failed", "killed"]),
+    help="Filter by status",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+def sessions_cmd(status: Optional[str], as_json: bool):
+    """List all sub-agent sessions.
+
+    Shows active and recent sub-agent sessions spawned via 'gptodo spawn'.
+    """
+    repo_root = find_repo_root(Path.cwd())
+    sessions = list_sessions(repo_root, status)
+
+    if as_json:
+        import json as json_mod
+
+        data = [
+            {
+                "session_id": s.session_id,
+                "task_id": s.task_id,
+                "agent_type": s.agent_type,
+                "backend": s.backend,
+                "status": s.status,
+                "started": s.started,
+            }
+            for s in sessions
+        ]
+        console.print(json_mod.dumps(data, indent=2))
+        return
+
+    if not sessions:
+        console.print("[dim]No sessions found[/]")
+        return
+
+    table = Table(title="Sub-Agent Sessions")
+    table.add_column("ID", style="cyan")
+    table.add_column("Task")
+    table.add_column("Type")
+    table.add_column("Backend")
+    table.add_column("Status")
+    table.add_column("Started")
+
+    status_colors = {
+        "running": "yellow",
+        "completed": "green",
+        "failed": "red",
+        "killed": "dim",
+    }
+
+    for s in sessions:
+        color = status_colors.get(s.status, "white")
+        # Parse and format started time
+        started = datetime.fromisoformat(s.started.replace("Z", "+00:00"))
+        ago = datetime.now(timezone.utc) - started
+        if ago.days > 0:
+            ago_str = f"{ago.days}d ago"
+        elif ago.seconds >= 3600:
+            ago_str = f"{ago.seconds // 3600}h ago"
+        elif ago.seconds >= 60:
+            ago_str = f"{ago.seconds // 60}m ago"
+        else:
+            ago_str = "just now"
+
+        table.add_row(
+            s.session_id,
+            s.task_id,
+            s.agent_type,
+            s.backend,
+            f"[{color}]{s.status}[/]",
+            ago_str,
+        )
+
+    console.print(table)
+
+
+@cli.command("output")
+@click.argument("session_id")
+def output_cmd(session_id: str):
+    """Get output from a sub-agent session.
+
+    Shows the output from a running or completed session.
+    """
+    repo_root = find_repo_root(Path.cwd())
+
+    # First update session status
+    session = check_session(session_id, repo_root)
+    if session is None:
+        console.print(f"[red]Session '{session_id}' not found[/]")
+        return
+
+    console.print(f"[cyan]Session:[/] {session.session_id}")
+    console.print(f"[cyan]Task:[/] {session.task_id}")
+    console.print(f"[cyan]Status:[/] {session.status}")
+    console.print()
+
+    output = get_session_output(session_id, repo_root)
+    console.print(output)
+
+
+@cli.command("kill")
+@click.argument("session_id")
+def kill_cmd(session_id: str):
+    """Kill a running sub-agent session.
+
+    Terminates the tmux session for a background agent.
+    """
+    repo_root = find_repo_root(Path.cwd())
+
+    if kill_session(session_id, repo_root):
+        console.print(f"[green]✓ Killed session:[/] {session_id}")
+    else:
+        console.print(f"[red]✗ Could not kill session:[/] {session_id}")
+        console.print("  Session may not exist or already stopped")
+
+
+@cli.command("cleanup-sessions")
+@click.option(
+    "--older-than",
+    type=int,
+    default=24,
+    help="Remove sessions older than N hours",
+)
+def cleanup_sessions_cmd(older_than: int):
+    """Clean up old session files.
+
+    Removes completed/failed session files older than the specified time.
+    """
+    repo_root = find_repo_root(Path.cwd())
+    count = cleanup_sessions(repo_root, older_than)
+    console.print(f"[green]✓ Cleaned up {count} session(s)[/]")
 
 
 if __name__ == "__main__":

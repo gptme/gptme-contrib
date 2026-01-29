@@ -15,5 +15,8 @@ venv/
 # Task lock files (runtime state)
 state/locks/
 
+# Session state files (runtime state)
+state/sessions/
+
 # Stale directory from tasks->gptodo rename (PR #171)
 packages/tasks/
