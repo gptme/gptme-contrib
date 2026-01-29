@@ -92,7 +92,9 @@ from gptodo.locks import (
     DEFAULT_LOCK_TIMEOUT_HOURS,
 )
 
-from gptodo.unblock import auto_unblock_tasks
+# Import unblocking functionality with fan-in support
+from gptodo.unblock import auto_unblock_with_fan_in
+
 
 # Import subagent functionality (Issue #255: Multi-Agent Collaboration)
 from gptodo.subagent import (
@@ -1143,15 +1145,18 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     except Exception as e:
                         console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
 
-        # Auto-unblock dependent tasks
+        # Auto-unblock dependent tasks and handle fan-in completion
         if completed_task_ids:
             # Reload all tasks to get fresh state
             all_tasks = load_tasks(tasks_dir)
-            unblocked = auto_unblock_tasks(completed_task_ids, all_tasks, tasks_dir)
+            unblocked = auto_unblock_with_fan_in(completed_task_ids, all_tasks, tasks_dir)
             if unblocked:
-                console.print("\n[cyan]📋 Auto-unblocked:[/]")
+                console.print("\n[cyan]📋 Auto-unblocked/completed:[/]")
                 for task_name, action in unblocked:
-                    console.print(f"  [green]✓[/] {task_name} ({action})")
+                    if "fan-in" in action:
+                        console.print(f"  [magenta]🎯[/] {task_name} ({action})")
+                    else:
+                        console.print(f"  [green]✓[/] {task_name} ({action})")
 
     # Show success message
     count = len(target_tasks)

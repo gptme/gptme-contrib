@@ -255,3 +255,229 @@ class TestAutoUnblockTasks:
         post = frontmatter.load(task_b_path)
         assert "waiting_for" not in post.metadata
         assert "waiting_since" not in post.metadata
+
+
+class TestFanInCompletion:
+    """Tests for fan-in completion aggregation."""
+
+    def test_single_subtask_completes_parent(self, tmp_path):
+        """When the only subtask completes, parent should be marked done."""
+        from gptodo.unblock import check_fan_in_completion
+
+        tasks_dir = tmp_path
+
+        # Create parent task with one spawned subtask
+        create_task_file(
+            tasks_dir,
+            "parent-task",
+            {
+                "state": "active",
+                "spawned_tasks": ["subtask-1"],
+                "coordination_mode": "fan-out-fan-in",
+            },
+        )
+
+        # Create completed subtask
+        create_task_file(
+            tasks_dir,
+            "subtask-1",
+            {
+                "state": "done",
+                "spawned_from": "parent-task",
+            },
+        )
+
+        # Create task info objects
+        parent = create_task_info(
+            "parent-task",
+            tasks_dir / "parent-task.md",
+            state="active",
+            metadata={"spawned_tasks": ["subtask-1"], "coordination_mode": "fan-out-fan-in"},
+        )
+        parent.spawned_tasks = ["subtask-1"]
+
+        subtask = create_task_info(
+            "subtask-1",
+            tasks_dir / "subtask-1.md",
+            state="done",
+            metadata={"spawned_from": "parent-task"},
+        )
+        subtask.spawned_from = "parent-task"
+
+        # Check fan-in completion
+        result = check_fan_in_completion(subtask, [parent, subtask], tasks_dir)
+
+        # Parent should be marked done
+        assert result is not None
+        assert result[0] == "parent-task"
+        assert "fan-in complete" in result[1]
+
+        # Verify parent file was updated
+        post = frontmatter.load(tasks_dir / "parent-task.md")
+        assert post.metadata["state"] == "done"
+
+    def test_partial_subtasks_do_not_complete_parent(self, tmp_path):
+        """When only some subtasks complete, parent should remain active."""
+        from gptodo.unblock import check_fan_in_completion
+
+        tasks_dir = tmp_path
+
+        # Create parent task with two spawned subtasks
+        create_task_file(
+            tasks_dir,
+            "parent-task",
+            {
+                "state": "active",
+                "spawned_tasks": ["subtask-1", "subtask-2"],
+            },
+        )
+
+        # Create one completed subtask
+        create_task_file(
+            tasks_dir,
+            "subtask-1",
+            {
+                "state": "done",
+                "spawned_from": "parent-task",
+            },
+        )
+
+        # Create one active subtask
+        create_task_file(
+            tasks_dir,
+            "subtask-2",
+            {
+                "state": "active",
+                "spawned_from": "parent-task",
+            },
+        )
+
+        # Create task info objects
+        parent = create_task_info(
+            "parent-task",
+            tasks_dir / "parent-task.md",
+            state="active",
+            metadata={"spawned_tasks": ["subtask-1", "subtask-2"]},
+        )
+        parent.spawned_tasks = ["subtask-1", "subtask-2"]
+
+        subtask1 = create_task_info(
+            "subtask-1",
+            tasks_dir / "subtask-1.md",
+            state="done",
+            metadata={"spawned_from": "parent-task"},
+        )
+        subtask1.spawned_from = "parent-task"
+
+        subtask2 = create_task_info(
+            "subtask-2",
+            tasks_dir / "subtask-2.md",
+            state="active",
+            metadata={"spawned_from": "parent-task"},
+        )
+        subtask2.spawned_from = "parent-task"
+
+        # Check fan-in completion
+        result = check_fan_in_completion(subtask1, [parent, subtask1, subtask2], tasks_dir)
+
+        # Parent should NOT be marked done (subtask-2 still active)
+        assert result is None
+
+        # Verify parent file was not changed
+        post = frontmatter.load(tasks_dir / "parent-task.md")
+        assert post.metadata["state"] == "active"
+
+    def test_all_subtasks_complete_marks_parent_done(self, tmp_path):
+        """When all subtasks complete, parent should be marked done."""
+        from gptodo.unblock import check_fan_in_completion
+
+        tasks_dir = tmp_path
+
+        # Create parent task with two spawned subtasks
+        create_task_file(
+            tasks_dir,
+            "parent-task",
+            {
+                "state": "active",
+                "spawned_tasks": ["subtask-1", "subtask-2"],
+            },
+        )
+
+        # Create both subtasks as done
+        create_task_file(
+            tasks_dir,
+            "subtask-1",
+            {
+                "state": "done",
+                "spawned_from": "parent-task",
+            },
+        )
+        create_task_file(
+            tasks_dir,
+            "subtask-2",
+            {
+                "state": "done",
+                "spawned_from": "parent-task",
+            },
+        )
+
+        # Create task info objects
+        parent = create_task_info(
+            "parent-task",
+            tasks_dir / "parent-task.md",
+            state="active",
+            metadata={"spawned_tasks": ["subtask-1", "subtask-2"]},
+        )
+        parent.spawned_tasks = ["subtask-1", "subtask-2"]
+
+        subtask1 = create_task_info(
+            "subtask-1",
+            tasks_dir / "subtask-1.md",
+            state="done",
+            metadata={"spawned_from": "parent-task"},
+        )
+        subtask1.spawned_from = "parent-task"
+
+        subtask2 = create_task_info(
+            "subtask-2",
+            tasks_dir / "subtask-2.md",
+            state="done",
+            metadata={"spawned_from": "parent-task"},
+        )
+        subtask2.spawned_from = "parent-task"
+
+        # Check fan-in completion when the second subtask completes
+        result = check_fan_in_completion(subtask2, [parent, subtask1, subtask2], tasks_dir)
+
+        # Parent should be marked done
+        assert result is not None
+        assert result[0] == "parent-task"
+        assert "fan-in complete" in result[1]
+
+        # Verify parent file was updated
+        post = frontmatter.load(tasks_dir / "parent-task.md")
+        assert post.metadata["state"] == "done"
+
+    def test_task_without_spawned_from_returns_none(self, tmp_path):
+        """Tasks without spawned_from should not trigger fan-in."""
+        from gptodo.unblock import check_fan_in_completion
+
+        tasks_dir = tmp_path
+
+        # Create a regular task (no spawned_from)
+        create_task_file(
+            tasks_dir,
+            "regular-task",
+            {"state": "done"},
+        )
+
+        task = create_task_info(
+            "regular-task",
+            tasks_dir / "regular-task.md",
+            state="done",
+        )
+        # spawned_from is None by default
+
+        result = check_fan_in_completion(task, [task], tasks_dir)
+
+        assert result is None

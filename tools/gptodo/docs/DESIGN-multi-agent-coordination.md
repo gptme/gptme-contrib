@@ -237,7 +237,7 @@ gptodo locks
 ### Phase 3: Swarm Coordination ✅
 - [x] Add `spawned_from`, `spawned_tasks`, `coordination_mode` (done in Phase 2)
 - [x] `gptodo spawn` command
-- [ ] Completion aggregation (fan-in) - future work
+- [x] Completion aggregation (fan-in) - implemented in `unblock.py`
 - [x] `gptodo graph` visualization
 
 ### Phase 4: OTel Observability (Optional)
