@@ -58,19 +58,17 @@ git push
 # Use --repo owner/repo with numeric PRs, or use PR URLs directly
 gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread1" --body "✅ Fixed in commit abc123"
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread1"
-gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread2" --body "✅ Fixed in commit abc123"
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread2" --body "This is intentional - the API expects nullable here for backwards compat"
 gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread2"
-gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "This is intentional - the API expects nullable here for backwards compat"
-gh pr-review threads resolve --repo owner/repo 123 --thread-id "PRRT_thread3"
-# Thread3 resolved: no code change, but explained why current behavior is correct
+# Thread2 resolved: no code change, but explained why current behavior is correct
 
 # If you need clarification, comment only (no resolve):
-gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread4" --body "Could you share an example of where this would cause issues?"
-# Thread4 stays open - waiting for reviewer response
+gh pr-review comments reply --repo owner/repo 123 --thread-id "PRRT_thread3" --body "Could you share an example of where this would cause issues?"
+# Thread3 stays open - waiting for reviewer response
 
 # Verify
 gh pr-review threads list --repo owner/repo 123 --unresolved
-# Should return only thread4 (pending clarification)
+# Should return only thread3 (pending clarification)
 ```
 
 **Why use `gh pr-review comments reply`?** Cleaner than raw `gh api` - the extension handles GraphQL thread IDs natively and produces minimal output.
