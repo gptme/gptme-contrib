@@ -3457,3 +3457,324 @@ def list_all_agents(cleanup: bool, show_all: bool, output_json: bool, timeout: i
 
 if __name__ == "__main__":
     cli()
+
+
+@cli.command("spawn")
+@click.argument("parent_id")
+@click.option(
+    "--subtask",
+    "-s",
+    multiple=True,
+    required=True,
+    help="Subtask name (can specify multiple times)",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["sequential", "parallel", "fan-out-fan-in"]),
+    default="parallel",
+    help="Coordination mode for subtasks",
+)
+@click.option(
+    "--isolation",
+    type=click.Choice(["none", "worktree", "container"]),
+    default="none",
+    help="Isolation mode for subtasks",
+)
+@click.option(
+    "--priority",
+    type=click.Choice(["high", "medium", "low"]),
+    default=None,
+    help="Priority for all subtasks",
+)
+def spawn(
+    parent_id: str, subtask: tuple[str, ...], mode: str, isolation: str, priority: str | None
+):
+    """Spawn subtasks from a parent task.
+
+    Creates new task files with spawned_from set to the parent task,
+    and updates the parent task's spawned_tasks and coordination_mode.
+
+    Examples:
+        gptodo spawn implement-api --subtask auth-endpoint --subtask users-endpoint
+        gptodo spawn big-task -s subtask-1 -s subtask-2 --mode sequential
+        gptodo spawn feature-x -s part-a -s part-b --isolation worktree
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Find parent task
+    parent_task = None
+    for task in tasks:
+        if task.name == parent_id or task.id == parent_id:
+            parent_task = task
+            break
+
+    if not parent_task:
+        console.print(f"[red]Parent task not found: {parent_id}[/]")
+        return
+
+    # Create subtask files
+    created_tasks = []
+    for subtask_name in subtask:
+        # Sanitize subtask name to filename
+        filename = subtask_name.lower().replace(" ", "-").replace("_", "-")
+        if not filename.endswith(".md"):
+            filename = f"{filename}.md"
+
+        subtask_path = tasks_dir / filename
+
+        if subtask_path.exists():
+            console.print(f"[yellow]Subtask already exists: {filename}[/]")
+            continue
+
+        # Create frontmatter for new subtask
+        now = datetime.now(timezone.utc)
+        frontmatter = {
+            "state": "todo",
+            "created": now.isoformat(),
+            "spawned_from": parent_task.id,
+            "parallelizable": mode == "parallel",
+        }
+
+        if isolation != "none":
+            frontmatter["isolation"] = isolation
+
+        if priority:
+            frontmatter["priority"] = priority
+
+        # Write subtask file
+        content = "---\n"
+        for key, value in frontmatter.items():
+            if isinstance(value, bool):
+                content += f"{key}: {str(value).lower()}\n"
+            else:
+                content += f"{key}: {value}\n"
+        content += "---\n\n"
+        content += f"# {subtask_name.replace('-', ' ').title()}\n\n"
+        content += f"Spawned from [{parent_task.id}](./{parent_task.path.name})\n\n"
+        content += "## Description\n\n[TODO]\n\n"
+        content += "## Acceptance Criteria\n\n- [ ] [TODO]\n"
+
+        subtask_path.write_text(content)
+        created_tasks.append(filename.replace(".md", ""))
+        console.print(f"[green]Created subtask: {filename}[/]")
+
+    if not created_tasks:
+        console.print("[yellow]No subtasks created[/]")
+        return
+
+    # Update parent task's spawned_tasks and coordination_mode
+    _update_parent_task(parent_task.path, created_tasks, mode)
+
+    console.print(f"\n[bold green]Spawned {len(created_tasks)} subtasks from {parent_task.id}[/]")
+    console.print(f"  Coordination mode: {mode}")
+    console.print(f"  Isolation: {isolation}")
+
+
+def _update_parent_task(parent_path: Path, new_subtasks: list[str], coordination_mode: str):
+    """Update parent task with spawned_tasks and coordination_mode."""
+    import re
+
+    content = parent_path.read_text()
+
+    # Find the frontmatter section
+    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if not match:
+        return
+
+    frontmatter_text = match.group(1)
+    rest = content[match.end() :]
+
+    # Parse existing spawned_tasks if any
+    existing_spawned = []
+    spawned_match = re.search(r"^spawned_tasks:\s*\[(.*?)\]", frontmatter_text, re.MULTILINE)
+    if spawned_match:
+        existing = spawned_match.group(1)
+        if existing.strip():
+            existing_spawned = [t.strip().strip("'\"") for t in existing.split(",")]
+
+    # Combine with new tasks (avoid duplicates)
+    all_subtasks = list(dict.fromkeys(existing_spawned + new_subtasks))
+
+    # Update frontmatter
+    # Remove old spawned_tasks line if exists
+    frontmatter_text = re.sub(r"^spawned_tasks:.*\n?", "", frontmatter_text, flags=re.MULTILINE)
+    # Remove old coordination_mode line if exists
+    frontmatter_text = re.sub(r"^coordination_mode:.*\n?", "", frontmatter_text, flags=re.MULTILINE)
+
+    # Add new fields
+    subtasks_str = ", ".join(all_subtasks)
+    frontmatter_text = frontmatter_text.rstrip() + "\n"
+    frontmatter_text += f"spawned_tasks: [{subtasks_str}]\n"
+    frontmatter_text += f"coordination_mode: {coordination_mode}\n"
+
+    # Reconstruct file
+    new_content = f"---\n{frontmatter_text}---{rest}"
+    parent_path.write_text(new_content)
+
+
+@cli.command("graph")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "mermaid"]),
+    default="text",
+    help="Output format",
+)
+@click.option("--task", "task_id", help="Focus on specific task and its relationships")
+def graph(output_format: str, task_id: str | None):
+    """Show task coordination graph.
+
+    Displays relationships between tasks including:
+    - Dependencies (requires/depends)
+    - Spawn relationships (spawned_from/spawned_tasks)
+    - Related tasks
+
+    Examples:
+        gptodo graph
+        gptodo graph --format mermaid
+        gptodo graph --task implement-api
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Build task lookup
+    task_map = {t.id: t for t in tasks}
+
+    if output_format == "mermaid":
+        _print_mermaid_graph(console, tasks, task_map, task_id)
+    else:
+        _print_text_graph(console, tasks, task_map, task_id)
+
+
+def _print_text_graph(console: Console, tasks: list, task_map: dict, focus_task: str | None):
+    """Print text representation of task graph."""
+    from rich.tree import Tree
+
+    if focus_task:
+        if focus_task not in task_map:
+            console.print(f"[red]Task not found: {focus_task}[/]")
+            return
+        tasks = [task_map[focus_task]]
+        # Add related tasks
+        task = task_map[focus_task]
+        related_ids = set(task.requires + task.related + task.spawned_tasks)
+        if task.spawned_from:
+            related_ids.add(task.spawned_from)
+        tasks.extend([task_map[tid] for tid in related_ids if tid in task_map])
+
+    # Find root tasks (no spawned_from, not spawned by others)
+    spawned_ids = set()
+    for t in tasks:
+        spawned_ids.update(t.spawned_tasks)
+
+    root_tasks = [t for t in tasks if not t.spawned_from and t.id not in spawned_ids]
+
+    if not root_tasks:
+        root_tasks = tasks[:10]  # Just show first 10 if no clear roots
+
+    tree = Tree("[bold]Task Coordination Graph[/]")
+
+    def add_task_node(parent_tree, task, visited: set):
+        if task.id in visited:
+            parent_tree.add(f"[dim]{task.id} (circular ref)[/]")
+            return
+        visited.add(task.id)
+
+        # Task node with state indicator
+        state_colors = {
+            "done": "green",
+            "active": "cyan",
+            "todo": "yellow",
+            "waiting": "magenta",
+            "backlog": "dim",
+        }
+        color = state_colors.get(task.state, "white")
+        mode_str = f" [{task.coordination_mode}]" if task.coordination_mode else ""
+        node = parent_tree.add(f"[{color}]{task.id}[/] ({task.state}){mode_str}")
+
+        # Add spawned tasks as children
+        for child_id in task.spawned_tasks:
+            if child_id in task_map:
+                add_task_node(node, task_map[child_id], visited.copy())
+            else:
+                node.add(f"[red]{child_id} (not found)[/]")
+
+        # Show dependencies inline
+        if task.requires:
+            deps = ", ".join(task.requires)
+            node.add(f"[dim]requires: {deps}[/]")
+
+    for root in root_tasks:
+        add_task_node(tree, root, set())
+
+    console.print(tree)
+
+
+def _print_mermaid_graph(console: Console, tasks: list, task_map: dict, focus_task: str | None):
+    """Print Mermaid diagram of task graph."""
+    lines = ["```mermaid", "graph TD"]
+
+    # Filter tasks if focused
+    if focus_task:
+        if focus_task not in task_map:
+            console.print(f"[red]Task not found: {focus_task}[/]")
+            return
+        task = task_map[focus_task]
+        relevant_ids = {focus_task}
+        relevant_ids.update(task.requires)
+        relevant_ids.update(task.related)
+        relevant_ids.update(task.spawned_tasks)
+        if task.spawned_from:
+            relevant_ids.add(task.spawned_from)
+        tasks = [t for t in tasks if t.id in relevant_ids]
+
+    # Add nodes
+    for task in tasks:
+        label = task.id.replace("-", "_")
+        lines.append(f"    {label}[{task.id}]")
+
+    # Add edges
+    for task in tasks:
+        label = task.id.replace("-", "_")
+
+        # Spawn relationships (solid arrow)
+        for child_id in task.spawned_tasks:
+            if child_id in task_map:
+                child_label = child_id.replace("-", "_")
+                lines.append(f"    {label} --> {child_label}")
+
+        # Dependencies (dashed arrow)
+        for dep_id in task.requires:
+            if dep_id in task_map:
+                dep_label = dep_id.replace("-", "_")
+                lines.append(f"    {dep_label} -.-> {label}")
+
+    # Add styling
+    lines.append("")
+    lines.append("    classDef done fill:#90EE90")
+    lines.append("    classDef active fill:#87CEEB")
+    lines.append("    classDef todo fill:#FFE4B5")
+    lines.append("    classDef waiting fill:#DDA0DD")
+
+    for task in tasks:
+        label = task.id.replace("-", "_")
+        if task.state in ["done", "active", "todo", "waiting"]:
+            lines.append(f"    class {label} {task.state}")
+
+    lines.append("```")
+
+    console.print("\n".join(lines))
