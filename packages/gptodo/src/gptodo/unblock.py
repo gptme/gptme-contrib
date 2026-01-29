@@ -145,3 +145,115 @@ def auto_unblock_tasks(
                 unblocked.append((task.name, ", ".join(changes_made)))
 
     return unblocked
+
+
+def check_fan_in_completion(
+    completed_task: TaskInfo,
+    all_tasks: list,
+    tasks_dir: Path,
+) -> tuple[str, str] | None:
+    """Check if a completed subtask causes its parent to complete (fan-in).
+
+    When a spawned subtask completes, check if all sibling subtasks are done.
+    If so, mark the parent task as done, completing the fan-in pattern.
+
+    Args:
+        completed_task: The task that was just completed
+        all_tasks: List of all tasks for lookup
+        tasks_dir: Path to the tasks directory
+
+    Returns:
+        Tuple of (parent_task_id, action) if parent was completed, None otherwise
+    """
+    # Check if this task was spawned from a parent
+    if not completed_task.spawned_from:
+        return None
+
+    parent_id = completed_task.spawned_from
+
+    # Build task lookup dict
+    tasks_by_id = {t.id: t for t in all_tasks}
+    tasks_by_name = {t.name: t for t in all_tasks}
+    all_tasks_dict = {**tasks_by_id, **tasks_by_name}
+
+    # Find the parent task
+    parent_task = all_tasks_dict.get(parent_id)
+    if not parent_task:
+        return None
+
+    # Skip if parent is already done/cancelled
+    if parent_task.state in ["done", "cancelled"]:
+        return None
+
+    # Check if all spawned subtasks are done
+    spawned_tasks = parent_task.spawned_tasks
+    if not spawned_tasks:
+        return None
+
+    remaining = []
+    for subtask_id in spawned_tasks:
+        subtask = all_tasks_dict.get(subtask_id)
+        if subtask and subtask.state not in ["done", "cancelled"]:
+            remaining.append(subtask_id)
+
+    if remaining:
+        # Not all subtasks are done yet
+        return None
+
+    # All subtasks are done! Mark parent as done
+    parent_path = parent_task.path
+    post = frontmatter.load(parent_path)
+    post.metadata["state"] = "done"
+
+    with open(parent_path, "w") as f:
+        f.write(frontmatter.dumps(post))
+
+    return (parent_task.id, "all subtasks done (fan-in complete)")
+
+
+def auto_unblock_with_fan_in(
+    completed_task_ids: List[str],
+    all_tasks: list,
+    tasks_dir: Path,
+    issue_cache: Optional[Dict] = None,
+) -> List[Tuple[str, str]]:
+    """Auto-unblock tasks and handle fan-in completion aggregation.
+
+    This is the main entry point that combines:
+    1. Standard auto-unblocking (clearing waiting_for, checking deps)
+    2. Fan-in completion (marking parent done when all subtasks complete)
+
+    Args:
+        completed_task_ids: IDs/names of tasks that were marked done
+        all_tasks: List of all tasks
+        tasks_dir: Path to the tasks directory
+        issue_cache: Optional cache of issue states for URL-based requires
+
+    Returns:
+        List of (task_id, action) tuples describing what was unblocked/completed
+    """
+    results: List[Tuple[str, str]] = []
+
+    # Build task lookup dict
+    tasks_by_id = {t.id: t for t in all_tasks}
+    tasks_by_name = {t.name: t for t in all_tasks}
+    all_tasks_dict = {**tasks_by_id, **tasks_by_name}
+
+    # Track newly completed parent tasks for recursive unblocking
+    newly_completed = list(completed_task_ids)
+
+    # First, check for fan-in completions
+    for task_id in completed_task_ids:
+        completed_task = all_tasks_dict.get(task_id)
+        if completed_task:
+            fan_in_result = check_fan_in_completion(completed_task, all_tasks, tasks_dir)
+            if fan_in_result:
+                results.append(fan_in_result)
+                # Add parent to list for recursive unblocking
+                newly_completed.append(fan_in_result[0])
+
+    # Then do standard auto-unblocking for all completed tasks (including parents)
+    unblock_results = auto_unblock_tasks(newly_completed, all_tasks, tasks_dir, issue_cache)
+    results.extend(unblock_results)
+
+    return results
