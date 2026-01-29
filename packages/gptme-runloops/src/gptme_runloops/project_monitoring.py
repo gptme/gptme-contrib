@@ -701,7 +701,15 @@ class ProjectMonitoringRun(BaseRunLoop):
             notifications = json.loads(result.stdout)
 
             # Filter for relevant notification reasons
-            relevant_reasons = {"mention", "assign", "review_requested", "team_mention"}
+            # Includes review/comment to catch review feedback on PRs
+            relevant_reasons = {
+                "mention",
+                "assign",
+                "review_requested",
+                "team_mention",
+                "review",  # Review submitted on your PR
+                "comment",  # Comment on issue/PR you're subscribed to
+            }
             relevant_notifications = [
                 n
                 for n in notifications
