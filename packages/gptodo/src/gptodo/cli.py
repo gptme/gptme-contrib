@@ -65,6 +65,9 @@ from gptodo.utils import (
     update_task_state,
     has_new_activity,
     normalize_state,
+    # Phase 5: Effective state CLI (bob#240)
+    compute_effective_state,
+    get_blocking_reasons,
     # Cache
     get_cache_path,
     load_cache,
@@ -202,6 +205,102 @@ def show(task_id):
     console.print("\n[bold]Content:[/]")
     post = frontmatter.load(task.path)  # Reload to get content
     console.out(post.content, highlight=True)
+
+
+@cli.command("effective")
+@click.argument("task_id")
+def effective_(task_id: str):
+    """Show the effective state of a task including blocking reasons.
+
+    The effective state considers both the task's actual state AND its
+    dependencies. A task may be 'blocked' (virtual state) if its
+    dependencies are not resolved.
+
+    This is useful for debugging why a task shows as ready/blocked.
+    """
+    effective(task_id)
+
+
+def effective(task_id: str):
+    """Show effective state of a task."""
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Build task dictionary
+    all_tasks: Dict[str, TaskInfo] = {t.name: t for t in tasks}
+
+    # Find requested task
+    task = None
+    for t in tasks:
+        if t.name == task_id or task_id in str(t.path):
+            task = t
+            break
+
+    if not task:
+        console.print(f"[red]Task not found: {task_id}[/]")
+        return
+
+    # Load issue cache if available
+    cache_path = get_cache_path(repo_root)
+    issue_cache = load_cache(cache_path)
+
+    # Compute effective state
+    eff_state = compute_effective_state(task, all_tasks, issue_cache)
+    blocking_reasons = get_blocking_reasons(task, all_tasks, issue_cache)
+
+    # Display results
+    console.print(f"\n[bold]Task:[/] {task.name}")
+    console.print(f"[bold]File:[/] {task.path}")
+
+    # Style the states - STATE_STYLES returns (style, emoji) tuples
+    actual_style_tuple = STATE_STYLES.get(task.state or "unknown")
+    eff_style_tuple = STATE_STYLES.get(eff_state or "unknown")
+    actual_style = actual_style_tuple[0] if actual_style_tuple else "white"
+    eff_style = eff_style_tuple[0] if eff_style_tuple else "white"
+    actual_state = task.state or "unknown"
+
+    console.print(f"\n[bold]Actual State:[/]  [{actual_style}]{actual_state}[/]")
+    console.print(f"[bold]Effective State:[/] [{eff_style}]{eff_state}[/]")
+
+    if blocking_reasons:
+        console.print("\n[bold yellow]Blocking Reasons:[/]")
+        for reason in blocking_reasons:
+            console.print(f"  • {reason}")
+    else:
+        if task.requires:
+            console.print(f"\n[green]✓ All {len(task.requires)} dependencies resolved[/]")
+        else:
+            console.print("\n[dim]No dependencies defined[/]")
+
+    # Show requirements summary
+    if task.requires:
+        console.print("\n[bold]Requirements:[/]")
+        for req in task.requires:
+            if isinstance(req, str) and req.startswith("http"):
+                # URL requirement
+                cached = issue_cache.get(req) if issue_cache else None
+                if cached:
+                    state = cached.get("state", "unknown")
+                    style = "green" if state in ("CLOSED", "MERGED") else "yellow"
+                    console.print(f"  • [{style}]{req}[/] ({state})")
+                else:
+                    console.print(f"  • [dim]{req}[/] (not cached)")
+            else:
+                # Task requirement
+                dep_task = all_tasks.get(req)
+                if dep_task:
+                    dep_state = dep_task.state or "unknown"
+                    dep_style_tuple = STATE_STYLES.get(dep_state)
+                    dep_style = dep_style_tuple[0] if dep_style_tuple else "white"
+                    console.print(f"  • [{dep_style}]{req}[/] ({dep_state})")
+                else:
+                    console.print(f"  • [red]{req}[/] (missing)")
 
 
 @cli.command("list")

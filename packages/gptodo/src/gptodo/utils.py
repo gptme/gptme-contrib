@@ -162,6 +162,8 @@ STATE_STYLES = {
     "waiting": ("magenta", "waiting"),
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
+    # Virtual states (computed, not stored in frontmatter)
+    "blocked": ("red", "blocked"),
     # Deprecated task states (still accepted, mapped to canonical)
     "new": ("yellow", "new"),  # deprecated → backlog
     "paused": ("cyan", "paused"),  # deprecated → backlog
