@@ -234,11 +234,11 @@ gptodo locks
 - [ ] Update `gptodo ready` to include parallelization info
 - [ ] Validate new fields in pre-commit
 
-### Phase 3: Swarm Coordination
-- [ ] Add `spawned_from`, `spawned_tasks`, `coordination_mode`
-- [ ] `gptodo spawn` command
-- [ ] Completion aggregation (fan-in)
-- [ ] `gptodo graph` visualization
+### Phase 3: Swarm Coordination ✅
+- [x] Add `spawned_from`, `spawned_tasks`, `coordination_mode` (done in Phase 2)
+- [x] `gptodo spawn` command
+- [ ] Completion aggregation (fan-in) - future work
+- [x] `gptodo graph` visualization
 
 ### Phase 4: OTel Observability (Optional)
 - [ ] Span instrumentation for agent activity
