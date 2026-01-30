@@ -414,6 +414,8 @@ Generate the delta operations now:"""
     def _find_lesson(self, category: str) -> Optional[Path]:
         """Find existing lesson file by category"""
         lessons_dir = Path("lessons")
+        if not lessons_dir.exists():
+            return None
         # Search subdirectories
         for subdir in lessons_dir.iterdir():
             if not subdir.is_dir():

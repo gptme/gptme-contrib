@@ -314,6 +314,9 @@ class InsightStorage:
             return None
 
         data = json.loads(insight_file.read_text())
+        # Deserialize nested InsightMetadata dataclass
+        if "metadata" in data and isinstance(data["metadata"], dict):
+            data["metadata"] = InsightMetadata(**data["metadata"])
         return StoredInsight(**data)
 
     def update_status(
