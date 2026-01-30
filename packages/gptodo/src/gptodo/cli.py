@@ -2162,7 +2162,9 @@ def sync(update, output_json, use_cache, light, full, changes_only):
         return
 
     # Rich table output
-    table = Table(title=f"[bold]Task-Issue Sync Status[/] ({len(results)} tracked)")
+    table = Table(
+        title=f"[bold]Task-Issue Sync Status[/] ({len(results)} {'changed' if changes_only else 'tracked'})"
+    )
     table.add_column("Task", style="cyan")
     table.add_column("Issue", style="blue")
     table.add_column("Task State", style="yellow")
