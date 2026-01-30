@@ -24,6 +24,7 @@ members = [
     "gptme-lessons-extras",
     "gptme-lsp",
     "gptme-ralph",
+    "gptme-retrieval",
     "gptme-runloops",
     "gptme-warpgrep",
     "gptme-wrapped",
@@ -1019,6 +1020,30 @@ provides-extras = ["test"]
 name = "gptme-ralph"
 version = "0.1.0"
 source = { editable = "plugins/gptme-ralph" }
+
+[[package]]
+name = "gptme-retrieval"
+version = "0.1.0"
+source = { editable = "plugins/gptme-retrieval" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "gptme-runloops"
