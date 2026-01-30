@@ -116,6 +116,21 @@ from gptodo.agents import (
     DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
 )
 
+# Import checker functionality (Issue #255: Claude Code-inspired patterns)
+from gptodo.checker import (
+    run_checker,
+    poll_task_completion,
+    CheckerConfig,
+    VALID_TRANSITIONS,
+)
+
+# Import dependency tree visualization (Issue #255)
+from gptodo.deptree import (
+    get_dependency_tree,
+    build_dependency_graph,
+    detect_circular_dependencies,
+)
+
 
 # Keep console instance for CLI output
 console = Console()
@@ -3823,6 +3838,250 @@ def _update_parent_task(parent_path: Path, new_subtasks: list[str], coordination
     # Reconstruct file
     new_content = f"---\n{frontmatter_text}---{rest}"
     parent_path.write_text(new_content)
+
+
+# ============================================================================
+# Dependency Tree Commands (Issue #255: Claude Code-inspired improvements)
+# ============================================================================
+
+
+@cli.group("dep")
+def dep_group():
+    """Dependency management and visualization commands.
+
+    These commands help analyze task dependencies, detect cycles,
+    and visualize the dependency graph.
+    """
+    pass
+
+
+@dep_group.command("tree")
+@click.argument("task_id")
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(["ascii", "mermaid"]),
+    default="ascii",
+    help="Output format (ascii or mermaid for diagrams)",
+)
+@click.option(
+    "--direction",
+    "-d",
+    type=click.Choice(["up", "down", "both"]),
+    default="both",
+    help="Direction: up (requires), down (required_by), both",
+)
+@click.option(
+    "--depth",
+    type=int,
+    default=5,
+    help="Maximum tree depth to display (default: 5)",
+)
+def dep_tree(task_id: str, format: str, direction: str, depth: int):
+    """Show dependency tree for a task.
+
+    Visualizes what a task requires (upstream) and what depends
+    on it (downstream) in ASCII or Mermaid format.
+
+    Examples:
+
+    \b
+        gptodo dep tree my-task
+        gptodo dep tree my-task --format mermaid
+        gptodo dep tree my-task --direction up --depth 3
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    tree = get_dependency_tree(
+        task_id=task_id,
+        repo_root=repo_root,
+        format=format,
+        direction=direction,
+        max_depth=depth,
+    )
+
+    if format == "mermaid":
+        console.print("[bold]Mermaid Graph:[/]")
+        console.print(f"```mermaid\n{tree}\n```")
+    else:
+        console.print(f"[bold]Dependency Tree: {task_id}[/]\n")
+        console.print(tree)
+
+
+@dep_group.command("check")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def dep_check(output_json: bool):
+    """Check for circular dependencies across all tasks.
+
+    Scans all tasks and reports any circular dependency chains found.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    from .utils import load_tasks
+
+    tasks = load_tasks(tasks_dir)
+    nodes = build_dependency_graph(tasks)
+    cycles = detect_circular_dependencies(nodes)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "cycles": [[n for n in cycle] for cycle in cycles],
+                    "count": len(cycles),
+                    "status": "warning" if cycles else "ok",
+                },
+                indent=2,
+            )
+        )
+    else:
+        if cycles:
+            console.print(f"[red]⚠️  Found {len(cycles)} circular dependency chain(s):[/]")
+            for cycle in cycles:
+                console.print(f"  • {' → '.join(cycle)}")
+        else:
+            console.print("[green]✓ No circular dependencies found[/]")
+
+
+# ============================================================================
+# Checker Pattern Commands (Issue #255: Claude Code-inspired task verification)
+# ============================================================================
+
+
+@cli.command("checker")
+@click.argument("task_id")
+@click.option("--poll", is_flag=True, help="Poll until task completes or times out")
+@click.option(
+    "--interval",
+    type=int,
+    default=30,
+    help="Polling interval in seconds (default: 30)",
+)
+@click.option(
+    "--max-polls",
+    type=int,
+    default=100,
+    help="Maximum number of polls before timeout (default: 100)",
+)
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--skip-subtasks",
+    is_flag=True,
+    help="Skip subtask completion verification",
+)
+@click.option(
+    "--skip-deps",
+    is_flag=True,
+    help="Skip dependency resolution verification",
+)
+def checker_cmd(
+    task_id: str,
+    poll: bool,
+    interval: int,
+    max_polls: int,
+    output_json: bool,
+    skip_subtasks: bool,
+    skip_deps: bool,
+):
+    """Run verification checks on a task.
+
+    The checker pattern verifies task state:
+    - Subtask completion (all done before marking done)
+    - Dependency resolution (deps resolved before active)
+    - State validity (valid state transitions)
+
+    Use --poll to continuously check until completion or timeout.
+
+    Examples:
+
+    \b
+        gptodo checker my-task
+        gptodo checker my-task --poll --interval 60
+        gptodo checker my-task --json
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    config = CheckerConfig(
+        poll_interval_seconds=interval,
+        max_polls=max_polls,
+        verify_subtasks=not skip_subtasks,
+        verify_dependencies=not skip_deps,
+    )
+
+    def on_poll(poll_num: int, result) -> bool:
+        """Callback for polling progress."""
+        if not output_json:
+            console.print(f"[dim]Poll {poll_num + 1}: {result.status} - {result.message}[/]")
+        return True  # Continue polling
+
+    if poll:
+        result = poll_task_completion(
+            task_id=task_id,
+            repo_root=repo_root,
+            config=config,
+            on_poll=on_poll,
+        )
+    else:
+        result = run_checker(task_id=task_id, repo_root=repo_root, config=config)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "task_id": result.task_id,
+                    "timestamp": result.timestamp,
+                    "status": result.status,
+                    "message": result.message,
+                    "checks": result.checks,
+                    "fixes_created": result.fixes_created,
+                },
+                indent=2,
+            )
+        )
+    else:
+        # Status indicator
+        status_styles = {
+            "passed": "[green]✅ PASSED[/]",
+            "failed": "[red]❌ FAILED[/]",
+            "needs_attention": "[yellow]👀 NEEDS ATTENTION[/]",
+            "in_progress": "[blue]🏃 IN PROGRESS[/]",
+        }
+        console.print(f"\n{status_styles.get(result.status, result.status)}")
+        console.print(f"[bold]{result.message}[/]\n")
+
+        # Show check details
+        for check in result.checks:
+            icon = "✅" if check["passed"] else "❌"
+            console.print(f"  {icon} {check['check']}: {check['message']}")
+            if check.get("details"):
+                for key, value in check["details"].items():
+                    console.print(f"      {key}: {value}")
+
+
+@cli.command("transitions")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def transitions_cmd(output_json: bool):
+    """Show valid state transitions for tasks.
+
+    Displays which state transitions are allowed in the task workflow.
+    """
+    console = Console()
+
+    if output_json:
+        print(json.dumps(VALID_TRANSITIONS, indent=2))
+    else:
+        console.print("[bold]Valid State Transitions:[/]\n")
+        for state, next_states in VALID_TRANSITIONS.items():
+            if next_states:
+                console.print(f"  {state} → {', '.join(next_states)}")
+            else:
+                console.print(f"  {state} [dim](terminal state)[/]")
+        console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
+        console.print("[dim]Alternate: active → waiting → active → done[/]")
 
 
 if __name__ == "__main__":

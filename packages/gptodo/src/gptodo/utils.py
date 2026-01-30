@@ -102,16 +102,17 @@ def normalize_state(state: str, warn: bool = True) -> str:
 
 def get_canonical_states() -> list[str]:
     """Get list of canonical (non-deprecated) task states."""
-    return ["backlog", "todo", "active", "waiting", "done", "cancelled"]
+    return ["backlog", "todo", "active", "ready_for_review", "waiting", "done", "cancelled"]
 
 
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",
-        # New state model per Issue #240 design:
+        # State model (Issue #240 design + ready_for_review from Issue #255):
         # - backlog: not triaged or intentionally deferred (consolidates new/someday/paused)
         # - todo: triaged and ready to pick up
         # - active: being actively worked on
+        # - ready_for_review: work done, awaiting review/verification (Issue #255)
         # - waiting: blocked on external response
         # - done: completed
         # - cancelled: won't do
@@ -120,6 +121,7 @@ CONFIGS = {
             "backlog",
             "todo",
             "active",
+            "ready_for_review",  # Issue #255: review state before done
             "waiting",
             "done",
             "cancelled",
@@ -159,6 +161,7 @@ STATE_STYLES = {
     "backlog": ("yellow", "backlog"),
     "todo": ("cyan", "todo"),
     "active": ("blue", "active"),
+    "ready_for_review": ("bright_yellow", "review"),  # Issue #255
     "waiting": ("magenta", "waiting"),
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
@@ -188,6 +191,7 @@ STATE_EMOJIS = {
     "backlog": "📥",
     "todo": "📋",
     "active": "🏃",
+    "ready_for_review": "👀",  # Issue #255: review state
     "waiting": "⏳",
     "done": "✅",
     "cancelled": "❌",
