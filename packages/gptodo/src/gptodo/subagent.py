@@ -32,7 +32,7 @@ class AgentSession:
     session_id: str
     task_id: str
     agent_type: Literal["general", "explore", "plan", "execute"]
-    backend: Literal["gptme", "claude"]
+    backend: Literal["gptme", "claude", "codex"]
     started: str
     status: Literal["running", "completed", "failed", "killed"]
     tmux_session: Optional[str] = None
@@ -96,7 +96,7 @@ def spawn_agent(
     task_id: str,
     prompt: str,
     agent_type: Literal["general", "explore", "plan", "execute"] = "general",
-    backend: Literal["gptme", "claude"] = "gptme",
+    backend: Literal["gptme", "claude", "codex"] = "gptme",
     background: bool = False,
     workspace: Optional[Path] = None,
     timeout: int = 600,
