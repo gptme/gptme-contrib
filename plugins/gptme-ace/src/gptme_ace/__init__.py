@@ -19,12 +19,20 @@ from gptme.tools import ToolSpec
 from .gptme_integration import GptmeHybridMatcher
 from .hybrid_retriever import HybridConfig, HybridLessonMatcher
 from .embedder import LessonEmbedder
+from .storage import InsightStorage, StoredInsight
+from .curator import CuratorAgent, Delta, DeltaOperation
 
 __all__ = [
     "GptmeHybridMatcher",
     "HybridConfig",
     "HybridLessonMatcher",
     "LessonEmbedder",
+    # Phase 2: Curator module
+    "InsightStorage",
+    "StoredInsight",
+    "CuratorAgent",
+    "Delta",
+    "DeltaOperation",
     "plugin",
 ]
 
@@ -36,6 +44,7 @@ ACE (Agentic Context Engineering) provides enhanced lesson matching using:
 - **Hybrid Retrieval**: Combines keyword, semantic, effectiveness, and recency scoring
 - **Semantic Matching**: Uses embeddings for similarity-based lesson discovery
 - **Analytics**: Tracks retrieval patterns for continuous improvement
+- **Curator**: Synthesizes insights into delta operations for lesson lifecycle management
 
 ### Configuration
 
@@ -54,6 +63,38 @@ considers:
 - Historical effectiveness (25% weight)
 - Recency (10% weight)
 - Tool context bonus (20% boost)
+
+### Curator Module
+
+The Curator agent synthesizes refined insights into delta operations for
+incremental lesson updates. It generates ADD/REMOVE/MODIFY operations:
+
+```python
+from gptme_ace import CuratorAgent, InsightStorage
+
+# Initialize curator
+curator = CuratorAgent()
+
+# Generate delta from insight
+storage = InsightStorage()
+insight = storage.get_insight("insight-id", source_agent="refined")
+delta = curator.generate_delta(insight)
+
+# Save and review delta
+curator.save_delta(delta)
+```
+
+CLI usage:
+```bash
+# Generate delta for single insight
+python -m gptme_ace.curator generate --insight-id abc123
+
+# Batch process approved insights
+python -m gptme_ace.curator batch --status approved
+
+# List pending deltas
+python -m gptme_ace.curator list --status pending
+```
 
 For embeddings support, install with:
 ```bash
