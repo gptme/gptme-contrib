@@ -152,9 +152,11 @@ def check_dependency_resolution(task: TaskInfo, all_tasks: dict[str, TaskInfo]) 
         else:
             resolved.append(dep)
 
+    # Exclude URL deps from total since they're skipped
+    url_deps = sum(1 for dep in task.requires if dep.startswith("http"))
     details["resolved"] = resolved
     details["unresolved"] = unresolved
-    details["total"] = len(task.requires)
+    details["total"] = len(task.requires) - url_deps
 
     if unresolved and task.state in ["active", "done", "ready_for_review"]:
         result["passed"] = False

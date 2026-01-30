@@ -184,15 +184,21 @@ def render_tree_ascii(
     # Render header
     lines.append(f"{state_marker(root.state)} {root.name} ({root.state})")
 
+    # Determine if required_by section will be rendered
+    has_required_by = direction in ["down", "both"] and root.required_by
+
     # Render requires section
     if direction in ["up", "both"] and root.requires:
-        lines.append("├── REQUIRES:")
+        # Use └── if this is the final section, ├── if required_by follows
+        req_connector = "├──" if has_required_by else "└──"
+        req_prefix = "│   " if has_required_by else "    "
+        lines.append(f"{req_connector} REQUIRES:")
         for i, req in enumerate(root.requires):
             is_last = i == len(root.requires) - 1
-            render_node(req, "│   ", is_last, 1, "up")
+            render_node(req, req_prefix, is_last, 1, "up")
 
     # Render required_by section
-    if direction in ["down", "both"] and root.required_by:
+    if has_required_by:
         lines.append("└── REQUIRED BY:")
         for i, dep in enumerate(root.required_by):
             is_last = i == len(root.required_by) - 1
