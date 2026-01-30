@@ -152,15 +152,31 @@ def spawn_agent(
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
+        #
+        # NOTE: For claude backend, we intentionally DO NOT export API keys
+        # (ANTHROPIC_API_KEY, OPENAI_API_KEY). Claude Code should use its
+        # OAuth subscription (flat-fee) rather than API keys (metered).
+        # If ANTHROPIC_API_KEY is in the env, Claude Code uses it, bypassing
+        # the subscription and hitting API rate limits.
         env_exports = []
-        for key in [
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "OPENROUTER_API_KEY",
-            "PATH",
-            "HOME",
-            "GPTME_MODEL",
-        ]:
+
+        # Base environment variables needed by all backends
+        base_vars = ["PATH", "HOME"]
+
+        # API keys only needed for gptme backend (Claude Code has its own auth)
+        if backend == "gptme":
+            api_vars = [
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENROUTER_API_KEY",
+                "GPTME_MODEL",
+            ]
+        else:
+            # For claude backend: export only GPTME_* config vars, not API keys
+            # This ensures Claude Code uses OAuth subscription, not API key
+            api_vars = ["GPTME_MODEL"]
+
+        for key in base_vars + api_vars:
             value = os.environ.get(key)
             if value:
                 # Export the variable inside the tmux session
