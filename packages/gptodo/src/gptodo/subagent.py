@@ -101,6 +101,7 @@ def spawn_agent(
     workspace: Optional[Path] = None,
     timeout: int = 600,
     model: Optional[str] = None,
+    clear_keys: Optional[bool] = None,
 ) -> AgentSession:
     """Spawn a sub-agent to work on a task.
 
@@ -113,6 +114,9 @@ def spawn_agent(
         workspace: Working directory for the agent
         timeout: Timeout in seconds (for foreground only)
         model: Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)
+        clear_keys: If True, explicitly unset API keys (useful for backends
+            with their own auth like Claude Code/Codex). If None (default),
+            auto-detects based on backend (True for claude, False for gptme).
 
     Returns:
         AgentSession with status and session_id
@@ -153,28 +157,37 @@ def spawn_agent(
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
         #
-        # NOTE: For claude backend, we intentionally DO NOT export API keys
-        # (ANTHROPIC_API_KEY, OPENAI_API_KEY). Claude Code should use its
-        # OAuth subscription (flat-fee) rather than API keys (metered).
+        # NOTE: For backends with their own auth (claude, codex), we can
+        # explicitly clear API keys to ensure they use OAuth subscription
+        # (flat-fee) rather than API keys (metered).
         # If ANTHROPIC_API_KEY is in the env, Claude Code uses it, bypassing
         # the subscription and hitting API rate limits.
         env_exports = []
+        env_unsets = []  # Variables to explicitly unset
 
         # Base environment variables needed by all backends
         base_vars = ["PATH", "HOME"]
 
-        # API keys only needed for gptme backend (Claude Code has its own auth)
-        if backend == "gptme":
-            api_vars = [
-                "OPENAI_API_KEY",
-                "ANTHROPIC_API_KEY",
-                "OPENROUTER_API_KEY",
-                "GPTME_MODEL",
-            ]
-        else:
-            # For claude backend: export only GPTME_* config vars, not API keys
-            # This ensures Claude Code uses OAuth subscription, not API key
+        # API keys that backends might use
+        api_key_vars = [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+        ]
+
+        # Determine whether to clear API keys (auto-detect based on backend if not specified)
+        should_clear_keys = (
+            clear_keys if clear_keys is not None else (backend in ("claude", "codex"))
+        )
+
+        if should_clear_keys:
+            # For backends with their own auth: export only GPTME_* config vars
+            # and explicitly unset API keys to prevent interference
             api_vars = ["GPTME_MODEL"]
+            env_unsets = api_key_vars  # Will be unset in the shell
+        else:
+            # For gptme backend: export all API keys
+            api_vars = api_key_vars + ["GPTME_MODEL"]
 
         for key in base_vars + api_vars:
             value = os.environ.get(key)
@@ -182,7 +195,12 @@ def spawn_agent(
                 # Export the variable inside the tmux session
                 env_exports.append(f"export {key}={shlex.quote(value)}")
 
-        env_setup = "; ".join(env_exports) + "; " if env_exports else ""
+        # Build env setup: unsets first (if any), then exports
+        env_commands = []
+        if env_unsets:
+            env_commands.append(f"unset {' '.join(env_unsets)}")
+        env_commands.extend(env_exports)
+        env_setup = "; ".join(env_commands) + "; " if env_commands else ""
 
         # Use bash -l to ensure login shell behavior (sources .profile/.bashrc)
         # This ensures PATH and other environment variables are properly set
@@ -214,6 +232,19 @@ def spawn_agent(
         # Claude backend doesn't support model selection
         cmd = ["claude", "-p", "--dangerously-skip-permissions", "--tools", "default", prompt]
 
+    # Build environment for subprocess
+    # If clear_keys is enabled, create modified environment without API keys
+    should_clear_keys_fg = (
+        clear_keys if clear_keys is not None else (backend in ("claude", "codex"))
+    )
+    if should_clear_keys_fg:
+        # Copy environment and remove API keys
+        env = os.environ.copy()
+        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]:
+            env.pop(key, None)
+    else:
+        env = None  # Use inherited environment
+
     try:
         result = subprocess.run(
             cmd,
@@ -221,6 +252,7 @@ def spawn_agent(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
 
         # Save output
