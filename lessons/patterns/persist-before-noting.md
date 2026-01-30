@@ -7,6 +7,7 @@ match:
     - "good to know for next time"
     - "learned this for future"
     - "understanding improved"
+status: active
 ---
 
 # Persist Before Noting
