@@ -1,0 +1,2 @@
+[gptme.plugins]
+gptme_retrieval = gptme_retrieval:plugin

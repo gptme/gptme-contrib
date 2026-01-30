@@ -2,13 +2,13 @@
 gptme-retrieval - Automatic context retrieval plugin for gptme.
 
 Provides a STEP_PRE hook that retrieves relevant context before each LLM step
-using backends like qmd for semantic/keyword search.
+using backends like qmd or gptme-rag for semantic/keyword search.
 
 Configuration via gptme.toml:
 ```toml
 [plugin.retrieval]
 enabled = true
-backend = "qmd"          # "qmd" (default), "grep", or custom command
+backend = "qmd"          # "qmd" (default), "gptme-rag", "grep", or custom command
 mode = "vsearch"         # "search" (bm25), "vsearch" (semantic), "query" (hybrid)
 max_results = 5
 threshold = 0.3          # Minimum score for results
@@ -17,6 +17,7 @@ collections = []         # Optional: filter by collection names
 """
 
 import logging
+import shlex
 import subprocess
 import json
 from collections.abc import Generator
@@ -79,7 +80,7 @@ def retrieve_context(
 
     Args:
         query: The search query (typically the user's message)
-        backend: Backend command to use ("qmd", "grep", or custom)
+        backend: Backend command to use ("qmd", "gptme-rag", "grep", or custom)
         mode: Search mode ("search" for BM25, "vsearch" for semantic, "query" for hybrid)
         max_results: Maximum number of results to return
         threshold: Minimum score threshold for results
@@ -92,6 +93,8 @@ def retrieve_context(
 
     if backend == "qmd":
         results = _retrieve_qmd(query, mode, max_results, collections)
+    elif backend == "gptme-rag":
+        results = _retrieve_gptme_rag(query, max_results)
     elif backend == "grep":
         results = _retrieve_grep(query, max_results)
     else:
@@ -159,6 +162,56 @@ def _retrieve_qmd(
         return []
 
 
+def _retrieve_gptme_rag(query: str, max_results: int) -> list[dict[str, Any]]:
+    """Retrieve context using gptme-rag.
+
+    Uses the gptme-rag CLI tool for retrieval.
+    Note: gptme-rag is experimental and may have issues.
+    """
+    cmd = ["gptme-rag", "search", query, "-n", str(max_results), "--json"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        if result.returncode != 0:
+            logger.debug(f"gptme-rag returned non-zero: {result.stderr}")
+            return []
+
+        # Parse JSON output
+        data = json.loads(result.stdout)
+
+        # Normalize output format
+        results = []
+        for item in data:
+            results.append(
+                {
+                    "content": item.get("content", item.get("text", "")),
+                    "source": item.get("path", item.get("source", "unknown")),
+                    "score": item.get("score", item.get("similarity", 1.0)),
+                }
+            )
+
+        return results
+
+    except FileNotFoundError:
+        logger.warning("gptme-rag not found - install with: pipx install gptme-rag")
+        return []
+    except subprocess.TimeoutExpired:
+        logger.warning("gptme-rag timed out")
+        return []
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse gptme-rag output: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"gptme-rag retrieval failed: {e}")
+        return []
+
+
 def _retrieve_grep(query: str, max_results: int) -> list[dict[str, Any]]:
     """Simple grep-based retrieval."""
     # Basic grep search - useful as fallback
@@ -196,14 +249,24 @@ def _retrieve_custom(
     mode: str,
     max_results: int,
 ) -> list[dict[str, Any]]:
-    """Execute custom backend command."""
-    # Custom backend should output JSON array
-    cmd = f'{backend} "{query}" --mode {mode} -n {max_results}'
+    """Execute custom backend command.
+
+    Security note: Uses shlex.split() to safely parse the backend command
+    without shell=True to prevent command injection.
+    """
+    # Parse backend command safely (e.g., "my-search --json" -> ["my-search", "--json"])
+    try:
+        base_cmd = shlex.split(backend)
+    except ValueError as e:
+        logger.warning(f"Invalid backend command syntax: {e}")
+        return []
+
+    # Build full command with arguments
+    cmd = base_cmd + [query, "--mode", mode, "-n", str(max_results)]
 
     try:
         result = subprocess.run(
             cmd,
-            shell=True,
             capture_output=True,
             text=True,
             timeout=10,
@@ -212,6 +275,9 @@ def _retrieve_custom(
         data = json.loads(result.stdout)
         return data
 
+    except FileNotFoundError:
+        logger.warning(f"Custom backend command not found: {base_cmd[0]}")
+        return []
     except Exception as e:
         logger.warning(f"Custom backend '{backend}' failed: {e}")
         return []

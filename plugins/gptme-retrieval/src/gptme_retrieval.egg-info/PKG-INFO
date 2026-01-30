@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: gptme-retrieval
+Version: 0.1.0
+Summary: Retrieval hook plugin for gptme - automatic context retrieval using qmd or other backends
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: gptme
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Requires-Dist: mypy>=1.0; extra == "dev"
+
 # gptme-retrieval
 
 Automatic context retrieval plugin for gptme.
