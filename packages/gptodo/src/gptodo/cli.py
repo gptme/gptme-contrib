@@ -1827,7 +1827,12 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     is_flag=True,
     help="Full sync: refresh all cached URLs regardless of age, then sync",
 )
-def sync(update, output_json, use_cache, light, full):
+@click.option(
+    "--changes-only",
+    is_flag=True,
+    help="Only show items where state changed from cached (detect stale queue entries)",
+)
+def sync(update, output_json, use_cache, light, full, changes_only):
     """Sync task states with linked GitHub issues.
 
     Finds tasks with tracking field in frontmatter and compares
@@ -2125,6 +2130,23 @@ def sync(update, output_json, use_cache, light, full):
 
         results.append(result)
 
+    # Filter to changes only if requested
+    if changes_only:
+        results = [
+            r for r in results if not r.get("in_sync", False) or r.get("new_activity", False)
+        ]
+        if not results:
+            if output_json:
+                print(
+                    json.dumps(
+                        {"synced_tasks": [], "count": 0, "message": "No state changes detected"},
+                        indent=2,
+                    )
+                )
+            else:
+                console.print("[green]✓ No state changes detected - all tracked items in sync[/]")
+            return
+
     # Output results
     if output_json:
         output = {
@@ -2140,7 +2162,9 @@ def sync(update, output_json, use_cache, light, full):
         return
 
     # Rich table output
-    table = Table(title=f"[bold]Task-Issue Sync Status[/] ({len(results)} tracked)")
+    table = Table(
+        title=f"[bold]Task-Issue Sync Status[/] ({len(results)} {'changed' if changes_only else 'tracked'})"
+    )
     table.add_column("Task", style="cyan")
     table.add_column("Issue", style="blue")
     table.add_column("Task State", style="yellow")
