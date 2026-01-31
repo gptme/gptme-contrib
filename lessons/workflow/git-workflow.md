@@ -105,8 +105,7 @@ Following this pattern results in:
 - Correct submodule update sequence
 
 ## Related
-- [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs (read together!)
-- [Git Remote Branch Pushing](./git-remote-branch-pushing.md) - Pushing to upstream branches
+- [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs, including push verification (read together!)
 - [When to Rebase PRs](./when-to-rebase-prs.md) - When to rebase
 
 ## Origin
