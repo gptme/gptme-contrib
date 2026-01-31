@@ -174,6 +174,16 @@ git branch --unset-upstream
 git push -u origin feature
 ```
 
+**Verification** after pushing:
+```shell
+# Verify remote branch was created correctly
+git branch -r | grep feature
+# Should show: origin/feature
+
+# Confirm PR can be created
+gh pr create --fill
+```
+
 ## Outcome
 Following this pattern results in:
 - **Parallel work**: Multiple features simultaneously
@@ -184,5 +194,6 @@ Following this pattern results in:
 ## Related
 - [Git Workflow](./git-workflow.md) - Commit practices and branch verification (read together!)
 - [When to Rebase PRs](./when-to-rebase-prs.md) - Rebase workflow
-- [Git Remote Branch Pushing](./git-remote-branch-pushing.md) - Pushing to upstream branches
 - [dotfiles/README.md](../../dotfiles/README.md) - Global git hooks setup (pre-commit, pre-push protection)
+
+> **Note**: `git-remote-branch-pushing.md` has been deprecated and consolidated into this lesson (see "Branch Tracking Issue and Fix" section above).
