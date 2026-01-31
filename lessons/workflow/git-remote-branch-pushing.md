@@ -1,24 +1,19 @@
 ---
+status: deprecated
+deprecated_by: git-worktree-workflow.md
+deprecated_date: 2026-01-31
 match:
   keywords:
-  # FOUNDATIONAL KEYWORDS - Keep these general terms!
-  # Git pushing is a common operation - this lesson should trigger
-  # whenever users are pushing to remotes for PRs. Do NOT remove
-  # thinking they're "too broad" - they catch learning opportunities.
-  - "git"
-  - "push"
-  - "branch"
-  - "PR"
-  # ERROR SIGNALS - Specific triggers for when mistakes occur
+  # DEPRECATED: This lesson is superseded by git-worktree-workflow.md
+  # which now includes comprehensive branch tracking and push verification.
+  # Keeping minimal keywords for historical reference only.
   - "pushed to wrong branch"
   - "push went to master instead"
-  # WORKFLOW CONTEXT - Medium specificity for discussions
-  - "git push explicit destination"
-  - "specify remote branch name"
-  - "push to feature branch"
 ---
 
 # Git Remote Branch Pushing for PRs
+
+> **⚠️ DEPRECATED**: This lesson has been superseded by [Git Worktree Workflow](./git-worktree-workflow.md), which provides comprehensive coverage of branch tracking, push verification, and the PR workflow. See the "Branch Tracking Issue and Fix" section there.
 
 ## Rule
 Always explicitly specify the remote branch name when pushing new branches for PRs, don't rely on default push behavior.
