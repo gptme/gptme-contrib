@@ -328,24 +328,62 @@ class TaskInfo:
 
 
 def find_repo_root(start_path: Path) -> Path:
-    """Find the repository root by looking for .git directory.
+    """Find the workspace root by looking for workspace markers.
 
-    If TASKS_REPO_ROOT environment variable is set, uses that as the
-    starting point instead. This allows the wrapper script to run in
-    a different directory (for module discovery) while still finding
-    tasks in the original workspace.
+    Priority order:
+    1. GPTODO_TASKS_DIR environment variable (explicit tasks directory)
+       - If set, returns its parent as the "repo root"
+    2. TASKS_REPO_ROOT environment variable (legacy, explicit repo root)
+    3. Auto-detect by walking up from start_path looking for:
+       a. gptme.toml (gptme workspace config - strongest signal)
+       b. .git directory with tasks/ sibling (git repo with tasks)
+       c. .git directory alone (any git repo - fallback)
+    4. start_path itself (ultimate fallback)
+
+    Args:
+        start_path: Directory to start searching from
+
+    Returns:
+        Path to the workspace root directory
     """
     import os
 
-    # Check for explicit repo root from wrapper script
+    # Priority 1: GPTODO_TASKS_DIR - explicit tasks directory
+    if tasks_dir := os.environ.get("GPTODO_TASKS_DIR"):
+        tasks_path = Path(tasks_dir).resolve()
+        # Return parent of tasks dir as the "repo root"
+        # so that repo_root / "tasks" works correctly
+        if tasks_path.is_dir():
+            return tasks_path.parent
+        # If it's a path like /foo/bar/tasks, return /foo/bar
+        # even if the directory doesn't exist yet
+        return tasks_path.parent
+
+    # Priority 2: TASKS_REPO_ROOT - legacy explicit repo root
     if env_root := os.environ.get("TASKS_REPO_ROOT"):
         start_path = Path(env_root)
 
     current = start_path.resolve()
-    while current != current.parent:
-        if (current / ".git").exists():
-            return current
-        current = current.parent
+
+    # First pass: look for strongest workspace markers (gptme.toml, tasks/)
+    search = current
+    while search != search.parent:
+        # gptme.toml is the strongest signal for a gptme workspace
+        if (search / "gptme.toml").exists():
+            return search
+        # .git with tasks/ directory is a strong signal for a task workspace
+        if (search / ".git").exists() and (search / "tasks").is_dir():
+            return search
+        search = search.parent
+
+    # Second pass: fall back to any .git directory
+    search = current
+    while search != search.parent:
+        if (search / ".git").exists():
+            return search
+        search = search.parent
+
+    # Ultimate fallback: return the start path
     return start_path.resolve()
 
 
