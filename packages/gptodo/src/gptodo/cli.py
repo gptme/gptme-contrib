@@ -138,10 +138,21 @@ console = Console()
 
 @click.group()
 @click.option("-v", "--verbose", is_flag=True)
-def cli(verbose):
+@click.option(
+    "--tasks-dir",
+    type=click.Path(exists=False, file_okay=False, resolve_path=True),
+    envvar="GPTODO_TASKS_DIR",
+    help="Path to tasks directory (overrides auto-detection). Can also be set via GPTODO_TASKS_DIR env var.",
+)
+def cli(verbose, tasks_dir):
     """Task verification and status CLI."""
     log_level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=log_level)
+
+    # Set GPTODO_TASKS_DIR if provided via CLI
+    # This allows find_repo_root to pick it up
+    if tasks_dir:
+        os.environ["GPTODO_TASKS_DIR"] = tasks_dir
 
 
 @cli.command("show")
