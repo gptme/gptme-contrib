@@ -282,18 +282,33 @@ def check_time(ref: str) -> tuple[bool, Optional[str]]:
     """Check if the specified time has passed.
 
     Args:
-        ref: ISO 8601 timestamp
+        ref: ISO 8601 timestamp (timezone-aware or naive)
 
     Returns:
         (resolved, error) - resolved=True if time has passed
+
+    Notes:
+        - Timezone-aware timestamps are compared in their original timezone
+        - Timezone-naive timestamps are compared against local time
     """
     try:
         target_time = datetime.fromisoformat(ref.replace("Z", "+00:00"))
-        if datetime.now(target_time.tzinfo) >= target_time:
+
+        # Handle both timezone-aware and naive datetimes
+        if target_time.tzinfo is not None:
+            # For aware datetimes, get current time in the same timezone
+            now = datetime.now(target_time.tzinfo)
+        else:
+            # For naive datetimes, use local time (also naive)
+            now = datetime.now()
+
+        if now >= target_time:
             return True, None
         return False, f"Waiting until {ref}"
-    except Exception as e:
+    except ValueError as e:
         return False, f"Invalid time format: {e}"
+    except Exception as e:
+        return False, f"Error checking time: {e}"
 
 
 def check_condition(condition: WaitCondition) -> WaitCondition:

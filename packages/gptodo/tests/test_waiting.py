@@ -185,3 +185,147 @@ class TestCheckCondition:
         result = check_condition(cond)
         assert result.resolved is True
         assert result.resolution_time is not None
+
+
+class TestCheckTime:
+    """Test time-based waiting conditions."""
+
+    def test_time_in_past(self):
+        """Test time that has already passed."""
+        from gptodo.waiting import check_time
+        from datetime import datetime, timedelta
+
+        # Use a time clearly in the past
+        past_time = (datetime.now() - timedelta(hours=1)).isoformat()
+        resolved, error = check_time(past_time)
+        assert resolved is True
+        assert error is None
+
+    def test_time_in_future(self):
+        """Test time that hasn't passed yet."""
+        from gptodo.waiting import check_time
+        from datetime import datetime, timedelta
+
+        # Use a time clearly in the future
+        future_time = (datetime.now() + timedelta(hours=1)).isoformat()
+        resolved, error = check_time(future_time)
+        assert resolved is False
+        assert "Waiting until" in error
+
+    def test_time_with_utc_suffix(self):
+        """Test time with Z suffix (UTC)."""
+        from gptodo.waiting import check_time
+        from datetime import datetime, timedelta, timezone
+
+        # Past time in UTC
+        past_utc = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        resolved, error = check_time(past_utc)
+        assert resolved is True
+        assert error is None
+
+    def test_time_with_timezone_offset(self):
+        """Test time with explicit timezone offset."""
+        from gptodo.waiting import check_time
+        from datetime import datetime, timedelta, timezone
+
+        # Past time with explicit timezone
+        past_with_tz = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S+00:00"
+        )
+        resolved, error = check_time(past_with_tz)
+        assert resolved is True
+        assert error is None
+
+    def test_time_naive_timestamp(self):
+        """Test timezone-naive timestamp (no crash)."""
+        from gptodo.waiting import check_time
+        from datetime import datetime, timedelta
+
+        # Naive timestamp in the past - should not crash
+        naive_past = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        resolved, error = check_time(naive_past)
+        assert resolved is True
+        assert error is None
+
+        # Naive timestamp in the future
+        naive_future = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        resolved, error = check_time(naive_future)
+        assert resolved is False
+        assert "Waiting until" in error
+
+    def test_time_invalid_format(self):
+        """Test invalid time format returns error."""
+        from gptodo.waiting import check_time
+
+        resolved, error = check_time("not-a-valid-time")
+        assert resolved is False
+        assert "Invalid time format" in error
+
+
+class TestCheckComment:
+    """Test comment-based waiting conditions."""
+
+    @patch("subprocess.run")
+    def test_comment_found(self, mock_run):
+        """Test when matching comment is found."""
+        from gptodo.waiting import check_comment
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="Thank you for the contribution!\nLGTM - looks good to me\nMerging now.",
+        )
+        resolved, error = check_comment("owner/repo#123", "LGTM")
+        assert resolved is True
+        assert error is None
+
+    @patch("subprocess.run")
+    def test_comment_not_found(self, mock_run):
+        """Test when no matching comment exists."""
+        from gptodo.waiting import check_comment
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="Please fix the tests\nNeeds more work",
+        )
+        resolved, error = check_comment("owner/repo#123", "LGTM")
+        assert resolved is False
+        assert "No comment matching" in error
+
+    @patch("subprocess.run")
+    def test_comment_case_insensitive(self, mock_run):
+        """Test case-insensitive pattern matching."""
+        from gptodo.waiting import check_comment
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="lgtm, ready to merge",
+        )
+        resolved, error = check_comment("owner/repo#123", "LGTM")
+        assert resolved is True
+        assert error is None
+
+    @patch("subprocess.run")
+    def test_comment_api_error(self, mock_run):
+        """Test handling of API errors."""
+        from gptodo.waiting import check_comment
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stderr="API error: rate limit exceeded",
+        )
+        resolved, error = check_comment("owner/repo#123", "LGTM")
+        assert resolved is False
+        assert "gh api failed" in error
+
+    @patch("subprocess.run")
+    def test_comment_empty_result(self, mock_run):
+        """Test when no comments exist."""
+        from gptodo.waiting import check_comment
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+        )
+        resolved, error = check_comment("owner/repo#123", "LGTM")
+        assert resolved is False
+        assert "No comment matching" in error

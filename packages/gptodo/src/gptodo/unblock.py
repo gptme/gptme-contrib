@@ -12,6 +12,7 @@ from typing import List, Dict, Tuple, Optional
 import frontmatter
 
 from gptodo.utils import TaskInfo
+from gptodo.waiting import parse_waiting_for, WaitType
 
 
 def find_dependent_tasks(
@@ -23,7 +24,7 @@ def find_dependent_tasks(
     A task depends on the completed task if:
     - `requires` contains the completed task ID
     - `depends` contains the completed task ID (deprecated alias)
-    - `waiting_for` contains the completed task ID
+    - `waiting_for` contains the completed task ID (string, dict, or list format)
 
     Args:
         completed_task_id: ID/name of the task that was completed
@@ -49,11 +50,13 @@ def find_dependent_tasks(
             dependent_tasks.append(task)
             continue
 
-        # Check waiting_for field
-        waiting_for = task.metadata.get("waiting_for", "")
-        if isinstance(waiting_for, str) and completed_task_id in waiting_for:
-            dependent_tasks.append(task)
-            continue
+        # Check waiting_for field (supports string, dict, and list formats)
+        conditions = parse_waiting_for(task.metadata)
+        for condition in conditions:
+            # For TASK type, check if ref matches the completed task
+            if condition.type == WaitType.TASK and completed_task_id in condition.ref:
+                dependent_tasks.append(task)
+                break
 
     return dependent_tasks
 
@@ -101,6 +104,8 @@ def auto_unblock_tasks(
 
             # Clear waiting_for if it was pointing to the completed task
             waiting_for = post.metadata.get("waiting_for", "")
+
+            # Handle legacy string format
             if isinstance(waiting_for, str) and completed_id in waiting_for:
                 # Only clear if this was the only thing being waited on
                 # Check for exact match (with optional whitespace)
@@ -115,6 +120,34 @@ def auto_unblock_tasks(
                     # This could be multiple tasks or descriptive text like "PR #123 review"
                     # Don't clear, but note the dependency was resolved
                     changes_made.append(f"dependency {completed_id} resolved (still waiting)")
+
+            # Handle structured formats (dict or list)
+            elif isinstance(waiting_for, (dict, list)):
+                conditions = parse_waiting_for(post.metadata)
+                # Find TASK conditions that reference the completed task
+                remaining_conditions = []
+                cleared_any = False
+                for condition in conditions:
+                    if condition.type == WaitType.TASK and completed_id in condition.ref:
+                        cleared_any = True
+                    else:
+                        remaining_conditions.append(condition)
+
+                if cleared_any:
+                    if not remaining_conditions:
+                        # All conditions cleared
+                        post.metadata.pop("waiting_for", None)
+                        post.metadata.pop("waiting_since", None)
+                        changes_made.append("cleared waiting_for")
+                    else:
+                        # Some conditions remain - update to remaining only
+                        if len(remaining_conditions) == 1:
+                            post.metadata["waiting_for"] = remaining_conditions[0].to_dict()
+                        else:
+                            post.metadata["waiting_for"] = [
+                                c.to_dict() for c in remaining_conditions
+                            ]
+                        changes_made.append(f"dependency {completed_id} resolved (still waiting)")
 
             # Check if task is now fully unblocked using the existing task object
             # Update requires from the modified metadata
