@@ -1052,6 +1052,146 @@ def check_waiting(fix: bool, verbose: bool):
             console.print(f"  • {task_id}")
 
 
+@cli.command("watch")
+@click.option(
+    "--interval",
+    "-i",
+    default=300,
+    type=int,
+    help="Check interval in seconds (default: 300 = 5 min)",
+)
+@click.option("--fix/--no-fix", default=True, help="Auto-clear resolved conditions")
+@click.option("--once", is_flag=True, help="Run once and exit (for testing)")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed status")
+def watch(interval: int, fix: bool, once: bool, verbose: bool):
+    """Daemon mode: continuously monitor waiting conditions.
+
+    Periodically checks all tasks with structured waiting_for conditions
+    and auto-clears resolved conditions. Designed for continuous operation.
+
+    Examples:
+        # Run with default 5-minute interval
+        gptodo watch
+
+        # Check every 2 minutes
+        gptodo watch --interval 120
+
+        # Single check (useful for cron/testing)
+        gptodo watch --once
+
+        # Report only, don't modify tasks
+        gptodo watch --no-fix
+    """
+    import signal
+    import time
+
+    from gptodo.waiting import parse_waiting_for, check_condition, WaitType
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Track state across iterations for change detection
+    previous_state: dict[str, dict] = {}  # task_id -> {condition_ref: resolved}
+    running = True
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        console.print("\n[yellow]Received signal, stopping...[/]")
+        running = False
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    def run_check():
+        """Run a single check iteration."""
+        all_tasks = load_tasks(tasks_dir)
+        if not all_tasks:
+            return 0, 0, []
+
+        resolved_count = 0
+        pending_count = 0
+        changes = []
+
+        for task in all_tasks:
+            if task.state in ["done", "cancelled"]:
+                continue
+
+            conditions = parse_waiting_for(task.metadata)
+            checkable = [c for c in conditions if c.type != WaitType.TASK]
+            if not checkable:
+                continue
+
+            # Check conditions
+            all_resolved = True
+            task_changes = []
+            for cond in checkable:
+                checked = check_condition(cond)
+                key = f"{cond.type.value}:{cond.ref}"
+
+                # Track state change
+                prev = previous_state.get(task.id, {}).get(key, False)
+                if checked.resolved and not prev:
+                    task_changes.append(f"✓ {cond.type.value}")
+                if not checked.resolved:
+                    all_resolved = False
+
+                # Update state tracking
+                if task.id not in previous_state:
+                    previous_state[task.id] = {}
+                previous_state[task.id][key] = checked.resolved
+
+            if all_resolved:
+                resolved_count += 1
+                if fix:
+                    import frontmatter
+
+                    post = frontmatter.load(task.path)
+                    post.metadata.pop("waiting_for", None)
+                    post.metadata.pop("waiting_since", None)
+                    with open(task.path, "w") as f:
+                        f.write(frontmatter.dumps(post))
+                    changes.append((task.id, task_changes))
+            else:
+                pending_count += 1
+
+        return resolved_count, pending_count, changes
+
+    console.print("[bold]gptodo watch[/] - monitoring waiting conditions")
+    console.print(f"  Interval: {interval}s | Auto-fix: {fix} | Tasks: {tasks_dir}")
+    console.print()
+
+    iteration = 0
+    while running:
+        iteration += 1
+        timestamp = time.strftime("%H:%M:%S")
+
+        resolved, pending, changes = run_check()
+
+        # Report changes
+        if changes:
+            console.print(f"[cyan][{timestamp}][/] Changes detected:")
+            for task_id, task_changes in changes:
+                console.print(f"  [green]✓ {task_id}[/] - {', '.join(task_changes)}")
+        elif verbose:
+            console.print(
+                f"[dim][{timestamp}] Check #{iteration}: "
+                f"{resolved} resolved, {pending} pending[/]"
+            )
+
+        if once:
+            console.print(f"\n[bold]Final:[/] {resolved} resolved, {pending} pending")
+            break
+
+        # Sleep in small increments to handle signals promptly
+        for _ in range(interval):
+            if not running:
+                break
+            time.sleep(1)
+
+    console.print("[dim]Watch stopped[/]")
+
+
 # Add priority ranking to the top of the file, after imports
 @cli.command("edit")
 @click.argument("task_ids", nargs=-1, required=True)

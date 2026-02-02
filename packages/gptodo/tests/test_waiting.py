@@ -329,3 +329,48 @@ class TestCheckComment:
         resolved, error = check_comment("owner/repo#123", "LGTM")
         assert resolved is False
         assert "No comment matching" in error
+
+
+class TestWatchCommand:
+    """Tests for the gptodo watch CLI command."""
+
+    def test_watch_once(self, tmp_path, monkeypatch):
+        """Test watch command with --once flag."""
+        from click.testing import CliRunner
+        from gptodo.cli import cli
+
+        # Create minimal tasks directory
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+
+        # Create a task with no waiting_for
+        task_file = tasks_dir / "test-task.md"
+        task_file.write_text("""---
+state: active
+created: 2026-01-01T10:00:00
+---
+# Test Task
+Test content
+""")
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            # Create tasks dir in isolated filesystem
+            (tmp_path / "tasks").mkdir(exist_ok=True)
+            monkeypatch.chdir(tmp_path)
+
+            result = runner.invoke(cli, ["watch", "--once"])
+            assert result.exit_code == 0
+            assert "Final:" in result.output
+
+    def test_watch_help(self):
+        """Test watch command help text."""
+        from click.testing import CliRunner
+        from gptodo.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["watch", "--help"])
+        assert result.exit_code == 0
+        assert "Daemon mode" in result.output
+        assert "--interval" in result.output
+        assert "--once" in result.output
