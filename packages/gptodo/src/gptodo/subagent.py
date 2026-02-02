@@ -152,7 +152,7 @@ def spawn_agent(
             shell_cmd = f'gptme -n {model_arg} {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
         else:
             # Claude backend doesn't support model selection
-            shell_cmd = f'claude -p --dangerously-skip-permissions --tools default {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
+            shell_cmd = f'claude -p --dangerously-skip-permissions --tools default -- {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -230,7 +230,7 @@ def spawn_agent(
         cmd.append(prompt)
     else:
         # Claude backend doesn't support model selection
-        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--tools", "default", prompt]
+        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--tools", "default", "--", prompt]
 
     # Build environment for subprocess
     # If clear_keys is enabled, create modified environment without API keys
