@@ -951,6 +951,107 @@ def check(fix: bool, task_files: list[str]):
         )
 
 
+@cli.command("check-waiting")
+@click.option("--fix", is_flag=True, help="Clear resolved waiting conditions")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed status")
+def check_waiting(fix: bool, verbose: bool):
+    """Check structured waiting_for conditions and report status.
+
+    Checks external conditions that tasks are waiting on:
+    - pr_ci: PR CI checks passing
+    - pr_merged: PR merged status
+    - comment: Comment matching pattern
+    - time: Specific time passed
+
+    Example waiting_for in task frontmatter:
+
+        waiting_for:
+          type: pr_ci
+          ref: "gptme/gptme#1217"
+    """
+    from gptodo.waiting import parse_waiting_for, check_condition, WaitType
+
+    console = Console()
+
+    # Find repo root and tasks directory
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        console.print("[yellow]No tasks found in tasks directory![/]")
+        return
+
+    # Track results
+    resolved_count = 0
+    pending_count = 0
+    skipped_count = 0
+    changes_made = []
+
+    console.print("[bold]Checking structured waiting_for conditions...[/]\n")
+
+    for task in all_tasks:
+        # Skip completed tasks
+        if task.state in ["done", "cancelled"]:
+            continue
+
+        # Parse waiting_for conditions
+        conditions = parse_waiting_for(task.metadata)
+        if not conditions:
+            continue
+
+        # Skip task-only dependencies (handled by unblock.py)
+        checkable = [c for c in conditions if c.type != WaitType.TASK]
+        if not checkable:
+            skipped_count += 1
+            if verbose:
+                console.print(f"[dim]{task.id}: Only task deps (handled by unblock.py)[/]")
+            continue
+
+        # Check each condition
+        all_resolved = True
+        status_parts = []
+        for cond in checkable:
+            checked = check_condition(cond)
+            if checked.resolved:
+                status_parts.append(f"[green]✓ {checked.type.value}[/]")
+            else:
+                all_resolved = False
+                err = checked.error or "pending"
+                status_parts.append(f"[yellow]⏳ {checked.type.value}: {err}[/]")
+
+        # Report status
+        status_str = ", ".join(status_parts)
+        if all_resolved:
+            resolved_count += 1
+            console.print(f"[green]✓ {task.id}[/]: {status_str}")
+            if fix:
+                # Clear waiting_for from task
+                post = frontmatter.load(task.path)
+                post.metadata.pop("waiting_for", None)
+                post.metadata.pop("waiting_since", None)
+                with open(task.path, "w") as f:
+                    f.write(frontmatter.dumps(post))
+                changes_made.append(task.id)
+                console.print("  [cyan]→ Cleared waiting_for[/]")
+        else:
+            pending_count += 1
+            console.print(f"[yellow]⏳ {task.id}[/]: {status_str}")
+
+    # Summary
+    console.print("\n[bold]Summary:[/]")
+    console.print(f"  Resolved: [green]{resolved_count}[/]")
+    console.print(f"  Pending: [yellow]{pending_count}[/]")
+    if skipped_count and verbose:
+        console.print(f"  Skipped (task deps): [dim]{skipped_count}[/]")
+
+    if changes_made:
+        console.print(f"\n[cyan]Cleared waiting_for on {len(changes_made)} task(s):[/]")
+        for task_id in changes_made:
+            console.print(f"  • {task_id}")
+
+
 # Add priority ranking to the top of the file, after imports
 @cli.command("edit")
 @click.argument("task_ids", nargs=-1, required=True)
