@@ -1,8 +1,28 @@
 """Prompt generation utilities for run loops."""
 
+import tomllib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+def get_agent_name(workspace: Path) -> str:
+    """Read agent name from workspace gptme.toml.
+
+    Args:
+        workspace: Path to workspace directory
+
+    Returns:
+        Agent name from config, or "Agent" as fallback
+    """
+    config_file = workspace / "gptme.toml"
+    if config_file.exists():
+        try:
+            config = tomllib.loads(config_file.read_text())
+            return config.get("agent", {}).get("name", "Agent")
+        except (tomllib.TOMLDecodeError, OSError):
+            pass
+    return "Agent"
 
 
 def generate_base_prompt(

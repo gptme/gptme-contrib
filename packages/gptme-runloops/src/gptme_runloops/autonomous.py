@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
-from gptme_runloops.utils.prompt import generate_base_prompt
+from gptme_runloops.utils.prompt import generate_base_prompt, get_agent_name
 
 
 class AutonomousRun(BaseRunLoop):
@@ -42,9 +42,13 @@ class AutonomousRun(BaseRunLoop):
             # Use existing template
             return template_file.read_text()
 
+        # Get agent name from workspace config
+        agent_name = get_agent_name(self.workspace)
+
         # Fallback: generate basic prompt
         return generate_base_prompt(
             run_type="autonomous",
+            agent_name=agent_name,
             additional_sections="""
 ## Required Workflow
 

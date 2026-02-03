@@ -5,7 +5,7 @@ from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult
-from gptme_runloops.utils.prompt import generate_base_prompt
+from gptme_runloops.utils.prompt import generate_base_prompt, get_agent_name
 
 
 class EmailRun(BaseRunLoop):
@@ -141,8 +141,12 @@ class EmailRun(BaseRunLoop):
         Returns:
             Email processing prompt
         """
+        # Get agent name from workspace config
+        agent_name = get_agent_name(self.workspace)
+
         return generate_base_prompt(
             run_type="email",
+            agent_name=agent_name,
             additional_sections=f"""
 ## Email Processing Task
 
