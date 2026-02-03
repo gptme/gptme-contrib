@@ -1,9 +1,18 @@
 """Prompt generation utilities for run loops."""
 
-import tomllib
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Python 3.10 compatibility: tomllib added in 3.11
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None  # type: ignore
 
 
 def get_agent_name(workspace: Path) -> str:
@@ -15,6 +24,9 @@ def get_agent_name(workspace: Path) -> str:
     Returns:
         Agent name from config, or "Agent" as fallback
     """
+    if tomllib is None:
+        return "Agent"
+
     config_file = workspace / "gptme.toml"
     if config_file.exists():
         try:
