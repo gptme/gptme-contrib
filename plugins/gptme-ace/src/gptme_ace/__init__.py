@@ -12,6 +12,7 @@ Key Features:
 - Hybrid lesson matching (keyword + semantic + effectiveness + recency)
 - Semantic deduplication via embeddings
 - Retrieval analytics and tracking
+- Generator-Reflector-Curator pipeline for insight extraction and lesson evolution
 """
 
 from gptme.tools import ToolSpec
@@ -29,6 +30,13 @@ from .metrics import (
     MetricsCalculator,
     get_default_metrics_db,
 )
+from .generator import (
+    GeneratorAgent,
+    TrajectoryParser,
+    Insight,
+    ThoughtActionObservation,
+)
+from .reflector import ReflectorAgent, Pattern, RefinedInsight
 
 __all__ = [
     "GptmeHybridMatcher",
@@ -41,6 +49,15 @@ __all__ = [
     "CuratorAgent",
     "Delta",
     "DeltaOperation",
+    # Phase 3: Generator module
+    "GeneratorAgent",
+    "TrajectoryParser",
+    "Insight",
+    "ThoughtActionObservation",
+    # Phase 4: Reflector module
+    "ReflectorAgent",
+    "Pattern",
+    "RefinedInsight",
     # Phase 5: Metrics module
     "CurationRun",
     "InsightQuality",
@@ -59,7 +76,7 @@ ACE (Agentic Context Engineering) provides enhanced lesson matching using:
 - **Hybrid Retrieval**: Combines keyword, semantic, effectiveness, and recency scoring
 - **Semantic Matching**: Uses embeddings for similarity-based lesson discovery
 - **Analytics**: Tracks retrieval patterns for continuous improvement
-- **Curator**: Synthesizes insights into delta operations for lesson lifecycle management
+- **Generator-Reflector-Curator Pipeline**: Extracts insights from trajectories, identifies patterns, and synthesizes into lesson updates
 
 ### Configuration
 
@@ -78,6 +95,72 @@ considers:
 - Historical effectiveness (25% weight)
 - Recency (10% weight)
 - Tool context bonus (20% boost)
+
+### Generator Module
+
+The Generator agent analyzes session trajectories to extract thought-action-observation
+chains and generate candidate insights for the lesson system:
+
+```python
+from gptme_ace import GeneratorAgent, TrajectoryParser
+from pathlib import Path
+
+# Parse session log
+parser = TrajectoryParser(Path("logs/session.log"))
+chains = parser.extract_tao_chains()
+
+# Generate insights
+generator = GeneratorAgent()
+insights = generator.analyze_trajectory(chains, parser.session_id)
+
+for insight in insights:
+    print(f"[{insight.category}] {insight.title} ({insight.confidence:.2f})")
+```
+
+CLI usage:
+```bash
+# Analyze single session log
+python -m gptme_ace.generator analyze path/to/session.log
+
+# Dry run (parse only, no LLM)
+python -m gptme_ace.generator analyze path/to/log --dry-run
+
+# With duplicate detection
+python -m gptme_ace.generator analyze path/to/log --workspace ~/bob
+```
+
+### Reflector Module
+
+The Reflector agent critiques Generator output to identify meta-patterns across insights
+and refine them for clarity and actionability:
+
+```python
+from gptme_ace import ReflectorAgent
+import json
+
+# Load insights from Generator
+with open("insights.json") as f:
+    insights = json.load(f)
+
+# Analyze patterns
+reflector = ReflectorAgent()
+patterns = reflector.analyze_patterns(insights)
+
+for pattern in patterns:
+    print(f"[{pattern.pattern_type}] {pattern.theme} ({pattern.confidence:.2f})")
+
+# Refine insights based on patterns
+refined = reflector.refine_insights(insights, patterns)
+```
+
+CLI usage:
+```bash
+# Extract patterns from insights
+python -m gptme_ace.reflector analyze insights.json -o patterns.json
+
+# Refine insights with pattern context
+python -m gptme_ace.reflector refine insights.json --patterns-file patterns.json -o refined.json
+```
 
 ### Curator Module
 
