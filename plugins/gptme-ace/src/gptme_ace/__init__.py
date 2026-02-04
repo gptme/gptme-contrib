@@ -21,6 +21,12 @@ from .hybrid_retriever import HybridConfig, HybridLessonMatcher
 from .embedder import LessonEmbedder
 from .storage import InsightStorage, StoredInsight
 from .curator import CuratorAgent, Delta, DeltaOperation
+from .generator import (
+    GeneratorAgent,
+    TrajectoryParser,
+    Insight,
+    ThoughtActionObservation,
+)
 
 __all__ = [
     "GptmeHybridMatcher",
@@ -33,6 +39,11 @@ __all__ = [
     "CuratorAgent",
     "Delta",
     "DeltaOperation",
+    # Phase 3: Generator module
+    "GeneratorAgent",
+    "TrajectoryParser",
+    "Insight",
+    "ThoughtActionObservation",
     "plugin",
 ]
 
@@ -94,6 +105,39 @@ python -m gptme_ace.curator batch --status approved
 
 # List pending deltas
 python -m gptme_ace.curator list --status pending
+```
+
+### Generator Module
+
+The Generator agent analyzes session trajectories to extract thought-action-observation
+chains and generate candidate insights for the lesson system:
+
+```python
+from gptme_ace import GeneratorAgent, TrajectoryParser
+from pathlib import Path
+
+# Parse session log
+parser = TrajectoryParser(Path("logs/session.log"))
+chains = parser.extract_tao_chains()
+
+# Generate insights
+generator = GeneratorAgent()
+insights = generator.analyze_trajectory(chains, parser.session_id)
+
+for insight in insights:
+    print(f"[{insight.category}] {insight.title} ({insight.confidence:.2f})")
+```
+
+CLI usage:
+```bash
+# Analyze single session log
+python -m gptme_ace.generator analyze path/to/session.log
+
+# Dry run (parse only, no LLM)
+python -m gptme_ace.generator analyze path/to/log --dry-run
+
+# With duplicate detection
+python -m gptme_ace.generator analyze path/to/log --workspace ~/bob
 ```
 
 For embeddings support, install with:
