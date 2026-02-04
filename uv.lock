@@ -1052,6 +1052,7 @@ source = { editable = "packages/gptme-runloops" }
 dependencies = [
     { name = "click" },
     { name = "pyyaml" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -1068,6 +1069,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
 ]
 provides-extras = ["dev"]
 
