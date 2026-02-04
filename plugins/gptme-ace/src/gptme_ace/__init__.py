@@ -21,6 +21,14 @@ from .hybrid_retriever import HybridConfig, HybridLessonMatcher
 from .embedder import LessonEmbedder
 from .storage import InsightStorage, StoredInsight
 from .curator import CuratorAgent, Delta, DeltaOperation
+from .metrics import (
+    CurationRun,
+    InsightQuality,
+    LessonImpact,
+    MetricsDB,
+    MetricsCalculator,
+    get_default_metrics_db,
+)
 
 __all__ = [
     "GptmeHybridMatcher",
@@ -33,6 +41,13 @@ __all__ = [
     "CuratorAgent",
     "Delta",
     "DeltaOperation",
+    # Phase 5: Metrics module
+    "CurationRun",
+    "InsightQuality",
+    "LessonImpact",
+    "MetricsDB",
+    "MetricsCalculator",
+    "get_default_metrics_db",
     "plugin",
 ]
 
@@ -94,6 +109,34 @@ python -m gptme_ace.curator batch --status approved
 
 # List pending deltas
 python -m gptme_ace.curator list --status pending
+```
+
+### Metrics Module
+
+The Metrics module tracks ACE curation quality and system health:
+
+```python
+from gptme_ace import MetricsDB, MetricsCalculator, get_default_metrics_db
+
+# Get metrics database
+db = get_default_metrics_db()  # Uses cwd/logs/ace_curation_metrics.db
+calc = MetricsCalculator(db)
+
+# Get system health summary
+health = calc.get_system_health()
+print(f"Status: {health['status']}")  # 'healthy' or 'warning'
+print(f"Alerts: {health['alerts']}")
+
+# Get curation effectiveness
+from datetime import timedelta
+summary = calc.get_curation_summary(timedelta(days=7))
+print(f"Conversion rate: {summary['conversion_rate']:.1%}")
+```
+
+CLI usage:
+```bash
+# Quick health check
+python -m gptme_ace.metrics /path/to/workspace
 ```
 
 For embeddings support, install with:
