@@ -24,16 +24,25 @@ The Reflector agent performs two key functions:
 """
 
 import json
+import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional
 
+import logging
+
 import click
+
+_logger = logging.getLogger(__name__)
 
 try:
     import anthropic
 except ImportError:
     anthropic = None  # type: ignore
+    _logger.warning(
+        "anthropic package not installed. Reflector features will be unavailable. "
+        "Install with: pip install anthropic"
+    )
 
 
 @dataclass
@@ -74,7 +83,9 @@ class ReflectorAgent:
     3. Curator then synthesizes refined insights into delta operations
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-sonnet-4-5"):
+    def __init__(
+        self, api_key: Optional[str] = None, model: str = "claude-sonnet-4-20250514"
+    ):
         """
         Initialize with Anthropic API.
 
@@ -171,15 +182,23 @@ Return JSON array:
             )
 
             content = response.content[0].text
-            # Extract JSON from response
-            start_idx = content.find("[")
-            end_idx = content.rfind("]") + 1
-            if start_idx == -1 or end_idx == 0:
-                click.echo("Warning: No JSON array found in response", err=True)
-                return []
 
-            json_match = content[start_idx:end_idx]
-            patterns_data = json.loads(json_match)
+            # Try to extract JSON from markdown code fence first
+            json_fence_match = re.search(
+                r"```(?:json)?\s*(\[.*?\])\s*```", content, re.DOTALL
+            )
+            if json_fence_match:
+                json_str = json_fence_match.group(1)
+            else:
+                # Fall back to finding raw JSON array
+                start_idx = content.find("[")
+                end_idx = content.rfind("]") + 1
+                if start_idx == -1 or end_idx <= start_idx:
+                    click.echo("Warning: No JSON array found in response", err=True)
+                    return []
+                json_str = content[start_idx:end_idx]
+
+            patterns_data = json.loads(json_str)
 
             return [Pattern(**p) for p in patterns_data]
 
@@ -258,14 +277,23 @@ Return refined insights as JSON array:
             )
 
             content = response.content[0].text
-            start_idx = content.find("[")
-            end_idx = content.rfind("]") + 1
-            if start_idx == -1 or end_idx == 0:
-                click.echo("Warning: No JSON array found in response", err=True)
-                return []
 
-            json_match = content[start_idx:end_idx]
-            refined_data = json.loads(json_match)
+            # Try to extract JSON from markdown code fence first
+            json_fence_match = re.search(
+                r"```(?:json)?\s*(\[.*?\])\s*```", content, re.DOTALL
+            )
+            if json_fence_match:
+                json_str = json_fence_match.group(1)
+            else:
+                # Fall back to finding raw JSON array
+                start_idx = content.find("[")
+                end_idx = content.rfind("]") + 1
+                if start_idx == -1 or end_idx <= start_idx:
+                    click.echo("Warning: No JSON array found in response", err=True)
+                    return []
+                json_str = content[start_idx:end_idx]
+
+            refined_data = json.loads(json_str)
 
             return [RefinedInsight(**r) for r in refined_data]
 

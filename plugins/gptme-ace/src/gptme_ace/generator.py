@@ -33,10 +33,18 @@ from typing import List, Optional
 
 import click
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 try:
     import anthropic
 except ImportError:
     anthropic = None  # noqa: F811
+    _logger.warning(
+        "anthropic package not installed. Generator features will be unavailable. "
+        "Install with: pip install anthropic"
+    )
 
 
 # Optimization 3: Domain Context
@@ -260,10 +268,22 @@ class TrajectoryParser:
 class GeneratorAgent:
     """ACE Generator Agent: analyzes trajectories and generates insights."""
 
-    def __init__(self, api_key: Optional[str] = None):
-        """Initialize with Anthropic API."""
+    def __init__(
+        self, api_key: Optional[str] = None, model: str = "claude-sonnet-4-20250514"
+    ):
+        """
+        Initialize with Anthropic API.
+
+        Args:
+            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            model: Model to use for analysis (default: claude-sonnet-4-20250514)
+        """
+        if anthropic is None:
+            raise ImportError(
+                "anthropic package required. Install: pip install anthropic"
+            )
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-5"
+        self.model = model
 
     def analyze_trajectory(
         self,
@@ -339,8 +359,21 @@ Return JSON array of insights following the good example format:
             )
 
             content = response.content[0].text
-            json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
-            json_str = json_match.group(1) if json_match else content
+
+            # Try to extract JSON from markdown code fence first
+            json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Fall back to finding raw JSON array
+                start_idx = content.find("[")
+                end_idx = content.rfind("]") + 1
+                if start_idx != -1 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx]
+                else:
+                    click.echo("Warning: No JSON array found in response", err=True)
+                    return []
+
             insights_data = json.loads(json_str)
 
             insights = []
@@ -412,8 +445,8 @@ def cli():
 @click.option(
     "--workspace",
     type=click.Path(exists=True),
-    default="/home/bob/bob",
-    help="Workspace path for lesson loading",
+    default=None,
+    help="Workspace path for lesson loading (auto-detected if not specified)",
 )
 @click.option(
     "--no-lessons",
@@ -432,7 +465,20 @@ def analyze(
 
     log_file = Path(log_path)
     output_file = Path(output) if output else None
-    workspace_path = Path(workspace)
+
+    # Auto-detect workspace path if not specified
+    if workspace:
+        workspace_path = Path(workspace)
+    else:
+        # Try to find workspace from log file location or cwd
+        workspace_path = Path.cwd()
+        # Check if we're in a workspace with lessons directory
+        if not (workspace_path / "lessons").exists():
+            # Try parent directories
+            for parent in workspace_path.parents:
+                if (parent / "lessons").exists():
+                    workspace_path = parent
+                    break
 
     click.echo(f"Analyzing session: {log_file.name}")
 
