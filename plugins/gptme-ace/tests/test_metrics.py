@@ -207,9 +207,9 @@ class TestMetricsCalculator:
         summary = calc.get_insight_quality_summary(timedelta(days=7))
 
         assert summary["total"] == 4
-        assert summary["avg_quality"] == 0.75  # (0.6+0.7+0.8+0.9)/4
-        assert summary["actionable_rate"] == 0.75  # 3/4
-        assert summary["novel_rate"] == 0.5  # 2/4
+        assert summary["avg_quality"] == pytest.approx(0.75)  # (0.6+0.7+0.8+0.9)/4
+        assert summary["actionable_rate"] == pytest.approx(0.75)  # 3/4
+        assert summary["novel_rate"] == pytest.approx(0.5)  # 2/4
         assert summary["by_category"]["workflow"] == 2
 
     def test_lesson_impact_summary(self, temp_db):
