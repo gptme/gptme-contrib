@@ -46,6 +46,37 @@ except ImportError:
 
 
 @dataclass
+def _get_default_anthropic_model() -> str:
+    """Get the default Anthropic model from gptme config or environment.
+
+    Checks in order:
+    1. GPTME_ACE_MODEL environment variable
+    2. gptme's configured default model (if Anthropic)
+    3. Falls back to claude-sonnet-4-5
+    """
+    import os
+
+    env_model = os.environ.get("GPTME_ACE_MODEL")
+    if env_model:
+        return env_model
+
+    try:
+        from gptme.llm.models import get_default_model
+
+        default_model = get_default_model()
+        if default_model:
+            model_full = default_model.full
+            if "claude" in model_full.lower():
+                parts = model_full.split("/")
+                for part in reversed(parts):
+                    if "claude" in part.lower():
+                        return part
+    except ImportError:
+        pass
+
+    return "claude-sonnet-4-5"
+
+
 class Pattern:
     """Meta-pattern identified across insights."""
 
@@ -83,22 +114,20 @@ class ReflectorAgent:
     3. Curator then synthesizes refined insights into delta operations
     """
 
-    def __init__(
-        self, api_key: Optional[str] = None, model: str = "claude-sonnet-4-20250514"
-    ):
+    def __init__(self, api_key: Optional[str] = None, model: str | None = None):
         """
         Initialize with Anthropic API.
 
         Args:
             api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-            model: Model to use for analysis (default: claude-sonnet-4-5)
+            model: Anthropic model name (uses gptme config/GPTME_ACE_MODEL if not set)
         """
         if anthropic is None:
             raise ImportError(
                 "anthropic package required. Install: pip install anthropic"
             )
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = model
+        self.model = model if model else _get_default_anthropic_model()
 
     def analyze_patterns(
         self, insights: List[dict], existing_patterns: Optional[List[dict]] = None

@@ -188,6 +188,48 @@ AVOID:
 
 
 @dataclass
+def _get_default_anthropic_model() -> str:
+    """Get the default Anthropic model from gptme config or environment.
+
+    Checks in order:
+    1. GPTME_ACE_MODEL environment variable
+    2. gptme's configured default model (if Anthropic)
+    3. Falls back to claude-sonnet-4-5
+
+    This allows the model to follow gptme's config instead of drifting
+    as new models are released.
+    """
+    import os
+
+    # Check environment override first
+    env_model = os.environ.get("GPTME_ACE_MODEL")
+    if env_model:
+        return env_model
+
+    # Try to get from gptme config
+    try:
+        from gptme.llm.models import get_default_model
+
+        default_model = get_default_model()
+        if default_model:
+            model_full = default_model.full
+            # Extract anthropic model name from various formats:
+            # - "anthropic/claude-sonnet-4-5" -> "claude-sonnet-4-5"
+            # - "openrouter/anthropic/claude-sonnet-4-5" -> "claude-sonnet-4-5"
+            # - "claude-sonnet-4-5" -> "claude-sonnet-4-5"
+            if "claude" in model_full.lower():
+                # Extract just the model name (after last slash with claude)
+                parts = model_full.split("/")
+                for part in reversed(parts):
+                    if "claude" in part.lower():
+                        return part
+    except ImportError:
+        pass
+
+    # Default fallback
+    return "claude-sonnet-4-5"
+
+
 class ThoughtActionObservation:
     """Represents a thought-action-observation chain from a session."""
 
@@ -268,22 +310,20 @@ class TrajectoryParser:
 class GeneratorAgent:
     """ACE Generator Agent: analyzes trajectories and generates insights."""
 
-    def __init__(
-        self, api_key: Optional[str] = None, model: str = "claude-sonnet-4-20250514"
-    ):
+    def __init__(self, api_key: Optional[str] = None, model: str | None = None):
         """
         Initialize with Anthropic API.
 
         Args:
             api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-            model: Model to use for analysis (default: claude-sonnet-4-20250514)
+            model: Anthropic model name (uses gptme config/GPTME_ACE_MODEL if not set)
         """
         if anthropic is None:
             raise ImportError(
                 "anthropic package required. Install: pip install anthropic"
             )
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = model
+        self.model = model if model else _get_default_anthropic_model()
 
     def analyze_trajectory(
         self,
