@@ -264,6 +264,7 @@ async def async_step(
                     step(
                         current_log,
                         stream=True,
+                        confirm=lambda _: True,  # Auto-confirm for Discord bot
                         tool_format="markdown",
                         workspace=workspace_root,
                         model=settings.model,
@@ -572,31 +573,14 @@ async def process_message(
         return current_response, had_error, log, accumulated_content
 
     elif msg.role == "system":
-        # Filter out internal system messages that shouldn't be shown to users
-        content_lower = msg.content.lower()
+        # Skip all system messages - they're internal gptme details
+        # If there's an actual error, the assistant will communicate it in its response
+        # Still track errors for metrics/logging purposes
         firstline = msg.content.split("\n", 1)[0].lower()
-
-        # Skip internal messages that users shouldn't see
-        skip_patterns = [
-            "<system_warning>",  # Token usage warnings
-            "<system_info>",  # Internal system info
-            "ran command:",  # Command execution logs
-        ]
-        is_internal = any(pattern in content_lower for pattern in skip_patterns)
-
-        # Only show actual error messages (not internal warnings)
-        is_error = (
-            "pre-commit" not in firstline
-            and any(word in firstline for word in ["error", "failed"])
-            and not is_internal
+        had_error = (
+            any(word in firstline for word in ["error", "failed"])
+            and "pre-commit" not in firstline
         )
-
-        if is_error:
-            display_content = f"System: {msg.content[:1000]}..."
-            await channel.send(display_content)
-            had_error = True
-        else:
-            had_error = False
         log = log.append(msg)
 
         # Complete metrics tracking
