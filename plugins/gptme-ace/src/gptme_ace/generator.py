@@ -187,7 +187,6 @@ AVOID:
 """
 
 
-@dataclass
 def _get_default_anthropic_model() -> str:
     """Get the default Anthropic model from gptme config or environment.
 
@@ -230,6 +229,7 @@ def _get_default_anthropic_model() -> str:
     return "claude-sonnet-4-5"
 
 
+@dataclass
 class ThoughtActionObservation:
     """Represents a thought-action-observation chain from a session."""
 
