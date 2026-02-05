@@ -572,21 +572,12 @@ async def process_message(
         return current_response, had_error, log, accumulated_content
 
     elif msg.role == "system":
-        # Only show important system messages
-        firstline = msg.content.split("\n", 1)[0].lower()
-        if "pre-commit" not in firstline and any(
-            word in firstline for word in ["error", "warning", "failed"]
-        ):
-            content = f"System: {msg.content[:1000]}..."
-            await channel.send(content)
-            had_error = True
-        else:
-            had_error = False
+        # Skip all system messages entirely - they're internal gptme details
+        # Don't check for "error" in content - tool errors are normal/recoverable
+        # had_error should only indicate real request execution failures
         log = log.append(msg)
-
-        # Complete metrics tracking
-        op.complete(success=not had_error)
-        return current_response, had_error, log, accumulated_content
+        op.complete(success=True)
+        return current_response, False, log, accumulated_content
 
     # Complete metrics tracking (default path)
     op.complete(success=True)
