@@ -144,7 +144,12 @@ def list_tasks(state: str = "active") -> str:
         >>> list_tasks()
         'Active tasks:\\n  fix-auth-bug (high) - Fix authentication...'
     """
-    return _run_gptodo("list", "--state", state)
+    args = ["list"]
+    if state == "active":
+        args.append("--active-only")
+    # For other states, just list all and let user filter
+    # The CLI doesn't support --state directly
+    return _run_gptodo(*args)
 
 
 def task_status(compact: bool = True) -> str:
