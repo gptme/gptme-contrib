@@ -264,7 +264,6 @@ async def async_step(
                     step(
                         current_log,
                         stream=True,
-                        confirm=lambda _: True,  # Auto-confirm for Discord bot
                         tool_format="markdown",
                         workspace=workspace_root,
                         model=settings.model,
