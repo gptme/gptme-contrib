@@ -57,5 +57,4 @@ Truncation causes responding to OLD comments while missing NEWER replies that ch
 - **No re-asks**: Maintainers don't need to repeat themselves
 
 ## Related
-- Companion doc: [knowledge/lessons/workflow/read-full-github-context.md](../../../knowledge/lessons/workflow/read-full-github-context.md)
 - [Read PR Reviews Comprehensively](./read-pr-reviews-comprehensively.md) - PR-specific patterns
