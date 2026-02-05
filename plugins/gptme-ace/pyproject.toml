@@ -35,6 +35,9 @@ dev = [
     "mypy>=1.0",
 ]
 
+[project.scripts]
+ace-viz = "gptme_ace.visualization:main"
+
 [project.entry-points."gptme.plugins"]
 gptme_ace = "gptme_ace:plugin"
 
