@@ -572,13 +572,28 @@ async def process_message(
         return current_response, had_error, log, accumulated_content
 
     elif msg.role == "system":
-        # Only show important system messages
+        # Filter out internal system messages that shouldn't be shown to users
+        content_lower = msg.content.lower()
         firstline = msg.content.split("\n", 1)[0].lower()
-        if "pre-commit" not in firstline and any(
-            word in firstline for word in ["error", "warning", "failed"]
-        ):
-            content = f"System: {msg.content[:1000]}..."
-            await channel.send(content)
+
+        # Skip internal messages that users shouldn't see
+        skip_patterns = [
+            "<system_warning>",  # Token usage warnings
+            "<system_info>",  # Internal system info
+            "ran command:",  # Command execution logs
+        ]
+        is_internal = any(pattern in content_lower for pattern in skip_patterns)
+
+        # Only show actual error messages (not internal warnings)
+        is_error = (
+            "pre-commit" not in firstline
+            and any(word in firstline for word in ["error", "failed"])
+            and not is_internal
+        )
+
+        if is_error:
+            display_content = f"System: {msg.content[:1000]}..."
+            await channel.send(display_content)
             had_error = True
         else:
             had_error = False
