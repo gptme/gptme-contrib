@@ -37,6 +37,7 @@ from .generator import (
     ThoughtActionObservation,
 )
 from .reflector import ReflectorAgent, Pattern, RefinedInsight
+from .visualization import cli as visualization_cli
 
 __all__ = [
     "GptmeHybridMatcher",
@@ -65,6 +66,8 @@ __all__ = [
     "MetricsDB",
     "MetricsCalculator",
     "get_default_metrics_db",
+    # Phase 5: Visualization CLI
+    "visualization_cli",
     "plugin",
 ]
 

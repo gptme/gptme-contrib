@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=1.24.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0",
+    "click>=8.0.0",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +27,6 @@ embeddings = [
 full = [
     "anthropic>=0.40.0",
     "plotext>=5.0.0",
-    "click>=8.0.0",
     "python-dotenv>=1.0.0",
 ]
 dev = [
@@ -34,6 +34,9 @@ dev = [
     "pytest-cov>=4.0",
     "mypy>=1.0",
 ]
+
+[project.scripts]
+ace-viz = "gptme_ace.visualization:main"
 
 [project.entry-points."gptme.plugins"]
 gptme_ace = "gptme_ace:plugin"
