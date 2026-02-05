@@ -1,12 +1,12 @@
 ---
 match:
   keywords:
-  - gh issue view
-  - gh pr view
-  - --comments | head
-  - --comments | tail
-  - truncating comments output
-  - not reading the whole issue
+    - "gh issue view"
+    - "gh pr view"
+    - "--comments"
+    - "| head"
+    - "| tail"
+    - "issue thread"
 ---
 
 # Read Full GitHub Context
