@@ -3686,6 +3686,148 @@ def spawn_cmd(
     )
 
 
+@cli.command("loop")
+@click.option(
+    "--max-tasks",
+    "-n",
+    type=int,
+    default=5,
+    help="Maximum number of tasks to process (default: 5)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="execute",
+    help="Type of agent to spawn for each task",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout per task in seconds",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be executed without running",
+)
+@click.option(
+    "--parallel",
+    "-p",
+    type=int,
+    default=1,
+    help="Number of parallel agents (1 = sequential)",
+)
+def loop_cmd(
+    max_tasks: int,
+    agent_type: str,
+    backend: str,
+    model: Optional[str],
+    timeout: int,
+    dry_run: bool,
+    parallel: int,
+):
+    """Process ready tasks in a loop.
+
+    Finds tasks that are ready (no unmet dependencies) and executes them
+    one by one until max-tasks is reached or no ready tasks remain.
+
+    This command is designed to be called by autonomous runs to churn
+    through ready work without manual intervention.
+
+    Examples:
+        gptodo loop                    # Process up to 5 ready tasks
+        gptodo loop -n 10              # Process up to 10 tasks
+        gptodo loop --dry-run          # Show what would run
+        gptodo loop -p 3               # Run 3 tasks in parallel
+        gptodo loop --backend claude   # Use Claude backend
+    """
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Find ready tasks
+    all_tasks_list = load_tasks(tasks_dir)
+    # Convert to dict for is_task_ready
+    all_tasks_dict: Dict[str, TaskInfo] = {t.name: t for t in all_tasks_list if t.name}
+    ready_tasks = [t for t in all_tasks_list if t.name and is_task_ready(t, all_tasks_dict)]
+
+    if not ready_tasks:
+        console.print("[yellow]No ready tasks found[/]")
+        return
+
+    # Sort by priority (high first)
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    ready_tasks.sort(key=lambda t: priority_order.get(t.priority or "medium", 1))
+
+    # Limit to max_tasks
+    tasks_to_run = ready_tasks[:max_tasks]
+
+    console.print(
+        f"[cyan]Found {len(ready_tasks)} ready tasks, will process {len(tasks_to_run)}[/]"
+    )
+
+    if dry_run:
+        console.print("\n[yellow]DRY RUN - would execute:[/]")
+        for i, task in enumerate(tasks_to_run, 1):
+            console.print(f"  {i}. {task.name} (priority: {task.priority})")
+        return
+
+    # Execute tasks
+    if parallel > 1:
+        # Parallel execution using spawn (background)
+        # All tasks run as background agents - use --max-tasks to limit total
+        console.print(f"\n[cyan]Spawning {len(tasks_to_run)} parallel agents...[/]")
+        for task in tasks_to_run:
+            console.print(f"\n[bold]Spawning: {task.name}[/]")
+            _execute_task_agent(
+                task_id=task.name,
+                prompt=None,
+                agent_type=agent_type,
+                backend=backend,
+                background=True,
+                model=model,
+                timeout=timeout,
+            )
+        console.print(f"\n[green]✓ Spawned {len(tasks_to_run)} agents[/]")
+        console.print("Monitor with: [cyan]gptodo sessions[/]")
+    else:
+        # Sequential execution
+        completed = 0
+        failed = 0
+        for i, task in enumerate(tasks_to_run, 1):
+            console.print(f"\n[bold]Task {i}/{len(tasks_to_run)}: {task.name}[/]")
+            try:
+                _execute_task_agent(
+                    task_id=task.name,
+                    prompt=None,
+                    agent_type=agent_type,
+                    backend=backend,
+                    background=False,
+                    model=model,
+                    timeout=timeout,
+                )
+                completed += 1
+            except Exception as e:
+                console.print(f"[red]Error: {e}[/]")
+                failed += 1
+
+        console.print(f"\n[green]✓ Loop complete: {completed} succeeded, {failed} failed[/]")
+
+
 @cli.command("sessions")
 @click.option(
     "--status",
