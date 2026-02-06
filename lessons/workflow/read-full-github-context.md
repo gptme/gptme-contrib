@@ -33,14 +33,18 @@ Read BOTH views every time - basic and comments:
 gh issue view <number>           # Basic view
 gh issue view <number> --comments # Full discussion
 
-# For PRs: ALWAYS run complete sequence
+# For PRs: Read ALL sources (basic + comments + reviews + inline)
 gh pr view <pr-url>              # Basic PR info
 gh pr view <pr-url> --comments   # Discussion comments
+
+# CRITICAL: Also read review comments (often missed!)
 gh api repos/<owner>/<repo>/pulls/<pr-number>/reviews \
-  | jq '.[] | {user: .user.login, state: .state}'
+  --jq '.[] | {user: .user.login, state: .state, body: .body}'
 gh api repos/<owner>/<repo>/pulls/<pr-number>/comments \
-  | jq '.[] | {path: .path, line: .line}'
+  --jq '.[] | {id: .id, path: .path, body: (.body | split("\n")[0])}'
 ```
+
+**Note**: For comprehensive PR review handling including thread replies, see [Read PR Reviews Comprehensively](./read-pr-reviews-comprehensively.md).
 
 ## Outcome
 Following this pattern leads to:
