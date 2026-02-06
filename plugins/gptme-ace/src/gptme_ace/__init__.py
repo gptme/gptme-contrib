@@ -22,6 +22,7 @@ from .hybrid_retriever import HybridConfig, HybridLessonMatcher
 from .embedder import LessonEmbedder
 from .storage import InsightStorage, StoredInsight
 from .curator import CuratorAgent, Delta, DeltaOperation
+from .applier import DeltaApplier, ApplierError
 from .metrics import (
     CurationRun,
     InsightQuality,
@@ -50,6 +51,9 @@ __all__ = [
     "CuratorAgent",
     "Delta",
     "DeltaOperation",
+    # Phase 5: Applier module
+    "DeltaApplier",
+    "ApplierError",
     # Phase 3: Generator module
     "GeneratorAgent",
     "TrajectoryParser",
