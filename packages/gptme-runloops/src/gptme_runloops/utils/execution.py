@@ -1,6 +1,7 @@
 """Execution utilities for running gptme."""
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -85,7 +86,8 @@ def execute_gptme(
 
         # Use tee to stream output to both terminal and log file
         # This gives us real-time journald logging AND complete log file
-        cmd_with_tee = f"{' '.join(cmd)} 2>&1 | tee '{log_file}'"
+        # Use shlex.join for proper escaping to prevent command injection
+        cmd_with_tee = f"{shlex.join(cmd)} 2>&1 | tee {shlex.quote(str(log_file))}"
 
         # Write header to log file first
         with log_file.open("w") as f:
