@@ -3789,11 +3789,9 @@ def loop_cmd(
     # Execute tasks
     if parallel > 1:
         # Parallel execution using spawn (background)
-        console.print(f"\n[cyan]Spawning {min(parallel, len(tasks_to_run))} parallel agents...[/]")
-        spawned = 0
+        # All tasks run as background agents - use --max-tasks to limit total
+        console.print(f"\n[cyan]Spawning {len(tasks_to_run)} parallel agents...[/]")
         for task in tasks_to_run:
-            if spawned >= parallel:
-                break
             console.print(f"\n[bold]Spawning: {task.name}[/]")
             _execute_task_agent(
                 task_id=task.name,
@@ -3804,8 +3802,7 @@ def loop_cmd(
                 model=model,
                 timeout=timeout,
             )
-            spawned += 1
-        console.print(f"\n[green]✓ Spawned {spawned} agents[/]")
+        console.print(f"\n[green]✓ Spawned {len(tasks_to_run)} agents[/]")
         console.print("Monitor with: [cyan]gptodo sessions[/]")
     else:
         # Sequential execution
