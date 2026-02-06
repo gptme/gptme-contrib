@@ -18,6 +18,7 @@ Usage:
 
 import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -470,7 +471,7 @@ class DeltaReviewer:
     def review_and_process(
         self,
         delta_id: str,
-        reviewer: str = "ace_reviewer",
+        reviewer_name: str = "ace_reviewer",
     ) -> ReviewResult:
         """
         Review a delta and optionally move it based on decision.
@@ -480,20 +481,24 @@ class DeltaReviewer:
 
         Args:
             delta_id: ID of the delta to review
-            reviewer: Name of the reviewer
+            reviewer_name: Name of the reviewer
 
         Returns:
             ReviewResult with decision
         """
-        result = self.review_delta(delta_id, reviewer)
+        result = self.review_delta(delta_id, reviewer_name)
         self.save_review(result)
 
         if self.auto_approve:
             if result.decision == ReviewDecision.APPROVE:
                 self.move_to_approved(delta_id)
+                # Mark that automatic action was taken
+                result.auto_approved = True
                 logger.info(f"Auto-approved delta {delta_id}")
             elif result.decision == ReviewDecision.REJECT:
                 self.move_to_rejected(delta_id, result.summary)
+                # Mark that automatic action was taken (rejection is also an auto action)
+                result.auto_approved = True
                 logger.info(f"Auto-rejected delta {delta_id}")
 
         return result
@@ -501,14 +506,14 @@ class DeltaReviewer:
     def batch_review(
         self,
         delta_ids: Optional[list[str]] = None,
-        reviewer: str = "ace_reviewer",
+        reviewer_name: str = "ace_reviewer",
     ) -> list[ReviewResult]:
         """
         Review multiple deltas.
 
         Args:
-            delta_ids: List of delta IDs (defaults to all pending)
-            reviewer: Name of the reviewer
+            delta_ids: List of delta IDs (if None, requires explicit --all flag in CLI)
+            reviewer_name: Name of the reviewer
 
         Returns:
             List of ReviewResults
@@ -519,7 +524,7 @@ class DeltaReviewer:
         results = []
         for delta_id in delta_ids:
             try:
-                result = self.review_and_process(delta_id, reviewer)
+                result = self.review_and_process(delta_id, reviewer_name)
                 results.append(result)
             except ReviewerError as e:
                 logger.warning(f"Failed to review {delta_id}: {e}")
@@ -612,7 +617,7 @@ def main():
     reviewer = DeltaReviewer(auto_approve=getattr(args, "auto_approve", False))
 
     if args.command == "review":
-        result = reviewer.review_and_process(args.delta_id, args.reviewer)
+        result = reviewer.review_and_process(args.delta_id, reviewer_name=args.reviewer)
         print(f"\n{result.summary}")
         print(f"Decision: {result.decision.value.upper()}")
         print(f"Score: {result.overall_score:.1%}")
@@ -622,7 +627,14 @@ def main():
                 print(f"  - {s}")
 
     elif args.command == "batch":
-        results = reviewer.batch_review(reviewer=args.reviewer)
+        if not args.all:
+            print(
+                "Error: batch command requires --all flag to review all pending deltas"
+            )
+            print("This prevents accidental batch operations.")
+            print("Use: python -m gptme_ace.reviewer batch --all")
+            sys.exit(1)
+        results = reviewer.batch_review(reviewer_name=args.reviewer)
         print(f"\nReviewed {len(results)} deltas:")
         for r in results:
             print(f"  {r.delta_id}: {r.decision.value} ({r.overall_score:.1%})")
