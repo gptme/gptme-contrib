@@ -9,6 +9,7 @@ import click
 from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.email import EmailRun
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
+from gptme_runloops.team import TeamRun
 
 
 @click.group()
@@ -41,6 +42,29 @@ def autonomous(workspace: Path):
 def email(workspace: Path):
     """Run email processing loop."""
     run = EmailRun(workspace)
+    exit_code = run.run()
+    sys.exit(exit_code)
+
+
+@main.command()
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd(),
+    help="Workspace directory (default: current directory)",
+)
+@click.option(
+    "--tools",
+    default=None,
+    help="Override coordinator tools (default: gptodo,save,append,...)",
+)
+def team(workspace: Path, tools: str | None):
+    """Run autonomous team coordination loop.
+
+    The coordinator agent runs with restricted tools and delegates
+    all work to subagents via gptodo. Inspired by Claude Code Agent Teams.
+    """
+    run = TeamRun(workspace, tools=tools)
     exit_code = run.run()
     sys.exit(exit_code)
 

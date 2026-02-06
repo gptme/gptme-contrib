@@ -4,5 +4,12 @@ from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.email import EmailRun
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
+from gptme_runloops.team import TeamRun
 
-__all__ = ["BaseRunLoop", "AutonomousRun", "EmailRun", "ProjectMonitoringRun"]
+__all__ = [
+    "BaseRunLoop",
+    "AutonomousRun",
+    "EmailRun",
+    "ProjectMonitoringRun",
+    "TeamRun",
+]

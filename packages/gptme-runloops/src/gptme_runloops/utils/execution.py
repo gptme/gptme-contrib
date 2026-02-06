@@ -1,6 +1,7 @@
 """Execution utilities for running gptme."""
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ def execute_gptme(
     shell_timeout: int = 120,
     env: Optional[dict] = None,
     run_type: str = "run",
+    tools: Optional[str] = None,
 ) -> ExecutionResult:
     """Execute gptme with the given prompt.
 
@@ -41,6 +43,7 @@ def execute_gptme(
         shell_timeout: Shell command timeout in seconds
         env: Additional environment variables
         run_type: Type of run (for log file naming)
+        tools: Tool allowlist string (e.g. "gptodo,save,append")
 
     Returns:
         ExecutionResult with exit code and status
@@ -64,6 +67,9 @@ def execute_gptme(
         if non_interactive:
             cmd.append("--non-interactive")
 
+        if tools:
+            cmd.extend(["--tools", tools])
+
         # this line is essential for the prompt file path to not be mistaken for a command
         cmd.append("'Here is the prompt to follow:'")
 
@@ -80,7 +86,8 @@ def execute_gptme(
 
         # Use tee to stream output to both terminal and log file
         # This gives us real-time journald logging AND complete log file
-        cmd_with_tee = f"{' '.join(cmd)} 2>&1 | tee '{log_file}'"
+        # Use shlex.join for proper escaping to prevent command injection
+        cmd_with_tee = f"{shlex.join(cmd)} 2>&1 | tee {shlex.quote(str(log_file))}"
 
         # Write header to log file first
         with log_file.open("w") as f:
