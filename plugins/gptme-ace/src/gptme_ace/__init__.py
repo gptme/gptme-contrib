@@ -39,6 +39,7 @@ from .generator import (
 )
 from .reflector import ReflectorAgent, Pattern, RefinedInsight
 from .visualization import cli as visualization_cli
+from .reviewer import DeltaReviewer, ReviewResult, ReviewDecision, ReviewCriterion
 
 __all__ = [
     "GptmeHybridMatcher",
@@ -72,6 +73,11 @@ __all__ = [
     "get_default_metrics_db",
     # Phase 5: Visualization CLI
     "visualization_cli",
+    # Phase 5: Reviewer module
+    "DeltaReviewer",
+    "ReviewResult",
+    "ReviewDecision",
+    "ReviewCriterion",
     "plugin",
 ]
 
@@ -167,6 +173,36 @@ python -m gptme_ace.reflector analyze insights.json -o patterns.json
 
 # Refine insights with pattern context
 python -m gptme_ace.reflector refine insights.json --patterns-file patterns.json -o refined.json
+```
+
+### Reviewer Module
+
+The Reviewer agent evaluates delta quality before applying to lessons:
+
+```python
+from gptme_ace import DeltaReviewer, ReviewDecision
+
+# Initialize reviewer
+reviewer = DeltaReviewer()
+
+# Review a delta
+result = reviewer.review_delta(delta)
+
+if result.decision == ReviewDecision.APPROVE:
+    print(f"Delta approved: {result.summary}")
+elif result.decision == ReviewDecision.REVISE:
+    print(f"Needs revision: {result.feedback}")
+else:
+    print(f"Rejected: {result.feedback}")
+```
+
+CLI usage:
+```bash
+# Review pending deltas
+python -m gptme_ace.reviewer review --delta-id abc123
+
+# Batch review
+python -m gptme_ace.reviewer batch --status pending
 ```
 
 ### Curator Module
