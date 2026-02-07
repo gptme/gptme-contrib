@@ -35,8 +35,8 @@ gh issue view <number> --comments
 gh pr view <pr-url>
 gh pr view <pr-url> --comments
 # ALSO check review comments (not included in --comments!)
-gh api repos/<owner>/<repo>/pulls/<number>/reviews --jq '.[] | {user: .user.login, state: .state}'
-gh api repos/<owner>/<repo>/pulls/<number>/comments --jq '.[] | {id, path, body: (.body | split("\n")[0])}'
+gh api repos/<owner>/<repo>/pulls/<pr-number>/reviews --jq '.[] | {user: .user.login, state: .state}'
+gh api repos/<owner>/<repo>/pulls/<pr-number>/comments --jq '.[] | {id, path, body: (.body | split("\n")[0])}'
 ```
 
 **After reading**: Trace conversation chronologically. What is the LATEST request? Respond to current state, not old comments.
