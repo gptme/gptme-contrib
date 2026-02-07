@@ -1,59 +1,63 @@
 ---
 match:
   keywords:
-  - gh issue view
-  - gh pr view
-  - missing critical discussions in comments
-  - duplicate work coordination
-  - responding without full context
-  - only seeing initial description
+    - "gh issue view"
+    - "gh pr view"
+    - "--comments"
+    - "| head"
+    - "| tail"
+    - "issue thread"
 ---
 
 # Read Full GitHub Context
 
 ## Rule
-ALWAYS read both basic view AND comments view when checking any GitHub issue or PR.
+NEVER truncate GitHub comment output. Read the ENTIRE thread chronologically before responding.
 
 ## Context
-Whenever reading, investigating, or working with GitHub issues or pull requests in any repository.
+Whenever reading GitHub issues or PRs via `gh` CLI, especially with `--comments` flag.
 
 ## Detection
-Observable signals of incomplete context reading:
-- Missing critical discussions that happened in comments
-- Duplicate work because you didn't see coordination in comments
-- Incomplete understanding of issue/PR status
-- Missing maintainer feedback or decisions
-- Responding to issues without full context
-- Only seeing initial description, missing follow-up clarifications
+Observable signals of truncation:
+- Using `gh pr view --comments | head` or `| tail`
+- Missing newer comments that supersede earlier ones
+- Maintainer saying "You're not reading the whole issue"
+- Responding to stale context when conversation evolved
 
 ## Pattern
-Read BOTH views every time - basic and comments:
+Read full output, no truncation:
 ```shell
-# For issues: ALWAYS run both commands
-gh issue view <number>           # Basic view
-gh issue view <number> --comments # Full discussion
+# Issues: ALWAYS both views, no truncation
+gh issue view <number>
+gh issue view <number> --comments
 
-# For PRs: ALWAYS run complete sequence
-gh pr view <pr-url>              # Basic PR info
-gh pr view <pr-url> --comments   # Discussion comments
-gh api repos/<owner>/<repo>/pulls/<pr-number>/reviews \
-  | jq '.[] | {user: .user.login, state: .state}'
-gh api repos/<owner>/<repo>/pulls/<pr-number>/comments \
-  | jq '.[] | {path: .path, line: .line}'
+# PRs: Full sequence including reviews, no truncation
+gh pr view <pr-url>
+gh pr view <pr-url> --comments
+# ALSO check review comments (not included in --comments!)
+gh api repos/<owner>/<repo>/pulls/<pr-number>/reviews --jq '.[] | {user: .user.login, state: .state}'
+gh api repos/<owner>/<repo>/pulls/<pr-number>/comments --jq '.[] | {id, path, body: (.body | split("\n")[0])}'
 ```
 
-## Outcome
-Following this pattern leads to:
-- **Complete context**: See all discussions, decisions, and coordination
-- **Better responses**: Understand full history before commenting
-- **Avoid duplication**: Know if others are already working on it
-- **Maintainer respect**: Shows you've read the discussion
-- **Quality work**: Complete information prevents mistakes
+**After reading**: Trace conversation chronologically. What is the LATEST request? Respond to current state, not old comments.
 
-Benefits in autonomous runs:
-- No missing critical feedback
-- Better decision-making with full context
-- Proper coordination with other contributors
+## Anti-Pattern
+
+```shell
+# ❌ WRONG: Truncating loses newer context
+gh issue view 123 --comments | head -50
+gh pr view 456 --comments | tail -20
+
+# ✅ CORRECT: Read everything
+gh issue view 123 --comments
+```
+
+Truncation causes responding to OLD comments while missing NEWER replies that changed context.
+
+## Outcome
+- **Complete context**: See all discussions chronologically
+- **Current responses**: Reply to latest state, not stale threads
+- **No re-asks**: Maintainers don't need to repeat themselves
 
 ## Related
-- [GitHub Issue Engagement](../social/github-issue-engagement.md) - Issue handling best practices
+- [Read PR Reviews Comprehensively](./read-pr-reviews-comprehensively.md) - PR-specific patterns
