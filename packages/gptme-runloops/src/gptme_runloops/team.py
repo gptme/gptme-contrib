@@ -81,7 +81,8 @@ class TeamRun(BaseRunLoop):
     """
 
     # Tools available to the coordinator
-    COORDINATOR_TOOLS = "gptodo,save,append,read,todoread,todowrite,complete"
+    # Note: ipython is required because gptodo functions are registered there
+    COORDINATOR_TOOLS = "gptodo,ipython,save,append,read,todoread,todowrite,complete"
 
     def __init__(self, workspace: Path, tools: str | None = None):
         """Initialize team run.
