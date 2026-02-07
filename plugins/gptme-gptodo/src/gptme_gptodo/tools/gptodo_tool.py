@@ -65,7 +65,7 @@ def delegate(
         prompt: Clear description of what the subagent should do.
             Include specific files, goals, and success criteria.
         task_id: Optional task ID to associate with the agent.
-            If None, a task is created from the prompt.
+            If None, a temporary task is created from the prompt.
         backend: Agent backend to use ('gptme' or 'claude').
         agent_type: Type of agent ('execute', 'plan', 'explore', 'general').
         timeout: Maximum time in seconds for the agent (default: 600).
@@ -81,6 +81,44 @@ def delegate(
         >>> delegate("Analyze the codebase structure", agent_type="explore")
         'Spawned agent def456 for exploration task (background)'
     """
+    import os
+
+    # If no task_id provided, create a temporary task file
+    temp_task_file = None
+    if not task_id:
+        # Generate a task ID from the prompt (first few words, slugified)
+        words = prompt.split()[:5]
+        slug = "-".join(
+            w.lower() for w in words if w.isalnum() or w.replace("-", "").isalnum()
+        )
+        slug = slug[:50] if len(slug) > 50 else slug
+        if not slug:
+            slug = "delegated-task"
+        task_id = f"temp-{slug}"
+
+        # Create temporary task file in the tasks directory
+        # Find tasks directory (look for common locations)
+        tasks_dir = None
+        for candidate in ["tasks", "../tasks", "../../tasks"]:
+            if os.path.isdir(candidate):
+                tasks_dir = candidate
+                break
+
+        if tasks_dir:
+            temp_task_file = os.path.join(tasks_dir, f"{task_id}.md")
+            with open(temp_task_file, "w") as f:
+                f.write(f"""---
+state: new
+priority: medium
+task_type: action
+---
+# {task_id}
+
+{prompt}
+""")
+        else:
+            return "Error: Could not find tasks directory to create temporary task"
+
     args = []
 
     if background:
@@ -88,16 +126,28 @@ def delegate(
     else:
         args.extend(["run"])
 
-    if task_id:
-        args.append(task_id)
+    args.append(task_id)
+
+    if prompt and not temp_task_file:
+        # If task_id was provided, use --prompt to override
         args.extend(["--prompt", prompt])
-    else:
-        # Create inline task from prompt
-        args.extend(["--inline", prompt])
 
     args.extend(["--backend", backend])
     args.extend(["--type", agent_type])
-    args.extend(["--timeout", str(timeout)])
+
+    if not background:
+        args.extend(["--timeout", str(timeout)])
+
+    result = _run_gptodo(*args, timeout=timeout + 30)
+
+    # Clean up temporary task file after spawning (for background) or completion (for foreground)
+    if temp_task_file and os.path.exists(temp_task_file):
+        try:
+            os.remove(temp_task_file)
+        except OSError:
+            pass  # Ignore cleanup errors
+
+    return result
 
     return _run_gptodo(*args, timeout=timeout + 30)
 
