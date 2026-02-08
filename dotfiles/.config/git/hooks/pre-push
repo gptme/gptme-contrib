@@ -61,4 +61,4 @@ fi
 echo "$STDIN_CONTENT" | "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
 
 # Git LFS support
-command -v git-lfs >/dev/null 2>&1 && git lfs pre-push "$@"
+command -v git-lfs >/dev/null 2>&1 && echo "$STDIN_CONTENT" | git lfs pre-push "$@"
