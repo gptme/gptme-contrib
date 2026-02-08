@@ -1,15 +1,12 @@
 ---
 match:
   keywords:
-    - workspace
-    - setup
-    - maintenance
-    - symlinks
-    - template
-    - infrastructure
-    - updates
-    - dotfiles
-    - gptme-contrib
+    - agent-workspace-setup
+    - infrastructure-symlinks
+    - workspace-maintenance
+    - gptme-agent-template
+    - submodule-update
+    - symlink-verification
 ---
 
 # Agent Workspace Setup and Maintenance
@@ -61,7 +58,7 @@ dotfiles/
     └── allowed-repos.conf → ../../gptme-contrib/.../.../allowed-repos.conf ✓
 ```
 
-**Custom:** `dotfiles/README.md` - Document both git hooks and your systemd services
+**Note:** `dotfiles/README.md` - Consider symlinking to contrib version, or keep custom if documenting agent-specific systemd services. See Bob's workspace for reference implementation.
 
 ### Scripts
 ```bash
