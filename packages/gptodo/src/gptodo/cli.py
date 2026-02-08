@@ -131,6 +131,17 @@ from gptodo.deptree import (
     detect_circular_dependencies,
 )
 
+# Import worktree workflow (Issue #246)
+from gptodo.worktree import (
+    create_worktree,
+    list_worktrees,
+    remove_worktree,
+    create_pr_from_worktree,
+    merge_worktree,
+    get_worktree_status,
+    cleanup_merged_worktrees,
+)
+
 
 # Keep console instance for CLI output
 console = Console()
@@ -4500,6 +4511,275 @@ def transitions_cmd(output_json: bool):
                 console.print(f"  {state} [dim](terminal state)[/]")
         console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
         console.print("[dim]Alternate: active → waiting → active → done[/]")
+
+
+# =============================================================================
+# Worktree Commands (Issue #246)
+# =============================================================================
+
+
+@cli.group("worktree")
+def worktree_group():
+    """Git worktree management for isolated agent execution.
+
+    Worktrees enable multiple agents to work on different features
+    simultaneously without conflicts. Each worktree gets its own
+    directory and branch.
+
+    Workflow:
+    1. Create worktree for task: gptodo worktree create <task-id>
+    2. Agent works in worktree, commits freely
+    3. On completion: create PR or merge locally
+    4. Cleanup: remove worktree after merge
+    """
+    pass
+
+
+@worktree_group.command("create")
+@click.argument("task_id")
+@click.option(
+    "--branch",
+    "-b",
+    help="Branch name (default: task-<task_id>)",
+)
+@click.option(
+    "--base",
+    default="origin/master",
+    help="Base branch to branch from (default: origin/master)",
+)
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_create_cmd(task_id: str, branch: str, base: str, output_json: bool):
+    """Create a worktree for isolated agent execution.
+
+    Creates a new git worktree with a fresh branch for the agent to
+    work in. The agent can commit freely without affecting the main branch.
+
+    Examples:
+
+    \b
+        gptodo worktree create my-task
+        gptodo worktree create my-task --branch feature/custom-name
+        gptodo worktree create my-task --base origin/develop
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    try:
+        info = create_worktree(
+            task_id=task_id,
+            branch_name=branch,
+            base_branch=base,
+            workspace=repo_root,
+        )
+
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "path": str(info.path),
+                        "branch": info.branch,
+                        "task_id": info.task_id,
+                        "base_branch": info.base_branch,
+                        "status": info.status,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console.print("[green]✅ Created worktree:[/]")
+            console.print(f"  Path: {info.path}")
+            console.print(f"  Branch: {info.branch}")
+            console.print(f"  Base: {info.base_branch}")
+            console.print(f"\n[dim]cd {info.path} to start working[/]")
+
+    except RuntimeError as e:
+        if output_json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            console.print(f"[red]❌ Error: {e}[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("list")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_list_cmd(output_json: bool):
+    """List all git worktrees.
+
+    Shows all worktrees in the repository with their branches and paths.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    worktrees = list_worktrees(repo_root)
+
+    if output_json:
+        print(json.dumps(worktrees, indent=2))
+    else:
+        if not worktrees:
+            console.print("[dim]No worktrees found[/]")
+            return
+
+        console.print("[bold]Git Worktrees:[/]\n")
+        for wt in worktrees:
+            path = wt.get("path", "unknown")
+            branch = wt.get("branch", "").replace("refs/heads/", "")
+            detached = wt.get("detached", False)
+
+            if detached:
+                console.print(f"  📁 {path}")
+                console.print(f"     [dim]HEAD: {wt.get('head', 'unknown')[:8]} (detached)[/]")
+            else:
+                console.print(f"  📁 {path}")
+                console.print(f"     [cyan]Branch: {branch}[/]")
+
+
+@worktree_group.command("status")
+@click.argument("worktree_path", type=click.Path(exists=True))
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_status_cmd(worktree_path: str, output_json: bool):
+    """Show status of a worktree.
+
+    Displays branch name, uncommitted changes, and commits ahead of origin/master.
+    """
+    console = Console()
+    status = get_worktree_status(Path(worktree_path))
+
+    if output_json:
+        print(json.dumps(status, indent=2))
+    else:
+        console.print(f"[bold]Worktree Status:[/] {status['path']}\n")
+        console.print(f"  Branch: [cyan]{status['branch']}[/]")
+        console.print(f"  Commits ahead: {status['commits_ahead']}")
+
+        if status["uncommitted_changes"]:
+            console.print("  [yellow]⚠️ Uncommitted changes:[/]")
+            for f in status["files_changed"][:10]:
+                console.print(f"    - {f}")
+            if len(status["files_changed"]) > 10:
+                console.print(f"    [dim]... and {len(status['files_changed']) - 10} more[/]")
+        else:
+            console.print("  [green]✅ Working tree clean[/]")
+
+
+@worktree_group.command("remove")
+@click.argument("worktree_path", type=click.Path())
+@click.option("--force", "-f", is_flag=True, help="Force removal even if dirty")
+@click.confirmation_option(prompt="Are you sure you want to remove this worktree?")
+def worktree_remove_cmd(worktree_path: str, force: bool):
+    """Remove a worktree.
+
+    Removes the worktree directory and unlinks it from git.
+    Use --force to remove even if there are uncommitted changes.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    if remove_worktree(Path(worktree_path), force=force, workspace=repo_root):
+        console.print(f"[green]✅ Removed worktree: {worktree_path}[/]")
+    else:
+        console.print("[red]❌ Failed to remove worktree[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("pr")
+@click.argument("worktree_path", type=click.Path(exists=True))
+@click.option("--title", "-t", required=True, help="PR title")
+@click.option("--body", "-b", help="PR body/description")
+@click.option("--draft", is_flag=True, help="Create as draft PR")
+def worktree_pr_cmd(worktree_path: str, title: str, body: str, draft: bool):
+    """Create a PR from a worktree branch.
+
+    Pushes the worktree branch to origin and creates a GitHub PR.
+
+    Examples:
+
+    \b
+        gptodo worktree pr .worktrees/task-foo --title "feat: implement foo"
+        gptodo worktree pr .worktrees/task-foo -t "fix: bug" -b "Fixes #123" --draft
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    console.print("[dim]Pushing branch and creating PR...[/]")
+
+    pr_url = create_pr_from_worktree(
+        worktree_path=Path(worktree_path),
+        title=title,
+        body=body,
+        draft=draft,
+        workspace=repo_root,
+    )
+
+    if pr_url:
+        console.print(f"[green]✅ Created PR: {pr_url}[/]")
+    else:
+        console.print("[red]❌ Failed to create PR[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("merge")
+@click.argument("worktree_path", type=click.Path(exists=True))
+@click.option(
+    "--target",
+    default="master",
+    help="Target branch to merge into (default: master)",
+)
+@click.option(
+    "--keep",
+    is_flag=True,
+    help="Keep worktree after merge (default: remove)",
+)
+@click.confirmation_option(prompt="Are you sure you want to merge this worktree?")
+def worktree_merge_cmd(worktree_path: str, target: str, keep: bool):
+    """Merge a worktree branch into target branch.
+
+    For local/swarm work that doesn't need a PR. Merges the worktree
+    branch into the target branch and optionally removes the worktree.
+
+    Examples:
+
+    \b
+        gptodo worktree merge .worktrees/task-foo
+        gptodo worktree merge .worktrees/task-foo --target develop
+        gptodo worktree merge .worktrees/task-foo --keep
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    if merge_worktree(
+        worktree_path=Path(worktree_path),
+        target_branch=target,
+        workspace=repo_root,
+        delete_after_merge=not keep,
+    ):
+        console.print(f"[green]✅ Merged worktree into {target}[/]")
+        if not keep:
+            console.print("[dim]Worktree removed[/]")
+    else:
+        console.print("[red]❌ Merge failed (conflict?)[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("cleanup")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_cleanup_cmd(output_json: bool):
+    """Remove worktrees whose branches have been merged.
+
+    Automatically cleans up worktrees that are no longer needed
+    because their branches have been merged into origin/master.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    count = cleanup_merged_worktrees(repo_root)
+
+    if output_json:
+        print(json.dumps({"cleaned_up": count}, indent=2))
+    else:
+        if count > 0:
+            console.print(f"[green]✅ Cleaned up {count} merged worktree(s)[/]")
+        else:
+            console.print("[dim]No merged worktrees to clean up[/]")
 
 
 if __name__ == "__main__":
