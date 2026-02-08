@@ -1,15 +1,12 @@
 ---
 match:
   keywords:
-    - workspace
-    - setup
-    - maintenance
-    - symlinks
-    - template
-    - infrastructure
-    - updates
-    - dotfiles
-    - gptme-contrib
+    - agent-workspace-setup
+    - infrastructure-symlinks
+    - workspace-maintenance
+    - gptme-agent-template
+    - submodule-update
+    - symlink-verification
 ---
 
 # Agent Workspace Setup and Maintenance
@@ -61,7 +58,7 @@ dotfiles/
     └── allowed-repos.conf → ../../gptme-contrib/.../.../allowed-repos.conf ✓
 ```
 
-**Custom:** `dotfiles/README.md` - Document both git hooks and your systemd services
+**Note:** `dotfiles/README.md` - Consider symlinking to contrib version, or keep custom if documenting agent-specific systemd services. See Bob's workspace for reference implementation.
 
 ### Scripts
 ```bash
@@ -71,7 +68,11 @@ scripts/
     └── autonomous-loop.sh → ../../../gptme-contrib/.../autonomous-loop.sh ✓
 ```
 
-**Custom:** `scripts/runs/autonomous/autonomous-run.sh` - But use env vars/config!
+**Varies:** `scripts/runs/autonomous/autonomous-run.sh`
+- Template has hardcoded placeholders requiring customization
+- Could potentially be generic with proper env vars/config
+- Becomes custom if adding agent-specific workflow logic (hooks, metrics, etc.)
+- **If custom:** Use env vars (`$WORKSPACE`, `$AGENT_NAME`) instead of hardcoded paths
 
 ## Verification Checklist
 
