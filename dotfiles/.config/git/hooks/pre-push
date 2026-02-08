@@ -60,5 +60,5 @@ fi
 # Pass stored stdin to validation script
 echo "$STDIN_CONTENT" | "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
 
-# Git LFS support
-command -v git-lfs >/dev/null 2>&1 && echo "$STDIN_CONTENT" | git lfs pre-push "$@"
+# Git LFS support (don't fail hook if LFS has issues)
+command -v git-lfs >/dev/null 2>&1 && echo "$STDIN_CONTENT" | git lfs pre-push "$@" 2>/dev/null || true

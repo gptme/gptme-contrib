@@ -1,3 +1,3 @@
 #!/bin/sh
-# Git LFS post-commit hook
-command -v git-lfs >/dev/null 2>&1 && git lfs post-commit "$@"
+# Git LFS post-commit hook (don't fail hook if LFS has issues)
+command -v git-lfs >/dev/null 2>&1 && git lfs post-commit "$@" 2>/dev/null || true
