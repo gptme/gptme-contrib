@@ -68,7 +68,11 @@ scripts/
     └── autonomous-loop.sh → ../../../gptme-contrib/.../autonomous-loop.sh ✓
 ```
 
-**Custom:** `scripts/runs/autonomous/autonomous-run.sh` - But use env vars/config!
+**Varies:** `scripts/runs/autonomous/autonomous-run.sh`
+- Template has hardcoded placeholders requiring customization
+- Could potentially be generic with proper env vars/config
+- Becomes custom if adding agent-specific workflow logic (hooks, metrics, etc.)
+- **If custom:** Use env vars (`$WORKSPACE`, `$AGENT_NAME`) instead of hardcoded paths
 
 ## Verification Checklist
 
