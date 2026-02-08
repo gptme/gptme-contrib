@@ -5,7 +5,31 @@
 set -euo pipefail
 
 # Configuration
-AGENT_NAME="${AGENT_NAME:-$(basename "$(dirname "$(dirname "$(dirname "$0")")")")}"
+# Detect agent name from:
+# 1. AGENT_NAME environment variable
+# 2. gptme.toml in workspace (search up from script location)
+# 3. Fall back to current directory name
+detect_agent_name() {
+    # Try to find gptme.toml by searching up from current directory
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/gptme.toml" ]]; then
+            # Extract agent name from gptme.toml
+            local name
+            name=$(grep -E '^\s*name\s*=' "$dir/gptme.toml" 2>/dev/null | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/' | tr '[:upper:]' '[:lower:]')
+            if [[ -n "$name" ]]; then
+                echo "$name"
+                return 0
+            fi
+        fi
+        dir=$(dirname "$dir")
+    done
+
+    # Fall back to current directory name
+    basename "$PWD"
+}
+
+AGENT_NAME="${AGENT_NAME:-$(detect_agent_name)}"
 
 # Colors (can be disabled)
 if [[ "$*" == *"--no-color"* ]]; then

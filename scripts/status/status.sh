@@ -4,7 +4,24 @@
 set -euo pipefail
 
 # Configuration
-AGENT_NAME="${AGENT_NAME:-$(basename "$(pwd)")}"
+# Detect agent name from gptme.toml or fall back to current directory
+detect_agent_name() {
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/gptme.toml" ]]; then
+            local name
+            name=$(grep -E '^\s*name\s*=' "$dir/gptme.toml" 2>/dev/null | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/' | tr '[:upper:]' '[:lower:]')
+            if [[ -n "$name" ]]; then
+                echo "$name"
+                return 0
+            fi
+        fi
+        dir=$(dirname "$dir")
+    done
+    basename "$PWD"
+}
+
+AGENT_NAME="${AGENT_NAME:-$(detect_agent_name)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors (only define what's used in this script)
