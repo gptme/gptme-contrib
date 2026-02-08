@@ -49,11 +49,10 @@ uv run telegram_bot.py
 
 ## Architecture
 
-This bot shares infrastructure with the Discord bot through `communication_utils/`:
+This bot shares some infrastructure with the Discord bot through `communication_utils/`:
 
-- **Rate Limiting**: `PerUserRateLimiter` - Per-user rate limiting with configurable limits
-- **State Tracking**: `ConversationTracker` - Conversation state management
-- **Metrics**: `MetricsCollector` - Usage metrics collection
+- **State Tracking**: `ConversationTracker` - Conversation state management (shared)
+- **Rate Limiting**: Simple local implementation (not shared)
 
 ### Shared vs Bot-Specific Code
 
@@ -84,9 +83,8 @@ Conversation logs are stored in:
 | Feature | Telegram | Discord |
 |---------|----------|---------|
 | Message limit | 4096 chars | 2000 chars |
-| Rate limiting | ✅ Shared `PerUserRateLimiter` | ✅ Shared `PerUserRateLimiter` |
+| Rate limiting | ✅ Local implementation | ✅ Local implementation |
 | State tracking | ✅ Shared `ConversationTracker` | ✅ Shared `ConversationTracker` |
-| Metrics | ✅ Shared `MetricsCollector` | ✅ Shared `MetricsCollector` |
 | Trusted users | ✅ | ✅ |
 | Commands | /start, /clear, /help | !help, !clear, etc. |
 
