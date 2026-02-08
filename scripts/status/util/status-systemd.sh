@@ -66,9 +66,9 @@ done < <(systemctl --user show "${AGENT_NAME}-*.service" --property=Id,ExecMainS
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
 
-    # Parse service name and state
+    # Parse service name and state (column 3 is ACTIVE state)
     service_name=$(echo "$line" | awk '{print $1}')
-    state=$(echo "$line" | awk '{print $2}')
+    state=$(echo "$line" | awk '{print $3}')
 
     # Skip if not our agent's service
     [[ ! "$service_name" =~ ^${AGENT_NAME}- ]] && continue
@@ -77,9 +77,8 @@ while IFS= read -r line; do
     short_name="${service_name#${AGENT_NAME}-}"
     short_name="${short_name%.service}"
 
-    # Get exit code
-    exit_code="${exit_codes[$service_name]}"
-    [[ -z "$exit_code" ]] && exit_code="0"
+    # Get exit code (with default if not found)
+    exit_code="${exit_codes[$service_name]:-0}"
 
     # Determine status icon and color
     if [[ "$state" == "active" ]]; then
@@ -105,11 +104,11 @@ while IFS= read -r line; do
     timer_name="${service_name%.service}.timer"
     timer_info=""
     if systemctl --user is-enabled "$timer_name" &>/dev/null; then
-        # Extract next trigger from timer JSON
+        # Extract next trigger from timer JSON (timestamp in microseconds)
         next_trigger=$(echo "$timer_json" | jq -r ".[] | select(.unit == \"$timer_name\") | .next" 2>/dev/null || echo "")
-        if [[ -n "$next_trigger" && "$next_trigger" != "null" && "$next_trigger" != "n/a" ]]; then
-            # Calculate time until next run
-            next_epoch=$(date -d "$next_trigger" +%s 2>/dev/null || echo "0")
+        if [[ -n "$next_trigger" && "$next_trigger" != "null" && "$next_trigger" != "n/a" && "$next_trigger" != "0" ]]; then
+            # Convert from microseconds to seconds
+            next_epoch=$((next_trigger / 1000000))
             now_epoch=$(date +%s)
             seconds_until=$((next_epoch - now_epoch))
 
