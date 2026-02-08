@@ -6,11 +6,10 @@ A Telegram bot that provides access to gptme's AI assistant capabilities through
 
 - 💬 Natural conversation with gptme
 - 🔧 Access to gptme tools (read, save, append, patch, shell)
-- 📊 Rate limiting per user (shared with Discord bot)
+- 📊 Per-user rate limiting
 - 🔒 Trusted user allowlist for security
 - 📝 Conversation history per chat
-- 📈 Metrics collection (shared with Discord bot)
-- 🔄 State tracking (shared with Discord bot)
+- 🔄 State tracking (shared with Discord bot via `ConversationTracker`)
 
 ## Setup
 
@@ -60,11 +59,12 @@ This bot shares infrastructure with the Discord bot through `communication_utils
 
 | Component | Location | Shared? |
 |-----------|----------|---------|
-| Rate limiting | `communication_utils/rate_limiting/` | ✅ Yes |
 | State tracking | `communication_utils/state/` | ✅ Yes |
-| Metrics | `communication_utils/monitoring/` | ✅ Yes |
+| Rate limiting | `scripts/telegram/telegram_bot.py` | ❌ Simple local implementation |
 | Bot logic | `scripts/telegram/` | ❌ Telegram-specific |
 | Bot logic | `scripts/discord/` | ❌ Discord-specific |
+
+**Note**: The rate limiter could be moved to `communication_utils/rate_limiting/` in a follow-up PR if desired. The current implementation uses a simple local rate limiter for simplicity.
 
 ## Security
 

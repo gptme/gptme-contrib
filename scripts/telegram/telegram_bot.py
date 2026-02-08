@@ -121,6 +121,8 @@ def main() -> None:
     logsdir = (
         workspace_root / "logs_telegram" if workspace_root else Path("logs_telegram")
     )
+    # Ensure logs directory exists
+    logsdir.mkdir(parents=True, exist_ok=True)
 
     # Load environment variables
     env_files = [".env", ".env.telegram"]
@@ -158,7 +160,11 @@ def main() -> None:
     )
     init_tools(tool_allowlist)
     tools: list[ToolSpec] = get_tools()
-    init_telemetry()
+    init_telemetry(
+        service_name="gptme-telegram",
+        agent_name="telegram-bot",
+        interactive=False,  # Telegram bot runs non-interactively
+    )
 
     logger.info(f"Initialized with {len(tools)} tools")
 
