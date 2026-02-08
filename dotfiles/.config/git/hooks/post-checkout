@@ -82,4 +82,7 @@ if [ "$merge_base" != "$origin_commit" ]; then
     echo ""
 fi
 
+# Git LFS support (don't fail hook if LFS has issues)
+command -v git-lfs >/dev/null 2>&1 && git lfs post-checkout "$@" 2>/dev/null || true
+
 exit 0
