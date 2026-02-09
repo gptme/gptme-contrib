@@ -4548,7 +4548,7 @@ def worktree_group():
     help="Base branch to branch from (default: origin/master)",
 )
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def worktree_create_cmd(task_id: str, branch: str, base: str, output_json: bool):
+def worktree_create_cmd(task_id: str, branch: Optional[str], base: str, output_json: bool):
     """Create a worktree for isolated agent execution.
 
     Creates a new git worktree with a fresh branch for the agent to
@@ -4686,7 +4686,7 @@ def worktree_remove_cmd(worktree_path: str, force: bool):
 @click.option("--title", "-t", required=True, help="PR title")
 @click.option("--body", "-b", help="PR body/description")
 @click.option("--draft", is_flag=True, help="Create as draft PR")
-def worktree_pr_cmd(worktree_path: str, title: str, body: str, draft: bool):
+def worktree_pr_cmd(worktree_path: str, title: str, body: Optional[str], draft: bool):
     """Create a PR from a worktree branch.
 
     Pushes the worktree branch to origin and creates a GitHub PR.

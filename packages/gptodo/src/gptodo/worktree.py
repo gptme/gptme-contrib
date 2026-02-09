@@ -89,7 +89,9 @@ def create_worktree(
         )
 
     # Fetch latest from origin to ensure base_branch is up to date
-    result = _run_git(["fetch", "origin", "master"], cwd=workspace)
+    # Extract the ref to fetch from base_branch (e.g. "origin/master" -> "master")
+    fetch_ref = base_branch.split("/", 1)[1] if "/" in base_branch else base_branch
+    result = _run_git(["fetch", "origin", fetch_ref], cwd=workspace)
     if result.returncode != 0:
         logger.warning(f"Failed to fetch: {result.stderr}")
 
@@ -373,7 +375,10 @@ def cleanup_merged_worktrees(workspace: Optional[Path] = None) -> int:
 
         # Check if branch is merged into origin/master
         result = _run_git(["branch", "--merged", "origin/master"], cwd=workspace)
-        if result.returncode == 0 and branch in result.stdout:
+        # Use exact line matching to avoid substring false positives
+        # (e.g. "task-foo" matching "task-foobar")
+        merged_branches = [b.strip().lstrip("* ") for b in result.stdout.splitlines()]
+        if result.returncode == 0 and branch in merged_branches:
             logger.info(f"Removing merged worktree: {path} (branch: {branch})")
             if remove_worktree(path, workspace=workspace):
                 # Also delete the branch
