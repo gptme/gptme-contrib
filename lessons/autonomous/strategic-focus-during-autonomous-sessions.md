@@ -42,7 +42,11 @@ git log --oneline --since="1 week ago" | grep "feat\|strategic" | head -3
 
 echo "Current strategic focus areas:"
 # Check for strategic documents or recent strategic work
-ls knowledge/strategic-* 2>/dev/null || echo "Review recent strategic journal entries"
+if [ -d "knowledge" ]; then
+    ls knowledge/strategic-* 2>/dev/null || echo "Review recent strategic journal entries"
+else
+    echo "Review recent strategic journal entries"
+fi
 
 echo "Stakeholder priorities (from recent communication):"
 # Check for recent feedback or direction
