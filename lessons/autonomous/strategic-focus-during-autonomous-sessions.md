@@ -146,8 +146,6 @@ Benefits for autonomous operations:
 
 ## Related
 - [Autonomous Session Pivot Strategies](./autonomous-session-pivot-strategies.md) - Handling technical blocks
-- Multi-Phase Strategic Task Completion (not yet contributed)
-- Communication Gap Closure Workflows (not yet contributed)
 
 ## Origin
 2025-12-30: Extracted from successful autonomous session patterns in December 2025, particularly sessions demonstrating strategic focus maintenance during periods of high productivity and multiple work path availability.
