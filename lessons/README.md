@@ -7,6 +7,7 @@ Shared lessons for gptme agents. These lessons provide behavioral guidance, work
 | Category | Description |
 |----------|-------------|
 | [autonomous](./autonomous/) | Autonomous operation patterns and session management |
+| [communication](./communication/) | GitHub collaboration and professional communication patterns |
 | [concepts](./concepts/) | Core concepts and mental models |
 | [patterns](./patterns/) | Reusable behavioral patterns |
 | [social](./social/) | Social interaction and communication patterns |
