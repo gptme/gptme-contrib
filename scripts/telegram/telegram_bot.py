@@ -29,6 +29,9 @@ import time
 from pathlib import Path
 from typing import Dict
 
+# Add these imports
+import re
+
 # Add scripts directory to path for imports
 SCRIPTS_DIR = Path(__file__).parent.parent
 sys.path.append(str(SCRIPTS_DIR))
@@ -54,6 +57,10 @@ logging.basicConfig(
     handlers=[RichHandler(rich_tracebacks=True)],
 )
 logger = logging.getLogger("telegram_bot")
+
+
+# Add regex pattern for thinking tags (same as Discord bot)
+re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
 
 
 class SimpleRateLimiter:
@@ -96,6 +103,7 @@ def main() -> None:
             MessageHandler,
             filters,
         )
+        from telegram.constants import ChatAction
     except ImportError:
         logger.error(
             "python-telegram-bot not installed. Run: pip install python-telegram-bot"
@@ -109,7 +117,7 @@ def main() -> None:
     from gptme.message import Message
     from gptme.prompts import get_prompt
     from gptme.telemetry import init_telemetry, shutdown_telemetry
-    from gptme.tools import ToolSpec, get_tools, init_tools
+    from gptme.tools import ToolSpec, ToolUse, get_tools, init_tools
 
     # Import shared utilities from communication_utils
     from communication_utils.state.tracking import (
@@ -196,7 +204,9 @@ def main() -> None:
             log_path = logsdir / f"chat_{chat_id}"
             log_path.mkdir(parents=True, exist_ok=True)
             initial_msgs = get_prompt(tools=tools, interactive=False)
-            logmanager = LogManager.load(log_path, initial_msgs=initial_msgs)
+            logmanager = LogManager.load(
+                log_path, initial_msgs=initial_msgs, create=True
+            )
             conversations[chat_id] = logmanager.log
             logger.info(f"Created new conversation for chat {chat_id}")
         return conversations[chat_id]
@@ -317,14 +327,48 @@ def main() -> None:
         log.append(Message(role="user", content=message.text))
 
         try:
-            # Generate response using gptme
-            # confirm=lambda _: True auto-confirms all tool uses (non-interactive)
+            # Process responses and execute tools in a loop (like Discord bot)
             response_parts = []
 
-            for msg in step(log, stream=False, confirm=lambda _: True, model=MODEL):
-                if msg.role == "assistant" and msg.content:
-                    response_parts.append(msg.content)
-                    log.append(msg)
+            while True:
+                # Show typing indicator
+                await context.bot.send_chat_action(
+                    chat_id=chat_id, action=ChatAction.TYPING
+                )
+
+                # Run step and collect all messages (assistant + tool results)
+                for msg in step(log, stream=True, model=MODEL):
+                    # Append ALL messages to log (including tool results)
+                    # Log.append() returns a NEW Log (immutable), so we must capture it
+                    log = log.append(msg)
+
+                    # Only collect assistant messages for response display
+                    if msg.role == "assistant" and msg.content:
+                        # Clean thinking tags and normalize newlines for display only
+                        cleaned_content = re_thinking.sub("", msg.content)
+                        cleaned_content = re.sub(r"\n\n+", "\n", cleaned_content)
+                        if cleaned_content.strip():
+                            response_parts.append(cleaned_content)
+
+                # Check if there are any runnable tools left in the last assistant message
+                last_content = next(
+                    (
+                        m.content
+                        for m in reversed(log.messages)
+                        if m.role == "assistant"
+                    ),
+                    "",
+                )
+                has_runnable = any(
+                    tooluse.is_runnable
+                    for tooluse in ToolUse.iter_from_content(last_content)
+                )
+
+                if not has_runnable:
+                    break  # No more tools to run, we're done
+
+            # Update conversations with the accumulated log
+            conversations[chat_id] = log
 
             # Combine response
             full_response = (
@@ -359,7 +403,11 @@ def main() -> None:
 
     async def error_handler(update: object, context: object) -> None:
         """Handle errors."""
-        logger.error(f"Exception while handling an update: {context}")
+        err = context.error
+        logger.error(
+            f"Exception while handling an update: {err}",
+            exc_info=(type(err), err, err.__traceback__) if err else None,
+        )
 
     # Create application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
