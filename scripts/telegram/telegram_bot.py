@@ -339,7 +339,8 @@ def main() -> None:
                 # Run step and collect all messages (assistant + tool results)
                 for msg in step(log, stream=True, model=MODEL):
                     # Append ALL messages to log (including tool results)
-                    log.append(msg)
+                    # Log.append() returns a NEW Log (immutable), so we must capture it
+                    log = log.append(msg)
 
                     # Only collect assistant messages for response display
                     if msg.role == "assistant" and msg.content:
@@ -365,6 +366,9 @@ def main() -> None:
 
                 if not has_runnable:
                     break  # No more tools to run, we're done
+
+            # Update conversations with the accumulated log
+            conversations[chat_id] = log
 
             # Combine response
             full_response = (
