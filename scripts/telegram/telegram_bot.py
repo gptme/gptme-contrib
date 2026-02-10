@@ -35,6 +35,7 @@ sys.path.append(str(SCRIPTS_DIR))
 
 from dotenv import load_dotenv
 from rich.logging import RichHandler
+from gptme.config import get_project_config
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -149,7 +150,20 @@ def main() -> None:
     logger.info(f"  Logs directory: {logsdir}")
     logger.info(f"  Trusted users: {TRUSTED_USERS}")
 
-    bot_name = os.environ.get("AGENT_NAME", "Agent")
+    def get_bot_name() -> str:
+        """Get agent name from gptme.toml config, fallback to environment or default."""
+        try:
+            # Try to get agent name from gptme.toml
+            project_config = get_project_config(workspace_root)
+            if project_config and project_config.agent and project_config.agent.name:
+                return project_config.agent.name
+        except Exception:
+            pass
+
+        # Fallback to environment variable
+        return os.environ.get("AGENT_NAME", "Agent")
+
+    bot_name = get_bot_name()
 
     # Basic tools only for safety
     tool_allowlist = ["read", "save", "append", "patch", "shell"]
