@@ -324,7 +324,11 @@ def main() -> None:
         log = get_conversation(chat_id)
 
         # Add user message to log
-        log.append(Message(role="user", content=message.text))
+        # Log.append() returns a NEW Log (immutable), so we must capture it
+        log = log.append(Message(role="user", content=message.text))
+
+        # Persist updated log immediately to prevent data loss on exception
+        conversations[chat_id] = log
 
         try:
             # Process responses and execute tools in a loop (like Discord bot)
@@ -337,7 +341,13 @@ def main() -> None:
                 )
 
                 # Run step and collect all messages (assistant + tool results)
-                for msg in step(log, stream=True, model=MODEL):
+                for msg in step(
+                    log,
+                    stream=True,
+                    tool_format="markdown",
+                    workspace=workspace_root,
+                    model=MODEL,
+                ):
                     # Append ALL messages to log (including tool results)
                     # Log.append() returns a NEW Log (immutable), so we must capture it
                     log = log.append(msg)
@@ -400,6 +410,10 @@ def main() -> None:
                 "❌ Sorry, I encountered an error processing your message. "
                 "Please try again."
             )
+        finally:
+            # Ensure log is always persisted, even on exception
+            # This prevents losing user messages on error
+            conversations[chat_id] = log
 
     async def error_handler(update: object, context: object) -> None:
         """Handle errors."""
