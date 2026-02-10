@@ -328,26 +328,28 @@ def main() -> None:
 
         try:
             # Process responses and execute tools in a loop (like Discord bot)
-            while True:
-                response_parts = []
+            response_parts = []
 
+            while True:
                 # Show typing indicator
                 await context.bot.send_chat_action(
                     chat_id=chat_id, action=ChatAction.TYPING
                 )
 
+                # Run step and collect all messages (assistant + tool results)
                 for msg in step(log, stream=True, model=MODEL):
+                    # Append ALL messages to log (including tool results)
+                    log.append(msg)
+
+                    # Only collect assistant messages for response display
                     if msg.role == "assistant" and msg.content:
-                        # Clean thinking tags and normalize newlines
+                        # Clean thinking tags and normalize newlines for display only
                         cleaned_content = re_thinking.sub("", msg.content)
                         cleaned_content = re.sub(r"\n\n+", "\n", cleaned_content)
                         if cleaned_content.strip():
                             response_parts.append(cleaned_content)
-                            log.append(
-                                Message(role="assistant", content=cleaned_content)
-                            )
 
-                # Check if there are runnable tools to execute
+                # Check if there are any runnable tools left in the last assistant message
                 last_content = next(
                     (
                         m.content
