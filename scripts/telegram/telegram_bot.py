@@ -327,6 +327,9 @@ def main() -> None:
         # Log.append() returns a NEW Log (immutable), so we must capture it
         log = log.append(Message(role="user", content=message.text))
 
+        # Persist updated log immediately to prevent data loss on exception
+        conversations[chat_id] = log
+
         try:
             # Process responses and execute tools in a loop (like Discord bot)
             response_parts = []
@@ -407,6 +410,10 @@ def main() -> None:
                 "❌ Sorry, I encountered an error processing your message. "
                 "Please try again."
             )
+        finally:
+            # Ensure log is always persisted, even on exception
+            # This prevents losing user messages on error
+            conversations[chat_id] = log
 
     async def error_handler(update: object, context: object) -> None:
         """Handle errors."""
