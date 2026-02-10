@@ -27,6 +27,8 @@ match:
 When creating new work, always `git fetch origin master` first, then create branch from `origin/master`.
 This prevents accidentally including uncommitted/unmerged changes.
 
+**NEW: Use centralized worktree location at `/tmp/worktrees/<project>/<branch>` to avoid grep pollution.**
+
 ## Quick Start: Single-Command Workflow
 
 **For existing PRs** (checkout and resume work):
@@ -34,9 +36,11 @@ This prevents accidentally including uncommitted/unmerged changes.
 # Run from repo root (e.g., ~/gptme)
 PR=123 && \
 BRANCH=$(gh pr view $PR --json headRefName -q .headRefName) && \
+PROJECT=$(basename "$(git rev-parse --show-toplevel)") && \
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/$PROJECT/$BRANCH" && \
 git fetch origin && \
-(git worktree list | grep -q "worktree/$BRANCH" || git worktree add "worktree/$BRANCH" -b "$BRANCH") && \
-cd "worktree/$BRANCH" && \
+(git worktree list | grep -q "$WORKTREE" || git worktree add "$WORKTREE" -b "$BRANCH") && \
+cd "$WORKTREE" && \
 gh pr checkout $PR
 ```
 
@@ -44,9 +48,11 @@ gh pr checkout $PR
 ```shell
 # Run from repo root
 BRANCH="feature-name" && \
+PROJECT=$(basename "$(git rev-parse --show-toplevel)") && \
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/$PROJECT/$BRANCH" && \
 git fetch origin && \
-(git worktree list | grep -q "worktree/$BRANCH" || git worktree add "worktree/$BRANCH" -b "$BRANCH" origin/master) && \
-cd "worktree/$BRANCH" && \
+(git worktree list | grep -q "$WORKTREE" || git worktree add "$WORKTREE" -b "$BRANCH" origin/master) && \
+cd "$WORKTREE" && \
 git branch --unset-upstream && \
 git push -u origin "$BRANCH"
 ```
@@ -55,6 +61,8 @@ git push -u origin "$BRANCH"
 - `gh pr checkout` handles branch tracking automatically for existing PRs
 - The `grep -q` check reuses existing worktrees instead of failing
 - For new branches, `--unset-upstream` prevents accidental push to master
+- Worktrees stored in `/tmp/worktrees/` (Linux) or `$TMPDIR/worktrees/` (macOS)
+- Use `WORKTREE_BASE` env var to customize location
 
 ## Context
 When making changes to repositories you don't own (gptme, gptme-contrib, etc.) where you need to create PRs.
@@ -73,30 +81,35 @@ Core workflow using ORIGINAL upstream branch names:
 gh pr view 812 --json headRefName -q .headRefName
 # Output: feature-task-loop (this is what we use)
 
-# 2. Check if worktree exists with that name
+# 2. Set up project name and worktree path
 cd ~/gptme
-git worktree list | grep feature-task-loop
+PROJECT=$(basename "$(git rev-parse --show-toplevel)")  # "gptme"
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/$PROJECT/feature-task-loop"
 
-# 3. Create worktree with ORIGINAL branch name (only if doesn't exist)
+# 3. Check if worktree exists with that name
+git worktree list | grep "$WORKTREE"
+
+# 4. Create worktree with ORIGINAL branch name (only if doesn't exist)
 # CORRECT: Use upstream's branch name and let gh pr checkout set tracking
-git worktree add worktree/feature-task-loop
-cd worktree/feature-task-loop
+git worktree add "$WORKTREE"
+cd "$WORKTREE"
 gh pr checkout 812  # Fetches PR and sets up tracking automatically
 
 # ALTERNATIVE: If creating new branch (not checking out existing PR)
-# git worktree add worktree/feature-name -b feature-name origin/master
+# WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/$PROJECT/feature-name"
+# git worktree add "$WORKTREE" -b feature-name origin/master
 # git push -u origin feature-name  # -u sets upstream tracking
 
 # WRONG: Don't use pr-NUMBER format
-# git worktree add worktree/pr-812 -b pr-812 origin/master  # ❌ Breaks tracking
+# git worktree add "$WORKTREE" -b pr-812 origin/master  # ❌ Breaks tracking
 
-# 4. Do work, commit, push (tracking already set by gh pr checkout)
+# 5. Do work, commit, push (tracking already set by gh pr checkout)
 git push  # Pushes to correct upstream branch
 gh pr create
 
-# 5. After merge, cleanup
+# 6. After merge, cleanup
 cd ~/gptme
-git worktree remove worktree/feature-task-loop
+git worktree remove "$WORKTREE"
 ```
 
 **Why original branch names matter**:
@@ -125,7 +138,8 @@ When creating a new worktree with `-b branch-name origin/master`, the branch aut
 **The Problem**:
 ```shell
 # After this command, 'feature' branch tracks origin/master
-git worktree add worktree/feature -b feature origin/master
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/gptme/feature"
+git worktree add "$WORKTREE" -b feature origin/master
 
 # Check the tracking:
 git branch -vv
@@ -137,7 +151,8 @@ git branch -vv
 **Option 1**: Explicit unset before first push (safest)
 ```shell
 # After creating worktree and making commits:
-cd worktree/feature
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/gptme/feature"
+cd "$WORKTREE"
 git branch --unset-upstream  # Remove tracking
 git push -u origin feature   # Push to NEW remote branch, set tracking
 ```
@@ -145,10 +160,11 @@ git push -u origin feature   # Push to NEW remote branch, set tracking
 **Option 2**: Create worktree without initial tracking (recommended for NEW work)
 ```shell
 # Step 1: Create worktree pointing to origin/master (no local branch yet)
-git worktree add worktree/feature
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/gptme/feature"
+git worktree add "$WORKTREE"
 
 # Step 2: Create and checkout branch (no upstream set automatically)
-cd worktree/feature
+cd "$WORKTREE"
 git checkout -b feature origin/master
 
 # Step 3: First push sets up tracking correctly
@@ -158,8 +174,9 @@ git push -u origin feature
 **Option 3**: Use `gh pr checkout` for existing PRs (automatic tracking)
 ```shell
 # For existing PRs, gh pr checkout handles tracking correctly:
-git worktree add worktree/feature
-cd worktree/feature
+WORKTREE="${WORKTREE_BASE:-/tmp/worktrees}/gptme/feature"
+git worktree add "$WORKTREE"
+cd "$WORKTREE"
 gh pr checkout 123  # Sets up tracking to PR's branch automatically
 ```
 
