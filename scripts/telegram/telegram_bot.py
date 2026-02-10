@@ -403,9 +403,10 @@ def main() -> None:
 
     async def error_handler(update: object, context: object) -> None:
         """Handle errors."""
+        err = context.error
         logger.error(
-            f"Exception while handling an update: {context.error}",
-            exc_info=context.error,
+            f"Exception while handling an update: {err}",
+            exc_info=(type(err), err, err.__traceback__) if err else None,
         )
 
     # Create application
