@@ -176,7 +176,7 @@ def main() -> None:
     tools: list[ToolSpec] = get_tools()
     init_telemetry(
         service_name="gptme-telegram",
-        agent_name="telegram-bot",
+        agent_name=bot_name,
         interactive=False,  # Telegram bot runs non-interactively
     )
 
