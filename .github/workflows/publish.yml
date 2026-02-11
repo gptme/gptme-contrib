@@ -3,7 +3,8 @@ name: Publish Package
 on:
   push:
     tags:
-      - '*-v*'  # e.g. gptodo-v0.1.0, gptmail-v0.2.0
+      - 'gptodo-v[0-9]*'
+      - 'gptmail-v[0-9]*'
 
 jobs:
   publish:
@@ -25,10 +26,17 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Publishing $PKG version $VERSION"
 
-      - name: Verify package directory exists
+      - name: Verify package and version
         run: |
-          if [ ! -d "packages/${{ steps.parse.outputs.package }}" ]; then
-            echo "Error: packages/${{ steps.parse.outputs.package }} does not exist"
+          PKG="${{ steps.parse.outputs.package }}"
+          VERSION="${{ steps.parse.outputs.version }}"
+          if [ ! -d "packages/$PKG" ]; then
+            echo "Error: packages/$PKG does not exist"
+            exit 1
+          fi
+          TOML_VERSION=$(grep '^version' "packages/$PKG/pyproject.toml" | sed 's/.*"\(.*\)"/\1/')
+          if [ "$VERSION" != "$TOML_VERSION" ]; then
+            echo "Error: tag version ($VERSION) != pyproject.toml version ($TOML_VERSION)"
             exit 1
           fi
 

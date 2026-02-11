@@ -94,4 +94,5 @@ check-names:  ## Validate naming patterns (no instance names in template)
 	@bash scripts/precommit/check-names.sh
 
 publish-package:  ## Publish a specific package (usage: make publish-package PKG=gptodo)
+	@test -n "$(PKG)" || (echo "Usage: make publish-package PKG=gptodo" && exit 1)
 	$(MAKE) -C packages/$(PKG) publish
