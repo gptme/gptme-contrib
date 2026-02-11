@@ -14,26 +14,58 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+from pathlib import Path
 
 from gptme.tools.base import ToolSpec
 
 logger = logging.getLogger(__name__)
 
 
+def _find_gptme_contrib_root() -> Path | None:
+    """Find gptme-contrib root by walking up from this file."""
+    for parent in Path(__file__).resolve().parents:
+        if parent.name == "gptme-contrib":
+            return parent
+    return None
+
+
 def _check_gptodo_available() -> bool:
     """Check if gptodo CLI is available."""
-    return shutil.which("gptodo") is not None
+    if shutil.which("gptodo") is not None:
+        return True
+
+    contrib_root = _find_gptme_contrib_root()
+    if contrib_root is None:
+        return False
+
+    gptodo_pkg = contrib_root / "packages" / "gptodo"
+    return gptodo_pkg.exists() and shutil.which("uv") is not None
 
 
 def _run_gptodo(*args: str, timeout: int = 30) -> str:
     """Run a gptodo CLI command and return output."""
-    if not _check_gptodo_available():
-        return "Error: gptodo CLI not found. Install with: uv pip install gptodo"
+    cmd = None
+    cwd = None
 
-    cmd = ["gptodo", *args]
+    if shutil.which("gptodo") is not None:
+        cmd = ["gptodo", *args]
+    else:
+        contrib_root = _find_gptme_contrib_root()
+        gptodo_pkg = (contrib_root / "packages" / "gptodo") if contrib_root else None
+        if gptodo_pkg and gptodo_pkg.exists() and shutil.which("uv") is not None:
+            cmd = ["uv", "run", "python3", "-m", "gptodo", *args]
+            cwd = str(gptodo_pkg)
+
+    if cmd is None:
+        return (
+            "Error: gptodo CLI not found. Install with: uv pip install gptodo\n"
+            "Or ensure gptme-contrib is present with packages/gptodo and uv is available."
+        )
+
     try:
         result = subprocess.run(
             cmd,
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
