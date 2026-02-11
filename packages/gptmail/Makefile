@@ -1,4 +1,4 @@
-.PHONY: install test typecheck format
+.PHONY: install test typecheck format publish
 
 install:  ## Install the package in development mode
 	uv pip install -e .
@@ -17,3 +17,7 @@ typecheck:  ## Run mypy for this package (relaxed for initial upstream)
 format:  ## Format code
 	uv run --with ruff ruff format src/ tests/
 	uv run --with ruff ruff check --fix src/ tests/
+
+publish:  ## Build and publish to PyPI
+	uv build
+	uv publish

@@ -92,3 +92,6 @@ ci-list-plugins-json:  ## Output plugins with tests as JSON array for CI matrix 
 
 check-names:  ## Validate naming patterns (no instance names in template)
 	@bash scripts/precommit/check-names.sh
+
+publish-package:  ## Publish a specific package (usage: make publish-package PKG=gptodo)
+	$(MAKE) -C packages/$(PKG) publish

@@ -1,0 +1,51 @@
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - '*-v*'  # e.g. gptodo-v0.1.0, gptmail-v0.2.0
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing (OIDC)
+    environment: pypi
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse package name from tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PKG="${TAG%-v*}"
+          VERSION="${TAG#*-v}"
+          echo "package=$PKG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing $PKG version $VERSION"
+
+      - name: Verify package directory exists
+        run: |
+          if [ ! -d "packages/${{ steps.parse.outputs.package }}" ]; then
+            echo "Error: packages/${{ steps.parse.outputs.package }} does not exist"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build package
+        working-directory: packages/${{ steps.parse.outputs.package }}
+        run: uv build
+
+      - name: Publish to PyPI
+        working-directory: packages/${{ steps.parse.outputs.package }}
+        run: uv publish
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}

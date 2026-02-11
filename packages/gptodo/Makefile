@@ -1,4 +1,4 @@
-.PHONY: test typecheck
+.PHONY: test typecheck publish
 
 test:  ## Run tests for this package
 	@if [ -d tests ] && [ "$$(find tests -name '*.py' 2>/dev/null | head -1)" ]; then \
@@ -9,3 +9,7 @@ test:  ## Run tests for this package
 
 typecheck:  ## Run mypy for this package
 	uv run --with mypy --with types-tabulate mypy -p gptodo --ignore-missing-imports --disable-error-code=unused-ignore
+
+publish:  ## Build and publish to PyPI
+	uv build
+	uv publish
