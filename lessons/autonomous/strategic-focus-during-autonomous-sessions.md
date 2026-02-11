@@ -38,15 +38,11 @@ Apply strategic focus discipline throughout autonomous session:
 # Before selecting work, establish strategic context
 echo "=== STRATEGIC CONTEXT CHECK ==="
 echo "Recent major completions:"
-git log --oneline --since="1 week ago" | grep "feat\|strategic" | head -3
+git log --oneline --since="1 week ago" | head -5
 
 echo "Current strategic focus areas:"
 # Check for strategic documents or recent strategic work
-if [ -d "knowledge" ]; then
-    ls knowledge/strategic-* 2>/dev/null || echo "Review recent strategic journal entries"
-else
-    echo "Review recent strategic journal entries"
-fi
+ls knowledge/strategic-* 2>/dev/null || echo "Review recent strategic journal entries"
 
 echo "Stakeholder priorities (from recent communication):"
 # Check for recent feedback or direction
