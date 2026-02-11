@@ -1,0 +1,59 @@
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - 'gptodo-v[0-9]*'
+      - 'gptmail-v[0-9]*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing (OIDC)
+    environment: pypi
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse package name from tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PKG="${TAG%-v*}"
+          VERSION="${TAG#*-v}"
+          echo "package=$PKG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing $PKG version $VERSION"
+
+      - name: Verify package and version
+        run: |
+          PKG="${{ steps.parse.outputs.package }}"
+          VERSION="${{ steps.parse.outputs.version }}"
+          if [ ! -d "packages/$PKG" ]; then
+            echo "Error: packages/$PKG does not exist"
+            exit 1
+          fi
+          TOML_VERSION=$(grep '^version' "packages/$PKG/pyproject.toml" | sed 's/.*"\(.*\)"/\1/')
+          if [ "$VERSION" != "$TOML_VERSION" ]; then
+            echo "Error: tag version ($VERSION) != pyproject.toml version ($TOML_VERSION)"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build package
+        working-directory: packages/${{ steps.parse.outputs.package }}
+        run: uv build
+
+      - name: Publish to PyPI
+        working-directory: packages/${{ steps.parse.outputs.package }}
+        run: uv publish
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
