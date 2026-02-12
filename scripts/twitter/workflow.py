@@ -66,6 +66,7 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import cached_get_me, load_twitter_client
+from trusted_users import is_trusted_user  # type: ignore
 
 # Import monitoring utilities
 from communication_utils.monitoring import get_logger, MetricsCollector
@@ -1242,10 +1243,53 @@ def process_timeline_tweets(
                     return drafts_generated
 
                 if not dry_run:
-                    # Save draft
-                    path = save_draft(draft, "new")
-                    console.print(f"[green]Created draft response: {path}")
-                    drafts_generated += 1
+                    # Check if this is a reply from a trusted user that should be auto-posted
+                    if (
+                        response.type == "reply"
+                        and is_trusted_user(author_username)
+                        and eval_result
+                        and eval_result.action == "respond"
+                    ):
+                        # Auto-post for trusted users
+                        console.print(
+                            f"[green]Auto-posting reply to trusted user @{author_username}"
+                        )
+                        try:
+                            client_for_post = load_twitter_client(require_auth=True)
+                            post_response = client_for_post.create_tweet(
+                                text=draft.text,
+                                in_reply_to_tweet_id=draft.in_reply_to,
+                                user_auth=False,
+                            )
+                            if post_response.data:
+                                tweet_id = post_response.data["id"]
+                                console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
+                                path = save_draft(draft, "posted")
+                                console.print(f"[green]Saved to posted: {path}")
+                                drafts_generated += 1
+                            else:
+                                console.print(
+                                    "[red]Error: No response data from auto-post"
+                                )
+                                # Fall back to saving as new
+                                path = save_draft(draft, "new")
+                                console.print(
+                                    f"[yellow]Saved as draft for manual review: {path}"
+                                )
+                                drafts_generated += 1
+                        except Exception as e:
+                            console.print(f"[red]Error auto-posting: {e}")
+                            # Fall back to saving as new
+                            path = save_draft(draft, "new")
+                            console.print(
+                                f"[yellow]Saved as draft for manual review: {path}"
+                            )
+                            drafts_generated += 1
+                    else:
+                        # Normal flow - save to new/ for review
+                        path = save_draft(draft, "new")
+                        console.print(f"[green]Created draft response: {path}")
+                        drafts_generated += 1
                 else:
                     console.print("[yellow]Would create draft response:")
                     console.print(f"[white]{draft.text}")
