@@ -24,78 +24,7 @@ LESSON_PATH = "lessons/tools/markdown-codeblock-syntax.md"
 LESSON_NAME = "Markdown Codeblock Syntax"
 FILE_PATTERNS = [".md"]
 
-# Known valid language tags
-VALID_LANGUAGE_TAGS = {
-    # Common formats
-    "txt",
-    "text",
-    "csv",
-    "json",
-    "yaml",
-    "yml",
-    "toml",
-    "ini",
-    "xml",
-    "html",
-    # Code languages
-    "python",
-    "py",
-    "javascript",
-    "js",
-    "typescript",
-    "ts",
-    "bash",
-    "sh",
-    "shell",
-    "c",
-    "cpp",
-    "c++",
-    "java",
-    "go",
-    "rust",
-    "ruby",
-    "php",
-    "perl",
-    "lua",
-    # Markup/styling
-    "markdown",
-    "md",
-    "css",
-    "scss",
-    "sass",
-    "less",
-    # Data/visualization
-    "sql",
-    "graphql",
-    "diagram",
-    "ascii",
-    "mermaid",
-    "dot",
-    # Documentation
-    "diff",
-    "patch",
-    "log",
-    "output",
-    "stdout",
-    "stderr",
-    "result",
-    # Special
-    "console",
-    "terminal",
-    "plaintext",
-    # Tool-specific (gptme)
-    "save",
-    "append",
-    "patch",
-    "shell",
-    "ipython",
-    "tmux",
-    "complete",
-    "gh",
-    "todowrite",
-    "todoread",
-    "morph",
-}
+# No predefined language tags - accept any non-empty tag
 
 
 # ==============================================================================
@@ -129,10 +58,12 @@ class MarkdownCodeblockValidator:
 
         lines = content.split("\n")
         violations_found = False
+        fence_count = 0
 
         for line_num, line in enumerate(lines, start=1):
             # Check for codeblock fence
             if line.strip().startswith("```"):
+                fence_count += 1
                 # Extract language tag (everything after ```)
                 fence_match = re.match(r"^```(\S*)", line.strip())
                 if fence_match:
@@ -144,22 +75,19 @@ class MarkdownCodeblockValidator:
                             (filepath, line_num, "No language tag specified")
                         )
                         violations_found = True
-                    # Unknown language tag is a warning (not strict violation)
-                    elif lang_tag.lower() not in VALID_LANGUAGE_TAGS and self.verbose:
-                        if self.verbose:
-                            print(
-                                f"Info: {filepath}:{line_num} - Unknown language tag '{lang_tag}'"
-                            )
+
+        # Check for unclosed code blocks (odd number of fences)
+        if fence_count % 2 != 0:
+            self.violations.append(
+                (
+                    filepath,
+                    0,
+                    f"Unclosed code block detected ({fence_count} fences, expected even number)",
+                )
+            )
+            violations_found = True
 
         return not violations_found
-
-    def get_error_message(self, filepath: Path, line_num: int, reason: str) -> str:
-        """Get actionable error message for a violation."""
-        return (
-            f"Line {line_num}: {reason}\n"
-            f"    Fix: Add language tag like ```txt, ```csv, ```python, etc.\n"
-            f"    Example: ```txt  (not just ```)"
-        )
 
     def run(self, files: List[Path]) -> int:
         """Run validator on list of files."""

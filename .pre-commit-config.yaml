@@ -91,3 +91,11 @@ repos:
     types: [markdown]
     files: ^lessons/
     pass_filenames: true
+
+  - id: validate-markdown-codeblock-syntax
+    name: Validate markdown codeblock syntax
+    description: Ensures markdown codeblocks have language tags to prevent parsing cut-offs.
+    entry: scripts/precommit/validators/validate_markdown_codeblock_syntax.py
+    language: system
+    types: [markdown]
+    pass_filenames: true
