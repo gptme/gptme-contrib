@@ -5,6 +5,7 @@ Bridges Twilio phone calls to OpenAI Realtime API for real-time
 voice conversations with gptme tool access.
 """
 
+import base64
 import json
 import os
 from typing import Optional
@@ -106,8 +107,6 @@ class VoiceServer:
                         mulaw_b64 = media.get("payload", "")
                         if mulaw_b64:
                             # Convert to PCM and send to OpenAI
-                            import base64
-
                             mulaw_data = base64.b64decode(mulaw_b64)
                             pcm_data = audio_converter.twilio_to_openai(mulaw_data)
                             await openai_client.send_audio(pcm_data)
@@ -130,7 +129,6 @@ class VoiceServer:
 
     async def _send_to_twilio(self, websocket, stream_sid: str, audio_data: bytes):
         """Send audio to Twilio Media Stream."""
-        import base64
 
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         message = {
@@ -167,8 +165,6 @@ class VoiceServer:
 
                 if data.get("type") == "audio":
                     # Audio chunk from client (PCM 24kHz)
-                    import base64
-
                     audio_b64 = data.get("audio", "")
                     if audio_b64:
                         audio_data = base64.b64decode(audio_b64)
@@ -185,7 +181,6 @@ class VoiceServer:
 
     async def _send_local_audio(self, websocket, audio_data: bytes):
         """Send audio to local client."""
-        import base64
 
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         message = {"type": "audio", "audio": audio_b64}
