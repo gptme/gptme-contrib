@@ -103,4 +103,3 @@ The original MVP implementation using record → transcribe → process → TTS.
 ## Related
 
 - Issue: https://github.com/gptme/gptme-contrib/issues/266
-- Architecture: [voice-interface-realtime-architecture.md](../../../knowledge/technical-designs/voice-interface-realtime-architecture.md)
