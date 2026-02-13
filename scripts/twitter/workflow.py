@@ -1269,7 +1269,8 @@ def process_timeline_tweets(
                                 console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
                                 path = save_draft(draft, "posted")
                                 console.print(f"[green]Saved to posted: {path}")
-                                drafts_generated += 1
+                                # Don't increment drafts_generated for auto-posted tweets
+                                # They go to posted/ not new/ and shouldn't count against draft limit
                             else:
                                 console.print(
                                     "[red]Error: No response data from auto-post"
