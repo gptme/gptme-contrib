@@ -40,29 +40,32 @@ def record_audio(duration: int = 5, sample_rate: int = 16000) -> bytes:
 
     p = pyaudio.PyAudio()
 
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=sample_rate,
-        input=True,
-        frames_per_buffer=1024,
-    )
+    try:
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=sample_rate,
+            input=True,
+            frames_per_buffer=1024,
+        )
 
-    print(f"Recording for {duration} seconds...")
-    frames = []
+        print(f"Recording for {duration} seconds...")
+        frames = []
 
-    for _ in range(0, int(sample_rate / 1024 * duration)):
-        data = stream.read(1024)
-        frames.append(data)
+        for _ in range(0, int(sample_rate / 1024 * duration)):
+            data = stream.read(1024)
+            frames.append(data)
 
-    print("Recording complete.")
+        print("Recording complete.")
 
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+        stream.stop_stream()
+        stream.close()
+    finally:
+        p.terminate()
 
     # Convert to WAV bytes
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        temp_path = f.name
         wf = wave.open(f.name, "wb")
         wf.setnchannels(1)
         wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
@@ -70,10 +73,11 @@ def record_audio(duration: int = 5, sample_rate: int = 16000) -> bytes:
         wf.writeframes(b"".join(frames))
         wf.close()
 
-        with open(f.name, "rb") as rf:
+    try:
+        with open(temp_path, "rb") as rf:
             audio_bytes = rf.read()
-
-        Path(f.name).unlink()
+    finally:
+        Path(temp_path).unlink()
 
     return audio_bytes
 
@@ -103,11 +107,11 @@ def transcribe_audio(audio_bytes: bytes) -> str:
 def speak_text(text: str) -> None:
     """Speak text using system TTS (espeak on Linux, say on macOS)."""
     if sys.platform == "darwin":
-        subprocess.run(["say", text], check=True)
+        subprocess.run(["say", text])
     else:
         # Try espeak on Linux
         try:
-            subprocess.run(["espeak", text], check=True)
+            subprocess.run(["espeak", text])
         except FileNotFoundError:
             # Fallback to printing
             print(f"[TTS not available] Would say: {text}")
@@ -116,7 +120,7 @@ def speak_text(text: str) -> None:
 def process_with_gptme(prompt: str) -> str:
     """Process prompt through gptme CLI."""
     result = subprocess.run(
-        ["gptme", "--non-interactive", prompt],
+        ["gptme", "--non-interactive", "--quiet", prompt],
         capture_output=True,
         text=True,
     )
