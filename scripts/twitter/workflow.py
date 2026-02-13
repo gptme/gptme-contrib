@@ -1085,11 +1085,12 @@ def process_timeline_tweets(
     total_drafts = existing_drafts + drafts_generated
 
     # Check if we're already at or over the limit
-    if max_drafts and total_drafts >= max_drafts:
+    # Don't return early - we still need to process trusted user mentions
+    at_draft_limit = max_drafts and total_drafts >= max_drafts
+    if at_draft_limit:
         console.print(
-            f"[yellow]Already have {existing_drafts} drafts (limit: {max_drafts}), skipping generation"
+            f"[yellow]Already have {existing_drafts} drafts (limit: {max_drafts}), will skip drafting for non-trusted users"
         )
-        return 0
 
     # Create lookup for user info
     user_lookup = {user.id: user for user in users} if users else {}
@@ -1235,12 +1236,14 @@ def process_timeline_tweets(
                 )
 
                 # Check draft limit before creating main draft
-                total_drafts = existing_drafts + drafts_generated
-                if max_drafts and total_drafts >= max_drafts:
-                    console.print(
-                        f"[yellow]Reached draft limit ({max_drafts}), stopping..."
-                    )
-                    return drafts_generated
+                # Skip this check for trusted users (they get auto-posted, not drafted)
+                if not (response.type == "reply" and is_trusted_user(author_username)):
+                    total_drafts = existing_drafts + drafts_generated
+                    if max_drafts and total_drafts >= max_drafts:
+                        console.print(
+                            f"[yellow]Reached draft limit ({max_drafts}), skipping draft for non-trusted user"
+                        )
+                        continue  # Skip to next tweet instead of returning
 
                 if not dry_run:
                     # Check if this is a reply from a trusted user that should be auto-posted
