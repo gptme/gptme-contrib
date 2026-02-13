@@ -5,7 +5,6 @@ description = "Voice interface for gptme with OpenAI Realtime API"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pyaudio>=0.2.13",
     "openai>=1.0.0",
     "websockets>=12.0",
     "starlette>=0.37.0",
@@ -15,6 +14,9 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest>=7.0",
+]
+local = [
+    "pyaudio>=0.2.13",
 ]
 
 [project.scripts]
