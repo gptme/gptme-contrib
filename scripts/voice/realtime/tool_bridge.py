@@ -26,6 +26,15 @@ class GptmeToolBridge:
     Bridge between OpenAI function calls and gptme CLI.
 
     Executes gptme commands asynchronously and returns results.
+
+    Note: This implementation uses subprocess execution with --non-interactive mode.
+    This means:
+    - Tools that require user input will fail or hang
+    - Interactive prompts are not supported
+    - Long-running operations are limited by the timeout parameter
+
+    For production use, consider implementing a tool allowlist to filter
+    supported tools, similar to packages/gptme-runloops/src/gptme_runloops/utils/execution.py
     """
 
     def __init__(
