@@ -35,21 +35,33 @@ Apply strategic focus discipline throughout autonomous session:
 
 ### Pre-Session Strategic Context Setting
 ```shell
-# Before selecting work, establish strategic context
+# Before selecting work, establish strategic context from actual sources
 echo "=== STRATEGIC CONTEXT CHECK ==="
-echo "Recent major completions:"
-git log --oneline --since="1 week ago" | grep "feat\|strategic" | head -3
 
-echo "Current strategic focus areas:"
-# Check for strategic documents or recent strategic work
-if [ -d "knowledge" ]; then
-    ls knowledge/strategic-* 2>/dev/null || echo "Review recent strategic journal entries"
+echo "1. Planned Work (from work queue):"
+if [ -f "state/queue-manual.md" ]; then
+    grep -A 2 "^##" state/queue-manual.md | grep -v "^--$" | head -10
 else
-    echo "Review recent strategic journal entries"
+    echo "No work queue found"
 fi
 
-echo "Stakeholder priorities (from recent communication):"
-# Check for recent feedback or direction
+echo ""
+echo "2. Stakeholder Direction (recent feedback):"
+if git rev-parse --git-dir > /dev/null 2>&1; then
+    # Check for unread mentions and review requests
+    gh api notifications --jq '.[] | select(.reason == "mention" or .reason == "review_requested") | select(.unread == true) | .subject.title' 2>/dev/null | head -5 || echo "No unread mentions"
+else
+    echo "Not in git repo"
+fi
+
+echo ""
+echo "3. Goal Alignment Check:"
+if [ -f "ABOUT.md" ]; then
+    echo "Core goals:"
+    grep -A 8 "## Goals" ABOUT.md | grep "^-" | head -5
+else
+    echo "No ABOUT.md found - consider defining goals"
+fi
 ```
 
 ### Work Selection with Strategic Lens
@@ -153,3 +165,9 @@ Benefits for autonomous operations:
 
 ## Origin
 2025-12-30: Extracted from successful autonomous session patterns in December 2025, particularly sessions demonstrating strategic focus maintenance during periods of high productivity and multiple work path availability.
+
+**Why this approach is better:**
+- **Derives from actual goals** - Uses ABOUT.md goals, not just commit message keywords
+- **Shows planned work** - Work queue contains actual priorities, not random commits
+- **Captures stakeholder direction** - Recent mentions/feedback, not assumed from commit type
+- **Higher signal** - Each source is a deliberate source of truth, not filtered noise
