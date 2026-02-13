@@ -21,4 +21,5 @@ def is_trusted_user(username: str) -> bool:
     Returns:
         True if user is trusted, False otherwise
     """
-    return username in TRUSTED_USERS
+    # Case-insensitive comparison for Twitter usernames
+    return username.lower() in {u.lower() for u in TRUSTED_USERS}

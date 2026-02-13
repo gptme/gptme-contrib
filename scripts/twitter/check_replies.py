@@ -9,12 +9,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
+from .trusted_users import is_trusted_user
 
 # Load environment variables
 load_dotenv()
-
-# Trusted users (usernames without @)
-TRUSTED_USERS = ["ErikBjare", "Alice"]  # Add more as needed
 
 
 def get_twitter_client():
@@ -58,11 +56,6 @@ def get_replies_to_tweet(client, tweet_id, my_user_id):
     except Exception as e:
         print(f"Error getting replies: {e}")
         return None
-
-
-def is_trusted_user(username):
-    """Check if user is in trusted list."""
-    return username.lower() in [u.lower() for u in TRUSTED_USERS]
 
 
 def main():
