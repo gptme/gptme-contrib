@@ -76,7 +76,7 @@ def save_summary(summary: DailySummary | WeeklySummary | MonthlySummary) -> Path
         raise ValueError(f"Unknown summary type: {type(summary)}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / filename
+    output_path: Path = output_dir / filename
 
     # Write markdown
     output_path.write_text(summary.to_markdown())
