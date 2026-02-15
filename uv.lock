@@ -1090,6 +1090,9 @@ provides-extras = ["dev"]
 name = "gptme-summarization"
 version = "0.1.0"
 source = { editable = "packages/gptme-summarization" }
+dependencies = [
+    { name = "gptme-contrib-lib" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -1104,6 +1107,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "gptme-contrib-lib", editable = "packages/gptme-contrib-lib" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
