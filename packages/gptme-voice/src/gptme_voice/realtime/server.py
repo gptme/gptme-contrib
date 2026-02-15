@@ -133,7 +133,7 @@ class VoiceServer:
                     break
 
         except Exception as e:
-            print(f"Error handling Twilio connection: {e}")
+            logger.exception("Error handling Twilio connection: %s", e)
         finally:
             if openai_client:
                 await openai_client.disconnect()
@@ -192,7 +192,7 @@ class VoiceServer:
                     await openai_client.commit_audio()
 
         except Exception as e:
-            print(f"Error handling local connection: {e}")
+            logger.exception("Error handling local connection: %s", e)
         finally:
             if openai_client:
                 await openai_client.disconnect()

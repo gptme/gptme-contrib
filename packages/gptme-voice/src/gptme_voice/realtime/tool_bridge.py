@@ -86,7 +86,10 @@ class GptmeToolBridge:
 
     async def _execute(self, task: str, mode: str = "smart") -> ToolResult:
         """Execute a gptme subagent and return the result."""
-        response_file = Path(tempfile.mktemp(prefix="gptme-voice-", suffix=".md"))
+        with tempfile.NamedTemporaryFile(
+            prefix="gptme-voice-", suffix=".md", delete=False
+        ) as tf:
+            response_file = Path(tf.name)
         augmented_task = task + _RESPONSE_SUFFIX.format(response_file=response_file)
 
         model = self.MODEL_FAST if mode == "fast" else self.MODEL_SMART

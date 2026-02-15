@@ -6,6 +6,7 @@ Handles conversion between:
 - OpenAI Realtime API: PCM 24kHz
 """
 
+import base64
 import audioop
 from typing import Optional
 
@@ -74,13 +75,9 @@ class AudioConverter:
     @staticmethod
     def pcm_to_base64(pcm_data: bytes) -> str:
         """Convert PCM bytes to base64 string for JSON transport."""
-        import base64
-
         return base64.b64encode(pcm_data).decode("utf-8")
 
     @staticmethod
     def base64_to_pcm(base64_str: str) -> bytes:
         """Convert base64 string to PCM bytes."""
-        import base64
-
         return base64.b64decode(base64_str.encode("utf-8"))
