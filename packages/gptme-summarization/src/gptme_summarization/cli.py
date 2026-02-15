@@ -187,6 +187,7 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
         themes=result.get("themes", []),
         work_in_progress=result.get("work_in_progress", [])[:5],
         narrative=result.get("narrative", ""),
+        key_insight=result.get("key_insight", ""),
         metrics=Metrics(
             sessions=session_stats.session_count,
             commits=activity.total_commits,

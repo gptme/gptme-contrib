@@ -126,7 +126,7 @@ Guidelines:
 - blockers: Issues preventing progress (active = still blocking)
 - themes: High-level topics (e.g., "security", "infrastructure", "documentation")
 - narrative: A concise prose summary capturing the essence of the day's work
-- Reference PR numbers and issue numbers when mentioning specific work
+- Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 
 Journal Entry:
@@ -220,7 +220,7 @@ Guidelines:
 - Update blocker statuses (if resolved later in day, mark as resolved)
 - Identify overarching themes
 - Extract the single most valuable insight
-- Reference PR numbers and issue numbers when mentioning specific work
+- Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 
 Journal Entries ({len(entries)} total):
@@ -317,7 +317,7 @@ Return ONLY valid JSON with this structure:
 Guidelines:
 - Focus on impact and significance, not just listing everything
 - Identify patterns across days
-- Reference PR numbers and issue numbers when mentioning specific work
+- Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 
 Daily Summaries:
@@ -414,7 +414,7 @@ Return ONLY valid JSON with this structure:
 Guidelines:
 - Focus on strategic significance and long-term impact
 - Identify capability growth and learning arcs
-- Reference PR numbers and issue numbers when mentioning specific work
+- Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 
 Weekly Summaries:

@@ -5,10 +5,26 @@ Uses Chain-of-Key (CoK) pattern with structured JSON for incremental updates.
 Based on research showing 40% accuracy improvement over baseline summarization.
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
 from typing import Optional
+
+# Default repos for linkifying bare #NNN references.
+# When text mentions "PR #123" or "#123" without a repo prefix, we can't know
+# which repo it refers to — so we only linkify explicit "owner/repo#NNN" refs.
+# The LLM prompt asks it to use full references like "gptme/gptme#1265".
+_GITHUB_REF_RE = re.compile(r"(?<![/\w])([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)#(\d+)")
+
+
+def _linkify(text: str) -> str:
+    """Turn owner/repo#NNN references into markdown links.
+
+    Examples:
+        "Fixed in gptme/gptme#1265" -> "Fixed in [gptme/gptme#1265](https://github.com/gptme/gptme/issues/1265)"
+    """
+    return _GITHUB_REF_RE.sub(r"[\1#\2](https://github.com/\1/issues/\2)", text)
 
 
 class BlockerStatus(Enum):
@@ -56,6 +72,39 @@ class Metrics:
     total_cost: float = 0.0
 
 
+def _format_metrics_line(metrics: "Metrics", sessions: int = 0) -> str:
+    """Format a compact metrics line from a Metrics object."""
+    parts = []
+    if sessions:
+        parts.append(f"**Sessions**: {sessions}")
+    elif metrics.sessions:
+        parts.append(f"**Sessions**: {metrics.sessions}")
+    if metrics.commits:
+        parts.append(f"**Commits**: {metrics.commits}")
+    if metrics.prs_merged:
+        parts.append(f"**PRs merged**: {metrics.prs_merged}")
+    if metrics.issues_closed:
+        parts.append(f"**Issues closed**: {metrics.issues_closed}")
+    return " | ".join(parts) if parts else ""
+
+
+def _format_session_metadata(metrics: "Metrics") -> str:
+    """Format session metadata (models, tokens, cost) as a line."""
+    parts = []
+    if metrics.models_used:
+        parts.append(f"**Models**: {', '.join(metrics.models_used)}")
+    if metrics.total_tokens:
+        if metrics.total_tokens >= 1_000_000:
+            parts.append(f"**Tokens**: {metrics.total_tokens / 1_000_000:.1f}M")
+        elif metrics.total_tokens >= 1_000:
+            parts.append(f"**Tokens**: {metrics.total_tokens / 1_000:.1f}K")
+        else:
+            parts.append(f"**Tokens**: {metrics.total_tokens}")
+    if metrics.total_cost > 0:
+        parts.append(f"**Cost**: ${metrics.total_cost:.2f}")
+    return " | ".join(parts) if parts else ""
+
+
 @dataclass
 class DailySummary:
     """
@@ -72,6 +121,7 @@ class DailySummary:
     themes: list[str] = field(default_factory=list)
     metrics: Metrics = field(default_factory=Metrics)
     narrative: str = ""
+    key_insight: str = ""
     session_count: int = 0
     generated_at: Optional[datetime] = None
 
@@ -80,9 +130,15 @@ class DailySummary:
         lines = [
             f"# Daily Summary: {self.date.isoformat()}",
             "",
-            f"**Sessions**: {self.session_count} | **Commits**: {self.metrics.commits} | **PRs**: {self.metrics.prs_merged} merged",
-            "",
         ]
+
+        metrics_line = _format_metrics_line(self.metrics, sessions=self.session_count)
+        if metrics_line:
+            lines.extend([metrics_line, ""])
+
+        session_meta = _format_session_metadata(self.metrics)
+        if session_meta:
+            lines.extend([session_meta, ""])
 
         if self.narrative:
             lines.extend([self.narrative, ""])
@@ -112,15 +168,15 @@ class DailySummary:
                 lines.extend(
                     [
                         "## Active Blockers",
-                        *[f"- ⚠️ {b.issue}" for b in active],
+                        *[f"- {b.issue}" for b in active],
                         "",
                     ]
                 )
             if resolved:
                 lines.extend(
                     [
-                        "## Resolved Blockers",
-                        *[f"- ✅ {b.issue}" for b in resolved],
+                        "## Resolved",
+                        *[f"- {b.issue}" for b in resolved],
                         "",
                     ]
                 )
@@ -134,6 +190,15 @@ class DailySummary:
                 ]
             )
 
+        if self.key_insight:
+            lines.extend(
+                [
+                    "## Key Insight",
+                    self.key_insight,
+                    "",
+                ]
+            )
+
         if self.themes:
             lines.extend(
                 [
@@ -143,7 +208,7 @@ class DailySummary:
                 ]
             )
 
-        return "\n".join(lines)
+        return _linkify("\n".join(lines))
 
 
 @dataclass
@@ -173,9 +238,15 @@ class WeeklySummary:
             f"# Weekly Summary: {self.week}",
             f"*{self.start_date.isoformat()} to {self.end_date.isoformat()}*",
             "",
-            f"**Sessions**: {self.metrics.sessions} | **Commits**: {self.metrics.commits} | **PRs Merged**: {self.metrics.prs_merged}",
-            "",
         ]
+
+        metrics_line = _format_metrics_line(self.metrics)
+        if metrics_line:
+            lines.extend([metrics_line, ""])
+
+        session_meta = _format_session_metadata(self.metrics)
+        if session_meta:
+            lines.extend([session_meta, ""])
 
         if self.narrative:
             lines.extend([self.narrative, ""])
@@ -184,7 +255,7 @@ class WeeklySummary:
             lines.extend(
                 [
                     "## Major Milestones",
-                    *[f"- 🎯 {m}" for m in self.milestones],
+                    *[f"- {m}" for m in self.milestones],
                     "",
                 ]
             )
@@ -237,7 +308,7 @@ class WeeklySummary:
                 ]
             )
 
-        return "\n".join(lines)
+        return _linkify("\n".join(lines))
 
 
 @dataclass
@@ -264,13 +335,24 @@ class MonthlySummary:
         lines = [
             f"# Monthly Summary: {self.month}",
             "",
-            "## Metrics",
-            f"- **Sessions**: {self.metrics.sessions}",
-            f"- **Commits**: {self.metrics.commits}",
-            f"- **PRs Merged**: {self.metrics.prs_merged}",
-            f"- **Issues Closed**: {self.metrics.issues_closed}",
-            "",
         ]
+
+        # Compact metrics block
+        metrics_parts = []
+        if self.metrics.sessions:
+            metrics_parts.append(f"**Sessions**: {self.metrics.sessions}")
+        if self.metrics.commits:
+            metrics_parts.append(f"**Commits**: {self.metrics.commits}")
+        if self.metrics.prs_merged:
+            metrics_parts.append(f"**PRs merged**: {self.metrics.prs_merged}")
+        if self.metrics.issues_closed:
+            metrics_parts.append(f"**Issues closed**: {self.metrics.issues_closed}")
+        if metrics_parts:
+            lines.extend([" | ".join(metrics_parts), ""])
+
+        session_meta = _format_session_metadata(self.metrics)
+        if session_meta:
+            lines.extend([session_meta, ""])
 
         if self.month_narrative:
             lines.extend([self.month_narrative, ""])
@@ -279,7 +361,7 @@ class MonthlySummary:
             lines.extend(
                 [
                     "## Major Accomplishments",
-                    *[f"- 🏆 {a}" for a in self.accomplishments],
+                    *[f"- {a}" for a in self.accomplishments],
                     "",
                 ]
             )
@@ -297,7 +379,7 @@ class MonthlySummary:
             lines.extend(
                 [
                     "## Key Learnings",
-                    *[f"- 📚 {learning}" for learning in self.key_learnings],
+                    *[f"- {learning}" for learning in self.key_learnings],
                     "",
                 ]
             )
@@ -315,7 +397,7 @@ class MonthlySummary:
             lines.extend(
                 [
                     "## Highlights",
-                    *[f"- ✨ {h}" for h in self.highlights],
+                    *[f"- {h}" for h in self.highlights],
                     "",
                 ]
             )
@@ -324,9 +406,9 @@ class MonthlySummary:
             lines.extend(
                 [
                     "## Direction for Next Month",
-                    *[f"- → {d}" for d in self.direction_for_next_month],
+                    *[f"- {d}" for d in self.direction_for_next_month],
                     "",
                 ]
             )
 
-        return "\n".join(lines)
+        return _linkify("\n".join(lines))
