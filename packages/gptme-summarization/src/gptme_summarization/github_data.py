@@ -31,12 +31,36 @@ class RepoActivity:
 
 
 @dataclass
+class PRReview:
+    """A PR review received from someone."""
+
+    repo: str
+    pr_number: int
+    pr_title: str
+    reviewer: str
+    url: str = ""
+
+
+@dataclass
+class CrossRepoPR:
+    """A PR authored in a repo outside DEFAULT_REPOS."""
+
+    repo: str
+    number: int
+    title: str
+    state: str = ""  # "open", "merged", "closed"
+    url: str = ""
+
+
+@dataclass
 class GitHubActivity:
     """Aggregated GitHub activity across repos."""
 
     start_date: date
     end_date: date
     repos: list[RepoActivity] = field(default_factory=list)
+    reviews_received: list[PRReview] = field(default_factory=list)
+    cross_repo_prs: list[CrossRepoPR] = field(default_factory=list)
 
     @property
     def total_commits(self) -> int:
@@ -167,6 +191,90 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
     return len(output.strip().splitlines())
 
 
+def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRReview]:
+    """Get PR review comments received on our PRs in a date range."""
+    reviews: list[PRReview] = []
+    for repo in repos:
+        output = _run_command(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "all",
+                "--search",
+                f"updated:{start.isoformat()}..{end.isoformat()}",
+                "--json",
+                "number,title,url,reviews",
+                "--limit",
+                "50",
+            ]
+        )
+        if not output:
+            continue
+        try:
+            prs = json.loads(output)
+            for pr in prs:
+                for review in pr.get("reviews", []):
+                    author = review.get("author", {}).get("login", "")
+                    if author and author not in ("ErikBjare", "bot"):
+                        reviews.append(
+                            PRReview(
+                                repo=repo,
+                                pr_number=pr.get("number", 0),
+                                pr_title=pr.get("title", ""),
+                                reviewer=author,
+                                url=pr.get("url", ""),
+                            )
+                        )
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return reviews
+
+
+def get_cross_repo_prs(start: date, end: date, author: str = "ErikBjare") -> list[CrossRepoPR]:
+    """Get PRs authored in repos outside the default list."""
+    output = _run_command(
+        [
+            "gh",
+            "search",
+            "prs",
+            "--author",
+            author,
+            "--created",
+            f"{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "repository,number,title,state,url",
+            "--limit",
+            "50",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        prs = json.loads(output)
+        results: list[CrossRepoPR] = []
+        for pr in prs:
+            repo_info = pr.get("repository", {})
+            repo_name = repo_info.get("nameWithOwner", "")
+            # Only include repos outside DEFAULT_REPOS
+            if repo_name and repo_name not in DEFAULT_REPOS:
+                results.append(
+                    CrossRepoPR(
+                        repo=repo_name,
+                        number=pr.get("number", 0),
+                        title=pr.get("title", ""),
+                        state=pr.get("state", "").lower(),
+                        url=pr.get("url", ""),
+                    )
+                )
+        return results
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 def fetch_activity(
     start: date,
     end: date,
@@ -207,6 +315,11 @@ def fetch_activity(
             activity.repos[0].commits = commit_count
         else:
             activity.repos.append(RepoActivity(repo="local", commits=commit_count))
+
+    # Fetch reviews received and cross-repo PRs
+    if has_gh:
+        activity.reviews_received = get_reviews_received(start, end, repos)
+        activity.cross_repo_prs = get_cross_repo_prs(start, end)
 
     return activity
 

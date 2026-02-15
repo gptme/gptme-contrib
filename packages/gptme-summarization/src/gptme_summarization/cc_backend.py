@@ -117,7 +117,13 @@ Return ONLY valid JSON (no explanation) with this exact structure:
     ],
     "themes": ["main themes or topics worked on"],
     "work_in_progress": ["items started but not finished"],
-    "narrative": "2-3 sentence prose summary of the entry"
+    "narrative": "2-3 sentence prose summary of the entry",
+    "interactions": [
+        {{"type": "github_review|github_issue|social_post|conversation|discord", "person": "who", "summary": "what happened", "url": ""}}
+    ],
+    "external_signals": [
+        {{"source": "RSS|Hacker News|Twitter|journal|podcast", "title": "headline", "relevance": "why it matters", "url": ""}}
+    ]
 }}
 
 Guidelines:
@@ -126,6 +132,8 @@ Guidelines:
 - blockers: Issues preventing progress (active = still blocking)
 - themes: High-level topics (e.g., "security", "infrastructure", "documentation")
 - narrative: A concise prose summary capturing the essence of the day's work
+- interactions: Human/social interactions — PR reviews, conversations with Erik, social media posts, Discord chats
+- external_signals: News, model releases, ecosystem developments, research findings, podcast mentions — anything from outside that informs strategy
 - Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 
@@ -147,6 +155,8 @@ Return ONLY the JSON, no additional text."""
         "themes": [],
         "work_in_progress": [],
         "narrative": "",
+        "interactions": [],
+        "external_signals": [],
     }
 
     for key, default in defaults.items():
@@ -211,7 +221,13 @@ Return ONLY valid JSON (no explanation) with this structure:
     "themes": ["main themes across all entries"],
     "work_in_progress": ["items still in progress"],
     "narrative": "2-3 sentence prose summary of the day's work",
-    "key_insight": "most important learning or insight from the day"
+    "key_insight": "most important learning or insight from the day",
+    "interactions": [
+        {{"type": "github_review|github_issue|social_post|conversation|discord", "person": "who", "summary": "what happened", "url": ""}}
+    ],
+    "external_signals": [
+        {{"source": "RSS|Hacker News|Twitter|journal|podcast", "title": "headline", "relevance": "why it matters", "url": ""}}
+    ]
 }}
 
 Guidelines:
@@ -220,6 +236,8 @@ Guidelines:
 - Update blocker statuses (if resolved later in day, mark as resolved)
 - Identify overarching themes
 - Extract the single most valuable insight
+- interactions: Human/social interactions — PR reviews, conversations with Erik, social media posts, Discord chats
+- external_signals: News, model releases, ecosystem developments, research findings, podcast mentions
 - Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
 
@@ -242,6 +260,8 @@ Return ONLY the JSON."""
         "work_in_progress": [],
         "narrative": "",
         "key_insight": "",
+        "interactions": [],
+        "external_signals": [],
     }
 
     for key, default in defaults.items():

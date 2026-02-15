@@ -30,7 +30,11 @@ from .schemas import (
     BlockerStatus,
     DailySummary,
     Decision,
+    ExternalContribution,
+    ExternalSignal,
+    Interaction,
     Metrics,
+    ModelUsage,
     MonthlySummary,
 )
 from .session_data import (
@@ -38,6 +42,78 @@ from .session_data import (
     fetch_session_stats_range,
     format_sessions_for_prompt,
 )
+
+
+def _build_model_breakdown(session_stats):  # type: ignore[no-untyped-def]
+    """Build ModelUsage list from SessionStats."""
+    return [
+        ModelUsage(
+            model=mb.model,
+            sessions=mb.sessions,
+            tokens=mb.total_tokens,
+            cost=mb.cost,
+        )
+        for mb in session_stats.model_breakdown
+    ]
+
+
+def _build_interactions_from_result(result: dict) -> list[Interaction]:
+    """Build Interaction list from LLM result dict."""
+    interactions = []
+    for i in result.get("interactions", []):
+        if isinstance(i, dict):
+            interactions.append(
+                Interaction(
+                    type=i.get("type", "conversation"),
+                    person=i.get("person", ""),
+                    summary=i.get("summary", ""),
+                    url=i.get("url", ""),
+                )
+            )
+    return interactions
+
+
+def _build_interactions_from_github(activity) -> list[Interaction]:  # type: ignore[no-untyped-def]
+    """Build Interaction list from GitHub reviews received."""
+    return [
+        Interaction(
+            type="github_review",
+            person=r.reviewer,
+            summary=f"Reviewed {r.repo}#{r.pr_number}: {r.pr_title}",
+            url=r.url,
+        )
+        for r in activity.reviews_received
+    ]
+
+
+def _build_external_contributions(activity) -> list[ExternalContribution]:  # type: ignore[no-untyped-def]
+    """Build ExternalContribution list from cross-repo PRs."""
+    return [
+        ExternalContribution(
+            repo=pr.repo,
+            title=pr.title,
+            pr_number=pr.number,
+            status=pr.state,
+            url=pr.url,
+        )
+        for pr in activity.cross_repo_prs
+    ]
+
+
+def _build_external_signals(result: dict) -> list[ExternalSignal]:
+    """Build ExternalSignal list from LLM result dict."""
+    signals = []
+    for s in result.get("external_signals", []):
+        if isinstance(s, dict):
+            signals.append(
+                ExternalSignal(
+                    source=s.get("source", "journal"),
+                    title=s.get("title", ""),
+                    relevance=s.get("relevance", ""),
+                    url=s.get("url", ""),
+                )
+            )
+    return signals
 
 
 def _build_extra_context(
@@ -162,6 +238,10 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
     activity = fetch_activity(target_date, target_date, workspace=str(WORKSPACE))
     session_stats = fetch_session_stats(target_date)
 
+    # Build interactions from LLM + GitHub reviews
+    interactions = _build_interactions_from_result(result)
+    interactions.extend(_build_interactions_from_github(activity))
+
     # Convert to DailySummary schema with real metrics
     return DailySummary(
         date=target_date,
@@ -188,12 +268,14 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
         work_in_progress=result.get("work_in_progress", [])[:5],
         narrative=result.get("narrative", ""),
         key_insight=result.get("key_insight", ""),
+        interactions=interactions,
+        external_signals=_build_external_signals(result),
         metrics=Metrics(
             sessions=session_stats.session_count,
             commits=activity.total_commits,
             prs_merged=activity.total_prs_merged,
             issues_closed=activity.total_issues_closed,
-            models_used=dict(session_stats.models_used),
+            model_breakdown=_build_model_breakdown(session_stats),
             total_tokens=session_stats.total_tokens,
             total_cost=session_stats.total_cost,
         ),
@@ -300,12 +382,14 @@ def generate_weekly_summary_cc(week: str, verbose: bool = False):
         key_decisions=decisions,
         trends=cc_result.get("patterns", []),
         narrative=cc_result.get("narrative", ""),
+        interactions=_build_interactions_from_github(activity),
+        external_contributions=_build_external_contributions(activity),
         metrics=Metrics(
             sessions=session_stats.session_count,
             commits=activity.total_commits,
             prs_merged=activity.total_prs_merged,
             issues_closed=activity.total_issues_closed,
-            models_used=dict(session_stats.models_used),
+            model_breakdown=_build_model_breakdown(session_stats),
             total_tokens=session_stats.total_tokens,
             total_cost=session_stats.total_cost,
         ),
@@ -441,12 +525,13 @@ def generate_monthly_summary_cc(month: str, verbose: bool = False):
         key_learnings=cc_result.get("key_learnings", []),
         strategic_decisions=decisions,
         month_narrative=cc_result.get("month_narrative", ""),
+        external_contributions=_build_external_contributions(activity),
         metrics=Metrics(
             sessions=session_stats.session_count,
             commits=activity.total_commits,
             prs_merged=activity.total_prs_merged,
             issues_closed=activity.total_issues_closed,
-            models_used=dict(session_stats.models_used),
+            model_breakdown=_build_model_breakdown(session_stats),
             total_tokens=session_stats.total_tokens,
             total_cost=session_stats.total_cost,
         ),

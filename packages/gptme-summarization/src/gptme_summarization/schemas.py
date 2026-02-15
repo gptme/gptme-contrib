@@ -11,20 +11,22 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
-# Default repos for linkifying bare #NNN references.
-# When text mentions "PR #123" or "#123" without a repo prefix, we can't know
-# which repo it refers to — so we only linkify explicit "owner/repo#NNN" refs.
-# The LLM prompt asks it to use full references like "gptme/gptme#1265".
+# Linkify owner/repo#NNN references into GitHub URLs.
 _GITHUB_REF_RE = re.compile(r"(?<![/\w])([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)#(\d+)")
 
 
 def _linkify(text: str) -> str:
-    """Turn owner/repo#NNN references into markdown links.
-
-    Examples:
-        "Fixed in gptme/gptme#1265" -> "Fixed in [gptme/gptme#1265](https://github.com/gptme/gptme/issues/1265)"
-    """
+    """Turn owner/repo#NNN references into markdown links."""
     return _GITHUB_REF_RE.sub(r"[\1#\2](https://github.com/\1/issues/\2)", text)
+
+
+def _fmt_tokens(n: int) -> str:
+    """Format a token count for human readability."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
 
 
 class BlockerStatus(Enum):
@@ -56,6 +58,47 @@ class Blocker:
 
 
 @dataclass
+class ModelUsage:
+    """Per-model usage breakdown."""
+
+    model: str
+    sessions: int = 0
+    tokens: int = 0
+    cost: float = 0.0
+
+
+@dataclass
+class Interaction:
+    """A human or social interaction."""
+
+    type: str  # "github_review", "github_issue", "social_post", "conversation", "discord"
+    person: str  # who was involved (e.g. "Erik", "greptile-bot", "@ErikBjare")
+    summary: str  # what happened
+    url: str = ""  # link to the interaction
+
+
+@dataclass
+class ExternalContribution:
+    """A PR or contribution to a repo Bob doesn't own."""
+
+    repo: str  # e.g. "gptme/gptme"
+    title: str
+    pr_number: int = 0
+    status: str = ""  # "merged", "open", "closed"
+    url: str = ""
+
+
+@dataclass
+class ExternalSignal:
+    """An external event, news item, or ecosystem development."""
+
+    source: str  # e.g. "RSS", "Hacker News", "Twitter", "journal"
+    title: str
+    relevance: str = ""  # why it matters to Bob's work
+    url: str = ""
+
+
+@dataclass
 class Metrics:
     """Quantitative metrics for a time period."""
 
@@ -66,8 +109,8 @@ class Metrics:
     issues_created: int = 0
     issues_closed: int = 0
     tokens_used: int = 0
-    # Session metadata from gptme logs (model name -> session count)
-    models_used: dict[str, int] = field(default_factory=dict)
+    # Per-model breakdown (model -> {sessions, tokens, cost})
+    model_breakdown: list[ModelUsage] = field(default_factory=list)
     total_tokens: int = 0
     total_cost: float = 0.0
 
@@ -88,22 +131,91 @@ def _format_metrics_line(metrics: "Metrics", sessions: int = 0) -> str:
     return " | ".join(parts) if parts else ""
 
 
-def _format_session_metadata(metrics: "Metrics") -> str:
-    """Format session metadata (models, tokens, cost) as a line."""
+def _format_model_table(metrics: "Metrics") -> list[str]:
+    """Format per-model usage as a markdown table. Returns lines or empty list."""
+    if not metrics.model_breakdown:
+        return []
+
+    lines = [
+        "## Model Usage",
+        "",
+        "| Model | Sessions | Tokens | Cost |",
+        "|-------|----------|--------|------|",
+    ]
+    for m in metrics.model_breakdown:
+        cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
+        tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
+        lines.append(f"| {m.model} | {m.sessions} | {tokens_str} | {cost_str} |")
+
+    # Total row
+    total_sessions = sum(m.sessions for m in metrics.model_breakdown)
+    total_tokens = sum(m.tokens for m in metrics.model_breakdown)
+    total_cost = sum(m.cost for m in metrics.model_breakdown)
+    cost_str = f"${total_cost:.2f}" if total_cost > 0 else "-"
+    tokens_str = _fmt_tokens(total_tokens) if total_tokens > 0 else "-"
+    lines.append(f"| **Total** | **{total_sessions}** | **{tokens_str}** | **{cost_str}** |")
+    lines.append("")
+    return lines
+
+
+def _format_session_metadata_line(metrics: "Metrics") -> str:
+    """Compact one-line fallback when no per-model breakdown is available."""
     parts = []
-    if metrics.models_used:
-        model_strs = [f"{name} ({count})" for name, count in metrics.models_used.items()]
+    if metrics.model_breakdown:
+        model_strs = [f"{m.model} ({m.sessions})" for m in metrics.model_breakdown]
         parts.append(f"**Models**: {', '.join(model_strs)}")
     if metrics.total_tokens:
-        if metrics.total_tokens >= 1_000_000:
-            parts.append(f"**Tokens**: {metrics.total_tokens / 1_000_000:.1f}M")
-        elif metrics.total_tokens >= 1_000:
-            parts.append(f"**Tokens**: {metrics.total_tokens / 1_000:.1f}K")
-        else:
-            parts.append(f"**Tokens**: {metrics.total_tokens}")
+        parts.append(f"**Tokens**: {_fmt_tokens(metrics.total_tokens)}")
     if metrics.total_cost > 0:
         parts.append(f"**Cost**: ${metrics.total_cost:.2f}")
     return " | ".join(parts) if parts else ""
+
+
+def _render_interactions(interactions: list["Interaction"]) -> list[str]:
+    """Render interactions section."""
+    if not interactions:
+        return []
+    lines = ["## Interactions", ""]
+    for i in interactions:
+        label = i.type.replace("_", " ").title()
+        entry = f"- **{label}** ({i.person}): {i.summary}"
+        if i.url:
+            entry += f" ([link]({i.url}))"
+        lines.append(entry)
+    lines.append("")
+    return lines
+
+
+def _render_external_contributions(contribs: list["ExternalContribution"]) -> list[str]:
+    """Render external contributions section."""
+    if not contribs:
+        return []
+    lines = ["## External Contributions", ""]
+    for c in contribs:
+        status = f" ({c.status})" if c.status else ""
+        ref = f"{c.repo}#{c.pr_number}" if c.pr_number else c.repo
+        entry = f"- **{ref}**{status}: {c.title}"
+        if c.url:
+            entry += f" ([link]({c.url}))"
+        lines.append(entry)
+    lines.append("")
+    return lines
+
+
+def _render_external_signals(signals: list["ExternalSignal"]) -> list[str]:
+    """Render external signals / situational awareness section."""
+    if not signals:
+        return []
+    lines = ["## External Signals", ""]
+    for s in signals:
+        entry = f"- **{s.source}**: {s.title}"
+        if s.relevance:
+            entry += f" — *{s.relevance}*"
+        if s.url:
+            entry += f" ([link]({s.url}))"
+        lines.append(entry)
+    lines.append("")
+    return lines
 
 
 @dataclass
@@ -124,6 +236,8 @@ class DailySummary:
     narrative: str = ""
     key_insight: str = ""
     session_count: int = 0
+    interactions: list[Interaction] = field(default_factory=list)
+    external_signals: list[ExternalSignal] = field(default_factory=list)
     generated_at: Optional[datetime] = None
 
     def to_markdown(self) -> str:
@@ -137,9 +251,14 @@ class DailySummary:
         if metrics_line:
             lines.extend([metrics_line, ""])
 
-        session_meta = _format_session_metadata(self.metrics)
-        if session_meta:
-            lines.extend([session_meta, ""])
+        # Model table or fallback line
+        model_table = _format_model_table(self.metrics)
+        if model_table:
+            lines.extend(model_table)
+        else:
+            meta = _format_session_metadata_line(self.metrics)
+            if meta:
+                lines.extend([meta, ""])
 
         if self.narrative:
             lines.extend([self.narrative, ""])
@@ -191,6 +310,9 @@ class DailySummary:
                 ]
             )
 
+        lines.extend(_render_interactions(self.interactions))
+        lines.extend(_render_external_signals(self.external_signals))
+
         if self.key_insight:
             lines.extend(
                 [
@@ -226,11 +348,14 @@ class WeeklySummary:
     milestones: list[str] = field(default_factory=list)
     recurring_themes: list[str] = field(default_factory=list)
     key_decisions: list[Decision] = field(default_factory=list)
-    progress_on_tasks: dict[str, str] = field(default_factory=dict)  # task_id -> progress summary
+    progress_on_tasks: dict[str, str] = field(default_factory=dict)
     blockers_summary: str = ""
     metrics: Metrics = field(default_factory=Metrics)
     narrative: str = ""
-    trends: list[str] = field(default_factory=list)  # Observed patterns
+    trends: list[str] = field(default_factory=list)
+    interactions: list[Interaction] = field(default_factory=list)
+    external_contributions: list[ExternalContribution] = field(default_factory=list)
+    external_signals: list[ExternalSignal] = field(default_factory=list)
     generated_at: Optional[datetime] = None
 
     def to_markdown(self) -> str:
@@ -245,9 +370,13 @@ class WeeklySummary:
         if metrics_line:
             lines.extend([metrics_line, ""])
 
-        session_meta = _format_session_metadata(self.metrics)
-        if session_meta:
-            lines.extend([session_meta, ""])
+        model_table = _format_model_table(self.metrics)
+        if model_table:
+            lines.extend(model_table)
+        else:
+            meta = _format_session_metadata_line(self.metrics)
+            if meta:
+                lines.extend([meta, ""])
 
         if self.narrative:
             lines.extend([self.narrative, ""])
@@ -281,6 +410,10 @@ class WeeklySummary:
                     "",
                 ]
             )
+
+        lines.extend(_render_interactions(self.interactions))
+        lines.extend(_render_external_contributions(self.external_contributions))
+        lines.extend(_render_external_signals(self.external_signals))
 
         if self.recurring_themes:
             lines.extend(
@@ -321,14 +454,16 @@ class MonthlySummary:
     """
 
     month: str  # Format: YYYY-MM (e.g., "2025-12")
-    accomplishments: list[str] = field(default_factory=list)  # Major achievements
-    goals_progress: dict[str, str] = field(default_factory=dict)  # goal -> status
+    accomplishments: list[str] = field(default_factory=list)
+    goals_progress: dict[str, str] = field(default_factory=dict)
     key_learnings: list[str] = field(default_factory=list)
     strategic_decisions: list[Decision] = field(default_factory=list)
     direction_for_next_month: list[str] = field(default_factory=list)
     metrics: Metrics = field(default_factory=Metrics)
     month_narrative: str = ""
-    highlights: list[str] = field(default_factory=list)  # Notable moments
+    highlights: list[str] = field(default_factory=list)
+    external_contributions: list[ExternalContribution] = field(default_factory=list)
+    external_signals: list[ExternalSignal] = field(default_factory=list)
     generated_at: Optional[datetime] = None
 
     def to_markdown(self) -> str:
@@ -338,22 +473,17 @@ class MonthlySummary:
             "",
         ]
 
-        # Compact metrics block
-        metrics_parts = []
-        if self.metrics.sessions:
-            metrics_parts.append(f"**Sessions**: {self.metrics.sessions}")
-        if self.metrics.commits:
-            metrics_parts.append(f"**Commits**: {self.metrics.commits}")
-        if self.metrics.prs_merged:
-            metrics_parts.append(f"**PRs merged**: {self.metrics.prs_merged}")
-        if self.metrics.issues_closed:
-            metrics_parts.append(f"**Issues closed**: {self.metrics.issues_closed}")
-        if metrics_parts:
-            lines.extend([" | ".join(metrics_parts), ""])
+        metrics_line = _format_metrics_line(self.metrics)
+        if metrics_line:
+            lines.extend([metrics_line, ""])
 
-        session_meta = _format_session_metadata(self.metrics)
-        if session_meta:
-            lines.extend([session_meta, ""])
+        model_table = _format_model_table(self.metrics)
+        if model_table:
+            lines.extend(model_table)
+        else:
+            meta = _format_session_metadata_line(self.metrics)
+            if meta:
+                lines.extend([meta, ""])
 
         if self.month_narrative:
             lines.extend([self.month_narrative, ""])
@@ -393,6 +523,9 @@ class MonthlySummary:
                     "",
                 ]
             )
+
+        lines.extend(_render_external_contributions(self.external_contributions))
+        lines.extend(_render_external_signals(self.external_signals))
 
         if self.highlights:
             lines.extend(

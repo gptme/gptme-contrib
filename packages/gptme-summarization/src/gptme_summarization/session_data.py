@@ -33,6 +33,21 @@ class SessionInfo:
 
 
 @dataclass
+class ModelBreakdown:
+    """Per-model aggregated usage."""
+
+    model: str
+    sessions: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass
 class SessionStats:
     """Aggregated session stats for a date range."""
 
@@ -45,10 +60,16 @@ class SessionStats:
     total_cost: float = 0.0
     total_duration_seconds: float = 0.0
     sessions: list[SessionInfo] = field(default_factory=list)
+    _model_data: dict[str, ModelBreakdown] = field(default_factory=dict)
 
     @property
     def total_tokens(self) -> int:
         return self.total_input_tokens + self.total_output_tokens
+
+    @property
+    def model_breakdown(self) -> list[ModelBreakdown]:
+        """Per-model usage breakdown, sorted by session count descending."""
+        return sorted(self._model_data.values(), key=lambda m: -m.sessions)
 
 
 def _get_logs_dir() -> Path:
@@ -236,6 +257,14 @@ def fetch_session_stats_range(
                 stats.models_used[session_info.model] = (
                     stats.models_used.get(session_info.model, 0) + 1
                 )
+                # Per-model breakdown
+                if session_info.model not in stats._model_data:
+                    stats._model_data[session_info.model] = ModelBreakdown(model=session_info.model)
+                mb = stats._model_data[session_info.model]
+                mb.sessions += 1
+                mb.input_tokens += session_info.input_tokens
+                mb.output_tokens += session_info.output_tokens
+                mb.cost += session_info.cost
 
             stats.total_input_tokens += session_info.input_tokens
             stats.total_output_tokens += session_info.output_tokens
