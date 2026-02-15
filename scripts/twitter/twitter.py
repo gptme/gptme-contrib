@@ -109,8 +109,15 @@ def cached_get_me(client, user_auth: bool = False):
 
 
 def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
-    """Initialize Twitter client with credentials from .env"""
-    load_dotenv()
+    """Initialize Twitter client with credentials from .env
+
+    Note: We use override=True with load_dotenv() to ensure we always get
+    the latest tokens from .env. This is critical because after token refresh,
+    the new tokens are written to .env but os.environ still has the old values.
+    Twitter's refresh tokens are single-use (RFC 6749 Section 6), so using a
+    stale refresh token will result in a 400 Bad Request error.
+    """
+    load_dotenv(override=True)
 
     # Check for bearer token (required for read operations)
     bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
@@ -166,7 +173,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                         if error or not new_token_info:
                             raise Exception(f"Token refresh failed: {error}")
 
-                        # Save new tokens
+                        # Save new tokens to .env file
                         save_token_to_env(
                             "TWITTER_OAUTH2_ACCESS_TOKEN",
                             new_token_info.token,
@@ -183,6 +190,20 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                                 "TWITTER_OAUTH2_EXPIRES_AT",
                                 new_token_info.expires_at.isoformat(),
                                 comment="OAuth 2.0 token expiration time",
+                            )
+
+                        # CRITICAL: Also update os.environ with new tokens
+                        # This ensures subsequent calls in the same process use new tokens
+                        # Twitter refresh tokens are single-use, so the old refresh token
+                        # is now invalid and must not be reused
+                        os.environ["TWITTER_OAUTH2_ACCESS_TOKEN"] = new_token_info.token
+                        if new_token_info.refresh_token:
+                            os.environ["TWITTER_OAUTH2_REFRESH_TOKEN"] = (
+                                new_token_info.refresh_token
+                            )
+                        if new_token_info.expires_at:
+                            os.environ["TWITTER_OAUTH2_EXPIRES_AT"] = (
+                                new_token_info.expires_at.isoformat()
                             )
 
                         saved_token = new_token_info.token
