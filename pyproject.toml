@@ -23,6 +23,7 @@ exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "pac
 gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
 
 [tool.mypy]
+check_untyped_defs = true
 # Exclude packages with hyphenated names from mypy
 # These cause "not a valid Python package name" errors due to mypy config parsing
 # TODO: investigate mypy hyphen handling (gptme-runloops fixed and type-checked)

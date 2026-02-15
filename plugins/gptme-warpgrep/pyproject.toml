@@ -23,4 +23,5 @@ build-backend = "hatchling.build"
 packages = ["src/gptme_warp_grep"]
 
 [tool.mypy]
+check_untyped_defs = true
 ignore_missing_imports = true
