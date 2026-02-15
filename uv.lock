@@ -1090,11 +1090,6 @@ provides-extras = ["dev"]
 name = "gptme-summarization"
 version = "0.1.0"
 source = { editable = "packages/gptme-summarization" }
-dependencies = [
-    { name = "click" },
-    { name = "python-frontmatter" },
-    { name = "rich" },
-]
 
 [package.optional-dependencies]
 dev = [
@@ -1109,14 +1104,11 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
-    { name = "python-frontmatter", specifier = ">=1.1.0" },
-    { name = "rich", specifier = ">=13.0.0" },
 ]
 provides-extras = ["dev", "test"]
 

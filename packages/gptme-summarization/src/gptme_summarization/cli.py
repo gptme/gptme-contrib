@@ -131,15 +131,14 @@ def generate_weekly_summary_cc(week: str):
     end_date = start_date + timedelta(days=6)
 
     # Count journal sessions for the week
-    journal_dir = Path("/home/bob/bob/journal")
     total_sessions = 0
     current = start_date
     while current <= end_date:
         date_str = current.isoformat()
         # Count old format: journal/YYYY-MM-DD.md and journal/YYYY-MM-DD-*.md
-        old_format = list(journal_dir.glob(f"{date_str}*.md"))
+        old_format = list(JOURNAL_DIR.glob(f"{date_str}*.md"))
         # Count new format: journal/YYYY-MM-DD/*.md (subdirectory)
-        new_format_dir = journal_dir / date_str
+        new_format_dir = JOURNAL_DIR / date_str
         new_format = list(new_format_dir.glob("*.md")) if new_format_dir.exists() else []
         total_sessions += len(old_format) + len(new_format)
         current += timedelta(days=1)

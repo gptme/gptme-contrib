@@ -9,6 +9,7 @@ This module handles:
 Note: The actual summarization is done by the Claude Code backend (cc_backend.py).
 """
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -18,9 +19,9 @@ from .schemas import (
     MonthlySummary,
 )
 
-# Journal directory (relative to workspace root)
-JOURNAL_DIR = Path("/home/bob/bob/journal")
-SUMMARIES_DIR = Path("/home/bob/bob/knowledge/summaries")
+# Journal directory - configurable via environment variable
+JOURNAL_DIR = Path(os.environ.get("GPTME_JOURNAL_DIR", "/home/bob/bob/journal"))
+SUMMARIES_DIR = Path(os.environ.get("GPTME_SUMMARIES_DIR", "/home/bob/bob/knowledge/summaries"))
 
 
 def get_journal_entries_for_date(target_date: date) -> list[Path]:
@@ -78,7 +79,10 @@ def save_summary(summary) -> Path:
     output_path.write_text(summary.to_markdown())
 
     # Also write JSON for programmatic access
+    import json
+    from dataclasses import asdict
+
     json_path = output_path.with_suffix(".json")
-    json_path.write_text(summary.to_json())
+    json_path.write_text(json.dumps(asdict(summary), default=str, indent=2))
 
     return output_path

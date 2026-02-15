@@ -20,11 +20,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Utilities",
 ]
-dependencies = [
-    "python-frontmatter>=1.1.0",
-    "click>=8.0.0",
-    "rich>=13.0.0",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/gptme/gptme-contrib"
@@ -43,7 +39,7 @@ test = [
 ]
 
 [project.scripts]
-summarize = "gptme_summarization.cli:cli"
+summarize = "gptme_summarization.cli:main"
 
 [build-system]
 requires = ["hatchling"]
