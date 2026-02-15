@@ -15,30 +15,63 @@ NC='\033[0m' # No Color
 
 check_repo() {
     local repo=$1
-    local label=${2:-$(basename "$repo")}
+    local label=${2:-$repo}
 
-    # Get latest workflow run
-    local status
-    status=$(gh run list --repo "$repo" --limit 1 --json conclusion -q '.[0].conclusion' 2>/dev/null || echo "unknown")
+    # Fetch last 2 runs so we can show previous result if latest is in-progress
+    local run_json
+    run_json=$(gh run list --repo "$repo" --limit 2 --json conclusion,status,url 2>/dev/null || echo "error")
 
-    case "$status" in
+    if [ "$run_json" = "error" ]; then
+        echo -e "${YELLOW}-${NC} $label: No Actions"
+        return
+    fi
+
+    if [ "$run_json" = "[]" ]; then
+        echo -e "${YELLOW}-${NC} $label: No runs"
+        return
+    fi
+
+    local conclusion status in_progress=""
+    conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // ""')
+    status=$(echo "$run_json" | jq -r '.[0].status // ""')
+
+    # If latest run is in-progress, use the previous run's conclusion instead
+    if [ -z "$conclusion" ] && [[ "$status" =~ ^(in_progress|queued|waiting|pending|requested)$ ]]; then
+        in_progress=1
+        conclusion=$(echo "$run_json" | jq -r '.[1].conclusion // ""' 2>/dev/null)
+    fi
+
+    local suffix=""
+    [ -n "$in_progress" ] && suffix=" (run in progress)"
+
+    case "$conclusion" in
         "success")
-            echo -e "${GREEN}✓${NC} $label: Passing"
+            echo -e "${GREEN}✓${NC} $label: Passing${suffix}"
             ;;
         "failure")
-            echo -e "${RED}✗${NC} $label: Failing"
-            # Get the workflow URL for easy access to logs
+            echo -e "${RED}✗${NC} $label: Failing${suffix}"
+            # Show URL for the failing run (index 1 if in-progress, else 0)
+            local idx=0
+            [ -n "$in_progress" ] && idx=1
             local workflow_url
-            workflow_url=$(gh run list --repo "$repo" --limit 1 --json url -q '.[0].url' 2>/dev/null || echo "")
+            workflow_url=$(echo "$run_json" | jq -r ".[$idx].url // \"\"")
             if [ -n "$workflow_url" ]; then
                 echo "  $workflow_url"
             fi
             ;;
         "cancelled"|"skipped")
-            echo -e "${YELLOW}⚠${NC} $label: $status"
+            echo -e "${YELLOW}⚠${NC} $label: $conclusion${suffix}"
+            ;;
+        "")
+            # No previous run to fall back on
+            if [ -n "$in_progress" ]; then
+                echo -e "${YELLOW}⏳${NC} $label: In progress (no previous run)"
+            else
+                echo "? $label: Unknown ($status)"
+            fi
             ;;
         *)
-            echo "? $label: Unknown status"
+            echo "? $label: $conclusion${suffix}"
             ;;
     esac
 }
@@ -71,20 +104,46 @@ if [ $# -gt 0 ]; then
         cat "$f"
     done
 else
-    # Try to use watched repos as fallback
-    watched_repos=$(gh api --paginate /user/subscriptions 2>/dev/null | jq -r '.[].full_name' 2>/dev/null || echo "")
+    # Dynamically build repo list: gptme org (non-archived) + recently updated personal repos
+    # Both calls are fast (~1s each) and run in parallel
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
 
-    if [ -n "$watched_repos" ]; then
-        # Use watched repos
-        echo "$watched_repos" | while read -r repo; do
-            [ -n "$repo" ] && check_repo "$repo"
-        done
-    else
-        # Final fallback: Default repos (gptme ecosystem)
-        check_repo "gptme/gptme" "gptme"
-        check_repo "gptme/gptme-rag" "gptme-rag"
-        check_repo "gptme/gptme-webui" "gptme-webui"
-        check_repo "gptme/gptme-agent-template" "gptme-agent-template"
-        check_repo "gptme/gptme-landing" "gptme-landing"
+    # Fetch repo lists in parallel
+    gh repo list gptme --no-archived --json nameWithOwner --jq '.[].nameWithOwner' --limit 30 > "$TMPDIR/org_repos.txt" 2>/dev/null &
+    gh repo list ErikBjare --no-archived --source --json nameWithOwner,pushedAt --limit 10 > "$TMPDIR/personal_repos.json" 2>/dev/null &
+    wait
+
+    # Get 5 most recently pushed personal repos
+    python3 -c "
+import json, sys
+try:
+    repos = json.load(open('$TMPDIR/personal_repos.json'))
+    repos.sort(key=lambda r: r['pushedAt'], reverse=True)
+    for r in repos[:5]:
+        print(r['nameWithOwner'])
+except Exception:
+    pass
+" > "$TMPDIR/personal_repos.txt" 2>/dev/null
+
+    # Combine and deduplicate
+    all_repos=$(cat "$TMPDIR/org_repos.txt" "$TMPDIR/personal_repos.txt" 2>/dev/null | sort -u)
+
+    if [ -z "$all_repos" ]; then
+        echo "Unable to fetch repo list"
+        exit 1
     fi
+
+    # Check all repos in parallel
+    i=0
+    while read -r repo; do
+        [ -n "$repo" ] && check_repo "$repo" > "$TMPDIR/$i.txt" 2>&1 &
+        ((i++))
+    done <<< "$all_repos"
+    wait
+
+    # Print results in order
+    for f in "$TMPDIR"/[0-9]*.txt; do
+        [ -f "$f" ] && cat "$f"
+    done
 fi
