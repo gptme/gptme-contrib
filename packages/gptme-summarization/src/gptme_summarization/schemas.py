@@ -66,8 +66,8 @@ class Metrics:
     issues_created: int = 0
     issues_closed: int = 0
     tokens_used: int = 0
-    # Session metadata from gptme logs
-    models_used: list[str] = field(default_factory=list)
+    # Session metadata from gptme logs (model name -> session count)
+    models_used: dict[str, int] = field(default_factory=dict)
     total_tokens: int = 0
     total_cost: float = 0.0
 
@@ -92,7 +92,8 @@ def _format_session_metadata(metrics: "Metrics") -> str:
     """Format session metadata (models, tokens, cost) as a line."""
     parts = []
     if metrics.models_used:
-        parts.append(f"**Models**: {', '.join(metrics.models_used)}")
+        model_strs = [f"{name} ({count})" for name, count in metrics.models_used.items()]
+        parts.append(f"**Models**: {', '.join(model_strs)}")
     if metrics.total_tokens:
         if metrics.total_tokens >= 1_000_000:
             parts.append(f"**Tokens**: {metrics.total_tokens / 1_000_000:.1f}M")
