@@ -19,6 +19,9 @@ members = ["packages/*", "plugins/*"]
 # packages/run_loops -> gptme-runloops
 exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "packages/lessons", "packages/lib", "packages/run_loops"]
 
+[tool.uv.sources]
+gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
+
 [tool.mypy]
 # Exclude packages with hyphenated names from mypy
 # These cause "not a valid Python package name" errors due to mypy config parsing
