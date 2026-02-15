@@ -1,6 +1,6 @@
-# gptme-summarization
+# gptme-activity-summary
 
-Journal summarization utilities for gptme agents.
+Activity summarization for gptme agents — journals, GitHub, sessions, tweets, email.
 
 ## Features
 
@@ -8,11 +8,13 @@ Journal summarization utilities for gptme agents.
 - **Weekly Aggregation**: Aggregate daily summaries into weekly summaries
 - **Monthly Aggregation**: Aggregate weekly summaries into monthly summaries
 - **Claude Code Backend**: High-quality summarization using Claude Code
+- **Real Data Sources**: GitHub activity, gptme session stats, posted tweets, sent emails
+- **Model Usage Tracking**: Per-model token/cost breakdown from conversation logs
 
 ## Installation
 
 ```bash
-pip install gptme-summarization
+pip install gptme-activity-summary
 ```
 
 ## Usage

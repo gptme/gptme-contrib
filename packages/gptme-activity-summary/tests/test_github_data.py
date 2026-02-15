@@ -3,7 +3,7 @@
 from datetime import date
 from unittest.mock import patch
 
-from gptme_summarization.github_data import (
+from gptme_activity_summary.github_data import (
     GitHubActivity,
     RepoActivity,
     _run_command,
@@ -94,7 +94,7 @@ def test_format_activity_multiple_repos():
 def test_get_merged_prs_parses_json():
     """Test get_merged_prs correctly parses gh output."""
     mock_output = '[{"number": 1, "title": "Fix bug", "url": "https://github.com/o/r/pull/1", "mergedAt": "2025-01-01T00:00:00Z"}]'
-    with patch("gptme_summarization.github_data._run_command", return_value=mock_output):
+    with patch("gptme_activity_summary.github_data._run_command", return_value=mock_output):
         prs = get_merged_prs(date(2025, 1, 1), date(2025, 1, 7), "o/r")
     assert len(prs) == 1
     assert prs[0]["number"] == "1"
@@ -103,7 +103,7 @@ def test_get_merged_prs_parses_json():
 
 def test_get_merged_prs_handles_none():
     """Test get_merged_prs returns empty list when command fails."""
-    with patch("gptme_summarization.github_data._run_command", return_value=None):
+    with patch("gptme_activity_summary.github_data._run_command", return_value=None):
         prs = get_merged_prs(date(2025, 1, 1), date(2025, 1, 7), "o/r")
     assert prs == []
 

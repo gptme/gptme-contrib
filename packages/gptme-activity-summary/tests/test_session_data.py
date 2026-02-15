@@ -4,7 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from gptme_summarization.session_data import (
+from gptme_activity_summary.session_data import (
     SessionStats,
     _session_matches_date,
     _session_matches_range,

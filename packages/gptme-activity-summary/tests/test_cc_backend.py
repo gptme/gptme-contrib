@@ -1,6 +1,6 @@
 """Tests for cc_backend module."""
 
-from gptme_summarization.cc_backend import extract_json_from_response
+from gptme_activity_summary.cc_backend import extract_json_from_response
 
 
 def test_extract_json_plain():

@@ -42,6 +42,10 @@ from .session_data import (
     fetch_session_stats_range,
     format_sessions_for_prompt,
 )
+from .workspace_data import (
+    fetch_workspace_activity,
+    format_workspace_activity_for_prompt,
+)
 
 
 def _build_model_breakdown(session_stats):  # type: ignore[no-untyped-def]
@@ -121,7 +125,13 @@ def _build_extra_context(
     end: date,
     verbose: bool = False,
 ) -> str:
-    """Build extra context string from GitHub activity and session data."""
+    """Build extra context string from all available data sources.
+
+    Sources:
+    - GitHub activity (commits, PRs, issues via gh CLI)
+    - gptme session stats (models, tokens, cost from log files)
+    - Workspace activity (posted tweets, sent emails from workspace dirs)
+    """
     parts: list[str] = []
 
     # Fetch GitHub activity
@@ -145,6 +155,16 @@ def _build_extra_context(
         if verbose:
             print(
                 f"  Sessions: {session_stats.session_count}, tokens: {session_stats.total_tokens:,}"
+            )
+
+    # Fetch workspace activity (tweets, emails)
+    ws_activity = fetch_workspace_activity(start, end, WORKSPACE)
+    ws_text = format_workspace_activity_for_prompt(ws_activity)
+    if ws_text:
+        parts.append(ws_text)
+        if verbose:
+            print(
+                f"  Workspace: {len(ws_activity.tweets)} tweets, {len(ws_activity.emails)} emails"
             )
 
     return "\n".join(parts)
