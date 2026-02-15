@@ -20,6 +20,8 @@ members = ["packages/*", "plugins/*"]
 exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "packages/lessons", "packages/lib", "packages/run_loops"]
 
 [tool.uv.sources]
+# External dependency
+gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
 # Workspace packages can depend on each other
 gptme-contrib-lib = { workspace = true }
 gptme-summarization = { workspace = true }
