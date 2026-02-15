@@ -20,17 +20,28 @@ from .schemas import (
 )
 
 
-def _get_workspace() -> Path:
+def _get_agent_workspace() -> Path:
     """Get the agent workspace directory.
 
     Detection order:
-    1. Git repository root (if in a git repo)
-    2. Current working directory
+    1. GPTME_WORKSPACE environment variable (if explicitly set)
+    2. Parent git repository root (if in a submodule like gptme-contrib)
+    3. Current git repository root (if in a main repo)
+    4. Current working directory (fallback)
+
+    This handles the case where code runs from within a submodule
+    (e.g., gptme-contrib) and needs to find the parent agent workspace.
 
     Returns:
-        Path to the workspace directory
+        Path to the agent workspace directory
     """
-    # Try to find git root
+    import os
+
+    # 1. Check for explicit environment variable
+    if workspace := os.environ.get("GPTME_WORKSPACE"):
+        return Path(workspace)
+
+    # 2. Try to find git root, handling submodules
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -39,16 +50,30 @@ def _get_workspace() -> Path:
             timeout=5,
         )
         if result.returncode == 0:
-            return Path(result.stdout.strip())
+            git_root = Path(result.stdout.strip())
+
+            # Check if we're in a submodule (.git is a file, not a directory)
+            git_path = git_root / ".git"
+            if git_path.is_file():
+                # We're in a submodule, the parent directory is the agent workspace
+                parent = git_root.parent
+                # Verify the parent has a .git directory (is a git repo)
+                if (parent / ".git").exists():
+                    return parent
+                # If parent isn't a git repo, return the submodule root
+                return git_root
+
+            # Not a submodule, return the git root
+            return git_root
     except Exception:
         pass
 
-    # Fall back to current directory
+    # 3. Fall back to current directory
     return Path.cwd()
 
 
 # Derive paths from workspace
-WORKSPACE = _get_workspace()
+WORKSPACE = _get_agent_workspace()
 JOURNAL_DIR = WORKSPACE / "journal"
 SUMMARIES_DIR = WORKSPACE / "knowledge" / "summaries"
 
