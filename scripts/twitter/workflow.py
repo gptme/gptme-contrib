@@ -1253,6 +1253,14 @@ def process_timeline_tweets(
                         and eval_result
                         and eval_result.action == "respond"
                     ):
+                        # Check for duplicate replies before auto-posting
+                        duplicates = _check_for_duplicate_replies_internal(draft)
+                        if "posted" in duplicates:
+                            console.print(
+                                f"[yellow]⚠ Skipping auto-post: already posted {len(duplicates['posted'])} reply(ies) to tweet {draft.in_reply_to}"
+                            )
+                            continue
+
                         # Auto-post for trusted users
                         console.print(
                             f"[green]Auto-posting reply to trusted user @{author_username}"
