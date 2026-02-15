@@ -1,0 +1,31 @@
+[project]
+name = "gptme-voice"
+version = "0.1.0"
+description = "Voice interface for gptme with OpenAI Realtime API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "websockets>=12.0",
+    "starlette>=0.37.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+local = [
+    "pyaudio>=0.2.13",
+]
+
+[project.scripts]
+gptme-voice-server = "gptme_voice.realtime.server:main"
+gptme-voice-test = "gptme_voice.realtime.local_test:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_voice"]
