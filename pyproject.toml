@@ -17,10 +17,7 @@ members = ["packages/*", "plugins/*"]
 # packages/lessons -> gptme-lessons-extras
 # packages/lib -> gptme-contrib-lib
 # packages/run_loops -> gptme-runloops
-# Also exclude gptme-summarization: has inter-package dep on gptme-contrib-lib
-# which breaks uv workspace resolution when running as a submodule (parent
-# workspace doesn't include gptme-contrib packages). Uses --no-project in Makefile.
-exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "packages/lessons", "packages/lib", "packages/run_loops", "packages/gptme-summarization"]
+exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "packages/lessons", "packages/lib", "packages/run_loops"]
 
 [tool.uv.sources]
 gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }

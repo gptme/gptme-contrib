@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "gptme-contrib-lib",
+    "gptme",
 ]
 
 [project.urls]

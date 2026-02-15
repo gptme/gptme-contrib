@@ -12,7 +12,7 @@ Note: The actual summarization is done by the Claude Code backend (cc_backend.py
 from datetime import date
 from pathlib import Path
 
-from gptme_contrib_lib.config import get_agent_workspace
+from gptme.dirs import get_workspace
 
 from .schemas import (
     DailySummary,
@@ -22,7 +22,7 @@ from .schemas import (
 
 
 # Derive paths from workspace
-WORKSPACE = get_agent_workspace()
+WORKSPACE = get_workspace()
 JOURNAL_DIR = WORKSPACE / "journal"
 SUMMARIES_DIR = WORKSPACE / "knowledge" / "summaries"
 
