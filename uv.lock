@@ -726,6 +726,7 @@ version = "0.1.0"
 source = { editable = "packages/gptmail" }
 dependencies = [
     { name = "click" },
+    { name = "gptme-contrib-lib" },
     { name = "markdown" },
     { name = "python-dateutil" },
     { name = "requests" },
@@ -742,6 +743,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
+    { name = "gptme-contrib-lib", editable = "packages/gptme-contrib-lib" },
     { name = "markdown", specifier = ">=3.4" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },

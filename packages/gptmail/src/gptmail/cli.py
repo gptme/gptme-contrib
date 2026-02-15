@@ -19,17 +19,13 @@ from pathlib import Path
 
 import click
 
+from gptme_contrib_lib.config import get_agent_workspace
 from gptmail.lib import AgentEmail
 
 
 def get_workspace_dir() -> Path:
-    """Get the agent workspace directory using `git rev-parse --show-toplevel`."""
-    return Path(
-        subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
-            text=True,
-        ).strip()
-    )
+    """Get the agent workspace directory using shared utility."""
+    return get_agent_workspace()
 
 
 def load_env_file(workspace_dir: Path) -> None:
