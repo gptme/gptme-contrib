@@ -35,6 +35,7 @@ class BlockerStatus(Enum):
     ACTIVE = "active"
     RESOLVED = "resolved"
     ESCALATED = "escalated"
+    DEFERRED = "deferred"
 
 
 @dataclass

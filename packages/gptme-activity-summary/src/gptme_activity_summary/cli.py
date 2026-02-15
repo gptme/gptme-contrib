@@ -24,7 +24,7 @@ from .generator import (
     get_journal_entries_for_date,
     save_summary,
 )
-from .github_data import fetch_activity, format_activity_for_prompt
+from .github_data import GitHubActivity, fetch_activity, format_activity_for_prompt
 from .schemas import (
     Blocker,
     BlockerStatus,
@@ -38,6 +38,7 @@ from .schemas import (
     MonthlySummary,
 )
 from .session_data import (
+    SessionStats,
     fetch_session_stats,
     fetch_session_stats_range,
     format_sessions_for_prompt,
@@ -46,6 +47,14 @@ from .workspace_data import (
     fetch_workspace_activity,
     format_workspace_activity_for_prompt,
 )
+
+
+def _parse_blocker_status(status: str) -> BlockerStatus:
+    """Parse blocker status string, defaulting to ACTIVE for unknown values."""
+    try:
+        return BlockerStatus(status)
+    except ValueError:
+        return BlockerStatus.ACTIVE
 
 
 def _build_model_breakdown(session_stats):  # type: ignore[no-untyped-def]
@@ -120,9 +129,24 @@ def _build_external_signals(result: dict) -> list[ExternalSignal]:
     return signals
 
 
+def _fetch_data(
+    start: date,
+    end: date,
+) -> tuple[GitHubActivity, SessionStats]:
+    """Fetch GitHub activity and session stats for a date range."""
+    activity = fetch_activity(start, end, workspace=str(WORKSPACE))
+    if start == end:
+        session_stats = fetch_session_stats(start)
+    else:
+        session_stats = fetch_session_stats_range(start, end)
+    return activity, session_stats
+
+
 def _build_extra_context(
     start: date,
     end: date,
+    activity: GitHubActivity,
+    session_stats: SessionStats,
     verbose: bool = False,
 ) -> str:
     """Build extra context string from all available data sources.
@@ -134,8 +158,6 @@ def _build_extra_context(
     """
     parts: list[str] = []
 
-    # Fetch GitHub activity
-    activity = fetch_activity(start, end, workspace=str(WORKSPACE))
     activity_text = format_activity_for_prompt(activity)
     if activity_text:
         parts.append(activity_text)
@@ -144,11 +166,6 @@ def _build_extra_context(
                 f"  GitHub: {activity.total_commits} commits, {activity.total_prs_merged} PRs, {activity.total_issues_closed} issues"
             )
 
-    # Fetch session stats
-    if start == end:
-        session_stats = fetch_session_stats(start)
-    else:
-        session_stats = fetch_session_stats_range(start, end)
     session_text = format_sessions_for_prompt(session_stats)
     if session_text:
         parts.append(session_text)
@@ -246,17 +263,16 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
     # Load content for each entry
     entry_contents = [(p, p.read_text()) for p in entries]
 
-    # Build extra context from real data sources
+    # Fetch data once, use for both prompt context and metrics
     if verbose:
         print("Fetching real data sources...")
-    extra_context = _build_extra_context(target_date, target_date, verbose=verbose)
+    activity, session_stats = _fetch_data(target_date, target_date)
+    extra_context = _build_extra_context(
+        target_date, target_date, activity, session_stats, verbose=verbose
+    )
 
     # Get summary from Claude Code
     result = summarize_daily_with_cc(entry_contents, str(target_date), extra_context=extra_context)
-
-    # Fetch real metrics
-    activity = fetch_activity(target_date, target_date, workspace=str(WORKSPACE))
-    session_stats = fetch_session_stats(target_date)
 
     # Build interactions from LLM + GitHub reviews
     interactions = _build_interactions_from_result(result)
@@ -280,7 +296,7 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
         blockers=[
             Blocker(
                 issue=b.get("issue", ""),
-                status=BlockerStatus(b.get("status", "active")),
+                status=_parse_blocker_status(b.get("status", "active")),
             )
             for b in result.get("blockers", [])
         ],
@@ -369,17 +385,16 @@ def generate_weekly_summary_cc(week: str, verbose: bool = False):
     if not daily_summaries:
         raise ValueError(f"No daily summaries found for {week}")
 
-    # Build extra context from real data sources
+    # Fetch data once, use for both prompt context and metrics
     if verbose:
         print("Fetching real data sources...")
-    extra_context = _build_extra_context(start_date, end_date, verbose=verbose)
+    activity, session_stats = _fetch_data(start_date, end_date)
+    extra_context = _build_extra_context(
+        start_date, end_date, activity, session_stats, verbose=verbose
+    )
 
     # Call Claude Code backend with full daily context
     cc_result = summarize_weekly_with_cc(daily_summaries, week, extra_context=extra_context)
-
-    # Fetch real metrics
-    activity = fetch_activity(start_date, end_date, workspace=str(WORKSPACE))
-    session_stats = fetch_session_stats_range(start_date, end_date)
 
     # Convert to WeeklySummary schema
     decisions = []
@@ -515,17 +530,16 @@ def generate_monthly_summary_cc(month: str, verbose: bool = False):
     if not weekly_summaries:
         raise ValueError(f"No weekly summaries found for {month}")
 
-    # Build extra context from real data sources
+    # Fetch data once, use for both prompt context and metrics
     if verbose:
         print("Fetching real data sources...")
-    extra_context = _build_extra_context(first_day, last_day, verbose=verbose)
+    activity, session_stats = _fetch_data(first_day, last_day)
+    extra_context = _build_extra_context(
+        first_day, last_day, activity, session_stats, verbose=verbose
+    )
 
     # Call Claude Code backend with full weekly context
     cc_result = summarize_monthly_with_cc(weekly_summaries, month, extra_context=extra_context)
-
-    # Fetch real metrics
-    activity = fetch_activity(first_day, last_day, workspace=str(WORKSPACE))
-    session_stats = fetch_session_stats_range(first_day, last_day)
 
     # Convert to MonthlySummary schema
     decisions = []
