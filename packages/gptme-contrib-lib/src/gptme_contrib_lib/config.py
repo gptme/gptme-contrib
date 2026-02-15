@@ -12,10 +12,66 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def get_workspace_path() -> Path:
-    """Get workspace path from environment or default."""
+    """Get workspace path from environment or default.
+
+    Simple version that only checks GPTME_WORKSPACE env var.
+    For submodule-aware workspace detection, use get_agent_workspace().
+    """
     if path := os.environ.get("GPTME_WORKSPACE"):
         return Path(path)
     return Path.home() / "workspace"
+
+
+def get_agent_workspace() -> Path:
+    """Get the agent workspace directory with submodule detection.
+
+    Detection order:
+    1. GPTME_WORKSPACE environment variable (if explicitly set)
+    2. Parent git repository root (if in a submodule like gptme-contrib)
+    3. Current git repository root (if in a main repo)
+    4. Current working directory (fallback)
+
+    This handles the case where code runs from within a submodule
+    (e.g., gptme-contrib) and needs to find the parent agent workspace.
+
+    Returns:
+        Path to the agent workspace directory
+    """
+    import subprocess
+
+    # 1. Check for explicit environment variable
+    if workspace := os.environ.get("GPTME_WORKSPACE"):
+        return Path(workspace)
+
+    # 2. Try to find git root, handling submodules
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            git_root = Path(result.stdout.strip())
+
+            # Check if we're in a submodule (.git is a file, not a directory)
+            git_path = git_root / ".git"
+            if git_path.is_file():
+                # We're in a submodule, the parent directory is the agent workspace
+                parent = git_root.parent
+                # Verify the parent has a .git directory (is a git repo)
+                if (parent / ".git").exists():
+                    return parent
+                # If parent isn't a git repo, return the submodule root
+                return git_root
+
+            # Not a submodule, return the git root
+            return git_root
+    except Exception:
+        pass
+
+    # 3. Fall back to current directory
+    return Path.cwd()
 
 
 def get_agent_config_dir() -> Path:

@@ -1,0 +1,735 @@
+"""
+CLI for journal summarization.
+
+Usage:
+    summarize daily [--date DATE]
+    summarize weekly [--week WEEK]
+    summarize monthly [--month MONTH]
+    summarize smart [--date DATE]  # Daily job that auto-runs weekly/monthly when due
+    summarize backfill [--from DATE] [--to DATE]
+    summarize stats
+
+All summarization uses Claude Code backend for high-quality results.
+"""
+
+import argparse
+import json
+import sys
+from datetime import date, datetime, timedelta
+
+from .generator import (
+    JOURNAL_DIR,
+    SUMMARIES_DIR,
+    WORKSPACE,
+    get_journal_entries_for_date,
+    save_summary,
+)
+from .github_data import fetch_activity, format_activity_for_prompt
+from .schemas import (
+    Blocker,
+    BlockerStatus,
+    DailySummary,
+    Decision,
+    Metrics,
+    MonthlySummary,
+)
+from .session_data import (
+    fetch_session_stats,
+    fetch_session_stats_range,
+    format_sessions_for_prompt,
+)
+
+
+def _build_extra_context(
+    start: date,
+    end: date,
+    verbose: bool = False,
+) -> str:
+    """Build extra context string from GitHub activity and session data."""
+    parts: list[str] = []
+
+    # Fetch GitHub activity
+    activity = fetch_activity(start, end, workspace=str(WORKSPACE))
+    activity_text = format_activity_for_prompt(activity)
+    if activity_text:
+        parts.append(activity_text)
+        if verbose:
+            print(
+                f"  GitHub: {activity.total_commits} commits, {activity.total_prs_merged} PRs, {activity.total_issues_closed} issues"
+            )
+
+    # Fetch session stats
+    if start == end:
+        session_stats = fetch_session_stats(start)
+    else:
+        session_stats = fetch_session_stats_range(start, end)
+    session_text = format_sessions_for_prompt(session_stats)
+    if session_text:
+        parts.append(session_text)
+        if verbose:
+            print(
+                f"  Sessions: {session_stats.session_count}, tokens: {session_stats.total_tokens:,}"
+            )
+
+    return "\n".join(parts)
+
+
+def _load_daily_summary_dict(daily_path_base: str) -> dict[str, object] | None:
+    """Try to load a daily summary as a dict, preferring JSON over markdown parsing."""
+    from pathlib import Path
+
+    # Prefer JSON file
+    json_path = Path(daily_path_base).with_suffix(".json")
+    if json_path.exists():
+        try:
+            with open(json_path) as f:
+                data: dict[str, object] = json.load(f)
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fall back to markdown parsing
+    md_path = Path(daily_path_base).with_suffix(".md")
+    if md_path.exists():
+        content = md_path.read_text()
+        return {
+            "date": Path(daily_path_base).stem,
+            "accomplishments": extract_list_from_md(content, "Accomplishments"),
+            "themes": extract_list_from_md(content, "Themes"),
+            "key_insight": extract_single_from_md(content, "Key Insight"),
+            "decisions": [],
+            "blockers": [],
+            "work_in_progress": extract_list_from_md(content, "Work in Progress"),
+        }
+    return None
+
+
+def _load_weekly_summary_dict(weekly_path_base: str) -> dict[str, object] | None:
+    """Try to load a weekly summary as a dict, preferring JSON over markdown parsing."""
+    from pathlib import Path
+
+    # Prefer JSON file
+    json_path = Path(weekly_path_base).with_suffix(".json")
+    if json_path.exists():
+        try:
+            with open(json_path) as f:
+                data: dict[str, object] = json.load(f)
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fall back to markdown parsing
+    md_path = Path(weekly_path_base).with_suffix(".md")
+    if md_path.exists():
+        content = md_path.read_text()
+        milestones = extract_list_from_md(content, "Major Milestones")
+        if not milestones:
+            milestones = extract_list_from_md(content, "Milestones")
+        return {
+            "week": Path(weekly_path_base).stem,
+            "milestones": milestones,
+            "top_accomplishments": milestones,
+            "recurring_themes": extract_list_from_md(content, "Recurring Themes"),
+            "themes": extract_list_from_md(content, "Recurring Themes"),
+            "trends": extract_list_from_md(content, "Observed Trends"),
+            "patterns": extract_list_from_md(content, "Observed Trends"),
+            "key_decisions": [],
+            "weekly_insight": "",
+        }
+    return None
+
+
+def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySummary:
+    """Generate daily summary using Claude Code backend."""
+    from .cc_backend import summarize_daily_with_cc
+
+    entries = get_journal_entries_for_date(target_date)
+    if not entries:
+        raise ValueError(f"No entries for {target_date}")
+
+    # Load content for each entry
+    entry_contents = [(p, p.read_text()) for p in entries]
+
+    # Build extra context from real data sources
+    if verbose:
+        print("Fetching real data sources...")
+    extra_context = _build_extra_context(target_date, target_date, verbose=verbose)
+
+    # Get summary from Claude Code
+    result = summarize_daily_with_cc(entry_contents, str(target_date), extra_context=extra_context)
+
+    # Fetch real metrics
+    activity = fetch_activity(target_date, target_date, workspace=str(WORKSPACE))
+    session_stats = fetch_session_stats(target_date)
+
+    # Convert to DailySummary schema with real metrics
+    return DailySummary(
+        date=target_date,
+        session_count=session_stats.session_count
+        if session_stats.session_count > 0
+        else len(entries),
+        accomplishments=result.get("accomplishments", [])[:10],
+        decisions=[
+            Decision(
+                topic=d.get("topic", ""),
+                decision=d.get("decision", ""),
+                rationale=d.get("rationale", ""),
+            )
+            for d in result.get("decisions", [])[:5]
+        ],
+        blockers=[
+            Blocker(
+                issue=b.get("issue", ""),
+                status=BlockerStatus(b.get("status", "active")),
+            )
+            for b in result.get("blockers", [])
+        ],
+        themes=result.get("themes", []),
+        work_in_progress=result.get("work_in_progress", [])[:5],
+        narrative=result.get("narrative", ""),
+        metrics=Metrics(
+            sessions=session_stats.session_count,
+            commits=activity.total_commits,
+            prs_merged=activity.total_prs_merged,
+            issues_closed=activity.total_issues_closed,
+            models_used=list(session_stats.models_used.keys()),
+            total_tokens=session_stats.total_tokens,
+            total_cost=session_stats.total_cost,
+        ),
+        generated_at=datetime.utcnow(),
+    )
+
+
+def cmd_daily(args):
+    """Generate daily summary."""
+    if args.date == "today":
+        target_date = date.today()
+    elif args.date == "yesterday":
+        target_date = date.today() - timedelta(days=1)
+    else:
+        target_date = date.fromisoformat(args.date)
+
+    entries = get_journal_entries_for_date(target_date)
+    if not entries:
+        print(f"No journal entries found for {target_date}")
+        return 1
+
+    print(f"Generating daily summary for {target_date} ({len(entries)} entries)...")
+
+    summary = generate_daily_with_cc(target_date, verbose=args.verbose)
+
+    if args.dry_run:
+        print("\n--- DRY RUN OUTPUT ---")
+        print(summary.to_markdown())
+        return 0
+
+    output_path = save_summary(summary)
+    print(f"Saved to {output_path}")
+
+    if args.verbose:
+        print("\n--- Summary ---")
+        print(summary.to_markdown())
+
+    return 0
+
+
+def generate_weekly_summary_cc(week: str, verbose: bool = False):
+    """Generate weekly summary using Claude Code backend."""
+    from .cc_backend import summarize_weekly_with_cc
+    from .schemas import WeeklySummary, Metrics, Decision
+
+    # Parse week string
+    year, week_num = int(week[:4]), int(week[6:])
+
+    # Calculate start and end dates for this week
+    jan1 = date(year, 1, 1)
+    first_monday = jan1 + timedelta(days=(7 - jan1.weekday()) % 7)
+    if jan1.weekday() <= 3:
+        first_monday = jan1 - timedelta(days=jan1.weekday())
+
+    start_date = first_monday + timedelta(weeks=week_num - 1)
+    end_date = start_date + timedelta(days=6)
+
+    # Load daily summaries — prefer JSON, fall back to markdown
+    daily_summaries = []
+    current_date = start_date
+    while current_date <= end_date:
+        daily_path_base = str(SUMMARIES_DIR / "daily" / current_date.isoformat())
+        summary_dict = _load_daily_summary_dict(daily_path_base)
+        if summary_dict:
+            # Ensure date is set
+            if "date" not in summary_dict:
+                summary_dict["date"] = current_date.isoformat()
+            daily_summaries.append(summary_dict)
+        current_date += timedelta(days=1)
+
+    if not daily_summaries:
+        raise ValueError(f"No daily summaries found for {week}")
+
+    # Build extra context from real data sources
+    if verbose:
+        print("Fetching real data sources...")
+    extra_context = _build_extra_context(start_date, end_date, verbose=verbose)
+
+    # Call Claude Code backend with full daily context
+    cc_result = summarize_weekly_with_cc(daily_summaries, week, extra_context=extra_context)
+
+    # Fetch real metrics
+    activity = fetch_activity(start_date, end_date, workspace=str(WORKSPACE))
+    session_stats = fetch_session_stats_range(start_date, end_date)
+
+    # Convert to WeeklySummary schema
+    decisions = []
+    for d in cc_result.get("key_decisions", []):
+        if isinstance(d, dict):
+            decisions.append(
+                Decision(
+                    topic=d.get("topic", ""),
+                    decision=d.get("decision", ""),
+                    rationale=d.get("impact", "") or d.get("rationale", "") or "",
+                )
+            )
+
+    return WeeklySummary(
+        week=week,
+        start_date=start_date,
+        end_date=end_date,
+        milestones=cc_result.get("top_accomplishments", []),
+        recurring_themes=cc_result.get("themes", []),
+        key_decisions=decisions,
+        trends=cc_result.get("patterns", []),
+        narrative=cc_result.get("narrative", ""),
+        metrics=Metrics(
+            sessions=session_stats.session_count,
+            commits=activity.total_commits,
+            prs_merged=activity.total_prs_merged,
+            issues_closed=activity.total_issues_closed,
+            models_used=list(session_stats.models_used.keys()),
+            total_tokens=session_stats.total_tokens,
+            total_cost=session_stats.total_cost,
+        ),
+        generated_at=datetime.utcnow(),
+    )
+
+
+def extract_list_from_md(content: str, section: str) -> list[str]:
+    """Extract a list from a markdown section."""
+    import re
+
+    # Try both formats: "## Section" and "**Section**"
+    patterns = [
+        rf"##\s*{section}\s*\n((?:- .+\n?)+)",  # ## Section format
+        rf"##\s*Key\s*{section}\s*\n((?:- .+\n?)+)",  # ## Key Section format
+        rf"\*\*{section}\*\*:?\s*\n((?:- .+\n?)+)",  # **Section** format
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            return [
+                line.strip("- ").strip()
+                for line in match.group(1).strip().split("\n")
+                if line.strip()
+            ]
+    return []
+
+
+def extract_single_from_md(content: str, section: str) -> str:
+    """Extract a single value from markdown."""
+    import re
+
+    patterns = [
+        rf"##\s*{section}\s*\n(.+)",
+        rf"\*\*{section}\*\*:?\s*(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def cmd_weekly(args):
+    """Generate weekly summary."""
+    if args.week == "current":
+        today = date.today()
+        week = today.strftime("%G-W%V")
+    elif args.week == "last":
+        last_week = date.today() - timedelta(days=7)
+        week = last_week.strftime("%G-W%V")
+    else:
+        week = args.week
+
+    print(f"Generating weekly summary for {week}...")
+
+    summary = generate_weekly_summary_cc(week, verbose=args.verbose)
+
+    if args.dry_run:
+        print("\n--- DRY RUN OUTPUT ---")
+        print(summary.to_markdown())
+        return 0
+
+    output_path = save_summary(summary)
+    print(f"Saved to {output_path}")
+
+    if args.verbose:
+        print("\n--- Summary ---")
+        print(summary.to_markdown())
+
+    return 0
+
+
+def generate_monthly_summary_cc(month: str, verbose: bool = False):
+    """Generate monthly summary using Claude Code backend."""
+    from .cc_backend import summarize_monthly_with_cc
+    from .schemas import Metrics, Decision
+
+    # Parse month to get weeks
+    year, month_num = int(month[:4]), int(month[5:])
+    first_day = date(year, month_num, 1)
+    if month_num == 12:
+        last_day = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last_day = date(year, month_num + 1, 1) - timedelta(days=1)
+
+    # Load weekly summaries — prefer JSON, fall back to markdown
+    weekly_summaries = []
+    current = first_day
+    weeks_processed: set[str] = set()
+    while current <= last_day:
+        week = current.strftime("%G-W%V")
+        if week not in weeks_processed:
+            weeks_processed.add(week)
+            weekly_path_base = str(SUMMARIES_DIR / "weekly" / week)
+            summary_dict = _load_weekly_summary_dict(weekly_path_base)
+            if summary_dict:
+                if "week" not in summary_dict:
+                    summary_dict["week"] = week
+                weekly_summaries.append(summary_dict)
+        current += timedelta(days=1)
+
+    if not weekly_summaries:
+        raise ValueError(f"No weekly summaries found for {month}")
+
+    # Build extra context from real data sources
+    if verbose:
+        print("Fetching real data sources...")
+    extra_context = _build_extra_context(first_day, last_day, verbose=verbose)
+
+    # Call Claude Code backend with full weekly context
+    cc_result = summarize_monthly_with_cc(weekly_summaries, month, extra_context=extra_context)
+
+    # Fetch real metrics
+    activity = fetch_activity(first_day, last_day, workspace=str(WORKSPACE))
+    session_stats = fetch_session_stats_range(first_day, last_day)
+
+    # Convert to MonthlySummary schema
+    decisions = []
+    for d in cc_result.get("strategic_decisions", []):
+        if isinstance(d, dict):
+            decisions.append(
+                Decision(
+                    topic=d.get("topic", ""),
+                    decision=d.get("decision", ""),
+                    rationale=d.get("strategic_impact", "") or d.get("rationale", "") or "",
+                )
+            )
+
+    return MonthlySummary(
+        month=month,
+        accomplishments=cc_result.get("major_achievements", []),
+        key_learnings=cc_result.get("key_learnings", []),
+        strategic_decisions=decisions,
+        month_narrative=cc_result.get("month_narrative", ""),
+        metrics=Metrics(
+            sessions=session_stats.session_count,
+            commits=activity.total_commits,
+            prs_merged=activity.total_prs_merged,
+            issues_closed=activity.total_issues_closed,
+            models_used=list(session_stats.models_used.keys()),
+            total_tokens=session_stats.total_tokens,
+            total_cost=session_stats.total_cost,
+        ),
+        generated_at=datetime.utcnow(),
+    )
+
+
+def cmd_monthly(args):
+    """Generate monthly summary."""
+    if args.month == "current":
+        month = date.today().strftime("%Y-%m")
+    elif args.month == "last":
+        first_of_month = date.today().replace(day=1)
+        last_month = first_of_month - timedelta(days=1)
+        month = last_month.strftime("%Y-%m")
+    else:
+        month = args.month
+
+    print(f"Generating monthly summary for {month}...")
+
+    summary = generate_monthly_summary_cc(month, verbose=args.verbose)
+
+    if args.dry_run:
+        print("\n--- DRY RUN OUTPUT ---")
+        print(summary.to_markdown())
+        return 0
+
+    output_path = save_summary(summary)
+    print(f"Saved to {output_path}")
+
+    if args.verbose:
+        print("\n--- Summary ---")
+        print(summary.to_markdown())
+
+    return 0
+
+
+def cmd_smart(args):
+    """
+    Smart summarization: runs daily, and automatically runs weekly/monthly when due.
+
+    Weekly: Run on Mondays
+    Monthly: Run on the 1st of each month
+    """
+    if args.date == "today":
+        target_date = date.today()
+    elif args.date == "yesterday":
+        target_date = date.today() - timedelta(days=1)
+    else:
+        target_date = date.fromisoformat(args.date)
+
+    results: list[tuple[str, bool | None]] = []
+
+    # 1. Always run daily summarization
+    print(f"=== Daily Summary for {target_date} ===")
+    entries = get_journal_entries_for_date(target_date)
+    if entries:
+        try:
+            summary = generate_daily_with_cc(target_date, verbose=args.verbose)
+            if not args.dry_run:
+                output_path = save_summary(summary)
+                print(f"Daily: Saved to {output_path}")
+            else:
+                print("Daily: Would generate (dry run)")
+            results.append(("daily", True))
+        except Exception as e:
+            print(f"Daily: Failed - {e}")
+            results.append(("daily", False))
+    else:
+        print(f"Daily: No entries for {target_date}")
+        results.append(("daily", None))
+
+    # 2. Check if weekly summarization is due (Monday)
+    if target_date.weekday() == 0:  # Monday
+        print("\n=== Weekly Summary (Monday) ===")
+        last_week = target_date - timedelta(days=7)
+        week = last_week.strftime("%G-W%V")
+        try:
+            summary = generate_weekly_summary_cc(week, verbose=args.verbose)
+            if not args.dry_run:
+                output_path = save_summary(summary)
+                print(f"Weekly: Saved to {output_path}")
+            else:
+                print("Weekly: Would generate (dry run)")
+            results.append(("weekly", True))
+        except Exception as e:
+            print(f"Weekly: Failed - {e}")
+            results.append(("weekly", False))
+    else:
+        print("\nWeekly: Not due (not Monday)")
+
+    # 3. Check if monthly summarization is due (1st of month)
+    if target_date.day == 1:
+        print("\n=== Monthly Summary (1st of month) ===")
+        first_of_month = target_date.replace(day=1)
+        last_month = first_of_month - timedelta(days=1)
+        month = last_month.strftime("%Y-%m")
+        try:
+            summary = generate_monthly_summary_cc(month, verbose=args.verbose)
+            if not args.dry_run:
+                output_path = save_summary(summary)
+                print(f"Monthly: Saved to {output_path}")
+            else:
+                print("Monthly: Would generate (dry run)")
+            results.append(("monthly", True))
+        except Exception as e:
+            print(f"Monthly: Failed - {e}")
+            results.append(("monthly", False))
+    else:
+        print("\nMonthly: Not due (not 1st of month)")
+
+    # Summary
+    print("\n=== Summary ===")
+    for name, success in results:
+        if success is True:
+            print(f"  {name}: OK")
+        elif success is False:
+            print(f"  {name}: FAILED")
+        else:
+            print(f"  {name}: skipped")
+
+    return 0
+
+
+def cmd_backfill(args):
+    """Backfill summaries for a date range."""
+    from_date = date.fromisoformat(args.from_date)
+    to_date = date.fromisoformat(args.to_date) if args.to_date else date.today()
+
+    print(f"Backfilling daily summaries from {from_date} to {to_date}...")
+
+    current = from_date
+    generated = 0
+    skipped = 0
+    failed = 0
+
+    while current <= to_date:
+        entries = get_journal_entries_for_date(current)
+        if entries:
+            output_path = SUMMARIES_DIR / "daily" / f"{current.isoformat()}.md"
+            if output_path.exists() and not args.force:
+                if args.verbose:
+                    print(f"  Skipping {current} (already exists)")
+                skipped += 1
+            else:
+                try:
+                    summary = generate_daily_with_cc(current, verbose=args.verbose)
+                    save_summary(summary)
+                    generated += 1
+                    if args.verbose:
+                        print(f"  Generated {current}")
+                except Exception as e:
+                    print(f"  Failed {current}: {e}")
+                    failed += 1
+        current += timedelta(days=1)
+
+    print(f"\nBackfill complete: {generated} generated, {skipped} skipped, {failed} failed")
+    return 0
+
+
+def cmd_stats(args):
+    """Show statistics about journal entries."""
+    print("Journal Statistics")
+    print("=" * 40)
+
+    if not JOURNAL_DIR.exists():
+        print("Journal directory not found!")
+        return 1
+
+    all_entries = list(JOURNAL_DIR.glob("*.md"))
+    print(f"Total entries: {len(all_entries)}")
+
+    # Count by date
+    dates: dict[str, int] = {}
+    for entry in all_entries:
+        import re
+
+        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", entry.name)
+        if date_match:
+            d = date_match.group(1)
+            dates[d] = dates.get(d, 0) + 1
+
+    print(f"Unique dates: {len(dates)}")
+
+    if dates:
+        first_date = min(dates.keys())
+        last_date = max(dates.keys())
+        print(f"Date range: {first_date} to {last_date}")
+
+        # Most active days
+        top_days = sorted(dates.items(), key=lambda x: -x[1])[:5]
+        print("\nMost active days:")
+        for d, count in top_days:
+            print(f"  {d}: {count} entries")
+
+    # Check existing summaries
+    print("\nExisting summaries:")
+    for level in ["daily", "weekly", "monthly"]:
+        summary_dir = SUMMARIES_DIR / level
+        if summary_dir.exists():
+            count = len(list(summary_dir.glob("*.md")))
+            print(f"  {level}: {count}")
+        else:
+            print(f"  {level}: 0")
+
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Recursive journal summarization system (Claude Code backend)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--dry-run", action="store_true", help="Print output without saving")
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # daily command
+    daily_parser = subparsers.add_parser("daily", help="Generate daily summary")
+    daily_parser.add_argument(
+        "--date",
+        default="yesterday",
+        help="Date to summarize (YYYY-MM-DD, 'today', or 'yesterday')",
+    )
+
+    # weekly command
+    weekly_parser = subparsers.add_parser("weekly", help="Generate weekly summary")
+    weekly_parser.add_argument(
+        "--week",
+        default="last",
+        help="Week to summarize (YYYY-Www, 'current', or 'last')",
+    )
+
+    # monthly command
+    monthly_parser = subparsers.add_parser("monthly", help="Generate monthly summary")
+    monthly_parser.add_argument(
+        "--month",
+        default="last",
+        help="Month to summarize (YYYY-MM, 'current', or 'last')",
+    )
+
+    # smart command (new)
+    smart_parser = subparsers.add_parser(
+        "smart", help="Smart summarization: daily + auto weekly/monthly when due"
+    )
+    smart_parser.add_argument(
+        "--date",
+        default="yesterday",
+        help="Date to process (YYYY-MM-DD, 'today', or 'yesterday')",
+    )
+
+    # backfill command
+    backfill_parser = subparsers.add_parser("backfill", help="Backfill summaries")
+    backfill_parser.add_argument(
+        "--from", dest="from_date", required=True, help="Start date (YYYY-MM-DD)"
+    )
+    backfill_parser.add_argument(
+        "--to", dest="to_date", help="End date (YYYY-MM-DD, defaults to today)"
+    )
+    backfill_parser.add_argument(
+        "--force", action="store_true", help="Overwrite existing summaries"
+    )
+
+    # stats command
+    subparsers.add_parser("stats", help="Show journal statistics")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    commands = {
+        "daily": cmd_daily,
+        "weekly": cmd_weekly,
+        "monthly": cmd_monthly,
+        "smart": cmd_smart,
+        "backfill": cmd_backfill,
+        "stats": cmd_stats,
+    }
+
+    return commands[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
