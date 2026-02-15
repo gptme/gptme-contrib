@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 
 # Add parent to path for imports
@@ -32,15 +33,24 @@ class LocalVoiceTest:
 
     Connects to the voice server via WebSocket and streams audio
     from microphone to speaker.
+
+    Feedback loop prevention: mic input is suppressed while audio is
+    playing and for a short cooldown after, to prevent speaker output
+    from being picked up by the mic. This means you can't interrupt
+    mid-sentence — use headphones if you need that.
     """
 
     SAMPLE_RATE = 24000
     CHUNK_SIZE = 1024
     CHANNELS = 1
+    # How long after playback ends to keep mic muted (seconds)
+    PLAYBACK_COOLDOWN = 0.5
 
     def __init__(self, server_url: str = "ws://localhost:8080/local"):
         self.server_url = server_url
         self.running = False
+        self._playing = False
+        self._play_ended_at: float = 0.0
 
         if PYAUDIO_AVAILABLE:
             self.audio = pyaudio.PyAudio()
@@ -79,6 +89,14 @@ class LocalVoiceTest:
         finally:
             self.running = False
 
+    def _is_mic_muted(self) -> bool:
+        """Check if mic should be muted (playing or in cooldown)."""
+        if self._playing:
+            return True
+        if time.monotonic() - self._play_ended_at < self.PLAYBACK_COOLDOWN:
+            return True
+        return False
+
     async def _send_audio(self, ws):
         """Send audio from microphone to server."""
         stream = self.audio.open(
@@ -91,15 +109,16 @@ class LocalVoiceTest:
 
         try:
             while self.running:
-                # Read audio chunk
+                # Read audio chunk (always read to keep buffer drained)
                 audio_data = stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
 
-                # Send to server
-                message = {
-                    "type": "audio",
-                    "audio": base64.b64encode(audio_data).decode("utf-8"),
-                }
-                await ws.send(json.dumps(message))
+                # Only send when not playing back to prevent feedback loops
+                if not self._is_mic_muted():
+                    message = {
+                        "type": "audio",
+                        "audio": base64.b64encode(audio_data).decode("utf-8"),
+                    }
+                    await ws.send(json.dumps(message))
 
                 # Small delay to prevent overwhelming
                 await asyncio.sleep(0.01)
@@ -130,8 +149,12 @@ class LocalVoiceTest:
                     # Decode and play
                     audio_b64 = data.get("audio", "")
                     if audio_b64:
+                        self._playing = True
                         audio_data = base64.b64decode(audio_b64)
                         stream.write(audio_data)
+                elif data.get("type") == "audio_end":
+                    self._playing = False
+                    self._play_ended_at = time.monotonic()
 
         except asyncio.CancelledError:
             pass
@@ -145,8 +168,8 @@ class LocalVoiceTest:
             self.audio.terminate()
 
 
-async def main():
-    """Main entry point."""
+async def _async_main():
+    """Async entry point."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Local voice interface test")
@@ -166,5 +189,10 @@ async def main():
         test.cleanup()
 
 
+def main():
+    """Synchronous entry point for console_scripts."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

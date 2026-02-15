@@ -7,7 +7,7 @@ voice conversations with gptme tool access.
 
 import base64
 import json
-import os
+import logging
 from typing import Optional
 
 from starlette.applications import Starlette
@@ -17,8 +17,16 @@ from starlette.responses import PlainTextResponse
 import uvicorn
 
 from .audio import AudioConverter
-from .openai_client import OpenAIRealtimeClient
+from .openai_client import (
+    OpenAIRealtimeClient,
+    SessionConfig,
+    _get_openai_api_key,
+    _load_project_instructions,
+    _detect_agent_repo,
+)
 from .tool_bridge import GptmeToolBridge
+
+logger = logging.getLogger(__name__)
 
 
 class VoiceServer:
@@ -35,8 +43,9 @@ class VoiceServer:
     ):
         self.host = host
         self.port = port
-        self.openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
-        self.workspace = workspace
+        self.openai_api_key = openai_api_key or _get_openai_api_key()
+        self.workspace = workspace or _detect_agent_repo()
+        self._instructions = _load_project_instructions(self.workspace)
 
         # Active connections: call_sid -> (twilio_ws, openai_client)
         self._connections: dict[str, tuple] = {}
@@ -69,7 +78,6 @@ class VoiceServer:
         call_sid: Optional[str] = None
         openai_client: Optional[OpenAIRealtimeClient] = None
         audio_converter = AudioConverter()
-        tool_bridge = GptmeToolBridge(workspace=self.workspace)
 
         try:
             async for message in websocket.iter_text():
@@ -85,16 +93,21 @@ class VoiceServer:
                     call_sid = data.get("start", {}).get("call_sid")
                     stream_sid = data.get("start", {}).get("stream_sid")
 
-                    # Create OpenAI client
+                    # Create OpenAI client, then tool bridge with inject callback
                     openai_client = OpenAIRealtimeClient(
                         api_key=self.openai_api_key,
+                        session_config=SessionConfig(instructions=self._instructions),
                         on_audio=lambda audio: self._send_to_twilio(  # type: ignore[arg-type]
                             websocket,
                             stream_sid,
                             audio_converter.openai_to_twilio(audio),
                         ),
-                        on_function_call=tool_bridge.handle_function_call,
                     )
+                    tool_bridge = GptmeToolBridge(
+                        workspace=self.workspace,
+                        on_result=openai_client.inject_message,
+                    )
+                    openai_client.on_function_call = tool_bridge.handle_function_call
 
                     await openai_client.connect()
                     self._connections[call_sid] = (websocket, openai_client)  # type: ignore[index]
@@ -148,15 +161,20 @@ class VoiceServer:
         await websocket.accept()
 
         openai_client: Optional[OpenAIRealtimeClient] = None
-        tool_bridge = GptmeToolBridge(workspace=self.workspace)
 
         try:
-            # Create OpenAI client
+            # Create OpenAI client first, then tool bridge with inject callback
             openai_client = OpenAIRealtimeClient(
                 api_key=self.openai_api_key,
+                session_config=SessionConfig(instructions=self._instructions),
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),  # type: ignore[arg-type]
-                on_function_call=tool_bridge.handle_function_call,
+                on_audio_end=lambda: self._send_local_audio_end(websocket),
             )
+            tool_bridge = GptmeToolBridge(
+                workspace=self.workspace,
+                on_result=openai_client.inject_message,
+            )
+            openai_client.on_function_call = tool_bridge.handle_function_call
 
             await openai_client.connect()
 
@@ -181,9 +199,13 @@ class VoiceServer:
 
     async def _send_local_audio(self, websocket, audio_data: bytes):
         """Send audio to local client."""
-
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         message = {"type": "audio", "audio": audio_b64}
+        await websocket.send_text(json.dumps(message))
+
+    async def _send_local_audio_end(self, websocket):
+        """Signal to local client that audio response is complete."""
+        message = {"type": "audio_end"}
         await websocket.send_text(json.dumps(message))
 
     def run(self):
@@ -199,8 +221,17 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
     parser.add_argument("--workspace", help="Working directory for gptme commands")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Suppress noisy websockets debug logging (also leaks API key in headers)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
     server = VoiceServer(
         host=args.host,
@@ -208,9 +239,8 @@ def main():
         workspace=args.workspace,
     )
 
-    print(f"Starting voice server on {args.host}:{args.port}")
-    print(f"Twilio endpoint: ws://{args.host}:{args.port}/twilio")
-    print(f"Local test endpoint: ws://{args.host}:{args.port}/local")
+    logger.info(f"Starting voice server on {args.host}:{args.port}")
+    logger.info(f"Local test endpoint: ws://{args.host}:{args.port}/local")
 
     server.run()
 
