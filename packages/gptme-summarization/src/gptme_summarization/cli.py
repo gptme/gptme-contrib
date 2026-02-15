@@ -15,7 +15,6 @@ All summarization uses Claude Code backend for high-quality results.
 import argparse
 import sys
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 from .generator import (
     JOURNAL_DIR,
@@ -147,7 +146,7 @@ def generate_weekly_summary_cc(week: str):
     daily_summaries = []
     current_date = start_date
     while current_date <= end_date:
-        daily_path = Path("knowledge/summaries/daily") / f"{current_date.isoformat()}.md"
+        daily_path = SUMMARIES_DIR / "daily" / f"{current_date.isoformat()}.md"
         if daily_path.exists():
             # Parse basic info from markdown for CC context
             content = daily_path.read_text()
@@ -289,7 +288,7 @@ def generate_monthly_summary_cc(month: str):
         week = current.strftime("%G-W%V")
         if week not in weeks_processed:
             weeks_processed.add(week)
-            weekly_path = Path("knowledge/summaries/weekly") / f"{week}.md"
+            weekly_path = SUMMARIES_DIR / "weekly" / f"{week}.md"
             if weekly_path.exists():
                 content = weekly_path.read_text()
                 # Extract milestones (try both "Major Milestones" and "Milestones")

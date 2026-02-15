@@ -9,7 +9,7 @@ This module handles:
 Note: The actual summarization is done by the Claude Code backend (cc_backend.py).
 """
 
-import os
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -19,9 +19,38 @@ from .schemas import (
     MonthlySummary,
 )
 
-# Journal directory - configurable via environment variable
-JOURNAL_DIR = Path(os.environ.get("GPTME_JOURNAL_DIR", "/home/bob/bob/journal"))
-SUMMARIES_DIR = Path(os.environ.get("GPTME_SUMMARIES_DIR", "/home/bob/bob/knowledge/summaries"))
+
+def _get_workspace() -> Path:
+    """Get the agent workspace directory.
+
+    Detection order:
+    1. Git repository root (if in a git repo)
+    2. Current working directory
+
+    Returns:
+        Path to the workspace directory
+    """
+    # Try to find git root
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except Exception:
+        pass
+
+    # Fall back to current directory
+    return Path.cwd()
+
+
+# Derive paths from workspace
+WORKSPACE = _get_workspace()
+JOURNAL_DIR = WORKSPACE / "journal"
+SUMMARIES_DIR = WORKSPACE / "knowledge" / "summaries"
 
 
 def get_journal_entries_for_date(target_date: date) -> list[Path]:
