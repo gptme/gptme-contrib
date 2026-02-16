@@ -8,7 +8,7 @@ match:
     - "@greptileai"
     - "greptile review"
     - "greptile PR"
-    - "request code review"
+    - "request greptile review"
 ---
 
 # Triggering Greptile PR Reviews

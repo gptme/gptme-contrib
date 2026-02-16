@@ -16,6 +16,7 @@ match:
   - "git commit"
   - "git push"
   - "git checkout"
+  - "stage files"
 ---
 
 # Git Workflow
