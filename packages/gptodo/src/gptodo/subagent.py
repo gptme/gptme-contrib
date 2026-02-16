@@ -411,4 +411,9 @@ def cleanup_sessions(
                     if output_path.exists():
                         output_path.unlink()
 
+                # Remove prompt file (used by background sessions)
+                prompt_file = sessions_dir / f"{session.session_id}.prompt"
+                if prompt_file.exists():
+                    prompt_file.unlink()
+
     return count
