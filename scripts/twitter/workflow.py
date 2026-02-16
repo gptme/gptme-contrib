@@ -1388,7 +1388,8 @@ def process_timeline_tweets(
                                 console.print(f"[green]Saved to posted: {path}")
                                 _git_commit_posted(path)
                                 auto_posts_this_cycle += 1
-                                _replied_tweet_ids.add(str(tweet.id))
+                                if draft.in_reply_to is not None:
+                                    _replied_tweet_ids.add(str(draft.in_reply_to))
                                 # Don't increment drafts_generated for auto-posted tweets
                                 # They go to posted/ not new/ and shouldn't count against draft limit
                             else:
