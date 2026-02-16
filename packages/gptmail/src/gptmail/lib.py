@@ -66,8 +66,8 @@ _utf8_qp.body_encoding = email.charset.QP
 
 def _is_html(text: str) -> bool:
     """Detect if text content is already HTML."""
-    stripped = text.strip()
-    return stripped.startswith(("<html", "<!DOCTYPE", "<HTML", "<!doctype"))
+    stripped = text.strip().lower()
+    return stripped.startswith(("<html", "<!doctype"))
 
 
 def fix_list_spacing(markdown_text: str) -> str:
@@ -657,6 +657,8 @@ class AgentEmail:
             # Detect if body is already HTML (e.g. from a script that
             # generates HTML directly). If so, send as simple text/html
             # without multipart/alternative or Content-Transfer-Encoding.
+            # multipart/alternative messages are silently dropped by some
+            # spam filters (e.g. Gandi), while simple text/html passes.
             # This matches what works with raw msmtp and avoids garbling
             # HTML through markdown.markdown().
             body_is_html = _is_html(body)
@@ -719,20 +721,23 @@ class AgentEmail:
                     fix_list_spacing(body),
                     extensions=["extra", "codehilite", "sane_lists"],
                 )
-                # Use quoted-printable instead of base64 to reduce spam score.
-                # Note: MIMEText._charset accepts Charset objects at runtime
-                # despite type stubs declaring str | None.
-                msg.attach(MIMEText(plain_text, "plain", _charset=_utf8_qp))  # type: ignore[arg-type]
-                msg.attach(MIMEText(html_body, "html", _charset=_utf8_qp))  # type: ignore[arg-type]
+                # Use quoted-printable instead of base64 to reduce spam
+                # score. MIMEText._charset accepts Charset objects at
+                # runtime despite type stubs declaring str | None.
+                msg.attach(
+                    MIMEText(plain_text, "plain", _charset=_utf8_qp)  # type: ignore[arg-type]
+                )
+                msg.attach(
+                    MIMEText(html_body, "html", _charset=_utf8_qp)  # type: ignore[arg-type]
+                )
                 mime_bytes = msg.as_string().encode("utf-8")
 
             # Get appropriate msmtp account
-            # Extract just email address from "Name <email>" format for account lookup
+            # Extract just email address from "Name <email>" format
             _, sender_email = parseaddr(sender)
             account = self._get_msmtp_account_for_address(sender_email or sender)
 
             # Build msmtp command
-            # Extract just the email address from "Name <email>" format
             _, recipient_email = parseaddr(recipient)
             if not recipient_email:
                 recipient_email = recipient  # Fallback if parsing fails
