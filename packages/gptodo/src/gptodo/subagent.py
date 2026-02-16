@@ -143,16 +143,19 @@ def spawn_agent(
         tmux_name = f"gptodo_{session_id}"
         session.tmux_session = tmux_name
 
-        # Escape shell arguments to prevent injection
-        safe_prompt = shlex.quote(prompt)
+        # Write prompt to a temp file to avoid tmux command-length limits
+        prompt_file = sessions_dir / f"{session_id}.prompt"
+        prompt_file.write_text(prompt)
+        safe_prompt_file = shlex.quote(str(prompt_file))
         safe_output = shlex.quote(str(output_file))
 
+        # Both backends: redirect to file + tail -f for tmux pane visibility
         if backend == "gptme":
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            shell_cmd = f'gptme -n {model_arg} {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
         else:
-            # Claude backend doesn't support model selection
-            shell_cmd = f'claude -p --dangerously-skip-permissions --tools default -- {safe_prompt} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
+            model_arg = f"--model {shlex.quote(model)}" if model else ""
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -184,7 +187,8 @@ def spawn_agent(
             # For backends with their own auth: export only GPTME_* config vars
             # and explicitly unset API keys to prevent interference
             api_vars = ["GPTME_MODEL"]
-            env_unsets = api_key_vars  # Will be unset in the shell
+            # Unset API keys + Claude Code session blockers
+            env_unsets = api_key_vars + ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
         else:
             # For gptme backend: export all API keys
             api_vars = api_key_vars + ["GPTME_MODEL"]
@@ -229,8 +233,18 @@ def spawn_agent(
             cmd.extend(["--model", model])
         cmd.append(prompt)
     else:
-        # Claude backend doesn't support model selection
-        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--tools", "default", "--", prompt]
+        cmd = ["claude", "-p"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(
+            [
+                "--dangerously-skip-permissions",
+                "--tools",
+                "default",
+                "--",
+                prompt,
+            ]
+        )
 
     # Build environment for subprocess
     # If clear_keys is enabled, create modified environment without API keys
@@ -240,7 +254,13 @@ def spawn_agent(
     if should_clear_keys_fg:
         # Copy environment and remove API keys
         env = os.environ.copy()
-        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]:
+        for key in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ]:
             env.pop(key, None)
     else:
         env = None  # Use inherited environment
@@ -388,5 +408,10 @@ def cleanup_sessions(
                     output_path = Path(session.output_file)
                     if output_path.exists():
                         output_path.unlink()
+
+                # Remove prompt file (used by background sessions)
+                prompt_file = sessions_dir / f"{session.session_id}.prompt"
+                if prompt_file.exists():
+                    prompt_file.unlink()
 
     return count
