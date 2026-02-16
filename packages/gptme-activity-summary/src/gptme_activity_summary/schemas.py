@@ -327,7 +327,7 @@ class DailySummary:
             lines.extend(
                 [
                     "## Themes",
-                    f"*{', '.join(self.themes)}*",
+                    *[f"- {t}" for t in self.themes],
                     "",
                 ]
             )
@@ -420,7 +420,7 @@ class WeeklySummary:
             lines.extend(
                 [
                     "## Recurring Themes",
-                    f"*{', '.join(self.recurring_themes)}*",
+                    *[f"- {t}" for t in self.recurring_themes],
                     "",
                 ]
             )

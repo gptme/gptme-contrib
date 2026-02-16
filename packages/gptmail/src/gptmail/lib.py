@@ -659,6 +659,8 @@ class AgentEmail:
             # without multipart/alternative or Content-Transfer-Encoding.
             # multipart/alternative messages are silently dropped by some
             # spam filters (e.g. Gandi), while simple text/html passes.
+            # This matches what works with raw msmtp and avoids garbling
+            # HTML through markdown.markdown().
             body_is_html = _is_html(body)
 
             # Build common header values
@@ -675,7 +677,7 @@ class AgentEmail:
 
             subject = headers.get("Subject", "")
             date_value = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
-            msg_id_value = headers.get("Message-ID", "")
+            message_id = headers.get("Message-ID", "")
 
             if body_is_html:
                 # Build a simple text/html message with raw UTF-8 body.
@@ -687,7 +689,7 @@ class AgentEmail:
                     f"To: {recipient}",
                     f"Date: {date_value}",
                     f"Subject: {subject}",
-                    f"Message-ID: {msg_id_value}",
+                    f"Message-ID: {message_id}",
                     "Content-Type: text/html; charset=utf-8",
                 ]
                 if "In-Reply-To" in headers:
@@ -708,7 +710,7 @@ class AgentEmail:
                 else:
                     msg["Subject"] = Header(subject, "utf-8").encode()
                 msg["Date"] = date_value
-                msg["Message-ID"] = msg_id_value
+                msg["Message-ID"] = message_id
                 if "In-Reply-To" in headers:
                     msg["In-Reply-To"] = headers["In-Reply-To"]
                 if "References" in headers:

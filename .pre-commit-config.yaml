@@ -92,6 +92,17 @@ repos:
     files: ^lessons/
     pass_filenames: true
 
+  - id: jscpd
+    name: Check for duplicate code (jscpd)
+    description: Detects copy-paste code duplication across the codebase.
+    entry: jscpd
+    language: node
+    additional_dependencies: ['jscpd']
+    pass_filenames: false
+    always_run: true
+    types_or: [python, javascript, shell, markdown]
+    args: ["--config", ".jscpd.json", "."]
+
   - id: validate-markdown-codeblock-syntax
     name: Validate markdown codeblock syntax
     description: Ensures markdown codeblocks have language tags to prevent parsing cut-offs.

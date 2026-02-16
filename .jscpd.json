@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/jscpd.json",
+  "threshold": 1,
+  "reporters": ["console"],
+  "ignore": [
+    "**/__pycache__/**",
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/uv.lock",
+    "**/*.lock",
+    "**/tests/**",
+    "dotfiles/**",
+    "packages/run_loops/**",
+    "packages/lessons/**",
+    "packages/gptme-runloops/**",
+    "packages/gptme-lessons-extras/**",
+    "packages/gptme-contrib-lib/**",
+    "packages/lib/src/lib/**",
+    "packages/gptodo/src/gptodo/**",
+    "scripts/communication_utils/**"
+  ],
+  "minTokens": 50,
+  "minLines": 5,
+  "format": ["python", "javascript", "bash", "yaml", "markdown"]
+}
