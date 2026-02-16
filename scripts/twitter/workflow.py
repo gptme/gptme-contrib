@@ -194,6 +194,7 @@ class TweetDraft:
         context: Optional[Dict] = None,
         reject_reason: Optional[str] = None,
         quality_score: Optional[int] = None,
+        thread: Optional[List[str]] = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread
@@ -203,6 +204,7 @@ class TweetDraft:
         self.created_at = datetime.now()
         self.reject_reason = reject_reason
         self.quality_score = quality_score  # 0-3 star rating (matches blog post system)
+        self.thread = thread or []  # List of follow-up tweet texts
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage"""
@@ -222,6 +224,9 @@ class TweetDraft:
         # Only include quality_score if it's set
         if self.quality_score is not None:
             result["quality_score"] = self.quality_score
+        # Only include thread if it's set and non-empty
+        if self.thread:
+            result["thread"] = self.thread
         return result
 
     @classmethod
@@ -243,6 +248,7 @@ class TweetDraft:
             context=data["context"],
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
             quality_score=data.get("quality_score"),  # Optional, backward compatible
+            thread=data.get("thread"),  # Optional, backward compatible
         )
         created_at = data["created_at"]
         if isinstance(created_at, str):
@@ -960,6 +966,65 @@ def edit(draft_id: str, new_text: str) -> None:
     console.print(f"[cyan]New text: {draft.text}")
 
 
+def _post_tweet_with_thread(client, draft: TweetDraft, tweet_id: str) -> None:
+    """Post thread follow-ups after main tweet is posted."""
+    if draft.thread:
+        console.print(f"[cyan]Posting {len(draft.thread)} thread follow-ups...")
+        previous_tweet_id = tweet_id
+        for i, thread_text in enumerate(draft.thread):
+            try:
+                thread_response = client.create_tweet(
+                    text=thread_text,
+                    in_reply_to_tweet_id=previous_tweet_id,
+                    user_auth=False,
+                )
+                if thread_response.data:
+                    previous_tweet_id = thread_response.data["id"]
+                    console.print(
+                        f"[green]Posted thread tweet {i+1}/{len(draft.thread)}: {previous_tweet_id}"
+                    )
+                else:
+                    console.print(
+                        f"[red]Error: No response data for thread tweet {i+1}"
+                    )
+                    break
+            except Exception as e:
+                console.print(f"[red]Error posting thread tweet {i+1}: {e}")
+                break
+
+
+def _git_commit_posted(path: Path) -> None:
+    """Git add+commit a posted tweet file so duplicate detection survives branch checkouts."""
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["git", "add", str(path)],
+            cwd=AGENT_DIR,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "commit",
+                "-m",
+                f"chore(twitter): auto-posted {path.name}",
+                "--",
+                str(path),
+            ],
+            cwd=AGENT_DIR,
+            capture_output=True,
+            check=True,
+        )
+        console.print(f"[green]Committed posted tweet: {path.name}")
+    except subprocess.CalledProcessError as e:
+        # Non-fatal - log but don't break posting flow
+        console.print(
+            f"[yellow]Could not auto-commit posted tweet: {e.stderr.decode().strip()}"
+        )
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
@@ -1020,6 +1085,7 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
 
         if yes or Confirm.ask("Post this tweet?", default=True):
             try:
+                # Post the main tweet
                 response = client.create_tweet(
                     text=draft.text,
                     in_reply_to_tweet_id=draft.in_reply_to,
@@ -1029,6 +1095,10 @@ def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
                 if response.data:
                     tweet_id = response.data["id"]
                     console.print(f"[green]Posted tweet: {tweet_id}")
+
+                    # Post thread follow-ups if present
+                    _post_tweet_with_thread(client, draft, tweet_id)
+
                     move_draft(path, "posted")
                 else:
                     console.print("[red]Error: No response data from tweet creation")
@@ -1071,6 +1141,7 @@ def process_timeline_tweets(
     times: Optional[int] = None,
     dry_run: bool = False,
     max_drafts: Optional[int] = None,
+    max_auto_posts: int = 5,
 ) -> int:
     """Process tweets from timeline
 
@@ -1078,6 +1149,7 @@ def process_timeline_tweets(
         Number of drafts generated
     """
     drafts_generated = 0
+    auto_posts_this_cycle = 0
     tweets_skipped_prefilter = 0
 
     # Count existing drafts in new/ directory
@@ -1219,11 +1291,20 @@ def process_timeline_tweets(
                 console.print(f"[blue]Priority: {eval_result.priority}/100")
 
             if response:
+                # Skip error responses from failed LLM parsing
+                # Only skip the exact default error text, not legitimate tweets starting with "Error"
+                if response.text == "Error processing response":
+                    console.print("[yellow]Skipping draft: LLM response parsing failed")
+                    continue
+
                 # Create draft from response
                 draft = TweetDraft(
                     text=response.text,
                     type=response.type,
                     in_reply_to=tweet.id if response.type == "reply" else None,
+                    thread=[response.follow_up]
+                    if response.thread_needed and response.follow_up
+                    else None,
                     context={
                         "original_tweet": tweet_data,
                         "evaluation": (
@@ -1261,6 +1342,16 @@ def process_timeline_tweets(
                             )
                             continue
 
+                        # Rate limit auto-posts per cycle
+                        if auto_posts_this_cycle >= max_auto_posts:
+                            console.print(
+                                f"[yellow]⚠ Auto-post rate limit reached ({max_auto_posts}/cycle), saving as draft"
+                            )
+                            path = save_draft(draft, "new")
+                            console.print(f"[yellow]Saved as draft: {path}")
+                            drafts_generated += 1
+                            continue
+
                         # Auto-post for trusted users
                         console.print(
                             f"[green]Auto-posting reply to trusted user @{author_username}"
@@ -1275,8 +1366,16 @@ def process_timeline_tweets(
                             if post_response.data:
                                 tweet_id = post_response.data["id"]
                                 console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
+
+                                # Post thread follow-ups if present
+                                _post_tweet_with_thread(
+                                    client_for_post, draft, tweet_id
+                                )
+
                                 path = save_draft(draft, "posted")
                                 console.print(f"[green]Saved to posted: {path}")
+                                _git_commit_posted(path)
+                                auto_posts_this_cycle += 1
                                 # Don't increment drafts_generated for auto-posted tweets
                                 # They go to posted/ not new/ and shouldn't count against draft limit
                             else:
@@ -1741,6 +1840,10 @@ def auto(
                     if response.data:
                         tweet_id = response.data["id"]
                         console.print(f"[green]Posted tweet: {tweet_id}")
+
+                        # Post thread follow-ups if present
+                        _post_tweet_with_thread(client, draft, tweet_id)
+
                         move_draft(path, "posted")
                     else:
                         console.print(
