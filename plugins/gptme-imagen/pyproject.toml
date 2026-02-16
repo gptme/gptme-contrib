@@ -27,4 +27,5 @@ build-backend = "hatchling.build"
 packages = ["src/gptme_imagen"]
 
 [tool.mypy]
+check_untyped_defs = true
 ignore_missing_imports = true

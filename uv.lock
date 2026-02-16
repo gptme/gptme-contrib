@@ -12,6 +12,7 @@ resolution-markers = [
 members = [
     "gptmail",
     "gptme-ace",
+    "gptme-activity-summary",
     "gptme-attention-tracker",
     "gptme-claude-code",
     "gptme-consortium",
@@ -759,7 +760,7 @@ requires-dist = [
 [[package]]
 name = "gptme"
 version = "0.31.0"
-source = { git = "https://github.com/gptme/gptme.git?branch=master#c5dd33129dbb8d458e9c6b3113b168b014bc1694" }
+source = { git = "https://github.com/gptme/gptme.git?branch=master#a81083c054e1cda04d7cc31dcd02e47ee2db3e49" }
 dependencies = [
     { name = "anthropic" },
     { name = "bashlex" },
@@ -838,6 +839,35 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scipy", marker = "extra == 'embeddings'", specifier = ">=1.9.0" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.2.0" },
+]
+
+[[package]]
+name = "gptme-activity-summary"
+version = "0.1.0"
+source = { editable = "packages/gptme-activity-summary" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
 ]
 
 [[package]]
