@@ -154,8 +154,8 @@ def spawn_agent(
             shell_cmd = f'gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            # Use stream-json for structured, capturable output; --verbose for richer logs
-            shell_cmd = f'claude -p {model_arg} --output-format stream-json --verbose --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
+            # Use stream-json for structured, capturable output
+            shell_cmd = f'claude -p {model_arg} --output-format stream-json --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -240,7 +240,6 @@ def spawn_agent(
             [
                 "--output-format",
                 "stream-json",
-                "--verbose",
                 "--dangerously-skip-permissions",
                 "--tools",
                 "default",
