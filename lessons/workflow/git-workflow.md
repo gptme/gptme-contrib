@@ -1,21 +1,22 @@
 ---
 match:
   keywords:
-  - git workflow
-  - branch management
-  - pr creation
-  - git add
-  - git restore
-  - master branch
-  - feature branch
-  - conventional commits
-  - submodule update
-  - secret protection
-  - git status
-  - commit
-  - stage
-  - checkout
-  - push
+  - "git workflow"
+  - "branch management"
+  - "pr creation"
+  - "git add"
+  - "git restore"
+  - "master branch"
+  - "feature branch"
+  - "conventional commits"
+  - "submodule update"
+  - "secret protection"
+  - "git status"
+  - "commit message format"
+  - "git commit"
+  - "git push"
+  - "git checkout"
+  - "stage files"
 ---
 
 # Git Workflow

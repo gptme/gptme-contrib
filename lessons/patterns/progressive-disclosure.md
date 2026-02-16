@@ -1,17 +1,14 @@
 ---
 match:
   keywords:
-    # Specific problem triggers (high precision)
     - "documentation file consuming excessive context tokens"
     - "always-included file over 500 lines"
     - "context budget consumed by rarely-needed content"
     - "monolithic documentation needs restructuring"
-    # Fallback keywords (broader coverage)
-    - "documentation"
-    - "token"
-    - "context"
-    - "large file"
-    - "auto-include"
+    - "restructure large documentation"
+    - "split monolithic docs"
+    - "auto-include too large"
+    - "context token budget"
 status: active
 ---
 

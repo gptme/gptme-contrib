@@ -1,22 +1,16 @@
 ---
 match:
   keywords:
-  # FOUNDATIONAL KEYWORDS - Keep these general terms!
-  # These ensure the lesson triggers during common git/PR workflows.
-  # Do NOT remove thinking they're "too broad" - they're intentionally
-  # general to catch workflows where users SHOULD learn this pattern.
-  - "git"
+  - "git worktree"
   - "worktree"
-  - "PR"
-  - "external"
-  - "branch"
-  # PROBLEM SIGNALS - Specific triggers for when problems occur
+  - "submit PR to external"
+  - "PR to gptme"
   - "branch from origin/master"
   - "included uncommitted changes"
-  # WORKFLOW CONTEXT - Medium specificity for discussions
   - "git worktree for PR"
   - "external repository PR"
   - "multiple branches simultaneously"
+  - "work on PR in separate directory"
 ---
 
 # Git Worktree Workflow for External Repositories
