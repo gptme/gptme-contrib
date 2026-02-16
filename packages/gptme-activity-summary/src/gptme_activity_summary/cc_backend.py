@@ -6,6 +6,7 @@ This provides better quality summaries and saves tokens in the main gptme sessio
 """
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -29,8 +30,6 @@ def call_claude_code(prompt: str, timeout: int = 120) -> str:
     """
     # Allow nesting: unset CLAUDECODE to avoid the nested-session guard
     # when called from within a Claude Code session (e.g. systemd timer).
-    import os
-
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
 
