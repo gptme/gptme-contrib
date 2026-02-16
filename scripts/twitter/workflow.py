@@ -136,6 +136,7 @@ APPROVED_DIR = TWEETS_DIR / "approved"
 POSTED_DIR = TWEETS_DIR / "posted"
 REJECTED_DIR = TWEETS_DIR / "rejected"
 CACHE_DIR = TWEETS_DIR / "cache"
+MAX_POSTS_PER_CYCLE = 5  # Rate limit to prevent mass posting in auto mode
 
 # Ensure directories exist
 for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR, CACHE_DIR]:
@@ -1842,7 +1843,7 @@ def auto(
             console.print("[yellow]No approved tweets to post")
         else:
             posts_this_cycle = 0
-            max_posts = 5  # Rate limit to prevent mass posting
+            max_posts = MAX_POSTS_PER_CYCLE
             for path in approved_drafts:
                 if posts_this_cycle >= max_posts:
                     console.print(
@@ -1863,6 +1864,16 @@ def auto(
                 console.print(f"[cyan]Type: {draft.type}")
                 if draft.in_reply_to:
                     console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+
+                    # Check for already posted duplicates
+                    duplicates = _check_for_duplicate_replies_internal(draft)
+                    if "posted" in duplicates:
+                        console.print(
+                            f"[red]⚠ Skipping duplicate reply to {draft.in_reply_to}[/red]"
+                        )
+                        move_draft(path, "rejected")
+                        continue
+
                 console.print(f"[white]{draft.text}")
                 if draft.thread:
                     console.print(
