@@ -1292,10 +1292,8 @@ def process_timeline_tweets(
 
             if response:
                 # Skip error responses from failed LLM parsing
-                if (
-                    response.text == "Error processing response"
-                    or response.text.startswith("Error")
-                ):
+                # Only skip the exact default error text, not legitimate tweets starting with "Error"
+                if response.text == "Error processing response":
                     console.print("[yellow]Skipping draft: LLM response parsing failed")
                     continue
 
@@ -1304,6 +1302,9 @@ def process_timeline_tweets(
                     text=response.text,
                     type=response.type,
                     in_reply_to=tweet.id if response.type == "reply" else None,
+                    thread=[response.follow_up]
+                    if response.thread_needed and response.follow_up
+                    else None,
                     context={
                         "original_tweet": tweet_data,
                         "evaluation": (
@@ -1365,6 +1366,12 @@ def process_timeline_tweets(
                             if post_response.data:
                                 tweet_id = post_response.data["id"]
                                 console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
+
+                                # Post thread follow-ups if present
+                                _post_tweet_with_thread(
+                                    client_for_post, draft, tweet_id
+                                )
+
                                 path = save_draft(draft, "posted")
                                 console.print(f"[green]Saved to posted: {path}")
                                 _git_commit_posted(path)
