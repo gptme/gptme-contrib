@@ -155,10 +155,9 @@ def spawn_agent(
             shell_cmd = f'set -o pipefail; gptme -n {model_arg} "$(cat {safe_prompt_file})" 2>&1 | tee {safe_output}; echo "EXIT_CODE=$?" >> {safe_output}'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            # Use stream-json for structured, capturable output
             # Use tee to show output in tmux pane AND save to file
             # pipefail ensures $? captures the agent's exit code, not tee's
-            shell_cmd = f'set -o pipefail; claude -p {model_arg} --output-format stream-json --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" 2>&1 | tee {safe_output}; echo "EXIT_CODE=$?" >> {safe_output}'
+            shell_cmd = f'set -o pipefail; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" 2>&1 | tee {safe_output}; echo "EXIT_CODE=$?" >> {safe_output}'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -241,8 +240,6 @@ def spawn_agent(
             cmd.extend(["--model", model])
         cmd.extend(
             [
-                "--output-format",
-                "stream-json",
                 "--dangerously-skip-permissions",
                 "--tools",
                 "default",
