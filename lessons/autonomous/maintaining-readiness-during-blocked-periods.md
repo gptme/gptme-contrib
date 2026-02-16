@@ -1,16 +1,13 @@
 ---
 match:
   keywords:
-    - blocked
-    - waiting
-    - external dependencies
-    - stakeholder input
-    - productivity
-    - readiness
-    - value creation
-    - knowledge capture
-    - strategic pause
-    - autonomous session
+    - maintaining readiness when blocked
+    - productive while waiting
+    - blocked period activities
+    - all tasks blocked
+    - strategic pause framework
+    - value creation during blocked
+    - waiting for stakeholder input
 ---
 
 # Maintaining Readiness During Blocked Periods

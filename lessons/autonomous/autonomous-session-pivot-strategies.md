@@ -1,16 +1,13 @@
 ---
 match:
   keywords:
-  - autonomous
-  - session
-  - pivot
-  - blocked
-  - troubleshooting
-  - time management
-  - alternative work
-  - technical issues
-  - value creation
-  - autonomous mode
+  - pivot when blocked
+  - switch tasks when stuck
+  - alternative value-creation
+  - technical issues blocking work
+  - autonomous session pivot
+  - troubleshooting time limit
+  - quick pivot sequence
 ---
 
 # Autonomous Session Pivot Strategies

@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: ["message", "communicate", "agent", "issue", "coordination"]
+  keywords: ["inter-agent communication", "agent-to-agent messaging", "cross-agent coordination", "communicate with other agent", "message another agent"]
 status: active
 ---
 

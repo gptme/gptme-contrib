@@ -2,13 +2,12 @@
 category: communication
 match:
   keywords:
-    - github
-    - issue
-    - follow-through
-    - memory
-    - response
-    - completion
-    - request
+    - issue follow-through
+    - close communication loop
+    - respond after completing
+    - confirm completion in thread
+    - missing follow-up response
+    - broken communication loop
 ---
 
 # GitHub Issue Follow-Through Pattern
