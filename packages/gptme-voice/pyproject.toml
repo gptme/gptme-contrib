@@ -22,7 +22,7 @@ local = [
 
 [project.scripts]
 gptme-voice-server = "gptme_voice.realtime.server:main"
-gptme-voice-test = "gptme_voice.realtime.local_test:main"
+gptme-voice-client = "gptme_voice.realtime.client:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -40,11 +40,11 @@ gptme-voice-server --workspace /path/to/agent-repo
 
 The server auto-detects the agent repo by walking up from gptme-contrib to find `gptme.toml`, and loads personality files (prioritizing ABOUT.md).
 
-### Connect with local test client
+### Connect with local client
 
 ```bash
 # In a separate terminal
-gptme-voice-test
+gptme-voice-client
 ```
 
 Speak into your microphone. The agent responds with its configured personality and can use the subagent tool to interact with its workspace.
@@ -61,7 +61,7 @@ The OpenAI API key is loaded from gptme config (`~/.config/gptme/config.toml` or
 - **server.py** - Starlette WebSocket server bridging clients to OpenAI
 - **tool_bridge.py** - Async subagent dispatcher (runs `gptme --non-interactive` in background, injects results)
 - **audio.py** - Audio format conversion (PCM ↔ μ-law for Twilio)
-- **local_test.py** - Local test client with mic/speaker I/O and feedback loop prevention
+- **client.py** - Local client with mic/speaker I/O and feedback loop prevention
 
 ## Limitations
 
