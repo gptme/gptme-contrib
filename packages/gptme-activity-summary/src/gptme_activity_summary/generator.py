@@ -9,10 +9,10 @@ This module handles:
 Note: The actual summarization is done by the Claude Code backend (cc_backend.py).
 """
 
+import os
+import subprocess
 from datetime import date
 from pathlib import Path
-
-from gptme.dirs import get_workspace
 
 from .schemas import (
     DailySummary,
@@ -21,8 +21,42 @@ from .schemas import (
 )
 
 
+def _detect_workspace() -> Path:
+    """Detect agent workspace directory.
+
+    Priority:
+    1. GPTME_WORKSPACE environment variable
+    2. gptme.dirs.get_workspace() (if available)
+    3. Git repository root (fallback)
+    """
+    # 1. Explicit env var
+    ws = os.environ.get("GPTME_WORKSPACE")
+    if ws:
+        return Path(ws)
+
+    # 2. Try gptme's get_workspace
+    try:
+        from gptme.dirs import get_workspace
+
+        return get_workspace()
+    except (ImportError, AttributeError):
+        pass
+
+    # 3. Fall back to git root
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return Path.cwd()
+
+
 # Derive paths from workspace
-WORKSPACE = get_workspace()
+WORKSPACE = _detect_workspace()
 JOURNAL_DIR = WORKSPACE / "journal"
 SUMMARIES_DIR = WORKSPACE / "knowledge" / "summaries"
 
