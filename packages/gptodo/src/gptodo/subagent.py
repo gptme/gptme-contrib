@@ -149,13 +149,12 @@ def spawn_agent(
         safe_prompt_file = shlex.quote(str(prompt_file))
         safe_output = shlex.quote(str(output_file))
 
+        # Both backends: redirect to file + tail -f for tmux pane visibility
         if backend == "gptme":
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            shell_cmd = f'gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            # Redirect to file; touch first so tail -f can start immediately
-            # tail -f shows live progress in tmux pane for monitoring
             shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
