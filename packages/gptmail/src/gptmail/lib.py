@@ -654,66 +654,77 @@ class AgentEmail:
             if not recipient:
                 raise ValueError("No recipient found in email headers")
 
-            # Create proper MIME multipart message
-
-            # Create multipart message
-            msg = MIMEMultipart("alternative")
-
-            # Set headers from extracted metadata
-            # For From header, only encode display name, not email address
-            from_header = headers.get("From") or sender
-            # Parse to separate display name and email
-            from_name, from_email = parseaddr(from_header)
-            if from_name:
-                # Only RFC 2047 encode display name if it has non-ASCII chars
-                if from_name.isascii():
-                    msg["From"] = f'"{from_name}" <{from_email}>'
-                else:
-                    encoded_name = Header(from_name, "utf-8").encode()
-                    msg["From"] = f"{encoded_name} <{from_email}>"
-            else:
-                msg["From"] = from_email
-            msg["To"] = recipient
-            # Only RFC 2047 encode Subject if it contains non-ASCII characters.
-            # Unnecessary encoding of ASCII subjects can trigger spam filters.
-            subject = headers.get("Subject", "")
-            if subject.isascii():
-                msg["Subject"] = subject
-            else:
-                msg["Subject"] = Header(subject, "utf-8").encode()
-            msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
-            msg["Message-ID"] = headers.get("Message-ID", "")
-            if "In-Reply-To" in headers:
-                msg["In-Reply-To"] = headers["In-Reply-To"]
-            if "References" in headers:
-                msg["References"] = headers["References"]
-
-            # Detect if body is already HTML (e.g. from a script that generates
-            # HTML directly). If so, use it as-is instead of running markdown
-            # conversion which would garble the HTML tags.
+            # Detect if body is already HTML (e.g. from a script that
+            # generates HTML directly). If so, send as simple text/html
+            # without multipart/alternative or Content-Transfer-Encoding.
+            # This matches what works with raw msmtp and avoids garbling
+            # HTML through markdown.markdown().
             body_is_html = _is_html(body)
 
-            if body_is_html:
-                # Body is already HTML — use it directly as the HTML part,
-                # and create a simple plain text fallback by stripping tags
-                plain_text = re.sub(r"<[^>]+>", "", body).strip()
-                html_body = body
+            # Build common header values
+            from_header = headers.get("From") or sender
+            from_name, from_email = parseaddr(from_header)
+            if from_name:
+                if from_name.isascii():
+                    from_value = f'"{from_name}" <{from_email}>'
+                else:
+                    encoded_name = Header(from_name, "utf-8").encode()
+                    from_value = f"{encoded_name} <{from_email}>"
             else:
-                # Body is markdown — use as plain text and convert to HTML
+                from_value = from_email
+
+            subject = headers.get("Subject", "")
+            date_value = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
+            message_id = headers.get("Message-ID", "")
+
+            if body_is_html:
+                # Build a simple text/html message with raw UTF-8 body.
+                # No multipart, no Content-Transfer-Encoding header.
+                # This is the format that reliably passes spam filters.
+                header_lines = [
+                    "MIME-Version: 1.0",
+                    f"From: {from_value}",
+                    f"To: {recipient}",
+                    f"Date: {date_value}",
+                    f"Subject: {subject}",
+                    f"Message-ID: {message_id}",
+                    "Content-Type: text/html; charset=utf-8",
+                ]
+                if "In-Reply-To" in headers:
+                    header_lines.append(f"In-Reply-To: {headers['In-Reply-To']}")
+                if "References" in headers:
+                    header_lines.append(f"References: {headers['References']}")
+
+                raw_message = "\r\n".join(header_lines) + "\r\n\r\n" + body
+                mime_bytes = raw_message.encode("utf-8")
+            else:
+                # Markdown body — create multipart/alternative with both
+                # plain text and HTML versions.
+                msg = MIMEMultipart("alternative")
+                msg["From"] = from_value
+                msg["To"] = recipient
+                if subject.isascii():
+                    msg["Subject"] = subject
+                else:
+                    msg["Subject"] = Header(subject, "utf-8").encode()
+                msg["Date"] = date_value
+                msg["Message-ID"] = message_id
+                if "In-Reply-To" in headers:
+                    msg["In-Reply-To"] = headers["In-Reply-To"]
+                if "References" in headers:
+                    msg["References"] = headers["References"]
+
                 plain_text = body
-                # Use sane_lists extension for better nested list handling
                 html_body = markdown.markdown(
                     fix_list_spacing(body),
                     extensions=["extra", "codehilite", "sane_lists"],
                 )
-
-            # Use quoted-printable encoding instead of base64.
-            # Base64-encoded multipart emails are more likely to be flagged
-            # as spam by receiving mail servers.
-            # Note: MIMEText._charset accepts Charset objects at runtime
-            # despite type stubs declaring str | None.
-            msg.attach(MIMEText(plain_text, "plain", _charset=_utf8_qp))  # type: ignore[arg-type]
-            msg.attach(MIMEText(html_body, "html", _charset=_utf8_qp))  # type: ignore[arg-type]
+                # Use quoted-printable instead of base64 to reduce spam score.
+                # Note: MIMEText._charset accepts Charset objects at runtime
+                # despite type stubs declaring str | None.
+                msg.attach(MIMEText(plain_text, "plain", _charset=_utf8_qp))  # type: ignore[arg-type]
+                msg.attach(MIMEText(html_body, "html", _charset=_utf8_qp))  # type: ignore[arg-type]
+                mime_bytes = msg.as_string().encode("utf-8")
 
             # Get appropriate msmtp account
             # Extract just email address from "Name <email>" format for account lookup
@@ -738,10 +749,10 @@ class AgentEmail:
                 if not self.rate_limiter.wait_if_needed(max_wait=60):
                     raise RuntimeError("Rate limit timeout - could not send within 60s")
 
-            # Send MIME message via msmtp
+            # Send via msmtp
             subprocess.run(
                 msmtp_cmd,
-                input=msg.as_string().encode("utf-8"),
+                input=mime_bytes,
                 capture_output=True,
                 check=True,
                 timeout=30,
