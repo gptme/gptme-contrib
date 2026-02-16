@@ -1168,6 +1168,22 @@ def process_timeline_tweets(
     user_lookup = {user.id: user for user in users} if users else {}
     tweets_processed = 0
 
+    # Build a set of tweet IDs we already have replies for (across all directories)
+    # This is more robust than filename substring matching
+    # Use strings for consistent comparison (in_reply_to can be int or str)
+    _replied_tweet_ids: set[str] = set()
+    for status_dir_name in ["posted", "approved", "new"]:
+        status_dir = TWEETS_DIR / status_dir_name
+        if not status_dir.exists():
+            continue
+        for draft_path in status_dir.glob("*.yml"):
+            try:
+                other_draft = TweetDraft.load(draft_path)
+                if other_draft.in_reply_to is not None:
+                    _replied_tweet_ids.add(str(other_draft.in_reply_to))
+            except Exception:
+                continue
+
     console.print(f"\n[bold]Processing tweets from {source}[/bold]")
     console.print(f"[blue]Existing drafts: {existing_drafts}")
     if max_drafts:
@@ -1182,18 +1198,12 @@ def process_timeline_tweets(
             if tweet.author_id == cached_get_me(client, user_auth=False).data.id:
                 continue
 
-            # Check if tweet already has a reply in posted directory
+            # Check if tweet already has a reply in any directory (posted, approved, new)
             tweet_id_str = str(tweet.id)
-            has_posted_reply = False
-            for posted_file in POSTED_DIR.glob("*.yml"):
-                if tweet_id_str in posted_file.name:
-                    console.print(
-                        f"[yellow]Skip: Already replied to tweet {tweet_id_str}"
-                    )
-                    has_posted_reply = True
-                    break
-
-            if has_posted_reply:
+            if tweet_id_str in _replied_tweet_ids:
+                console.print(
+                    f"[yellow]Skip: Already have reply for tweet {tweet_id_str}"
+                )
                 continue
 
             # Pre-filter tweet before expensive LLM evaluation
@@ -1350,6 +1360,8 @@ def process_timeline_tweets(
                             path = save_draft(draft, "new")
                             console.print(f"[yellow]Saved as draft: {path}")
                             drafts_generated += 1
+                            if draft.in_reply_to is not None:
+                                _replied_tweet_ids.add(str(draft.in_reply_to))
                             continue
 
                         # Auto-post for trusted users
@@ -1376,6 +1388,8 @@ def process_timeline_tweets(
                                 console.print(f"[green]Saved to posted: {path}")
                                 _git_commit_posted(path)
                                 auto_posts_this_cycle += 1
+                                if draft.in_reply_to is not None:
+                                    _replied_tweet_ids.add(str(draft.in_reply_to))
                                 # Don't increment drafts_generated for auto-posted tweets
                                 # They go to posted/ not new/ and shouldn't count against draft limit
                             else:
@@ -1388,6 +1402,8 @@ def process_timeline_tweets(
                                     f"[yellow]Saved as draft for manual review: {path}"
                                 )
                                 drafts_generated += 1
+                                if draft.in_reply_to is not None:
+                                    _replied_tweet_ids.add(str(draft.in_reply_to))
                         except Exception as e:
                             console.print(f"[red]Error auto-posting: {e}")
                             # Fall back to saving as new
@@ -1396,11 +1412,15 @@ def process_timeline_tweets(
                                 f"[yellow]Saved as draft for manual review: {path}"
                             )
                             drafts_generated += 1
+                            if draft.in_reply_to is not None:
+                                _replied_tweet_ids.add(str(draft.in_reply_to))
                     else:
                         # Normal flow - save to new/ for review
                         path = save_draft(draft, "new")
                         console.print(f"[green]Created draft response: {path}")
                         drafts_generated += 1
+                        if draft.in_reply_to is not None:
+                            _replied_tweet_ids.add(str(draft.in_reply_to))
                 else:
                     console.print("[yellow]Would create draft response:")
                     console.print(f"[white]{draft.text}")
