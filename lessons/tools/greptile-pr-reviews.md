@@ -1,17 +1,14 @@
 ---
 match:
   keywords:
-    # Specific problem triggers (high precision)
     - "trigger greptile re-review after improvements"
     - "PR received low quality score from greptile"
     - "validate quality improvements before human review"
     - "@greptileai review comment"
-    # Fallback keywords (broader coverage)
     - "@greptileai"
-    - "greptile"
-    - "PR review"
-    - "code quality"
-    - "Codecov"
+    - "greptile review"
+    - "greptile PR"
+    - "request code review"
 ---
 
 # Triggering Greptile PR Reviews
