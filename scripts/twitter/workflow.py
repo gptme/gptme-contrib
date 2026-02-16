@@ -136,6 +136,7 @@ APPROVED_DIR = TWEETS_DIR / "approved"
 POSTED_DIR = TWEETS_DIR / "posted"
 REJECTED_DIR = TWEETS_DIR / "rejected"
 CACHE_DIR = TWEETS_DIR / "cache"
+MAX_POSTS_PER_CYCLE = 5  # Rate limit to prevent mass posting in auto mode
 
 # Ensure directories exist
 for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR, CACHE_DIR]:
@@ -981,15 +982,15 @@ def _post_tweet_with_thread(client, draft: TweetDraft, tweet_id: str) -> None:
                 if thread_response.data:
                     previous_tweet_id = thread_response.data["id"]
                     console.print(
-                        f"[green]Posted thread tweet {i+1}/{len(draft.thread)}: {previous_tweet_id}"
+                        f"[green]Posted thread tweet {i + 1}/{len(draft.thread)}: {previous_tweet_id}"
                     )
                 else:
                     console.print(
-                        f"[red]Error: No response data for thread tweet {i+1}"
+                        f"[red]Error: No response data for thread tweet {i + 1}"
                     )
                     break
             except Exception as e:
-                console.print(f"[red]Error posting thread tweet {i+1}: {e}")
+                console.print(f"[red]Error posting thread tweet {i + 1}: {e}")
                 break
 
 
@@ -1779,76 +1780,105 @@ def auto(
     console.print("\n[bold]Step 2: Reviewing drafts[/bold]")
     drafts = list_drafts("new")
 
-    if not drafts:
-        console.print("[yellow]No drafts to review")
-        return
-
     approved_count = 0
     needs_review_count = 0
 
-    for path in drafts:
-        draft = TweetDraft.load(path)
+    if not drafts:
+        console.print("[yellow]No new drafts to review")
+    else:
+        for path in drafts:
+            draft = TweetDraft.load(path)
 
-        console.print(f"\n[bold]Reviewing draft:[/bold] {path.name}")
-        console.print(f"[cyan]Type: {draft.type}")
-        if draft.in_reply_to:
-            console.print(f"[cyan]Reply to: {draft.in_reply_to}")
-        console.print(f"[white]{draft.text}")
+            console.print(f"\n[bold]Reviewing draft:[/bold] {path.name}")
+            console.print(f"[cyan]Type: {draft.type}")
+            if draft.in_reply_to:
+                console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+            console.print(f"[white]{draft.text}")
 
-        # Get LLM review
-        approved_by_llm, review_result = verify_draft(draft.to_dict())
+            # Get LLM review
+            approved_by_llm, review_result = verify_draft(draft.to_dict())
 
-        # Compute and save quality score
-        quality_score = compute_quality_score(review_result)
-        draft.quality_score = quality_score
-        draft.save(path)  # Persist quality_score to file
+            # Compute and save quality score
+            quality_score = compute_quality_score(review_result)
+            draft.quality_score = quality_score
+            draft.save(path)  # Persist quality_score to file
 
-        # Display review results
-        stars = "★" * quality_score + "☆" * (3 - quality_score)
-        console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
-        console.print("\n[bold]Review Results:[/bold]")
-        for criterion, result in review_result.criteria_results.items():
-            status = "✅" if result.passed else "❌"
-            console.print(f"{status} {criterion}: {result.notes}")
+            # Display review results
+            stars = "★" * quality_score + "☆" * (3 - quality_score)
+            console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
+            console.print("\n[bold]Review Results:[/bold]")
+            for criterion, result in review_result.criteria_results.items():
+                status = "✅" if result.passed else "❌"
+                console.print(f"{status} {criterion}: {result.notes}")
 
-        if review_result.improvements:
-            console.print("\n[yellow]Suggested improvements:[/yellow]")
-            for improvement in review_result.improvements:
-                console.print(f"• {improvement}")
+            if review_result.improvements:
+                console.print("\n[yellow]Suggested improvements:[/yellow]")
+                for improvement in review_result.improvements:
+                    console.print(f"• {improvement}")
 
-        # Handle auto-approve or mark for human review
-        if auto_approve and approved_by_llm:
-            if not dry_run:
-                move_draft(path, "approved")
-                console.print("[green]Draft automatically approved")
+            # Handle auto-approve or mark for human review
+            if auto_approve and approved_by_llm:
+                if not dry_run:
+                    move_draft(path, "approved")
+                    console.print("[green]Draft automatically approved")
+                else:
+                    console.print("[yellow]Would approve draft (dry run)")
+                approved_count += 1
             else:
-                console.print("[yellow]Would approve draft (dry run)")
-            approved_count += 1
-        else:
-            if approved_by_llm:
-                console.print(
-                    "[blue]Draft passes checks but requires human review (--auto-approve to skip)"
-                )
-            else:
-                console.print("[yellow]Draft needs improvements and human review")
-            needs_review_count += 1
+                if approved_by_llm:
+                    console.print(
+                        "[blue]Draft passes checks but requires human review (--auto-approve to skip)"
+                    )
+                else:
+                    console.print("[yellow]Draft needs improvements and human review")
+                needs_review_count += 1
 
     # Step 3: Post approved tweets if requested
-    if post_approved and approved_count > 0 and not dry_run:
+    # Post ALL approved drafts (not just ones approved this cycle)
+    if post_approved and not dry_run:
         console.print("\n[bold]Step 3: Posting approved tweets[/bold]")
 
         approved_drafts = list_drafts("approved")
         if not approved_drafts:
             console.print("[yellow]No approved tweets to post")
         else:
+            posts_this_cycle = 0
+            max_posts = MAX_POSTS_PER_CYCLE
             for path in approved_drafts:
+                if posts_this_cycle >= max_posts:
+                    console.print(
+                        f"[yellow]Post rate limit reached ({max_posts}/cycle), remaining drafts will be posted next cycle"
+                    )
+                    break
+
                 draft = TweetDraft.load(path)
+
+                # Skip if scheduled for later
+                if draft.scheduled_time and draft.scheduled_time > datetime.now():
+                    console.print(
+                        f"[blue]Skipping scheduled draft (due {draft.scheduled_time}): {path.name}"
+                    )
+                    continue
 
                 console.print("\n[bold]Posting tweet:[/bold]")
                 console.print(f"[cyan]Type: {draft.type}")
                 if draft.in_reply_to:
                     console.print(f"[cyan]Reply to: {draft.in_reply_to}")
+
+                    # Check for already posted duplicates
+                    duplicates = _check_for_duplicate_replies_internal(draft)
+                    if "posted" in duplicates:
+                        console.print(
+                            f"[red]⚠ Skipping duplicate reply to {draft.in_reply_to}[/red]"
+                        )
+                        move_draft(path, "rejected")
+                        continue
+
                 console.print(f"[white]{draft.text}")
+                if draft.thread:
+                    console.print(
+                        f"[cyan]Thread: {len(draft.thread)} follow-up tweet(s)"
+                    )
 
                 try:
                     response = client.create_tweet(
@@ -1865,6 +1895,7 @@ def auto(
                         _post_tweet_with_thread(client, draft, tweet_id)
 
                         move_draft(path, "posted")
+                        posts_this_cycle += 1
                     else:
                         console.print(
                             "[red]Error: No response data from tweet creation"
