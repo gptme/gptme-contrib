@@ -32,6 +32,7 @@ Example:
             print(f"Need to reply to: {subject} from {sender}")
 """
 
+import email.charset
 import logging
 from typing import Dict, Tuple
 import os
@@ -56,6 +57,17 @@ from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
 
 logger = logging.getLogger(__name__)
+
+# Use quoted-printable instead of base64 for UTF-8 email parts.
+# Base64-encoded multipart emails are more likely to trigger spam filters.
+_utf8_qp = email.charset.Charset("utf-8")
+_utf8_qp.body_encoding = email.charset.QP
+
+
+def _is_html(text: str) -> bool:
+    """Detect if text content is already HTML."""
+    stripped = text.strip()
+    return stripped.startswith(("<html", "<!DOCTYPE", "<HTML", "<!doctype"))
 
 
 def fix_list_spacing(markdown_text: str) -> str:
@@ -653,15 +665,22 @@ class AgentEmail:
             # Parse to separate display name and email
             from_name, from_email = parseaddr(from_header)
             if from_name:
-                # RFC 2047 encode only the display name if it has non-ASCII
-                encoded_name = Header(from_name, "utf-8").encode()
-                msg["From"] = f"{encoded_name} <{from_email}>"
+                # Only RFC 2047 encode display name if it has non-ASCII chars
+                if from_name.isascii():
+                    msg["From"] = f'"{from_name}" <{from_email}>'
+                else:
+                    encoded_name = Header(from_name, "utf-8").encode()
+                    msg["From"] = f"{encoded_name} <{from_email}>"
             else:
                 msg["From"] = from_email
             msg["To"] = recipient
-            # RFC 2047 encode Subject to handle non-ASCII characters (åäö etc)
+            # Only RFC 2047 encode Subject if it contains non-ASCII characters.
+            # Unnecessary encoding of ASCII subjects can trigger spam filters.
             subject = headers.get("Subject", "")
-            msg["Subject"] = Header(subject, "utf-8").encode()
+            if subject.isascii():
+                msg["Subject"] = subject
+            else:
+                msg["Subject"] = Header(subject, "utf-8").encode()
             msg["Date"] = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
             msg["Message-ID"] = headers.get("Message-ID", "")
             if "In-Reply-To" in headers:
@@ -669,20 +688,32 @@ class AgentEmail:
             if "References" in headers:
                 msg["References"] = headers["References"]
 
-            # Add plain text version (markdown as fallback)
-            plain_text = body
-            msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+            # Detect if body is already HTML (e.g. from a script that generates
+            # HTML directly). If so, use it as-is instead of running markdown
+            # conversion which would garble the HTML tags.
+            body_is_html = _is_html(body)
 
-            # Add HTML version (converted markdown)
-            # Use sane_lists extension for better nested list handling
-            # Note: Removed nl2br extension as it breaks proper list formatting
-            # by converting single newlines to <br> tags, which prevents proper
-            # paragraph and list rendering in HTML
-            html_body = markdown.markdown(
-                fix_list_spacing(body),
-                extensions=["extra", "codehilite", "sane_lists"],
-            )
-            msg.attach(MIMEText(html_body, "html", "utf-8"))
+            if body_is_html:
+                # Body is already HTML — use it directly as the HTML part,
+                # and create a simple plain text fallback by stripping tags
+                plain_text = re.sub(r"<[^>]+>", "", body).strip()
+                html_body = body
+            else:
+                # Body is markdown — use as plain text and convert to HTML
+                plain_text = body
+                # Use sane_lists extension for better nested list handling
+                html_body = markdown.markdown(
+                    fix_list_spacing(body),
+                    extensions=["extra", "codehilite", "sane_lists"],
+                )
+
+            # Use quoted-printable encoding instead of base64.
+            # Base64-encoded multipart emails are more likely to be flagged
+            # as spam by receiving mail servers.
+            # Note: MIMEText._charset accepts Charset objects at runtime
+            # despite type stubs declaring str | None.
+            msg.attach(MIMEText(plain_text, "plain", _charset=_utf8_qp))  # type: ignore[arg-type]
+            msg.attach(MIMEText(html_body, "html", _charset=_utf8_qp))  # type: ignore[arg-type]
 
             # Get appropriate msmtp account
             # Extract just email address from "Name <email>" format for account lookup
