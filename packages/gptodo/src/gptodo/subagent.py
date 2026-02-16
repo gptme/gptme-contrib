@@ -154,9 +154,9 @@ def spawn_agent(
             shell_cmd = f'gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            # Redirect to file; show live progress in tmux via tail -f background
-            # (tee causes buffering issues with claude -p pipe)
-            shell_cmd = f'tail -f {safe_output} 2>/dev/null & TAIL_PID=$!; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            # Redirect to file; touch first so tail -f can start immediately
+            # tail -f shows live progress in tmux pane for monitoring
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
