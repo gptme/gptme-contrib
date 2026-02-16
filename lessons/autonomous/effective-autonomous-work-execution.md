@@ -1,17 +1,13 @@
 ---
 match:
   keywords:
-  - autonomous
-  - work execution
-  - structured approach
-  - phases
-  - productivity
-  - task management
-  - session
-  - dependencies
-  - priority
-  - autonomous mode
-  - planning
+  - autonomous work execution
+  - maximizing session value
+  - work execution patterns
+  - structured work approach
+  - blocked on dependencies
+  - autonomous session productivity
+  - task selection priorities
 ---
 
 # Effective Autonomous Work Execution

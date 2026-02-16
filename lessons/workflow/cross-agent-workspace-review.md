@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: ["review", "workspace", "cross-agent", "collaboration", "patterns"]
+  keywords: ["cross-agent review", "workspace review patterns", "reviewing other agent's work", "mutual workspace analysis", "cross-agent knowledge sharing"]
 status: active
 ---
 

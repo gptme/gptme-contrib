@@ -7,11 +7,11 @@ tags:
 - focus
 match:
   keywords:
-  - autonomous session
-  - strategic focus
-  - productivity trap
-  - session planning
-  - autonomous work
+  - strategic focus discipline
+  - productivity trap avoidance
+  - darwinian trap avoidance
+  - autonomous session planning
+  - strategic work selection
 ---
 
 # Strategic Focus During Autonomous Sessions

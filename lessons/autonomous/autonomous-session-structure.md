@@ -1,17 +1,13 @@
 ---
 match:
   keywords:
-  - autonomous
-  - session
-  - structure
-  - phases
-  - time management
-  - workflow
-  - completion
-  - git status
-  - commit
-  - planning
-  - autonomous mode
+  - autonomous session structure
+  - 4-phase session
+  - session phase planning
+  - structured autonomous session
+  - autonomous work phases
+  - session status check
+  - commit and complete
 ---
 
 # Autonomous Session Structure
