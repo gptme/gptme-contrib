@@ -428,6 +428,8 @@ def cleanup_sessions(
                     prompt_file.unlink()
 
     # Phase 3: Kill orphaned tmux sessions (gptodo_ prefix, no state file)
+    # Re-read sessions to avoid race: a new spawn between Phase 1 and now
+    # would create a tmux session not in our earlier snapshot.
     try:
         result = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
@@ -435,7 +437,8 @@ def cleanup_sessions(
             text=True,
         )
         if result.returncode == 0:
-            known_tmux = {s.tmux_session for s in sessions if s.tmux_session}
+            fresh_sessions = list_sessions(workspace)
+            known_tmux = {s.tmux_session for s in fresh_sessions if s.tmux_session}
             for tmux_name in result.stdout.strip().split("\n") if result.stdout.strip() else []:
                 tmux_name = tmux_name.strip()
                 if tmux_name.startswith("gptodo_") and tmux_name not in known_tmux:
