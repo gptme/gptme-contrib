@@ -154,11 +154,10 @@ def spawn_agent(
 
         # Both backends: redirect to file + tail -f for tmux pane visibility
         # Wrap with timeout to prevent runaway background sessions
-        timeout_cmd = f"timeout {timeout}" if timeout > 0 else ""
+        timeout_prefix = f"timeout {timeout} " if timeout > 0 else ""
         if backend == "gptme":
             model_arg = f"--model {shlex.quote(model)}" if model else ""
             agent_cmd = f'gptme -n {model_arg} "$(cat {safe_prompt_file})"'
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_cmd} {agent_cmd} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
             sysprompt_arg = (
@@ -167,7 +166,7 @@ def spawn_agent(
                 else ""
             )
             agent_cmd = f'claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})"'
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_cmd} {agent_cmd} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+        shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_prefix}{agent_cmd} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
