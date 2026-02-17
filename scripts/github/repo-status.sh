@@ -95,7 +95,7 @@ if [ $# -gt 0 ]; then
         else
             check_repo "$arg" > "$TMPDIR/$i.txt" 2>&1 &
         fi
-        ((i++))
+        i=$((i + 1))
     done
     wait  # Wait for all parallel checks to complete
 
@@ -138,7 +138,7 @@ except Exception:
     i=0
     while read -r repo; do
         [ -n "$repo" ] && check_repo "$repo" > "$TMPDIR/$i.txt" 2>&1 &
-        ((i++))
+        i=$((i + 1))
     done <<< "$all_repos"
     wait
 
