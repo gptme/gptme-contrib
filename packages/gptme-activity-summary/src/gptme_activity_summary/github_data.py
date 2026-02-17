@@ -523,7 +523,7 @@ def fetch_user_activity(
     # Build per-repo activity
     all_repos = set(repo_prs.keys()) | set(repo_issues.keys())
     for repo in sorted(all_repos):
-        merged = [p for p in repo_prs.get(repo, []) if True]  # all PRs for now
+        merged = list(repo_prs.get(repo, []))
         closed = repo_issues.get(repo, [])
         repo_activity = RepoActivity(
             repo=repo,
