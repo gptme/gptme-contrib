@@ -99,7 +99,7 @@ def spawn_agent(
     backend: Literal["gptme", "claude", "codex"] = "gptme",
     background: bool = False,
     workspace: Optional[Path] = None,
-    timeout: int = 600,
+    timeout: int = 3000,
     model: Optional[str] = None,
     clear_keys: Optional[bool] = None,
     system_prompt_file: Optional[str] = None,
@@ -400,8 +400,8 @@ def cleanup_sessions(
 ) -> int:
     """Remove old session files and kill zombie tmux sessions.
 
-    Also kills any gptodo_agent_* tmux sessions that are still running
-    but whose session state shows completed/failed/killed (zombies).
+    Also syncs state for sessions where tmux died but state still shows running.
+    Reuses check_session() for zombie detection to avoid logic duplication.
 
     Returns count of sessions cleaned up.
     """
@@ -411,27 +411,15 @@ def cleanup_sessions(
     cutoff = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
 
     for session in sessions:
-        started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
+        # Sync state with tmux reality for "running" sessions
+        if session.status == "running":
+            updated = check_session(session.session_id, workspace)
+            if updated:
+                session = updated
 
-        # First: sync state with tmux reality for "running" sessions
-        if session.status == "running" and session.tmux_session:
-            check_result = subprocess.run(
-                ["tmux", "has-session", "-t", session.tmux_session],
-                capture_output=True,
-            )
-            if check_result.returncode != 0:
-                # tmux session is gone but state still says running
-                session.status = "completed"
-                session.completed_at = datetime.now(timezone.utc).isoformat()
-                if session.output_file and Path(session.output_file).exists():
-                    output = Path(session.output_file).read_text()
-                    if "EXIT_CODE=" in output and "EXIT_CODE=0" not in output:
-                        session.status = "failed"
-                        session.error = "Non-zero exit code (detected during cleanup)"
-                save_session(session, workspace)
-
-        # Then: clean up old completed sessions
+        # Clean up old completed sessions
         if session.status in ("completed", "failed", "killed"):
+            started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
             if started.timestamp() < cutoff:
                 # Kill zombie tmux session if still somehow running
                 if session.tmux_session:
