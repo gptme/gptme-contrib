@@ -3481,6 +3481,7 @@ def _execute_task_agent(
     model: Optional[str],
     timeout: int,
     max_concurrent: int = 4,
+    system_prompt_file: Optional[str] = None,
 ):
     """Shared logic for run and spawn commands."""
     repo_root = find_repo_root(Path.cwd())
@@ -3543,6 +3544,10 @@ Focus on making progress on this task. When done, summarize what you accomplishe
     console.print(f"  Backend: {backend}")
     if model:
         console.print(f"  Model: {model}")
+    if timeout > 0:
+        console.print(f"  Timeout: {timeout}s ({timeout // 60}min)")
+    if system_prompt_file:
+        console.print(f"  System prompt: {system_prompt_file}")
     if background:
         console.print(f"  Background: {background}")
 
@@ -3557,6 +3562,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         workspace=repo_root,
         timeout=timeout,
         model=model,
+        system_prompt_file=system_prompt_file,
     )
 
     if session.status == "failed":
@@ -3611,6 +3617,12 @@ Focus on making progress on this task. When done, summarize what you accomplishe
     default=600,
     help="Timeout in seconds",
 )
+@click.option(
+    "--system-prompt-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to file with additional system prompt (claude backend only)",
+)
 def run_cmd(
     task_id: str,
     prompt: Optional[str],
@@ -3618,6 +3630,7 @@ def run_cmd(
     backend: str,
     model: Optional[str],
     timeout: int,
+    system_prompt_file: Optional[str],
 ):
     """Run a task synchronously (foreground).
 
@@ -3641,6 +3654,7 @@ def run_cmd(
         background=False,
         model=model,
         timeout=timeout,
+        system_prompt_file=system_prompt_file,
     )
 
 
@@ -3681,8 +3695,14 @@ def run_cmd(
 @click.option(
     "--timeout",
     type=int,
-    default=600,
-    help="Timeout in seconds (foreground only)",
+    default=3000,
+    help="Timeout in seconds (default: 3000, ~50min; 0 to disable)",
+)
+@click.option(
+    "--system-prompt-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to file with additional system prompt (claude backend only)",
 )
 @click.option(
     "--max-concurrent",
@@ -3699,6 +3719,7 @@ def spawn_cmd(
     model: Optional[str],
     timeout: int,
     max_concurrent: int,
+    system_prompt_file: Optional[str],
 ):
     """Spawn a sub-agent in background (tmux).
 
@@ -3712,7 +3733,8 @@ def spawn_cmd(
 
     Examples:
         gptodo spawn my-task
-        gptodo spawn my-task --model openrouter/moonshotai/kimi-k2.5
+        gptodo spawn my-task --timeout 1800  # 30min timeout
+        gptodo spawn my-task --backend claude --system-prompt-file sysprompt.md
         gptodo spawn my-task --backend claude --type explore
         gptodo spawn my-task -f  # Foreground mode (prefer 'run' command)
     """
@@ -3725,6 +3747,7 @@ def spawn_cmd(
         model=model,
         timeout=timeout,
         max_concurrent=max_concurrent,
+        system_prompt_file=system_prompt_file,
     )
 
 
