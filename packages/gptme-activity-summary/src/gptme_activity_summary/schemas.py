@@ -63,6 +63,7 @@ class ModelUsage:
     """Per-model usage breakdown."""
 
     model: str
+    harness: str = ""  # "gptme", "claude-code", etc.
     sessions: int = 0
     tokens: int = 0
     cost: float = 0.0
@@ -137,16 +138,35 @@ def _format_model_table(metrics: "Metrics") -> list[str]:
     if not metrics.model_breakdown:
         return []
 
-    lines = [
-        "## Model Usage",
-        "",
-        "| Model | Sessions | Tokens | Cost |",
-        "|-------|----------|--------|------|",
-    ]
-    for m in metrics.model_breakdown:
-        cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
-        tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
-        lines.append(f"| {m.model} | {m.sessions} | {tokens_str} | {cost_str} |")
+    # Check if we have multiple harnesses (show harness column if so)
+    harnesses = {m.harness for m in metrics.model_breakdown if m.harness}
+    show_harness = len(harnesses) > 1
+
+    if show_harness:
+        lines = [
+            "## Model Usage",
+            "",
+            "| Harness | Model | Sessions | Tokens | Cost |",
+            "|---------|-------|----------|--------|------|",
+        ]
+        for m in metrics.model_breakdown:
+            cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
+            tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
+            harness_str = m.harness or "-"
+            lines.append(
+                f"| {harness_str} | {m.model} | {m.sessions} | {tokens_str} | {cost_str} |"
+            )
+    else:
+        lines = [
+            "## Model Usage",
+            "",
+            "| Model | Sessions | Tokens | Cost |",
+            "|-------|----------|--------|------|",
+        ]
+        for m in metrics.model_breakdown:
+            cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
+            tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
+            lines.append(f"| {m.model} | {m.sessions} | {tokens_str} | {cost_str} |")
 
     # Total row
     total_sessions = sum(m.sessions for m in metrics.model_breakdown)
@@ -154,7 +174,10 @@ def _format_model_table(metrics: "Metrics") -> list[str]:
     total_cost = sum(m.cost for m in metrics.model_breakdown)
     cost_str = f"${total_cost:.2f}" if total_cost > 0 else "-"
     tokens_str = _fmt_tokens(total_tokens) if total_tokens > 0 else "-"
-    lines.append(f"| **Total** | **{total_sessions}** | **{tokens_str}** | **{cost_str}** |")
+    if show_harness:
+        lines.append(f"| | **Total** | **{total_sessions}** | **{tokens_str}** | **{cost_str}** |")
+    else:
+        lines.append(f"| **Total** | **{total_sessions}** | **{tokens_str}** | **{cost_str}** |")
     lines.append("")
     return lines
 

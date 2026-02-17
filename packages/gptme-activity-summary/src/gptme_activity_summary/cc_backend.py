@@ -33,9 +33,11 @@ def call_claude_code(prompt: str, timeout: int = 120) -> str:
 
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
     result = subprocess.run(
-        ["claude", "-p", prompt],
+        ["claude", "-p", "-"],
+        input=prompt,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -366,6 +368,75 @@ Return ONLY the JSON."""
         "patterns": [],
         "narrative": "",
         "weekly_insight": "",
+    }
+
+    for key, default in defaults.items():
+        if key not in result:
+            result[key] = default
+
+    return result
+
+
+def summarize_github_activity_with_cc(
+    github_context: str,
+    username: str,
+    period: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """
+    Summarize GitHub activity for a human user using Claude Code.
+
+    Args:
+        github_context: Formatted GitHub activity markdown
+        username: GitHub username
+        period: Human-readable period description (e.g., "2026-02-10 to 2026-02-17")
+        timeout: Maximum time to wait for response
+
+    Returns:
+        Dictionary with structured activity summary
+    """
+    prompt = f"""Analyze this GitHub activity for user @{username} during {period} and create a structured summary.
+
+{github_context}
+
+Return ONLY valid JSON (no explanation) with this structure:
+{{
+    "highlights": ["top 3-5 most notable contributions or achievements"],
+    "projects_active": [
+        {{"repo": "owner/name", "description": "what they worked on", "prs": 0, "issues": 0}}
+    ],
+    "themes": ["main areas of focus"],
+    "narrative": "2-3 sentence summary of the person's GitHub activity during this period",
+    "stats": {{
+        "total_prs": 0,
+        "total_issues": 0,
+        "total_commits": 0,
+        "repos_active": 0
+    }}
+}}
+
+Guidelines:
+- Focus on what the person accomplished, not internal tool/agent details
+- Identify themes and patterns in their work
+- Keep the narrative human-readable and suitable for a profile or newsletter
+- Group related work into coherent project descriptions
+
+Return ONLY the JSON."""
+
+    response = call_claude_code(prompt, timeout=timeout)
+    result = extract_json_from_response(response)
+
+    defaults: dict[str, Any] = {
+        "highlights": [],
+        "projects_active": [],
+        "themes": [],
+        "narrative": "",
+        "stats": {
+            "total_prs": 0,
+            "total_issues": 0,
+            "total_commits": 0,
+            "repos_active": 0,
+        },
     }
 
     for key, default in defaults.items():

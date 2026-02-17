@@ -5,12 +5,15 @@ from datetime import date
 from pathlib import Path
 
 from gptme_activity_summary.session_data import (
+    ModelBreakdown,
+    SessionInfo,
     SessionStats,
     _session_matches_date,
     _session_matches_range,
     fetch_session_stats,
     fetch_session_stats_range,
     format_sessions_for_prompt,
+    merge_session_stats,
 )
 
 
@@ -51,7 +54,7 @@ def test_format_sessions_with_data():
         total_duration_seconds=7200,
     )
     result = format_sessions_for_prompt(stats)
-    assert "gptme Session Data (Real Data)" in result
+    assert "Session Data (Real Data)" in result
     assert "Sessions**: 3" in result
     assert "claude-3-opus (2x)" in result
     assert "Total tokens**: 15,000" in result
@@ -128,3 +131,72 @@ def test_session_stats_total_tokens():
         total_output_tokens=500,
     )
     assert stats.total_tokens == 1500
+
+
+def test_merge_session_stats():
+    """Test merging two SessionStats objects."""
+    a = SessionStats(
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 1),
+        session_count=2,
+        models_used={"opus": 2},
+        total_input_tokens=1000,
+        total_output_tokens=500,
+        total_cost=0.50,
+        total_duration_seconds=3600,
+        sessions=[SessionInfo(name="s1", model="opus")],
+    )
+    a._model_data["opus"] = ModelBreakdown(
+        model="opus", sessions=2, input_tokens=1000, output_tokens=500, cost=0.50
+    )
+
+    b = SessionStats(
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 1, 2),
+        session_count=1,
+        models_used={"opus": 1, "sonnet": 1},
+        total_input_tokens=500,
+        total_output_tokens=200,
+        total_cost=0.0,
+        total_duration_seconds=1800,
+        sessions=[SessionInfo(name="s2", model="sonnet")],
+    )
+    b._model_data["opus"] = ModelBreakdown(
+        model="opus", sessions=1, input_tokens=300, output_tokens=100, cost=0.0
+    )
+    b._model_data["sonnet"] = ModelBreakdown(
+        model="sonnet", sessions=1, input_tokens=200, output_tokens=100, cost=0.0
+    )
+
+    merged = merge_session_stats(a, b)
+    assert merged.session_count == 3
+    assert merged.start_date == date(2025, 1, 1)
+    assert merged.end_date == date(2025, 1, 2)
+    assert merged.total_input_tokens == 1500
+    assert merged.total_output_tokens == 700
+    assert merged.total_cost == 0.50
+    assert merged.total_duration_seconds == 5400
+    assert len(merged.sessions) == 2
+    assert merged.models_used["opus"] == 3
+    assert merged.models_used["sonnet"] == 1
+
+    # Check model breakdown
+    breakdown = {mb.model: mb for mb in merged.model_breakdown}
+    assert breakdown["opus"].sessions == 3
+    assert breakdown["opus"].input_tokens == 1300
+    assert breakdown["sonnet"].sessions == 1
+
+
+def test_format_sessions_header():
+    """Test that the header no longer says 'gptme'."""
+    stats = SessionStats(
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 1),
+        session_count=1,
+        models_used={"opus": 1},
+        total_input_tokens=100,
+        total_output_tokens=50,
+    )
+    result = format_sessions_for_prompt(stats)
+    assert "## Session Data (Real Data)" in result
+    assert "gptme" not in result
