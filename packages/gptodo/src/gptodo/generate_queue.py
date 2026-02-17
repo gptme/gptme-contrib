@@ -384,7 +384,9 @@ class QueueGenerator:
             except Exception:
                 continue
 
-        # Also check archive directory for completed tasks
+        # Also check archive directory for completed tasks.
+        # Default to "done" for archive tasks (vs "new" for tasks/) because
+        # archived tasks are presumed completed unless metadata says otherwise.
         archive_dir = self.tasks_dir / "archive"
         if archive_dir.exists():
             for task_file in archive_dir.glob("*.md"):

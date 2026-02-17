@@ -140,6 +140,42 @@ class TestFilterBlockedTasks:
         result = gen.filter_blocked_tasks(tasks)
         assert len(result) == 1
 
+    def test_mixed_url_and_task_requires(self, workspace: Path) -> None:
+        """Tasks with both URL and resolved task-based requires should pass through."""
+        write_task(workspace / "tasks", "dep-task", state="done", priority="medium")
+
+        gen = QueueGenerator(workspace)
+        tasks = [
+            Task(
+                id="task-a",
+                title="A",
+                priority="high",
+                state="active",
+                source="tasks",
+                requires=["dep-task", "https://github.com/org/repo/issues/1"],
+            )
+        ]
+        result = gen.filter_blocked_tasks(tasks)
+        assert len(result) == 1
+
+    def test_mixed_url_and_unresolved_task_requires(self, workspace: Path) -> None:
+        """Tasks with URL requires but unresolved task requires should be blocked."""
+        write_task(workspace / "tasks", "dep-task", state="active", priority="medium")
+
+        gen = QueueGenerator(workspace)
+        tasks = [
+            Task(
+                id="task-a",
+                title="A",
+                priority="high",
+                state="active",
+                source="tasks",
+                requires=["dep-task", "https://github.com/org/repo/issues/1"],
+            )
+        ]
+        result = gen.filter_blocked_tasks(tasks)
+        assert len(result) == 0
+
 
 class TestComputeUnblockingPower:
     def test_no_dependents(self, workspace: Path) -> None:
@@ -177,6 +213,29 @@ class TestComputeUnblockingPower:
         tasks = [Task(id="task-a", title="A", priority="high", state="active", source="tasks")]
         gen.compute_unblocking_power(tasks)
         assert tasks[0].unblocking_power == 2
+
+    def test_diamond_dependency_graph(self, workspace: Path) -> None:
+        """Diamond graph: A→B→D and A→C→D. D should be counted once, not twice."""
+        write_task(workspace / "tasks", "task-a", state="active", priority="high")
+        write_task(
+            workspace / "tasks", "task-b", state="new", priority="medium", requires=["task-a"]
+        )
+        write_task(
+            workspace / "tasks", "task-c", state="new", priority="medium", requires=["task-a"]
+        )
+        write_task(
+            workspace / "tasks",
+            "task-d",
+            state="new",
+            priority="medium",
+            requires=["task-b", "task-c"],
+        )
+
+        gen = QueueGenerator(workspace)
+        tasks = [Task(id="task-a", title="A", priority="high", state="active", source="tasks")]
+        gen.compute_unblocking_power(tasks)
+        # B, C, D = 3 unique dependents (D counted once via visited set dedup)
+        assert tasks[0].unblocking_power == 3
 
     def test_done_tasks_not_counted(self, workspace: Path) -> None:
         """Done tasks should not count as dependents."""
