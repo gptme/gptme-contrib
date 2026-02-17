@@ -102,6 +102,7 @@ def spawn_agent(
     timeout: int = 600,
     model: Optional[str] = None,
     clear_keys: Optional[bool] = None,
+    system_prompt_file: Optional[str] = None,
 ) -> AgentSession:
     """Spawn a sub-agent to work on a task.
 
@@ -112,11 +113,13 @@ def spawn_agent(
         backend: Which backend to use (gptme or claude)
         background: If True, run in tmux session
         workspace: Working directory for the agent
-        timeout: Timeout in seconds (for foreground only)
+        timeout: Timeout in seconds (applies to both foreground and background)
         model: Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)
         clear_keys: If True, explicitly unset API keys (useful for backends
             with their own auth like Claude Code/Codex). If None (default),
             auto-detects based on backend (True for claude, False for gptme).
+        system_prompt_file: Path to file with additional system prompt context.
+            For claude backend, passed as --append-system-prompt-file.
 
     Returns:
         AgentSession with status and session_id
@@ -150,12 +153,21 @@ def spawn_agent(
         safe_output = shlex.quote(str(output_file))
 
         # Both backends: redirect to file + tail -f for tmux pane visibility
+        # Wrap with timeout to prevent runaway background sessions
+        timeout_cmd = f"timeout {timeout}" if timeout > 0 else ""
         if backend == "gptme":
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            agent_cmd = f'gptme -n {model_arg} "$(cat {safe_prompt_file})"'
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_cmd} {agent_cmd} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            sysprompt_arg = (
+                f"--append-system-prompt-file {shlex.quote(system_prompt_file)}"
+                if system_prompt_file
+                else ""
+            )
+            agent_cmd = f'claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})"'
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_cmd} {agent_cmd} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -236,6 +248,8 @@ def spawn_agent(
         cmd = ["claude", "-p"]
         if model:
             cmd.extend(["--model", model])
+        if system_prompt_file:
+            cmd.extend(["--append-system-prompt-file", system_prompt_file])
         cmd.extend(
             [
                 "--dangerously-skip-permissions",
@@ -384,7 +398,10 @@ def cleanup_sessions(
     workspace: Optional[Path] = None,
     older_than_hours: int = 24,
 ) -> int:
-    """Remove old session files.
+    """Remove old session files and kill zombie tmux sessions.
+
+    Also kills any gptodo_agent_* tmux sessions that are still running
+    but whose session state shows completed/failed/killed (zombies).
 
     Returns count of sessions cleaned up.
     """
@@ -394,9 +411,35 @@ def cleanup_sessions(
     cutoff = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
 
     for session in sessions:
+        started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
+
+        # First: sync state with tmux reality for "running" sessions
+        if session.status == "running" and session.tmux_session:
+            check_result = subprocess.run(
+                ["tmux", "has-session", "-t", session.tmux_session],
+                capture_output=True,
+            )
+            if check_result.returncode != 0:
+                # tmux session is gone but state still says running
+                session.status = "completed"
+                session.completed_at = datetime.now(timezone.utc).isoformat()
+                if session.output_file and Path(session.output_file).exists():
+                    output = Path(session.output_file).read_text()
+                    if "EXIT_CODE=" in output and "EXIT_CODE=0" not in output:
+                        session.status = "failed"
+                        session.error = "Non-zero exit code (detected during cleanup)"
+                save_session(session, workspace)
+
+        # Then: clean up old completed sessions
         if session.status in ("completed", "failed", "killed"):
-            started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
             if started.timestamp() < cutoff:
+                # Kill zombie tmux session if still somehow running
+                if session.tmux_session:
+                    subprocess.run(
+                        ["tmux", "kill-session", "-t", session.tmux_session],
+                        capture_output=True,
+                    )
+
                 # Remove session file
                 session_file = sessions_dir / f"{session.session_id}.json"
                 if session_file.exists():

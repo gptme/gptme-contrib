@@ -3480,6 +3480,7 @@ def _execute_task_agent(
     background: bool,
     model: Optional[str],
     timeout: int,
+    system_prompt_file: Optional[str] = None,
 ):
     """Shared logic for run and spawn commands."""
     repo_root = find_repo_root(Path.cwd())
@@ -3534,6 +3535,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         workspace=repo_root,
         timeout=timeout,
         model=model,
+        system_prompt_file=system_prompt_file,
     )
 
     if session.status == "failed":
@@ -3658,8 +3660,14 @@ def run_cmd(
 @click.option(
     "--timeout",
     type=int,
-    default=600,
-    help="Timeout in seconds (foreground only)",
+    default=3000,
+    help="Timeout in seconds (default: 3000, ~50 min)",
+)
+@click.option(
+    "--system-prompt-file",
+    type=str,
+    default=None,
+    help="Path to file with additional system prompt context (claude backend only)",
 )
 def spawn_cmd(
     task_id: str,
@@ -3669,6 +3677,7 @@ def spawn_cmd(
     foreground: bool,
     model: Optional[str],
     timeout: int,
+    system_prompt_file: Optional[str],
 ):
     """Spawn a sub-agent in background (tmux).
 
@@ -3685,6 +3694,7 @@ def spawn_cmd(
         gptodo spawn my-task --model openrouter/moonshotai/kimi-k2.5
         gptodo spawn my-task --backend claude --type explore
         gptodo spawn my-task -f  # Foreground mode (prefer 'run' command)
+        gptodo spawn my-task --backend claude --system-prompt-file context.md
     """
     _execute_task_agent(
         task_id=task_id,
@@ -3694,6 +3704,7 @@ def spawn_cmd(
         background=not foreground,
         model=model,
         timeout=timeout,
+        system_prompt_file=system_prompt_file,
     )
 
 
@@ -3970,9 +3981,10 @@ def kill_cmd(session_id: str):
     help="Remove sessions older than N hours",
 )
 def cleanup_sessions_cmd(older_than: int):
-    """Clean up old session files.
+    """Clean up old session files and zombie tmux sessions.
 
     Removes completed/failed session files older than the specified time.
+    Also syncs state for sessions where tmux died but state still shows running.
     """
     repo_root = find_repo_root(Path.cwd())
     count = cleanup_sessions(repo_root, older_than)
