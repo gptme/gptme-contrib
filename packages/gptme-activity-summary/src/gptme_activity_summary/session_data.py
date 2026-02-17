@@ -23,6 +23,7 @@ class SessionInfo:
 
     name: str
     model: str = ""
+    harness: str = ""  # "gptme", "claude-code", "codex", etc.
     workspace: str = ""
     message_count: int = 0
     input_tokens: int = 0
@@ -34,9 +35,10 @@ class SessionInfo:
 
 @dataclass
 class ModelBreakdown:
-    """Per-model aggregated usage."""
+    """Per-model (and optionally per-harness) aggregated usage."""
 
     model: str
+    harness: str = ""
     sessions: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -139,15 +141,36 @@ def _parse_conversation_jsonl(conv_path: Path) -> dict:
                     except (ValueError, TypeError):
                         pass
 
-                # Extract token usage if present
+                # Extract token usage — check multiple locations:
+                # - msg.usage (legacy/generic)
+                # - msg.metadata (gptme puts tokens here)
+                # - msg.metadata.usage (future gptme format)
                 usage = msg.get("usage") or {}
-                stats["input_tokens"] += (
-                    usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0
+                metadata = msg.get("metadata") or {}
+                meta_usage = metadata.get("usage") or {}
+
+                input_tok = (
+                    usage.get("input_tokens", 0)
+                    or meta_usage.get("input_tokens", 0)
+                    or metadata.get("input_tokens", 0)
+                    or usage.get("prompt_tokens", 0)
+                    or 0
                 )
-                stats["output_tokens"] += (
-                    usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0
+                output_tok = (
+                    usage.get("output_tokens", 0)
+                    or meta_usage.get("output_tokens", 0)
+                    or metadata.get("output_tokens", 0)
+                    or usage.get("completion_tokens", 0)
+                    or 0
                 )
-                stats["cost"] += usage.get("cost", 0.0) or 0.0
+                stats["input_tokens"] += input_tok
+                stats["output_tokens"] += output_tok
+                stats["cost"] += (
+                    usage.get("cost", 0.0)
+                    or meta_usage.get("cost", 0.0)
+                    or metadata.get("cost", 0.0)
+                    or 0.0
+                )
 
     except Exception as e:
         logger.debug("Failed to parse %s: %s", conv_path, e)
@@ -196,6 +219,29 @@ def fetch_session_stats(
     return fetch_session_stats_range(target_date, target_date, logs_dir)
 
 
+def _aggregate_session(stats: SessionStats, info: SessionInfo) -> None:
+    """Add a single session's data into aggregated stats."""
+    stats.session_count += 1
+    stats.sessions.append(info)
+
+    if info.model:
+        stats.models_used[info.model] = stats.models_used.get(info.model, 0) + 1
+        # Per harness+model breakdown
+        key = f"{info.harness}/{info.model}" if info.harness else info.model
+        if key not in stats._model_data:
+            stats._model_data[key] = ModelBreakdown(model=info.model, harness=info.harness)
+        mb = stats._model_data[key]
+        mb.sessions += 1
+        mb.input_tokens += info.input_tokens
+        mb.output_tokens += info.output_tokens
+        mb.cost += info.cost
+
+    stats.total_input_tokens += info.input_tokens
+    stats.total_output_tokens += info.output_tokens
+    stats.total_cost += info.cost
+    stats.total_duration_seconds += info.duration_seconds
+
+
 def fetch_session_stats_range(
     start: date,
     end: date,
@@ -229,15 +275,17 @@ def fetch_session_stats_range(
             if not _session_matches_range(session_dir.name, start, end):
                 continue
 
-            session_info = SessionInfo(name=session_dir.name)
+            session_info = SessionInfo(name=session_dir.name, harness="gptme")
 
             # Parse config.toml if it exists
             config_path = session_dir / "config.toml"
             if config_path.exists():
                 config = _parse_config_toml(config_path)
-                session_info.model = config.get("model", "")
-                session_info.workspace = config.get("workspace", "")
-                session_info.interactive = config.get("interactive", True)
+                # gptme stores config under [chat] section
+                chat = config.get("chat", {})
+                session_info.model = chat.get("model", "") or config.get("model", "")
+                session_info.workspace = chat.get("workspace", "") or config.get("workspace", "")
+                session_info.interactive = chat.get("interactive", config.get("interactive", True))
 
             # Parse conversation.jsonl if it exists
             conv_path = session_dir / "conversation.jsonl"
@@ -249,32 +297,49 @@ def fetch_session_stats_range(
                 session_info.cost = conv_stats["cost"]
                 session_info.duration_seconds = conv_stats["duration_seconds"]
 
-            # Aggregate
-            stats.session_count += 1
-            stats.sessions.append(session_info)
-
-            if session_info.model:
-                stats.models_used[session_info.model] = (
-                    stats.models_used.get(session_info.model, 0) + 1
-                )
-                # Per-model breakdown
-                if session_info.model not in stats._model_data:
-                    stats._model_data[session_info.model] = ModelBreakdown(model=session_info.model)
-                mb = stats._model_data[session_info.model]
-                mb.sessions += 1
-                mb.input_tokens += session_info.input_tokens
-                mb.output_tokens += session_info.output_tokens
-                mb.cost += session_info.cost
-
-            stats.total_input_tokens += session_info.input_tokens
-            stats.total_output_tokens += session_info.output_tokens
-            stats.total_cost += session_info.cost
-            stats.total_duration_seconds += session_info.duration_seconds
+            _aggregate_session(stats, session_info)
 
     except PermissionError:
         logger.debug("Permission denied reading logs directory: %s", logs_dir)
 
     return stats
+
+
+def merge_session_stats(a: SessionStats, b: SessionStats) -> SessionStats:
+    """Merge two SessionStats objects into one.
+
+    Sums tokens, costs, durations; merges model breakdowns; concatenates session lists.
+    Uses the earliest start_date and latest end_date from either input.
+    """
+    merged = SessionStats(
+        start_date=min(a.start_date, b.start_date),
+        end_date=max(a.end_date, b.end_date),
+        session_count=a.session_count + b.session_count,
+        total_input_tokens=a.total_input_tokens + b.total_input_tokens,
+        total_output_tokens=a.total_output_tokens + b.total_output_tokens,
+        total_cost=a.total_cost + b.total_cost,
+        total_duration_seconds=a.total_duration_seconds + b.total_duration_seconds,
+        sessions=a.sessions + b.sessions,
+    )
+
+    # Merge models_used counts
+    for model, count in a.models_used.items():
+        merged.models_used[model] = merged.models_used.get(model, 0) + count
+    for model, count in b.models_used.items():
+        merged.models_used[model] = merged.models_used.get(model, 0) + count
+
+    # Merge model breakdown data (keys are "harness/model" composites)
+    for source in (a, b):
+        for key, mb in source._model_data.items():
+            if key not in merged._model_data:
+                merged._model_data[key] = ModelBreakdown(model=mb.model, harness=mb.harness)
+            dest = merged._model_data[key]
+            dest.sessions += mb.sessions
+            dest.input_tokens += mb.input_tokens
+            dest.output_tokens += mb.output_tokens
+            dest.cost += mb.cost
+
+    return merged
 
 
 def format_sessions_for_prompt(stats: SessionStats) -> str:
@@ -287,7 +352,7 @@ def format_sessions_for_prompt(stats: SessionStats) -> str:
         return ""
 
     lines: list[str] = []
-    lines.append("## gptme Session Data (Real Data)")
+    lines.append("## Session Data (Real Data)")
     lines.append(f"Period: {stats.start_date.isoformat()} to {stats.end_date.isoformat()}")
     lines.append(f"- **Sessions**: {stats.session_count}")
 

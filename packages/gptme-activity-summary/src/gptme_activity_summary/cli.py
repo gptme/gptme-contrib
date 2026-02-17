@@ -37,11 +37,13 @@ from .schemas import (
     ModelUsage,
     MonthlySummary,
 )
+from .cc_session_data import fetch_cc_session_stats_range
 from .session_data import (
     SessionStats,
     fetch_session_stats,
     fetch_session_stats_range,
     format_sessions_for_prompt,
+    merge_session_stats,
 )
 from .workspace_data import (
     fetch_workspace_activity,
@@ -62,6 +64,7 @@ def _build_model_breakdown(session_stats):  # type: ignore[no-untyped-def]
     return [
         ModelUsage(
             model=mb.model,
+            harness=mb.harness,
             sessions=mb.sessions,
             tokens=mb.total_tokens,
             cost=mb.cost,
@@ -133,12 +136,20 @@ def _fetch_data(
     start: date,
     end: date,
 ) -> tuple[GitHubActivity, SessionStats]:
-    """Fetch GitHub activity and session stats for a date range."""
+    """Fetch GitHub activity and session stats for a date range.
+
+    Merges gptme session stats with Claude Code session stats.
+    """
     activity = fetch_activity(start, end, workspace=str(WORKSPACE))
     if start == end:
-        session_stats = fetch_session_stats(start)
+        gptme_stats = fetch_session_stats(start)
     else:
-        session_stats = fetch_session_stats_range(start, end)
+        gptme_stats = fetch_session_stats_range(start, end)
+
+    # Merge in Claude Code sessions
+    cc_stats = fetch_cc_session_stats_range(start, end)
+    session_stats = merge_session_stats(gptme_stats, cc_stats)
+
     return activity, session_stats
 
 
@@ -774,9 +785,107 @@ def cmd_stats(args):
     return 0
 
 
+def cmd_github(args):
+    """Generate activity summary for a GitHub user (human mode)."""
+    from .cc_backend import summarize_github_activity_with_cc
+    from .github_data import fetch_user_activity, format_activity_for_prompt
+
+    username = args.user
+
+    # Parse period
+    if args.period == "daily":
+        if args.date == "today":
+            target_date = date.today()
+        elif args.date == "yesterday":
+            target_date = date.today() - timedelta(days=1)
+        else:
+            target_date = date.fromisoformat(args.date)
+        start = target_date
+        end = target_date
+        period_str = target_date.isoformat()
+    elif args.period == "weekly":
+        end = date.today() if args.date == "today" else date.today() - timedelta(days=1)
+        start = end - timedelta(days=6)
+        period_str = f"{start.isoformat()} to {end.isoformat()}"
+    elif args.period == "monthly":
+        end = date.today() if args.date == "today" else date.today() - timedelta(days=1)
+        start = end.replace(day=1)
+        period_str = f"{start.isoformat()} to {end.isoformat()}"
+    else:
+        print(f"Unknown period: {args.period}")
+        return 1
+
+    print(f"Fetching GitHub activity for @{username} ({period_str})...")
+
+    # Fetch GitHub activity for this user
+    activity = fetch_user_activity(start, end, username)
+
+    if args.verbose:
+        print(
+            f"  Found: {activity.total_commits} commits, "
+            f"{activity.total_prs_merged} PRs, "
+            f"{activity.total_issues_closed} issues, "
+            f"{len(activity.repos)} repos"
+        )
+
+    github_text = format_activity_for_prompt(activity)
+
+    if not github_text:
+        print(f"No GitHub activity found for @{username} in this period.")
+        return 0
+
+    if args.raw:
+        # Just print the raw GitHub data without LLM summarization
+        print(f"\n{github_text}")
+        return 0
+
+    print("Generating summary with Claude Code...")
+    result = summarize_github_activity_with_cc(github_text, username, period_str)
+
+    # Format output
+    print(f"\n## GitHub Activity Summary: @{username}")
+    print(f"**Period**: {period_str}\n")
+
+    if result.get("narrative"):
+        print(result["narrative"])
+        print()
+
+    if result.get("highlights"):
+        print("### Highlights")
+        for h in result["highlights"]:
+            print(f"- {h}")
+        print()
+
+    if result.get("projects_active"):
+        print("### Active Projects")
+        for p in result["projects_active"]:
+            desc = p.get("description", "")
+            repo = p.get("repo", "")
+            prs = p.get("prs", 0)
+            issues = p.get("issues", 0)
+            print(f"- **{repo}**: {desc} ({prs} PRs, {issues} issues)")
+        print()
+
+    if result.get("themes"):
+        print("### Themes")
+        for t in result["themes"]:
+            print(f"- {t}")
+        print()
+
+    stats = result.get("stats", {})
+    if stats:
+        print("### Stats")
+        print(f"- Commits: {stats.get('total_commits', 0)}")
+        print(f"- PRs: {stats.get('total_prs', 0)}")
+        print(f"- Issues: {stats.get('total_issues', 0)}")
+        print(f"- Repos active: {stats.get('repos_active', 0)}")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Recursive journal summarization system (Claude Code backend)",
+        description="Activity summarization — journals, GitHub, sessions, tweets, email",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
@@ -833,6 +942,33 @@ def main():
     # stats command
     subparsers.add_parser("stats", help="Show journal statistics")
 
+    # github command (human mode)
+    github_parser = subparsers.add_parser(
+        "github",
+        help="Summarize GitHub activity for any user (no journal needed)",
+    )
+    github_parser.add_argument(
+        "--user",
+        required=True,
+        help="GitHub username to summarize activity for",
+    )
+    github_parser.add_argument(
+        "--period",
+        default="weekly",
+        choices=["daily", "weekly", "monthly"],
+        help="Time period to summarize (default: weekly)",
+    )
+    github_parser.add_argument(
+        "--date",
+        default="today",
+        help="Reference date (YYYY-MM-DD or 'today'/'yesterday'). Period is calculated relative to this.",
+    )
+    github_parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Print raw GitHub data without LLM summarization",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -846,6 +982,7 @@ def main():
         "smart": cmd_smart,
         "backfill": cmd_backfill,
         "stats": cmd_stats,
+        "github": cmd_github,
     }
 
     return commands[args.command](args)
