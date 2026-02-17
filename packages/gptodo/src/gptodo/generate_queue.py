@@ -384,7 +384,9 @@ class QueueGenerator:
             except Exception:
                 continue
 
-        # Also check archive directory for completed tasks
+        # Also check archive directory for completed tasks.
+        # Default to "done" for archive tasks (vs "new" for tasks/) because
+        # archived tasks are presumed completed unless metadata says otherwise.
         archive_dir = self.tasks_dir / "archive"
         if archive_dir.exists():
             for task_file in archive_dir.glob("*.md"):
@@ -404,7 +406,7 @@ class QueueGenerator:
             blocked = False
             for req in task.requires:
                 # Skip URL-based requires (can't check without cache)
-                if isinstance(req, str) and req.startswith("http"):
+                if isinstance(req, str) and req.startswith(("http://", "https://")):
                     continue
                 req_state = all_task_states.get(req)
                 if req_state is None or req_state not in ("done", "cancelled"):
@@ -445,7 +447,9 @@ class QueueGenerator:
                 if requires and isinstance(requires, list):
                     # Filter to task-based requires only
                     task_requires = [
-                        r for r in requires if isinstance(r, str) and not r.startswith("http")
+                        r
+                        for r in requires
+                        if isinstance(r, str) and not r.startswith(("http://", "https://"))
                     ]
                     if task_requires:
                         all_requires[task_file.stem] = task_requires
