@@ -49,6 +49,7 @@ class Task:
         details: Optional[str] = None,
         blockers: Optional[List[str]] = None,
         assigned: bool = False,
+        requires: Optional[List[str]] = None,
     ):
         self.id = id
         self.title = title
@@ -58,9 +59,17 @@ class Task:
         self.details = details or ""
         self.blockers = blockers or []
         self.assigned = assigned  # For GitHub issues: explicitly assigned
+        self.requires = requires or []  # Task IDs this task depends on
+        self.unblocking_power = 0  # Set by compute_unblocking_power()
 
     def priority_score(self) -> int:
-        """Get numeric priority for sorting (higher = more important)."""
+        """Get numeric priority for sorting (higher = more important).
+
+        Score components:
+        - Base: urgent=4, high=3, medium=2, low=1
+        - +1 if explicitly assigned (GitHub issues)
+        - +unblocking_power (tasks that unblock more work rank higher)
+        """
         priority = self.priority.lower()
         if priority == "urgent":
             score = 4
@@ -74,6 +83,9 @@ class Task:
         # Boost score if explicitly assigned (GitHub issues only)
         if self.assigned:
             score += 1
+
+        # Boost by unblocking power (how many tasks this unblocks transitively)
+        score += self.unblocking_power
 
         return score
 
@@ -104,6 +116,10 @@ class Task:
         if self.blockers:
             blocker_text = ", ".join(self.blockers)
             lines.append(f"   - Blocked on: {blocker_text}")
+
+        # Show unblocking power if significant
+        if self.unblocking_power > 0:
+            lines.append(f"   - Unblocks: {self.unblocking_power} downstream task(s)")
 
         # Add source reference
         lines.append(f"   - Source: {self.source}/{self.id}")
@@ -202,6 +218,11 @@ class QueueGenerator:
                         title = line[2:].strip()
                         break
 
+                # Read dependency fields (requires is canonical, depends is deprecated alias)
+                requires_list = post.metadata.get("requires", []) or post.metadata.get(
+                    "depends", []
+                )
+
                 tasks.append(
                     Task(
                         id=task_file.stem,
@@ -209,6 +230,7 @@ class QueueGenerator:
                         state=state,
                         priority=priority,
                         source="tasks",
+                        requires=requires_list if isinstance(requires_list, list) else [],
                     )
                 )
             except Exception as e:
@@ -341,6 +363,119 @@ class QueueGenerator:
         # Fallback: generic message
         return f"Session {datetime.now().strftime('%Y%m%d-%H%M')}: Work in progress"
 
+    def filter_blocked_tasks(self, tasks: List[Task]) -> List[Task]:
+        """Filter out tasks whose dependencies are not yet resolved.
+
+        A task is blocked if any of its requires references a task that is
+        not in 'done' or 'cancelled' state. We check against all task files
+        in the tasks directory (not just high-priority ones).
+        """
+        if not self.tasks_dir.exists():
+            return tasks
+
+        # Build a map of all task states (including done/cancelled ones)
+        all_task_states: dict[str, str] = {}
+        for task_file in self.tasks_dir.glob("*.md"):
+            if task_file.name.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(task_file)
+                all_task_states[task_file.stem] = post.metadata.get("state", "new")
+            except Exception:
+                continue
+
+        # Also check archive directory for completed tasks
+        archive_dir = self.tasks_dir / "archive"
+        if archive_dir.exists():
+            for task_file in archive_dir.glob("*.md"):
+                try:
+                    post = frontmatter.load(task_file)
+                    all_task_states[task_file.stem] = post.metadata.get("state", "done")
+                except Exception:
+                    continue
+
+        ready_tasks = []
+        for task in tasks:
+            if not task.requires:
+                ready_tasks.append(task)
+                continue
+
+            # Check if all task-based requires are resolved
+            blocked = False
+            for req in task.requires:
+                # Skip URL-based requires (can't check without cache)
+                if isinstance(req, str) and req.startswith("http"):
+                    continue
+                req_state = all_task_states.get(req)
+                if req_state is None or req_state not in ("done", "cancelled"):
+                    blocked = True
+                    break
+
+            if not blocked:
+                ready_tasks.append(task)
+
+        filtered_count = len(tasks) - len(ready_tasks)
+        if filtered_count > 0:
+            print(f"  Filtered {filtered_count} blocked task(s) with unmet dependencies")
+
+        return ready_tasks
+
+    def compute_unblocking_power(self, tasks: List[Task]) -> None:
+        """Compute how many tasks each task transitively unblocks.
+
+        For each task, count how many other tasks (across all task files)
+        depend on it either directly or transitively. Tasks that unblock
+        more work get higher priority scores.
+        """
+        if not self.tasks_dir.exists():
+            return
+
+        # Build a map of all task requires (including non-queue tasks)
+        all_requires: dict[str, list[str]] = {}
+        for task_file in self.tasks_dir.glob("*.md"):
+            if task_file.name.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(task_file)
+                state = post.metadata.get("state", "new")
+                # Only count non-terminal tasks as "things to unblock"
+                if state in ("done", "cancelled"):
+                    continue
+                requires = post.metadata.get("requires", []) or post.metadata.get("depends", [])
+                if requires and isinstance(requires, list):
+                    # Filter to task-based requires only
+                    task_requires = [
+                        r for r in requires if isinstance(r, str) and not r.startswith("http")
+                    ]
+                    if task_requires:
+                        all_requires[task_file.stem] = task_requires
+            except Exception:
+                continue
+
+        for task in tasks:
+            if task.source != "tasks":
+                continue
+            task.unblocking_power = self._count_transitive_dependents(task.id, all_requires, set())
+
+    def _count_transitive_dependents(
+        self,
+        task_id: str,
+        all_requires: dict[str, list[str]],
+        visited: set[str],
+    ) -> int:
+        """Count tasks that directly or transitively depend on task_id."""
+        if task_id in visited:
+            return 0
+        visited.add(task_id)
+
+        count = 0
+        for other_id, requires in all_requires.items():
+            if task_id in requires and other_id not in visited:
+                count += 1  # Direct dependent
+                count += self._count_transitive_dependents(other_id, all_requires, visited)
+
+        return count
+
     def generate_work_queue(self, tasks: List[Task], current_run: str) -> str:
         """Generate queue-generated.md content."""
         # Sort tasks by priority
@@ -392,6 +527,12 @@ class QueueGenerator:
         print(
             f"Found {len(file_tasks)} tasks from files, " f"{len(github_issues)} from GitHub issues"
         )
+
+        # Filter out blocked tasks (unmet dependencies)
+        all_tasks = self.filter_blocked_tasks(all_tasks)
+
+        # Compute unblocking power for priority scoring
+        self.compute_unblocking_power(all_tasks)
 
         # Get current run summary
         current_run = self.get_current_run_summary()
