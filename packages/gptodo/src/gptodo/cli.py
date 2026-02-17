@@ -3480,10 +3480,33 @@ def _execute_task_agent(
     background: bool,
     model: Optional[str],
     timeout: int,
+    max_concurrent: int = 4,
 ):
     """Shared logic for run and spawn commands."""
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
+
+    # Check concurrency limit for background spawns
+    if background and max_concurrent > 0:
+        from .subagent import list_sessions, check_session
+
+        running = list_sessions(repo_root, status="running")
+        # Reconcile with actual tmux state
+        actually_running = []
+        for s in running:
+            checked = check_session(s.session_id, repo_root)
+            if checked and checked.status == "running":
+                actually_running.append(checked)
+
+        if len(actually_running) >= max_concurrent:
+            console.print(f"[yellow]⚠ Max concurrent agents ({max_concurrent}) reached[/]")
+            for s in actually_running:
+                console.print(f"  • {s.session_id[:8]} — {s.task_id}")
+            console.print(
+                "\nWait for agents to finish, or kill one with: "
+                "[cyan]gptodo kill <session-id>[/]"
+            )
+            return
 
     # Find the task
     tasks = load_tasks(tasks_dir)
@@ -3661,6 +3684,12 @@ def run_cmd(
     default=600,
     help="Timeout in seconds (foreground only)",
 )
+@click.option(
+    "--max-concurrent",
+    type=int,
+    default=4,
+    help="Max concurrent background agents (0 = unlimited)",
+)
 def spawn_cmd(
     task_id: str,
     prompt: Optional[str],
@@ -3669,6 +3698,7 @@ def spawn_cmd(
     foreground: bool,
     model: Optional[str],
     timeout: int,
+    max_concurrent: int,
 ):
     """Spawn a sub-agent in background (tmux).
 
@@ -3694,6 +3724,7 @@ def spawn_cmd(
         background=not foreground,
         model=model,
         timeout=timeout,
+        max_concurrent=max_concurrent,
     )
 
 
