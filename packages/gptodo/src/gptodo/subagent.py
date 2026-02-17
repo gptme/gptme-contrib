@@ -283,7 +283,7 @@ def spawn_agent(
             cwd=workspace,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=timeout if timeout > 0 else None,
             env=env,
         )
 
