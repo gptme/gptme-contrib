@@ -643,36 +643,25 @@ def load_tasks(
                     date_obj = date.fromisoformat(value_str)
                     return datetime.combine(date_obj, datetime.min.time())
 
+            # Parse created and modified independently to avoid git fallback
+            # when only one field is missing (common: modified is rarely in frontmatter)
+            stats = file.stat()
+
+            # Parse created timestamp
             try:
                 created = parse_datetime_field(metadata.get("created", ""))
-                modified = parse_datetime_field(metadata.get("modified", ""))
             except (ValueError, TypeError):
-                # Fallback to git timestamps
-                try:
-                    # Get last commit time
-                    result = subprocess.run(
-                        ["git", "log", "-1", "--format=%at", "--", str(file)],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                    timestamp = int(result.stdout.strip())
-                    modified = datetime.fromtimestamp(timestamp)
+                created = datetime.fromtimestamp(stats.st_ctime)
 
-                    # Get first commit time (creation)
-                    result = subprocess.run(
-                        ["git", "log", "--reverse", "--format=%at", "--", str(file)],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                    timestamp = int(result.stdout.strip().split("\n")[0])
-                    created = datetime.fromtimestamp(timestamp)
-                except (subprocess.CalledProcessError, ValueError, IndexError):
-                    # Fallback to filesystem timestamps if git fails
-                    stats = file.stat()
-                    created = datetime.fromtimestamp(stats.st_ctime)
+            # Parse modified timestamp — use file mtime as fast fallback
+            # (avoids expensive git log subprocess per task)
+            if "modified" in metadata:
+                try:
+                    modified = parse_datetime_field(metadata["modified"])
+                except (ValueError, TypeError):
                     modified = datetime.fromtimestamp(stats.st_mtime)
+            else:
+                modified = datetime.fromtimestamp(stats.st_mtime)
 
             # Convert to naive datetime if timezone-aware
             if created.tzinfo:
