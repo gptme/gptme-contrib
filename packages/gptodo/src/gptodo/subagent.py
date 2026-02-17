@@ -99,7 +99,7 @@ def spawn_agent(
     backend: Literal["gptme", "claude", "codex"] = "gptme",
     background: bool = False,
     workspace: Optional[Path] = None,
-    timeout: int = 600,
+    timeout: int = 3000,
     model: Optional[str] = None,
     clear_keys: Optional[bool] = None,
     system_prompt_file: Optional[str] = None,
