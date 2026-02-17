@@ -384,7 +384,11 @@ def cleanup_sessions(
     workspace: Optional[Path] = None,
     older_than_hours: int = 24,
 ) -> int:
-    """Remove old session files.
+    """Remove old session files and reconcile stale state.
+
+    First reconciles any "running" sessions whose tmux sessions have
+    exited (detects zombie state). Then removes session files for
+    terminated sessions older than the cutoff.
 
     Returns count of sessions cleaned up.
     """
@@ -393,6 +397,15 @@ def cleanup_sessions(
     sessions_dir = get_sessions_dir(workspace)
     cutoff = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
 
+    # Phase 1: Reconcile "running" sessions with tmux state
+    for session in sessions:
+        if session.status == "running":
+            check_session(session.session_id, workspace)
+
+    # Reload after reconciliation (statuses may have changed)
+    sessions = list_sessions(workspace)
+
+    # Phase 2: Remove old terminated sessions
     for session in sessions:
         if session.status in ("completed", "failed", "killed"):
             started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
@@ -413,5 +426,28 @@ def cleanup_sessions(
                 prompt_file = sessions_dir / f"{session.session_id}.prompt"
                 if prompt_file.exists():
                     prompt_file.unlink()
+
+    # Phase 3: Kill orphaned tmux sessions (gptodo_ prefix, no state file)
+    # Re-read sessions to avoid race: a new spawn between Phase 1 and now
+    # would create a tmux session not in our earlier snapshot.
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            fresh_sessions = list_sessions(workspace)
+            known_tmux = {s.tmux_session for s in fresh_sessions if s.tmux_session}
+            for tmux_name in result.stdout.strip().split("\n") if result.stdout.strip() else []:
+                tmux_name = tmux_name.strip()
+                if tmux_name.startswith("gptodo_") and tmux_name not in known_tmux:
+                    subprocess.run(
+                        ["tmux", "kill-session", "-t", tmux_name],
+                        capture_output=True,
+                    )
+                    count += 1
+    except FileNotFoundError:
+        pass  # tmux not installed
 
     return count
