@@ -102,6 +102,7 @@ def spawn_agent(
     timeout: int = 600,
     model: Optional[str] = None,
     clear_keys: Optional[bool] = None,
+    system_prompt_file: Optional[str] = None,
 ) -> AgentSession:
     """Spawn a sub-agent to work on a task.
 
@@ -112,11 +113,13 @@ def spawn_agent(
         backend: Which backend to use (gptme or claude)
         background: If True, run in tmux session
         workspace: Working directory for the agent
-        timeout: Timeout in seconds (for foreground only)
+        timeout: Timeout in seconds (both foreground and background)
         model: Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)
         clear_keys: If True, explicitly unset API keys (useful for backends
             with their own auth like Claude Code/Codex). If None (default),
             auto-detects based on backend (True for claude, False for gptme).
+        system_prompt_file: Path to file with additional system prompt content
+            (claude backend only, uses --append-system-prompt-file).
 
     Returns:
         AgentSession with status and session_id
@@ -150,12 +153,19 @@ def spawn_agent(
         safe_output = shlex.quote(str(output_file))
 
         # Both backends: redirect to file + tail -f for tmux pane visibility
+        # Wrap with timeout to prevent runaway sessions
+        timeout_prefix = f"timeout {timeout} " if timeout > 0 else ""
         if backend == "gptme":
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_prefix}gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
         else:
             model_arg = f"--model {shlex.quote(model)}" if model else ""
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; claude -p {model_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            sysprompt_arg = (
+                f"--append-system-prompt-file {shlex.quote(system_prompt_file)}"
+                if system_prompt_file
+                else ""
+            )
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_prefix}claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -236,6 +246,8 @@ def spawn_agent(
         cmd = ["claude", "-p"]
         if model:
             cmd.extend(["--model", model])
+        if system_prompt_file:
+            cmd.extend(["--append-system-prompt-file", system_prompt_file])
         cmd.extend(
             [
                 "--dangerously-skip-permissions",
@@ -323,6 +335,9 @@ def check_session(session_id: str, workspace: Optional[Path] = None) -> Optional
                 output = Path(session.output_file).read_text()
                 if "EXIT_CODE=0" in output:
                     session.status = "completed"
+                elif "EXIT_CODE=124" in output:
+                    session.status = "failed"
+                    session.error = "Timed out"
                 elif "EXIT_CODE=" in output:
                     session.status = "failed"
                     session.error = "Non-zero exit code"
