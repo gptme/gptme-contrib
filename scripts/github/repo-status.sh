@@ -99,9 +99,9 @@ if [ $# -gt 0 ]; then
     done
     wait  # Wait for all parallel checks to complete
 
-    # Print results in order
-    for f in "$TMPDIR"/*.txt; do
-        cat "$f"
+    # Print results in order (iterate by index to handle 10+ repos correctly)
+    for j in $(seq 0 $((i - 1))); do
+        [ -f "$TMPDIR/$j.txt" ] && cat "$TMPDIR/$j.txt"
     done
 else
     # Dynamically build repo list: gptme org (non-archived) + recently updated personal repos
@@ -111,7 +111,7 @@ else
 
     # Fetch repo lists in parallel
     gh repo list gptme --no-archived --json nameWithOwner --jq '.[].nameWithOwner' --limit 30 > "$TMPDIR/org_repos.txt" 2>/dev/null &
-    gh repo list ErikBjare --no-archived --source --json nameWithOwner,pushedAt --limit 10 > "$TMPDIR/personal_repos.json" 2>/dev/null &
+    gh repo list "${GH_USER:-ErikBjare}" --no-archived --source --json nameWithOwner,pushedAt --limit 10 > "$TMPDIR/personal_repos.json" 2>/dev/null &
     wait
 
     # Get 5 most recently pushed personal repos
@@ -142,8 +142,8 @@ except Exception:
     done <<< "$all_repos"
     wait
 
-    # Print results in order
-    for f in "$TMPDIR"/[0-9]*.txt; do
-        [ -f "$f" ] && cat "$f"
+    # Print results in order (iterate by index to handle 10+ repos correctly)
+    for j in $(seq 0 $((i - 1))); do
+        [ -f "$TMPDIR/$j.txt" ] && cat "$TMPDIR/$j.txt"
     done
 fi
