@@ -436,9 +436,7 @@ def cleanup_sessions(
         )
         if result.returncode == 0:
             known_tmux = {s.tmux_session for s in sessions if s.tmux_session}
-            for tmux_name in (
-                result.stdout.strip().split("\n") if result.stdout.strip() else []
-            ):
+            for tmux_name in result.stdout.strip().split("\n") if result.stdout.strip() else []:
                 tmux_name = tmux_name.strip()
                 if tmux_name.startswith("gptodo_") and tmux_name not in known_tmux:
                     subprocess.run(
