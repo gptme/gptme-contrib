@@ -9,7 +9,6 @@ Dispatch files are written to state/dispatches/ as YAML files.
 
 import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 DISPATCH_PATTERNS = [
     r"\bplease\b.*\b(do|fix|add|create|implement|update|check|review|look at|work on|help with)\b",
     r"\b(can you|could you|would you)\b.*\b(do|fix|add|create|implement|update|check|review|look at|work on|help)\b",
-    r"\b(go|try|start|begin|run|execute|deploy|build|test|investigate)\b",
+    r"^(go|try|start|begin|run|execute|deploy|build|test|investigate)\b",  # Only at sentence start
     r"\b(file|open|submit|create)\b.*\b(issue|pr|pull request|bug|task)\b",
     r"\b(fix|address|resolve|handle|tackle)\b.*\b(bug|issue|error|problem|regression)\b",
 ]
@@ -34,32 +33,18 @@ CONVERSATION_PATTERNS = [
 ]
 
 
-@dataclass
-class DispatchRequest:
-    """A parsed dispatch request from a trusted user."""
+def detect_dispatch(tweet_text: str, author_username: str) -> bool:
+    """Check if a tweet looks like a dispatch request.
 
-    tweet_id: str
-    author: str
-    text: str
-    task_summary: str
-    created_at: str
-    tweet_url: str
-
-
-def detect_dispatch(tweet_text: str, author_username: str, is_trusted: bool) -> bool:
-    """Check if a tweet from a trusted user looks like a dispatch request.
+    Caller is responsible for ensuring the author is trusted before calling.
 
     Args:
         tweet_text: The tweet text (with @mention removed)
         author_username: The author's username
-        is_trusted: Whether the author is a trusted user
 
     Returns:
         True if this looks like a dispatch request
     """
-    if not is_trusted:
-        return False
-
     # Remove @mentions from text for pattern matching
     clean_text = re.sub(r"@\w+", "", tweet_text).strip().lower()
 
@@ -97,8 +82,10 @@ def create_dispatch(
     author: str,
     tweet_text: str,
     agent_dir: Path,
-) -> Path:
+) -> Path | None:
     """Create a dispatch file for the autonomous loop to pick up.
+
+    Returns None if a dispatch for this tweet_id already exists (dedup).
 
     Args:
         tweet_id: The tweet ID
@@ -107,10 +94,18 @@ def create_dispatch(
         agent_dir: The agent workspace directory
 
     Returns:
-        Path to the created dispatch file
+        Path to the created dispatch file, or None if already dispatched
     """
     dispatch_dir = agent_dir / "state" / "dispatches"
     dispatch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Dedup: check if a dispatch for this tweet_id already exists
+    for existing in dispatch_dir.glob("dispatch_*.yml"):
+        with open(existing) as f:
+            data = yaml.safe_load(f)
+        if data and str(data.get("tweet_id")) == str(tweet_id):
+            logger.info(f"Dispatch for tweet {tweet_id} already exists: {existing}")
+            return None
 
     task_summary = extract_task_summary(tweet_text)
     now = datetime.now(timezone.utc)

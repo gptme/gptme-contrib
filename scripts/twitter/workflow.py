@@ -1228,25 +1228,32 @@ def process_timeline_tweets(
 
             # Check for dispatch requests from trusted users
             if is_trusted_user(author_username) and detect_dispatch(
-                tweet.text, author_username, True
+                tweet.text, author_username
             ):
                 console.print(
                     f"[bold magenta]🚀 Dispatch detected from @{author_username}:[/bold magenta]"
                 )
                 console.print(f"[magenta]{tweet.text}[/magenta]")
+                # Always mark as replied to prevent duplicate acks across cycles
+                if tweet.id is not None:
+                    _replied_tweet_ids.add(str(tweet.id))
                 if not dry_run:
                     dispatch_path = create_dispatch(
                         str(tweet.id), author_username, tweet.text, AGENT_DIR
                     )
+                    if dispatch_path is None:
+                        console.print(
+                            "[dim]Dispatch already exists for this tweet, skipping[/dim]"
+                        )
+                        continue
                     console.print(
                         f"[green]✓ Dispatch saved: {dispatch_path.name}[/green]"
                     )
 
-                    # Post acknowledgement reply
+                    # Post acknowledgement reply (reuse existing client)
                     try:
-                        client_for_ack = load_twitter_client(require_auth=True)
                         ack_text = f"@{author_username} Got it, I'll work on this. 👍"
-                        ack_response = client_for_ack.create_tweet(
+                        ack_response = client.create_tweet(
                             text=ack_text,
                             in_reply_to_tweet_id=tweet.id,
                             user_auth=False,
@@ -1255,8 +1262,6 @@ def process_timeline_tweets(
                             console.print(
                                 f"[green]✓ Ack posted: {ack_response.data['id']}[/green]"
                             )
-                            if tweet.id is not None:
-                                _replied_tweet_ids.add(str(tweet.id))
                     except Exception as e:
                         console.print(f"[yellow]Could not post ack: {e}[/yellow]")
                 else:
