@@ -67,6 +67,7 @@ from twitter.llm import (
 )
 from twitter.twitter import cached_get_me, load_twitter_client
 from trusted_users import is_trusted_user  # type: ignore
+from dispatch import detect_dispatch, create_dispatch  # type: ignore
 
 # Import monitoring utilities
 from communication_utils.monitoring import get_logger, MetricsCollector
@@ -1224,6 +1225,43 @@ def process_timeline_tweets(
             # Get author info
             author = user_lookup.get(tweet.author_id)
             author_username = author.username if author else str(tweet.author_id)
+
+            # Check for dispatch requests from trusted users
+            if is_trusted_user(author_username) and detect_dispatch(
+                tweet.text, author_username, True
+            ):
+                console.print(
+                    f"[bold magenta]🚀 Dispatch detected from @{author_username}:[/bold magenta]"
+                )
+                console.print(f"[magenta]{tweet.text}[/magenta]")
+                if not dry_run:
+                    dispatch_path = create_dispatch(
+                        str(tweet.id), author_username, tweet.text, AGENT_DIR
+                    )
+                    console.print(
+                        f"[green]✓ Dispatch saved: {dispatch_path.name}[/green]"
+                    )
+
+                    # Post acknowledgement reply
+                    try:
+                        client_for_ack = load_twitter_client(require_auth=True)
+                        ack_text = f"@{author_username} Got it, I'll work on this. 👍"
+                        ack_response = client_for_ack.create_tweet(
+                            text=ack_text,
+                            in_reply_to_tweet_id=tweet.id,
+                            user_auth=False,
+                        )
+                        if ack_response.data:
+                            console.print(
+                                f"[green]✓ Ack posted: {ack_response.data['id']}[/green]"
+                            )
+                            if tweet.id is not None:
+                                _replied_tweet_ids.add(str(tweet.id))
+                    except Exception as e:
+                        console.print(f"[yellow]Could not post ack: {e}[/yellow]")
+                else:
+                    console.print("[yellow](dry run - dispatch not saved)[/yellow]")
+                continue
 
             # Prepare tweet data for processing
             tweet_data = {
