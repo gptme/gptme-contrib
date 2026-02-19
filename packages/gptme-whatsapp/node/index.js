@@ -22,7 +22,8 @@
  *   SYSTEM_PROMPT_FILE  - Path to system prompt file for Claude Code
  */
 
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import pkg from 'whatsapp-web.js';
+const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
