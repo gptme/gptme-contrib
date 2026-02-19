@@ -141,7 +141,7 @@ def check_dependency_resolution(task: TaskInfo, all_tasks: dict[str, TaskInfo]) 
     resolved: list[str] = []
 
     for dep in task.requires:
-        if dep.startswith("http"):
+        if dep.startswith(("http://", "https://")):
             # URL dependency - can't check without cache
             continue
         dep_task = all_tasks.get(dep)
@@ -153,7 +153,7 @@ def check_dependency_resolution(task: TaskInfo, all_tasks: dict[str, TaskInfo]) 
             resolved.append(dep)
 
     # Exclude URL deps from total since they're skipped
-    url_deps = sum(1 for dep in task.requires if dep.startswith("http"))
+    url_deps = sum(1 for dep in task.requires if dep.startswith(("http://", "https://")))
     details["resolved"] = resolved
     details["unresolved"] = unresolved
     details["total"] = len(task.requires) - url_deps

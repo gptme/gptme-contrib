@@ -319,7 +319,7 @@ def effective(task_id: str):
     if task.requires:
         console.print("\n[bold]Requirements:[/]")
         for req in task.requires:
-            if isinstance(req, str) and req.startswith("http"):
+            if isinstance(req, str) and req.startswith(("http://", "https://")):
                 # URL requirement
                 cached = issue_cache.get(req) if issue_cache else None
                 if cached:

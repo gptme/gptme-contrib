@@ -157,7 +157,7 @@ def auto_unblock_tasks(
             all_deps_done = True
             for dep_name in task_requires:
                 # Skip URL-based dependencies
-                if isinstance(dep_name, str) and dep_name.startswith("http"):
+                if isinstance(dep_name, str) and dep_name.startswith(("http://", "https://")):
                     continue
                 dep_task = all_tasks_dict.get(dep_name)
                 if dep_task and dep_task.state not in ["done", "cancelled"]:
