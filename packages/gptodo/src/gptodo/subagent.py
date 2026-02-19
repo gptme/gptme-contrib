@@ -143,7 +143,7 @@ def _setup_coordination(
             env=env,
             cwd=str(workspace),
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except Exception:
         logger.warning("Could not announce agent on coordination bus")
 
     return agent_id, db_path, str(system_prompt)
@@ -192,20 +192,19 @@ def spawn_agent(
     # Handle coordination setup
     coord_db_path: Optional[str] = None
     if coordination or coordination_db:
-        try:
-            agent_id, coord_db_path, coord_prompt = _setup_coordination(workspace, coordination_db)
-            # Use coordination system prompt if none specified
-            if not system_prompt_file:
-                system_prompt_file = coord_prompt
-            # Prepend agent ID to prompt
-            prompt = (
-                f"Your agent ID is: {agent_id}. "
-                "Follow the coordination protocol in your system prompt. "
-                f"Start by checking your inbox and status.\n\n{prompt}"
-            )
-            logger.info(f"Coordination enabled: agent={agent_id}, db={coord_db_path}")
-        except FileNotFoundError as e:
-            logger.warning(f"Coordination setup failed: {e}")
+        # Raises FileNotFoundError if coordination package not installed — let it propagate
+        # so the user knows coordination is NOT active (fail loudly, not silently).
+        agent_id, coord_db_path, coord_prompt = _setup_coordination(workspace, coordination_db)
+        # Use coordination system prompt if none specified
+        if not system_prompt_file:
+            system_prompt_file = coord_prompt
+        # Prepend agent ID to prompt
+        prompt = (
+            f"Your agent ID is: {agent_id}. "
+            "Follow the coordination protocol in your system prompt. "
+            f"Start by checking your inbox and status.\n\n{prompt}"
+        )
+        logger.info(f"Coordination enabled: agent={agent_id}, db={coord_db_path}")
 
     session_id = f"agent_{uuid.uuid4().hex[:8]}"
     sessions_dir = get_sessions_dir(workspace)
