@@ -57,12 +57,14 @@ client.on('message', async (msg) => {
         return;
     }
 
-    // Skip non-text messages (images, videos, stickers, etc.)
+    const sender = msg.from.replace('@c.us', '');
+
+    // Skip media messages or messages without text body
     if (!msg.body) {
+        console.log(`Ignoring non-text message from ${sender} (type: ${msg.type})`);
         return;
     }
 
-    const sender = msg.from.replace('@c.us', '');
     const body = msg.body.trim();
 
     // Check allowlist if configured
