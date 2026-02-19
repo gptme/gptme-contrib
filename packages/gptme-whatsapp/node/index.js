@@ -57,6 +57,11 @@ client.on('message', async (msg) => {
         return;
     }
 
+    // Skip non-text messages (images, videos, stickers, etc.)
+    if (!msg.body) {
+        return;
+    }
+
     const sender = msg.from.replace('@c.us', '');
     const body = msg.body.trim();
 
