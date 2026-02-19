@@ -827,7 +827,7 @@ def is_task_ready(
     url_requires = []
     task_requires = []
     for req in requires:
-        if isinstance(req, str) and req.startswith("http"):
+        if isinstance(req, str) and req.startswith(("http://", "https://")):
             url_requires.append(req)
         else:
             task_requires.append(req)
@@ -891,7 +891,7 @@ def compute_effective_state(
 
     # Check each dependency
     for req in requires:
-        if isinstance(req, str) and req.startswith("http"):
+        if isinstance(req, str) and req.startswith(("http://", "https://")):
             # URL-based dependency - check cache
             if issue_cache:
                 cached = issue_cache.get(req)
@@ -942,7 +942,7 @@ def get_blocking_reasons(
 
     reasons = []
     for req in requires:
-        if isinstance(req, str) and req.startswith("http"):
+        if isinstance(req, str) and req.startswith(("http://", "https://")):
             # URL-based dependency
             if issue_cache:
                 cached = issue_cache.get(req)
@@ -1273,9 +1273,9 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
     if tracking:
         if isinstance(tracking, list):
             for item in tracking:
-                if isinstance(item, str) and item.startswith("http"):
+                if isinstance(item, str) and item.startswith(("http://", "https://")):
                     urls.append(item)
-        elif isinstance(tracking, str) and tracking.startswith("http"):
+        elif isinstance(tracking, str) and tracking.startswith(("http://", "https://")):
             urls.append(tracking)
 
     # Check blocks field
@@ -1283,9 +1283,9 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
     if blocks:
         if isinstance(blocks, list):
             for item in blocks:
-                if isinstance(item, str) and item.startswith("http"):
+                if isinstance(item, str) and item.startswith(("http://", "https://")):
                     urls.append(item)
-        elif isinstance(blocks, str) and blocks.startswith("http"):
+        elif isinstance(blocks, str) and blocks.startswith(("http://", "https://")):
             urls.append(blocks)
 
     # Check related field
@@ -1293,9 +1293,9 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
     if related:
         if isinstance(related, list):
             for item in related:
-                if isinstance(item, str) and item.startswith("http"):
+                if isinstance(item, str) and item.startswith(("http://", "https://")):
                     urls.append(item)
-        elif isinstance(related, str) and related.startswith("http"):
+        elif isinstance(related, str) and related.startswith(("http://", "https://")):
             urls.append(related)
 
     return urls

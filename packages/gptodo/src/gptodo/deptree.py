@@ -49,7 +49,7 @@ def build_dependency_graph(
 
         # Process requires (what this task depends on)
         for req in task.requires:
-            if req.startswith("http"):
+            if req.startswith(("http://", "https://")):
                 # URL dependency - create a placeholder node
                 short_name = req[:50] + "..." if len(req) > 50 else req
                 if req not in nodes:
