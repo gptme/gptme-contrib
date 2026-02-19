@@ -51,9 +51,25 @@ def generate_systemd_service(
     workspace: str,
     allowed_contacts: list[str],
     node_path: str = "/usr/local/bin/node",
+    backend: str = "gptme",
+    claude_path: str = "",
 ) -> str:
     """Generate a systemd service file for the WhatsApp bridge."""
     allowed = ",".join(allowed_contacts)
+    env_lines = [
+        f"Environment=GPTME_AGENT={agent_name}",
+        f"Environment=AGENT_WORKSPACE={workspace}",
+        f"Environment=ALLOWED_CONTACTS={allowed}",
+        f"Environment=BACKEND={backend}",
+    ]
+    path_parts = [node_path]
+    if claude_path:
+        path_parts.append(claude_path)
+    path_parts.extend(
+        ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+    )
+    env_lines.append(f"Environment=PATH={':'.join(path_parts)}")
+
     service = f"""[Unit]
 Description=gptme WhatsApp bridge for {agent_name}
 After=network.target
@@ -61,10 +77,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory={NODE_DIR}
-Environment=GPTME_AGENT={agent_name}
-Environment=AGENT_WORKSPACE={workspace}
-Environment=ALLOWED_CONTACTS={allowed}
-Environment=PATH={node_path}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{chr(10).join(env_lines)}
 ExecStart=/usr/bin/node {NODE_DIR}/index.js
 Restart=on-failure
 RestartSec=10
@@ -93,6 +106,15 @@ def main():
     service_parser.add_argument(
         "--node-path", default="/usr/local/bin", help="Node.js bin path"
     )
+    service_parser.add_argument(
+        "--backend",
+        default="gptme",
+        choices=["gptme", "claude-code"],
+        help="Agent backend",
+    )
+    service_parser.add_argument(
+        "--claude-path", default="", help="Claude Code bin path"
+    )
 
     args = parser.parse_args()
 
@@ -104,7 +126,12 @@ def main():
     elif args.command == "service":
         contacts = args.contacts or []
         service = generate_systemd_service(
-            args.agent, args.workspace, contacts, args.node_path
+            args.agent,
+            args.workspace,
+            contacts,
+            args.node_path,
+            args.backend,
+            args.claude_path,
         )
         print(service)
     else:
