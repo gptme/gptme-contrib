@@ -92,6 +92,63 @@ def list_sessions(
     return sessions
 
 
+def _setup_coordination(
+    workspace: Path,
+    coordination_db: Optional[str] = None,
+) -> tuple[str, str, str]:
+    """Set up coordination for a spawned agent.
+
+    Auto-discovers the coordination system prompt and DB in the workspace.
+    Generates a unique agent ID and announces presence.
+
+    Args:
+        workspace: Working directory (repo root)
+        coordination_db: Explicit DB path, or None to auto-detect
+
+    Returns:
+        Tuple of (agent_id, db_path, system_prompt_path)
+
+    Raises:
+        FileNotFoundError: If coordination system prompt not found
+    """
+    # Auto-detect DB path
+    if coordination_db:
+        db_path = coordination_db
+    else:
+        db_path = str(workspace / "state" / "coordination" / "coord.db")
+
+    # Ensure DB directory exists
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Find system prompt file
+    system_prompt = workspace / "packages" / "coordination" / "agent-system-prompt.md"
+    if not system_prompt.exists():
+        raise FileNotFoundError(
+            f"Coordination system prompt not found at {system_prompt}. "
+            "Install the coordination package first."
+        )
+
+    # Generate agent ID
+    agent_id = f"agent_{uuid.uuid4().hex[:8]}"
+
+    # Pre-announce on coordination bus (best-effort)
+    try:
+        env = os.environ.copy()
+        env["COORDINATION_DB"] = db_path
+        subprocess.run(
+            ["coordination", "announce", agent_id],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
+            cwd=str(workspace),
+        )
+    except Exception:
+        logger.warning("Could not announce agent on coordination bus")
+
+    return agent_id, db_path, str(system_prompt)
+
+
 def spawn_agent(
     task_id: str,
     prompt: str,
@@ -103,6 +160,8 @@ def spawn_agent(
     model: Optional[str] = None,
     clear_keys: Optional[bool] = None,
     system_prompt_file: Optional[str] = None,
+    coordination: bool = False,
+    coordination_db: Optional[str] = None,
 ) -> AgentSession:
     """Spawn a sub-agent to work on a task.
 
@@ -120,12 +179,32 @@ def spawn_agent(
             auto-detects based on backend (True for claude, False for gptme).
         system_prompt_file: Path to file with additional system prompt content
             (claude backend only, uses --append-system-prompt-file).
+        coordination: If True, enable inter-agent coordination (auto-generates
+            agent ID, announces presence, passes system prompt and COORDINATION_DB).
+        coordination_db: Explicit path to coordination DB (implies coordination=True).
 
     Returns:
         AgentSession with status and session_id
     """
     if workspace is None:
         workspace = Path.cwd()
+
+    # Handle coordination setup
+    coord_db_path: Optional[str] = None
+    if coordination or coordination_db:
+        # Raises FileNotFoundError if coordination package not installed — let it propagate
+        # so the user knows coordination is NOT active (fail loudly, not silently).
+        agent_id, coord_db_path, coord_prompt = _setup_coordination(workspace, coordination_db)
+        # Use coordination system prompt if none specified
+        if not system_prompt_file:
+            system_prompt_file = coord_prompt
+        # Prepend agent ID to prompt
+        prompt = (
+            f"Your agent ID is: {agent_id}. "
+            "Follow the coordination protocol in your system prompt. "
+            f"Start by checking your inbox and status.\n\n{prompt}"
+        )
+        logger.info(f"Coordination enabled: agent={agent_id}, db={coord_db_path}")
 
     session_id = f"agent_{uuid.uuid4().hex[:8]}"
     sessions_dir = get_sessions_dir(workspace)
@@ -209,6 +288,10 @@ def spawn_agent(
                 # Export the variable inside the tmux session
                 env_exports.append(f"export {key}={shlex.quote(value)}")
 
+        # Inject COORDINATION_DB for coordinated agents
+        if coord_db_path:
+            env_exports.append(f"export COORDINATION_DB={shlex.quote(coord_db_path)}")
+
         # Build env setup: unsets first (if any), then exports
         env_commands = []
         if env_unsets:
@@ -276,6 +359,12 @@ def spawn_agent(
             env.pop(key, None)
     else:
         env = None  # Use inherited environment
+
+    # Inject COORDINATION_DB for coordinated agents (foreground)
+    if coord_db_path:
+        if env is None:
+            env = os.environ.copy()
+        env["COORDINATION_DB"] = coord_db_path
 
     try:
         result = subprocess.run(
