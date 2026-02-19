@@ -3482,6 +3482,8 @@ def _execute_task_agent(
     timeout: int,
     max_concurrent: int = 4,
     system_prompt_file: Optional[str] = None,
+    coordination: bool = False,
+    coordination_db: Optional[str] = None,
 ):
     """Shared logic for run and spawn commands."""
     repo_root = find_repo_root(Path.cwd())
@@ -3548,6 +3550,10 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         console.print(f"  Timeout: {timeout}s ({timeout // 60}min)")
     if system_prompt_file:
         console.print(f"  System prompt: {system_prompt_file}")
+    if coordination or coordination_db:
+        console.print("  Coordination: enabled")
+        if coordination_db:
+            console.print(f"  Coordination DB: {coordination_db}")
     if background:
         console.print(f"  Background: {background}")
 
@@ -3563,6 +3569,8 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         timeout=timeout,
         model=model,
         system_prompt_file=system_prompt_file,
+        coordination=coordination or bool(coordination_db),
+        coordination_db=coordination_db,
     )
 
     if session.status == "failed":
@@ -3623,6 +3631,17 @@ Focus on making progress on this task. When done, summarize what you accomplishe
     default=None,
     help="Path to file with additional system prompt (claude backend only)",
 )
+@click.option(
+    "--coordination",
+    is_flag=True,
+    help="Enable inter-agent coordination (auto-generates agent ID, announces presence)",
+)
+@click.option(
+    "--coordination-db",
+    type=str,
+    default=None,
+    help="Path to coordination DB (implies --coordination)",
+)
 def run_cmd(
     task_id: str,
     prompt: Optional[str],
@@ -3631,6 +3650,8 @@ def run_cmd(
     model: Optional[str],
     timeout: int,
     system_prompt_file: Optional[str],
+    coordination: bool,
+    coordination_db: Optional[str],
 ):
     """Run a task synchronously (foreground).
 
@@ -3645,6 +3666,7 @@ def run_cmd(
         gptodo run my-task
         gptodo run my-task --model openrouter/moonshotai/kimi-k2.5
         gptodo run my-task --backend claude --type explore
+        gptodo run my-task --backend claude --coordination
     """
     _execute_task_agent(
         task_id=task_id,
@@ -3655,6 +3677,8 @@ def run_cmd(
         model=model,
         timeout=timeout,
         system_prompt_file=system_prompt_file,
+        coordination=coordination,
+        coordination_db=coordination_db,
     )
 
 
@@ -3710,6 +3734,17 @@ def run_cmd(
     default=4,
     help="Max concurrent background agents (0 = unlimited)",
 )
+@click.option(
+    "--coordination",
+    is_flag=True,
+    help="Enable inter-agent coordination (auto-generates agent ID, announces presence)",
+)
+@click.option(
+    "--coordination-db",
+    type=str,
+    default=None,
+    help="Path to coordination DB (implies --coordination)",
+)
 def spawn_cmd(
     task_id: str,
     prompt: Optional[str],
@@ -3720,6 +3755,8 @@ def spawn_cmd(
     timeout: int,
     max_concurrent: int,
     system_prompt_file: Optional[str],
+    coordination: bool,
+    coordination_db: Optional[str],
 ):
     """Spawn a sub-agent in background (tmux).
 
@@ -3736,6 +3773,7 @@ def spawn_cmd(
         gptodo spawn my-task --timeout 1800  # 30min timeout
         gptodo spawn my-task --backend claude --system-prompt-file sysprompt.md
         gptodo spawn my-task --backend claude --type explore
+        gptodo spawn my-task --backend claude --coordination
         gptodo spawn my-task -f  # Foreground mode (prefer 'run' command)
     """
     _execute_task_agent(
@@ -3748,6 +3786,8 @@ def spawn_cmd(
         timeout=timeout,
         max_concurrent=max_concurrent,
         system_prompt_file=system_prompt_file,
+        coordination=coordination,
+        coordination_db=coordination_db,
     )
 
 
