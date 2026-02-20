@@ -46,7 +46,7 @@ Authentication Flow:
 For OAuth 2.0 setup:
 1. Configure app in Twitter Developer Portal
 2. Add callback URL: http://localhost:9876 (for local development)
-3. Request scopes: tweet.read, tweet.write, users.read, users.follow.write
+3. Request scopes: tweet.read, tweet.write, users.read, follows.write
 4. Add client credentials to .env file
 """
 
@@ -242,7 +242,7 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                         "tweet.read",
                         "tweet.write",
                         "users.read",
-                        "users.follow.write",
+                        "follows.write",
                         "offline.access",
                     ],
                 )
@@ -644,7 +644,7 @@ def user(username: str, limit: int) -> None:
     "--dry-run", is_flag=True, help="Show what would be done without actually following"
 )
 def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
-    """Follow one or more Twitter accounts (requires users.follow.write scope).
+    """Follow one or more Twitter accounts (requires follows.write scope).
 
     Note: If re-authorization is needed (scope not previously granted),
     run 'twitter.py me' to trigger the OAuth flow with the updated scope.
@@ -697,7 +697,7 @@ def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
             error_msg = str(e)
             if "403" in error_msg or "not authorized" in error_msg.lower():
                 console.print(
-                    f"[red]Authorization error for @{username}: missing 'users.follow.write' scope?\n"
+                    f"[red]Authorization error for @{username}: missing 'follows.write' scope?\n"
                     "Re-authorize by deleting your OAuth tokens and running 'twitter.py me'."
                 )
             else:
