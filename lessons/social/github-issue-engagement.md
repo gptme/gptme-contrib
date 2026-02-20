@@ -11,6 +11,8 @@ match:
   - "check for similar issues"
   - "update issue after work"
   - "gh issue"
+  - "check own previous comments"
+  - "agent created duplicate issues"
 status: active
 ---
 
@@ -31,6 +33,7 @@ Observable signals indicating this need:
 - Reading issue/PR basic view without checking comments
 - Creating PR without checking for existing work
 - Missing ongoing discussions about the same topic
+- **Returning to a thread without checking own previous comments**
 
 **Post-work**:
 - Completed work in response to issue/PR comment
@@ -42,6 +45,10 @@ Observable signals indicating this need:
 Check, read full context, coordinate, work, then update:
 
 ```shell
+# 0. Pre-flight: Check own previous actions (CRITICAL for agents)
+gh issue view <number> --comments | grep -A5 "$(gh api user --jq .login)"
+# If you already commented/acted → DON'T duplicate. Update existing if needed.
+
 # 1. Search for existing work
 gh issue list --repo owner/repo --search "topic keywords"
 gh pr list --repo owner/repo --search "related terms"
@@ -62,7 +69,7 @@ gh issue comment <number> --body "I'd like to help with this"
 # 4. If not found: Create issue first, wait for feedback
 gh issue create --title "..." --body "..."
 
-# 5. After completing work: Update with status
+# 5. After completing work: Update with status IN THE ORIGINATING THREAD
 gh issue comment <number> --body "✅ Completed: [brief summary]
 
 Details:
