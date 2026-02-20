@@ -46,7 +46,7 @@ Check, read full context, coordinate, work, then update:
 
 ```shell
 # 0. Pre-flight: Check own previous actions (CRITICAL for agents)
-gh issue view <number> --comments | grep -A5 "<your-handle>"
+gh issue view <number> --comments | grep -A5 "$(gh api user --jq .login)"
 # If you already commented/acted → DON'T duplicate. Update existing if needed.
 
 # 1. Search for existing work
