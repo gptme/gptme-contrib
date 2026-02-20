@@ -46,7 +46,7 @@ Authentication Flow:
 For OAuth 2.0 setup:
 1. Configure app in Twitter Developer Portal
 2. Add callback URL: http://localhost:9876 (for local development)
-3. Request scopes: tweet.read, tweet.write, users.read
+3. Request scopes: tweet.read, tweet.write, users.read, users.follow.write
 4. Add client credentials to .env file
 """
 
@@ -238,7 +238,13 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                     client_id=client_id,
                     client_secret=client_secret,
                     redirect_uri="http://localhost:9876/callback",
-                    scope=["tweet.read", "tweet.write", "users.read", "offline.access"],
+                    scope=[
+                        "tweet.read",
+                        "tweet.write",
+                        "users.read",
+                        "users.follow.write",
+                        "offline.access",
+                    ],
                 )
 
                 # Get authorization URL and provide it to the user
@@ -630,6 +636,82 @@ def user(username: str, limit: int) -> None:
     except tweepy.TweepyException as e:
         console.print(f"[red]Error getting tweets: {e}")
         sys.exit(1)
+
+
+@cli.command()
+@click.argument("usernames", nargs=-1, required=True)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be done without actually following"
+)
+def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
+    """Follow one or more Twitter accounts (requires users.follow.write scope).
+
+    Note: If re-authorization is needed (scope not previously granted),
+    run 'twitter.py me' to trigger the OAuth flow with the updated scope.
+
+    Example: ./twitter.py follow karpathy AnthropicAI steipete
+    """
+    client = load_twitter_client(require_auth=True)
+
+    results: dict[str, list[str]] = {
+        "followed": [],
+        "already_following": [],
+        "errors": [],
+    }
+
+    for raw_username in usernames:
+        username = raw_username.lstrip("@")
+        try:
+            target = client.get_user(username=username)
+            if not target.data:
+                console.print(f"[red]User @{username} not found")
+                results["errors"].append(username)
+                continue
+
+            target_id = target.data.id
+
+            if dry_run:
+                console.print(
+                    f"[yellow][dry-run] Would follow @{username} (id={target_id})"
+                )
+                continue
+
+            response = client.follow_user(target_id, user_auth=False)
+            if response.data:
+                if response.data.get("following"):
+                    console.print(f"[green]Now following @{username}")
+                    results["followed"].append(username)
+                elif response.data.get("pending_follow"):
+                    console.print(
+                        f"[yellow]Follow request sent to @{username} (protected account)"
+                    )
+                    results["followed"].append(username)
+                else:
+                    console.print(f"[blue]Already following @{username}")
+                    results["already_following"].append(username)
+            else:
+                console.print(f"[red]Failed to follow @{username}: unexpected response")
+                results["errors"].append(username)
+
+        except tweepy.TweepyException as e:
+            error_msg = str(e)
+            if "403" in error_msg or "not authorized" in error_msg.lower():
+                console.print(
+                    f"[red]Authorization error for @{username}: missing 'users.follow.write' scope?\n"
+                    "Re-authorize by deleting your OAuth tokens and running 'twitter.py me'."
+                )
+            else:
+                console.print(f"[red]Error following @{username}: {e}")
+            results["errors"].append(username)
+
+    if not dry_run:
+        console.print(
+            f"\n[bold]Summary:[/bold] followed={len(results['followed'])}, "
+            f"already_following={len(results['already_following'])}, "
+            f"errors={len(results['errors'])}"
+        )
+        if results["errors"]:
+            console.print(f"[red]Errors: {', '.join(results['errors'])}")
 
 
 @cli.command()
