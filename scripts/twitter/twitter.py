@@ -695,7 +695,30 @@ def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
 
         except tweepy.TweepyException as e:
             error_msg = str(e)
-            if "403" in error_msg or "not authorized" in error_msg.lower():
+            if "402" in error_msg or "Payment Required" in error_msg:
+                console.print(
+                    f"[red]API credits exhausted — cannot follow @{username}.\n"
+                    "The X API uses pay-as-you-go billing. Add credits at https://developer.x.com "
+                    "or follow accounts manually via the web UI."
+                )
+                results["errors"].append(username)
+                # Abort remaining follows — no point retrying with no credits
+                remaining = [
+                    u.lstrip("@")
+                    for u in usernames
+                    if u.lstrip("@")
+                    not in results["followed"]
+                    + results["already_following"]
+                    + results["errors"]
+                ]
+                if remaining:
+                    console.print(
+                        f"[yellow]Skipping {len(remaining)} remaining account(s): "
+                        f"{', '.join('@' + u for u in remaining)}"
+                    )
+                    results["errors"].extend(remaining)
+                break
+            elif "403" in error_msg or "not authorized" in error_msg.lower():
                 console.print(
                     f"[red]Authorization error for @{username}: missing 'follows.write' scope?\n"
                     "Re-authorize by deleting your OAuth tokens and running 'twitter.py me'."
