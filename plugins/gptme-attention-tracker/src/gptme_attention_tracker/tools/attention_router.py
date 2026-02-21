@@ -70,7 +70,7 @@ class AttentionState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "AttentionState":
+    def from_dict(cls, data: dict) -> AttentionState:
         """Create from dict."""
         return cls(
             scores=data.get("scores", {}),
@@ -504,7 +504,7 @@ def reset_state() -> str:
 
 # CACHE_INVALIDATED hook implementation
 def cache_invalidated_hook(
-    manager: "LogManager",
+    manager: LogManager,
     reason: str,
     tokens_before: int | None = None,
     tokens_after: int | None = None,
@@ -559,8 +559,8 @@ _cache_awareness_available = False
 
 try:
     from gptme.hooks.cache_awareness import (
-        on_cache_change,
         get_turns_since_invalidation,
+        on_cache_change,
     )
 
     def _on_cache_invalidated(cache_state) -> None:

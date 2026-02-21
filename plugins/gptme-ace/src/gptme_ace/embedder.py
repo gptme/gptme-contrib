@@ -17,12 +17,14 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
 try:
-    from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
+    from sentence_transformers import (
+        SentenceTransformer,  # type: ignore[import-not-found]
+    )
 
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
@@ -77,8 +79,8 @@ class LessonEmbedder:
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
 
         # Load or initialize components
-        self.model: Optional[Any] = None
-        self.index: Optional[Any] = None
+        self.model: Any | None = None
+        self.index: Any | None = None
         self.metadata: Dict[str, Dict] = {}
         self.config: Dict[str, Any] = {}
 
@@ -266,7 +268,7 @@ class LessonEmbedder:
         """
         return hashlib.sha256(text.encode()).hexdigest()
 
-    def generate_embedding(self, text: str) -> Optional[np.ndarray]:
+    def generate_embedding(self, text: str) -> np.ndarray | None:
         """Generate embedding vector for text using Sentence-BERT.
 
         Args:
@@ -654,7 +656,10 @@ class LessonEmbedder:
         condensed_distances = squareform(distances, checks=False)
 
         # Perform clustering using linkage + fcluster
-        from scipy.cluster.hierarchy import fcluster, linkage  # type: ignore[import-untyped]
+        from scipy.cluster.hierarchy import (  # type: ignore[import-untyped]
+            fcluster,
+            linkage,
+        )
 
         Z = linkage(condensed_distances, method="average")
         cluster_labels = fcluster(Z, distance_threshold, criterion="distance")

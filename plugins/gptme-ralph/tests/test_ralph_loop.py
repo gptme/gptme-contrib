@@ -1,12 +1,11 @@
 """Tests for the Ralph Loop plugin."""
 
 import pytest
-
 from gptme_ralph.tools.ralph_loop import (
     Plan,
     PlanStep,
-    create_plan,
     _build_prompt,
+    create_plan,
 )
 
 

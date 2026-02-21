@@ -13,7 +13,6 @@ Part of gptme-ace plugin (Phase 5: Utilities).
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -84,7 +83,7 @@ def _load_deltas(delta_dir: Path) -> list[Delta]:
     help="Data directory for metrics and deltas (default: workspace-relative)",
 )
 @click.pass_context
-def cli(ctx: click.Context, data_dir: Optional[Path]):
+def cli(ctx: click.Context, data_dir: Path | None):
     """ACE Visualization CLI - Explore context optimization data"""
     ctx.ensure_object(dict)
 

@@ -55,7 +55,6 @@ import sys
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 import click
 import tweepy
@@ -467,7 +466,7 @@ def format_tweet_time(tweet: tweepy.Tweet) -> str:
     return tweet.created_at.strftime("%Y-%m-%d %H:%M")  # type: ignore
 
 
-def display_tweet(tweet: tweepy.Tweet, author_info: Optional[str] = None) -> None:
+def display_tweet(tweet: tweepy.Tweet, author_info: str | None = None) -> None:
     """Display a single tweet with consistent formatting"""
     console.print(f"[cyan]{format_tweet_time(tweet)}[/cyan]")
     if author_info:
@@ -544,14 +543,14 @@ def me(limit: int) -> None:
 @click.argument("text")
 @click.option("--reply-to", help="Tweet ID to reply to")
 @click.option("--thread", is_flag=True, help="Post as thread (split by ---)")
-def post(text: str, reply_to: Optional[str], thread: bool) -> None:
+def post(text: str, reply_to: str | None, thread: bool) -> None:
     """Post a tweet (requires OAuth authentication)"""
     client = load_twitter_client(require_auth=True)
 
     # Handle thread posting
     if thread:
         thread_messages = split_thread(text)
-        reply_to_id: Optional[str] = None
+        reply_to_id: str | None = None
 
         for message in thread_messages:
             # Create tweet and get the response data
@@ -918,7 +917,7 @@ def quotes(since: str, limit: int, unanswered: bool) -> None:
     "--limit", default=DEFAULT_LIMIT, help="Maximum number of tweets to fetch"
 )
 @click.option("--list-id", help="Twitter list ID to fetch from")
-def timeline(since: str, limit: int, list_id: Optional[str]) -> None:
+def timeline(since: str, limit: int, list_id: str | None) -> None:
     """Read home timeline or list timeline"""
     client = load_twitter_client(require_auth=True)
 

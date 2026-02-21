@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from gptme_ace.metrics import (
     CurationRun,
     InsightQuality,

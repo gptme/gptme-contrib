@@ -54,7 +54,7 @@ Examples:
     args = parser.parse_args()
 
     # Import here to avoid slow startup for --help
-    from .tools import wrapped_stats, wrapped_report, wrapped_heatmap, wrapped_export
+    from .tools import wrapped_export, wrapped_heatmap, wrapped_report, wrapped_stats
 
     if args.command == "report":
         print(wrapped_report(args.year))

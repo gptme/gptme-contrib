@@ -7,11 +7,10 @@ messages, and completion status across platforms.
 
 import json
 import uuid
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from .locks import file_lock
 
@@ -32,26 +31,26 @@ class MessageInfo:
 
     # Core identifiers
     message_id: str
-    conversation_id: Optional[str] = None
+    conversation_id: str | None = None
 
     # Platform-specific fields (Phase 3.1)
     platform: str = "email"  # Platform identifier: email, twitter, discord
     platform_message_id: str = ""  # Native platform ID (tweet_id, discord_id, etc.)
 
     # Threading
-    in_reply_to: Optional[str] = None  # Parent message ID (universal)
-    references: Optional[list[str]] = field(default_factory=list)  # Full thread chain
+    in_reply_to: str | None = None  # Parent message ID (universal)
+    references: list[str] | None = field(default_factory=list)  # Full thread chain
 
     # Metadata
-    from_user: Optional[str] = None
-    to_user: Optional[str] = None
-    subject: Optional[str] = None
+    from_user: str | None = None
+    to_user: str | None = None
+    subject: str | None = None
 
     # State tracking
     state: MessageState = MessageState.PENDING
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    error: Optional[str] = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    error: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -107,7 +106,7 @@ class ConversationTracker:
 
     def get_message_state(
         self, conversation_id: str, message_id: str
-    ) -> Optional[MessageInfo]:
+    ) -> MessageInfo | None:
         """
         Get state of a specific message.
 
@@ -137,7 +136,7 @@ class ConversationTracker:
         conversation_id: str,
         message_id: str,
         state: MessageState,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """
         Update message state.
@@ -181,7 +180,7 @@ class ConversationTracker:
         self,
         conversation_id: str,
         message_id: str,
-        in_reply_to: Optional[str] = None,
+        in_reply_to: str | None = None,
     ) -> MessageInfo:
         """
         Start tracking a new message.
@@ -278,10 +277,10 @@ class ConversationTracker:
         conversation_id: str,
         platform: str,
         platform_message_id: str,
-        in_reply_to: Optional[str] = None,
-        from_user: Optional[str] = None,
-        to_user: Optional[str] = None,
-        subject: Optional[str] = None,
+        in_reply_to: str | None = None,
+        from_user: str | None = None,
+        to_user: str | None = None,
+        subject: str | None = None,
     ) -> MessageInfo:
         """
         Create a message with universal ID for cross-platform tracking.
@@ -363,7 +362,7 @@ class ConversationTracker:
 
     def get_message_by_platform_id(
         self, conversation_id: str, platform: str, platform_message_id: str
-    ) -> Optional[MessageInfo]:
+    ) -> MessageInfo | None:
         """
         Get message by platform-specific ID.
 

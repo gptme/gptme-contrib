@@ -161,6 +161,7 @@ def test_tool_has_command():
 def test_lsp_command_returns_generator():
     """Test that the lsp command returns a generator."""
     from unittest.mock import MagicMock
+
     from gptme_lsp.tools.lsp_tool import _lsp_command
 
     # Create a mock CommandContext

@@ -20,7 +20,7 @@ Checks:
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import click
 import frontmatter
@@ -38,7 +38,7 @@ VALID_PRIORITIES = ["low", "medium", "high"]
 VALID_TASK_TYPES = ["project", "action"]
 
 
-def validate_timestamp(ts: str | datetime) -> Optional[str]:
+def validate_timestamp(ts: str | datetime) -> str | None:
     """Validate an ISO 8601 timestamp or datetime object."""
     if isinstance(ts, datetime):
         return None

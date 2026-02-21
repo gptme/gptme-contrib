@@ -1,9 +1,9 @@
 """Message header parsing and formatting utilities."""
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-import uuid
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -20,9 +20,9 @@ class MessageHeaders:
     subject: str
     platform: str
     platform_message_id: str
-    conversation_id: Optional[str] = None
-    in_reply_to: Optional[str] = None
-    references: Optional[List[str]] = None
+    conversation_id: str | None = None
+    in_reply_to: str | None = None
+    references: List[str] | None = None
 
     def __post_init__(self):
         if self.references is None:
@@ -36,9 +36,9 @@ class MessageHeaders:
         subject: str,
         platform: str,
         platform_message_id: str,
-        conversation_id: Optional[str] = None,
-        in_reply_to: Optional[str] = None,
-        references: Optional[List[str]] = None,
+        conversation_id: str | None = None,
+        in_reply_to: str | None = None,
+        references: List[str] | None = None,
     ) -> "MessageHeaders":
         """Create new message headers with generated universal ID.
 

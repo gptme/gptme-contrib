@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from gptme_imagen.tools.image_gen import (
     ImageResult,
     batch_generate,

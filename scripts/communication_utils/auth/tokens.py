@@ -8,7 +8,6 @@ from environment variables with secure defaults.
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
 
 
 @dataclass
@@ -16,8 +15,8 @@ class TokenInfo:
     """Information about an authentication token."""
 
     token: str
-    expires_at: Optional[datetime] = None
-    refresh_token: Optional[str] = None
+    expires_at: datetime | None = None
+    refresh_token: str | None = None
     token_type: str = "Bearer"
 
     def is_expired(self, buffer_seconds: int = 300) -> bool:
@@ -55,7 +54,7 @@ class TokenManager:
     }
 
     @classmethod
-    def get_token(cls, platform: str) -> Optional[str]:
+    def get_token(cls, platform: str) -> str | None:
         """
         Retrieve token for the specified platform from environment.
 
@@ -73,8 +72,8 @@ class TokenManager:
 
     @classmethod
     def get_token_info(
-        cls, platform: str, expires_at: Optional[datetime] = None
-    ) -> Optional[TokenInfo]:
+        cls, platform: str, expires_at: datetime | None = None
+    ) -> TokenInfo | None:
         """
         Get TokenInfo for the specified platform.
 

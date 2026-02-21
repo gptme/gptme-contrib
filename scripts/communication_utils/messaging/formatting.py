@@ -5,7 +5,7 @@ and text processing that can be used across Twitter, Discord, email, and other p
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 
 @dataclass
@@ -19,7 +19,7 @@ class ThreadMessage:
     """
 
     text: str
-    in_reply_to: Optional[str] = None
+    in_reply_to: str | None = None
     order: int = 0
 
     def __post_init__(self):
@@ -29,7 +29,7 @@ class ThreadMessage:
 
 
 def split_thread(
-    text: str, delimiter: str = "\n---\n", max_length: Optional[int] = None
+    text: str, delimiter: str = "\n---\n", max_length: int | None = None
 ) -> List[ThreadMessage]:
     """Split text into thread messages using a delimiter.
 
@@ -104,7 +104,7 @@ def split_thread(
 def format_for_platform(
     text: str,
     platform: str = "twitter",
-    max_length: Optional[int] = None,
+    max_length: int | None = None,
     truncate_suffix: str = "...",
 ) -> str:
     """Format text for specific platform constraints.

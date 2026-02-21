@@ -73,7 +73,7 @@ class Plan:
     current_step: int = 1
 
     @classmethod
-    def from_markdown(cls, content: str) -> "Plan":
+    def from_markdown(cls, content: str) -> Plan:
         """Parse a plan from markdown format."""
         lines = content.strip().split("\n")
 

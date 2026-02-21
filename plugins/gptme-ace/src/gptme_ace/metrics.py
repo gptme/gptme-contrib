@@ -14,7 +14,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -29,7 +29,7 @@ class CurationRun:
     duration_seconds: float
     tokens_used: int
     success: bool
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 @dataclass
@@ -55,7 +55,7 @@ class LessonImpact:
     total_uses: int = 0
     helpful_count: int = 0
     harmful_count: int = 0
-    last_used: Optional[datetime] = None
+    last_used: datetime | None = None
 
 
 class MetricsDB:
@@ -204,7 +204,7 @@ class MetricsDB:
             )
 
     def get_curation_runs(
-        self, since: Optional[datetime] = None, limit: int = 100
+        self, since: datetime | None = None, limit: int = 100
     ) -> list[CurationRun]:
         """Get recent curation runs"""
         with sqlite3.connect(self.db_path) as conn:
@@ -236,7 +236,7 @@ class MetricsDB:
             ]
 
     def get_insights(
-        self, since: Optional[datetime] = None, limit: int = 100
+        self, since: datetime | None = None, limit: int = 100
     ) -> list[InsightQuality]:
         """Get recent insights"""
         with sqlite3.connect(self.db_path) as conn:
@@ -266,7 +266,7 @@ class MetricsDB:
             ]
 
     def get_lessons(
-        self, since: Optional[datetime] = None, limit: int = 100
+        self, since: datetime | None = None, limit: int = 100
     ) -> list[LessonImpact]:
         """Get recent lessons"""
         with sqlite3.connect(self.db_path) as conn:
@@ -445,7 +445,7 @@ class MetricsCalculator:
         }
 
 
-def get_default_metrics_db(workspace: Optional[Path] = None) -> MetricsDB:
+def get_default_metrics_db(workspace: Path | None = None) -> MetricsDB:
     """Get default metrics database instance.
 
     Args:

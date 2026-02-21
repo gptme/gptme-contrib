@@ -5,10 +5,10 @@ from unittest.mock import Mock
 
 from gptme.message import Message
 from gptme_example_hooks.hooks.example_hooks import (
-    session_start_hook,
-    tool_pre_execute_hook,
     message_post_process_hook,
     register,
+    session_start_hook,
+    tool_pre_execute_hook,
 )
 
 
