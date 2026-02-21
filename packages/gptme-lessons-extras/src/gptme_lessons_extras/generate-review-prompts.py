@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 @dataclass
@@ -20,8 +20,8 @@ class LessonInfo:
     path: str
     name: str
     days_stale: int
-    usage_refs: Optional[int] = None
-    last_used: Optional[str] = None
+    usage_refs: int | None = None
+    last_used: str | None = None
 
 
 class ReviewPromptGenerator:
@@ -98,7 +98,7 @@ class ReviewPromptGenerator:
 
         return prompts
 
-    def _generate_prompt_for_lesson(self, lesson: LessonInfo) -> Optional[Dict]:
+    def _generate_prompt_for_lesson(self, lesson: LessonInfo) -> Dict | None:
         """Generate review prompt for a single lesson."""
         priority = 0
         reason = []

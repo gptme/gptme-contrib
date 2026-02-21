@@ -12,8 +12,8 @@ def test_submodule_imports():
     """Test that core modules can be imported."""
     # These should be importable without errors
     import gptmail.cli
-    import gptmail.lib
     import gptmail.communication_utils
+    import gptmail.lib
 
     # Verify they exist
     assert hasattr(gptmail.cli, "__file__")

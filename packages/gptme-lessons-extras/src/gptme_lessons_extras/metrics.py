@@ -6,12 +6,11 @@ Analyzes lesson effectiveness across the agent network using evolution tracking 
 Generates network-wide insights about lesson success rates, adoption patterns, and best practices.
 """
 
-import json
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import Optional
 import argparse
+import json
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 
 
 @dataclass
@@ -54,7 +53,7 @@ class MetricsAggregator:
         self.metrics_dir = history_dir / "metrics"
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    def aggregate_lesson_metrics(self, lesson_id: str) -> Optional[LessonMetrics]:
+    def aggregate_lesson_metrics(self, lesson_id: str) -> LessonMetrics | None:
         """
         Aggregate metrics for a specific lesson.
 

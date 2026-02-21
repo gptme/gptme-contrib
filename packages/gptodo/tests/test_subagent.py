@@ -7,10 +7,10 @@ import pytest
 
 from gptodo.subagent import (
     AgentSession,
-    save_session,
-    load_session,
-    list_sessions,
     _setup_coordination,
+    list_sessions,
+    load_session,
+    save_session,
 )
 
 

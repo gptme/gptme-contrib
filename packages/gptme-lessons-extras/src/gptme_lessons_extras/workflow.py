@@ -15,12 +15,10 @@ Usage:
     ./workflow.py validate <lesson-file>
 """
 
-import sys
-
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -177,7 +175,7 @@ def validate_lesson(lesson_path: Path) -> tuple[bool, list[str]]:
     return len(errors) == 0, errors
 
 
-def create_from_failure_log(log_file: Path) -> Optional[str]:
+def create_from_failure_log(log_file: Path) -> str | None:
     """
     Analyze a failure log and suggest a lesson structure.
 

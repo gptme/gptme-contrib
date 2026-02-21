@@ -10,19 +10,16 @@ Usage:
     ./scripts/lessons/import.py --lesson network-lessons/workflow/autonomous-run.md --adopt
 """
 
-import sys
-
 import argparse
+import sys
 from pathlib import Path
-from typing import Optional
 
 import yaml
-
 
 from gptme_lessons_extras.network_schema import validate_network_metadata
 
 
-def parse_network_lesson(content: str) -> tuple[Optional[dict], str]:
+def parse_network_lesson(content: str) -> tuple[dict | None, str]:
     """Parse network lesson into frontmatter and content.
 
     Args:

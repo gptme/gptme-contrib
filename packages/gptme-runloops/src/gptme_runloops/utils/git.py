@@ -4,14 +4,13 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
 
 
 def git_pull_with_retry(
     workspace: Path,
     max_retries: int = 3,
     retry_delay: int = 5,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> bool:
     """Pull latest changes from git with retry logic.
 

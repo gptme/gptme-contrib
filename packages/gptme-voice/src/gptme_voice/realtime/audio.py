@@ -6,9 +6,8 @@ Handles conversion between:
 - OpenAI Realtime API: PCM 24kHz
 """
 
-import base64
 import audioop
-from typing import Optional
+import base64
 
 
 class AudioConverter:
@@ -20,7 +19,7 @@ class AudioConverter:
     OPENAI_RATE = 24000
 
     def __init__(self):
-        self._resample_state: Optional[tuple] = None
+        self._resample_state: tuple | None = None
 
     def twilio_to_openai(self, mulaw_data: bytes) -> bytes:
         """

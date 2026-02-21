@@ -182,7 +182,7 @@ def llm_author_reflect(
     # Read the new lesson template
     template_path = _find_lesson_template()
 
-    with open(template_path, "r", encoding="utf-8") as f:
+    with open(template_path, encoding="utf-8") as f:
         template = f.read()
 
     # Prepare evidence with enhanced formatting

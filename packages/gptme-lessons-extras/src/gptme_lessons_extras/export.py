@@ -10,15 +10,12 @@ Usage:
     ./scripts/lessons/export.py --lesson lessons/workflow/autonomous-run.md
 """
 
-import sys
-
 import argparse
 import os
+import sys
 from pathlib import Path
-from typing import Optional
 
 import yaml
-
 
 from gptme_lessons_extras.network_schema import (
     NetworkMetadata,
@@ -26,7 +23,7 @@ from gptme_lessons_extras.network_schema import (
 )
 
 
-def parse_lesson_frontmatter(content: str) -> tuple[Optional[dict], str]:
+def parse_lesson_frontmatter(content: str) -> tuple[dict | None, str]:
     """Parse lesson frontmatter and content.
 
     Args:

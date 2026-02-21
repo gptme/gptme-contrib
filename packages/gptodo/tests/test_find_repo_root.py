@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 from gptodo.utils import find_repo_root
 
 

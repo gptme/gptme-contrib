@@ -3,7 +3,7 @@
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict, Optional
+from typing import Dict
 
 
 @dataclass
@@ -23,7 +23,7 @@ class RateLimiter:
 
     max_requests: int
     window: float
-    name: Optional[str] = None
+    name: str | None = None
 
     # Internal state
     _requests: list[float] = field(default_factory=list, init=False, repr=False)

@@ -3,7 +3,6 @@
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
 
 from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
 from gptme_runloops.utils.git import git_pull_with_retry
@@ -56,8 +55,8 @@ class BaseRunLoop(ABC):
         self.lock = RunLoopLock(lock_dir, run_type)
         self.logger = get_logger(run_type)
 
-        self._start_time: Optional[float] = None
-        self._work_description: Optional[str] = None  # Description of work found
+        self._start_time: float | None = None
+        self._work_description: str | None = None  # Description of work found
 
     def setup(self) -> bool:
         """Acquire lock and perform initial setup.

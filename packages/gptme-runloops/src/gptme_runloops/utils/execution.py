@@ -7,7 +7,6 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # Global log directory (not in workspace to prevent Issue #151 recursive grep)
 GLOBAL_LOG_DIR = Path.home() / ".cache" / "gptme" / "logs"
@@ -29,9 +28,9 @@ def execute_gptme(
     timeout: int,
     non_interactive: bool = True,
     shell_timeout: int = 120,
-    env: Optional[dict] = None,
+    env: dict | None = None,
     run_type: str = "run",
-    tools: Optional[str] = None,
+    tools: str | None = None,
 ) -> ExecutionResult:
     """Execute gptme with the given prompt.
 
