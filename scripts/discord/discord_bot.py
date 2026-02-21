@@ -275,7 +275,7 @@ async def async_step(
             # Run step within the copied context to ensure ContextVars are available
             def run_step():
                 return list(
-                    step(  # type: ignore[call-arg]
+                    step(
                         current_log,
                         stream=True,
                         tool_format="markdown",
