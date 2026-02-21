@@ -14,7 +14,6 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -72,11 +71,11 @@ class LessonHistory:
             "versions": [v.to_dict() for v in self.versions],
         }
 
-    def latest_version(self) -> Optional[LessonVersion]:
+    def latest_version(self) -> LessonVersion | None:
         """Get the most recent version."""
         return self.versions[-1] if self.versions else None
 
-    def get_version(self, version_num: int) -> Optional[LessonVersion]:
+    def get_version(self, version_num: int) -> LessonVersion | None:
         """Get specific version by number."""
         for v in self.versions:
             if v.version == version_num:
@@ -199,7 +198,7 @@ class EvolutionTracker:
         self._save_history(history)
         return new_version
 
-    def load_history(self, lesson_id: str) -> Optional[LessonHistory]:
+    def load_history(self, lesson_id: str) -> LessonHistory | None:
         """Load lesson history from disk."""
         path = self._history_path(lesson_id)
         if not path.exists():

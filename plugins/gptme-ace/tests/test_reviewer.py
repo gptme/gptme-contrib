@@ -4,14 +4,13 @@ import json
 from pathlib import Path
 
 import pytest
-
 from gptme_ace.reviewer import (
+    DEFAULT_CRITERIA,
     DeltaReviewer,
     ReviewCriterion,
     ReviewDecision,
-    ReviewResult,
-    DEFAULT_CRITERIA,
     ReviewerError,
+    ReviewResult,
 )
 
 

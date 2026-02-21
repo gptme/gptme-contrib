@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 
 @dataclass
@@ -28,10 +28,10 @@ class SourceMetrics:
     duplicate_requests: int = 0
 
     # Error tracking
-    last_poll_time: Optional[datetime] = None
-    last_success_time: Optional[datetime] = None
-    last_error: Optional[str] = None
-    last_error_time: Optional[datetime] = None
+    last_poll_time: datetime | None = None
+    last_success_time: datetime | None = None
+    last_error: str | None = None
+    last_error_time: datetime | None = None
     consecutive_failures: int = 0
 
     # Performance

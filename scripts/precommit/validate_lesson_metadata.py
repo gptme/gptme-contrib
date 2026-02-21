@@ -19,12 +19,11 @@ Usage:
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
 
-def get_frontmatter(content: str) -> tuple[Optional[dict], Optional[str]]:
+def get_frontmatter(content: str) -> tuple[dict | None, str | None]:
     """Extract YAML frontmatter from markdown content.
 
     Returns:

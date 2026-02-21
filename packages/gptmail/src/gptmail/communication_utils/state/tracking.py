@@ -6,11 +6,10 @@ messages, and completion status across platforms.
 """
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from .locks import file_lock
 
@@ -30,12 +29,12 @@ class MessageInfo:
     """Information about a message."""
 
     message_id: str
-    conversation_id: Optional[str] = None
-    in_reply_to: Optional[str] = None
+    conversation_id: str | None = None
+    in_reply_to: str | None = None
     state: MessageState = MessageState.PENDING
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    error: Optional[str] = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    error: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -77,7 +76,7 @@ class ConversationTracker:
         """Get path to lock file for conversation."""
         return self.state_dir / f"{conversation_id}.lock"
 
-    def get_message_state(self, conversation_id: str, message_id: str) -> Optional[MessageInfo]:
+    def get_message_state(self, conversation_id: str, message_id: str) -> MessageInfo | None:
         """
         Get state of a specific message.
 
@@ -107,7 +106,7 @@ class ConversationTracker:
         conversation_id: str,
         message_id: str,
         state: MessageState,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """
         Update message state.
@@ -151,7 +150,7 @@ class ConversationTracker:
         self,
         conversation_id: str,
         message_id: str,
-        in_reply_to: Optional[str] = None,
+        in_reply_to: str | None = None,
     ) -> MessageInfo:
         """
         Start tracking a new message.

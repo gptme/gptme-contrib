@@ -28,7 +28,6 @@ Usage:
 # Import stdlib email.message BEFORE sys.path manipulation
 # This ensures the stdlib module is cached and not shadowed by any local directories
 import email.message  # noqa: F401
-
 import sys
 from pathlib import Path as _Path
 
@@ -49,16 +48,18 @@ from typing import (
     Any,
     Dict,
     List,
-    Optional,
     Tuple,
 )
 
 import click
 import yaml
+
+# Import monitoring utilities
+from communication_utils.monitoring import MetricsCollector, get_logger
 from gptme.init import init as init_gptme
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
-
+from trusted_users import is_trusted_user  # type: ignore
 from twitter.llm import (
     EvaluationResponse,
     TweetResponse,
@@ -66,10 +67,6 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import cached_get_me, load_twitter_client
-from trusted_users import is_trusted_user  # type: ignore
-
-# Import monitoring utilities
-from communication_utils.monitoring import get_logger, MetricsCollector
 
 logger = get_logger(__name__, "twitter")
 metrics = MetricsCollector()
@@ -170,14 +167,14 @@ def save_to_cache(tweet_id: str, eval_result, response=None) -> None:
     console.print(f"[blue]Cached results for tweet {tweet_id}")
 
 
-def load_from_cache(tweet_id: str) -> Tuple[Optional[dict], Optional[dict]]:
+def load_from_cache(tweet_id: str) -> Tuple[dict | None, dict | None]:
     """Load tweet processing results from cache"""
     cache_path = get_cache_path(tweet_id)
 
     if not cache_path.exists():
         return None, None
 
-    with open(cache_path, "r") as f:
+    with open(cache_path) as f:
         cache_data = json.load(f)
 
     return cache_data.get("evaluation"), cache_data.get("response")
@@ -190,12 +187,12 @@ class TweetDraft:
         self,
         text: str,
         type: str = "tweet",
-        in_reply_to: Optional[str] = None,
-        scheduled_time: Optional[datetime] = None,
-        context: Optional[Dict] = None,
-        reject_reason: Optional[str] = None,
-        quality_score: Optional[int] = None,
-        thread: Optional[List[str]] = None,
+        in_reply_to: str | None = None,
+        scheduled_time: datetime | None = None,
+        context: Dict | None = None,
+        reject_reason: str | None = None,
+        quality_score: int | None = None,
+        thread: List[str] | None = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread
@@ -577,8 +574,8 @@ def move_draft(path: Path, new_status: str) -> Path:
 
 
 def find_draft(
-    draft_id: str, status: Optional[str] = None, show_error: bool = True
-) -> Optional[Path]:
+    draft_id: str, status: str | None = None, show_error: bool = True
+) -> Path | None:
     """Find a draft by ID or path.
 
     Args:
@@ -661,9 +658,7 @@ def cli(model: str | None = None) -> None:
 )
 @click.option("--reply-to", help="Tweet ID to reply to")
 @click.option("--schedule", help="Schedule time (ISO format)")
-def draft(
-    text: str, type: str, reply_to: Optional[str], schedule: Optional[str]
-) -> None:
+def draft(text: str, type: str, reply_to: str | None, schedule: str | None) -> None:
     """Create a new tweet draft"""
     op = metrics.start_operation("draft_creation", "twitter")
 
@@ -926,7 +921,7 @@ def approve(draft_id: str) -> None:
 @cli.command()
 @click.argument("draft_id")
 @click.option("--reason", "-r", help="Reason for rejection", default=None)
-def reject(draft_id: str, reason: Optional[str]) -> None:
+def reject(draft_id: str, reason: str | None) -> None:
     """Reject a draft tweet by ID (works on both new and approved drafts)"""
     # Try to find draft in either new or approved directories
     draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
@@ -1030,7 +1025,7 @@ def _git_commit_posted(path: Path) -> None:
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--draft-id", help="Post a specific draft by ID or path")
-def post(dry_run: bool, yes: bool, draft_id: Optional[str] = None) -> None:
+def post(dry_run: bool, yes: bool, draft_id: str | None = None) -> None:
     """Post approved tweets"""
     # If a specific draft ID is provided, find only that draft
     if draft_id:
@@ -1139,9 +1134,9 @@ def process_timeline_tweets(
     users,
     source: str,
     client,
-    times: Optional[int] = None,
+    times: int | None = None,
     dry_run: bool = False,
-    max_drafts: Optional[int] = None,
+    max_drafts: int | None = None,
     max_auto_posts: int = 5,
 ) -> int:
     """Process tweets from timeline
@@ -1492,10 +1487,10 @@ def process_timeline_tweets(
     help="Number of tweets to process before exiting",
 )
 def monitor(
-    list_id: Optional[str],
+    list_id: str | None,
     interval: int,
     dry_run: bool,
-    times: Optional[int],
+    times: int | None,
     max_drafts: int = 10,
 ) -> None:
     """Monitor timeline and generate draft replies
@@ -1636,7 +1631,7 @@ def monitor(
 @click.option("--skip-mentions", is_flag=True, help="Skip processing of mentions")
 @click.option("--skip-timeline", is_flag=True, help="Skip processing of timeline")
 def auto(
-    list_id: Optional[str],
+    list_id: str | None,
     auto_approve: bool,
     post_approved: bool,
     dry_run: bool,

@@ -3,7 +3,6 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # Python 3.10 compatibility: tomllib added in 3.11
 if sys.version_info >= (3, 11):
@@ -40,9 +39,9 @@ def get_agent_name(workspace: Path) -> str:
 def generate_base_prompt(
     run_type: str,
     agent_name: str = "Agent",
-    current_time: Optional[str] = None,
+    current_time: str | None = None,
     context_budget: int = 200000,
-    additional_sections: Optional[str] = None,
+    additional_sections: str | None = None,
 ) -> str:
     """Generate base prompt template for run loops.
 

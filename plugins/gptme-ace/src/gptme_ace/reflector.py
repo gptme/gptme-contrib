@@ -24,12 +24,11 @@ The Reflector agent performs two key functions:
 """
 
 import json
-import re
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import List, Optional
-
 import logging
+import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import List
 
 import click
 
@@ -114,7 +113,7 @@ class ReflectorAgent:
     3. Curator then synthesizes refined insights into delta operations
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: str | None = None):
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         """
         Initialize with Anthropic API.
 
@@ -130,7 +129,7 @@ class ReflectorAgent:
         self.model = model if model else _get_default_anthropic_model()
 
     def analyze_patterns(
-        self, insights: List[dict], existing_patterns: Optional[List[dict]] = None
+        self, insights: List[dict], existing_patterns: List[dict] | None = None
     ) -> List[Pattern]:
         """
         Identify meta-patterns across insights.
@@ -387,8 +386,8 @@ def cli():
 )
 def analyze(
     insights_file: str,
-    output: Optional[str],
-    existing_patterns: Optional[str],
+    output: str | None,
+    existing_patterns: str | None,
     dry_run: bool,
 ):
     """Analyze insights to extract meta-patterns."""
@@ -449,8 +448,8 @@ def analyze(
 )
 def refine(
     insights_file: str,
-    patterns_file: Optional[str],
-    output: Optional[str],
+    patterns_file: str | None,
+    output: str | None,
     dry_run: bool,
 ):
     """Refine insights based on pattern analysis."""

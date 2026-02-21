@@ -14,9 +14,9 @@ conversation when ready.
 import asyncio
 import logging
 import tempfile
-from pathlib import Path
-from typing import Optional, Callable, Awaitable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class ToolResult:
 
     success: bool
     output: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class GptmeToolBridge:
@@ -56,8 +56,8 @@ class GptmeToolBridge:
         self,
         gptme_path: str = "gptme",
         timeout: int = 300,
-        workspace: Optional[str] = None,
-        on_result: Optional[Callable[[str], Awaitable[None]]] = None,
+        workspace: str | None = None,
+        on_result: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.gptme_path = gptme_path
         self.timeout = timeout

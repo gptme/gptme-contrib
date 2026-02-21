@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class ConfigError(Exception):
@@ -24,9 +24,9 @@ class BaseConfig:
 
     def __init__(
         self,
-        workspace_dir: Optional[Path] = None,
-        env_file: Optional[str] = None,
-        config_file: Optional[Path] = None,
+        workspace_dir: Path | None = None,
+        env_file: str | None = None,
+        config_file: Path | None = None,
     ):
         """
         Initialize configuration.
@@ -64,8 +64,8 @@ class BaseConfig:
             self._yaml_config = yaml_loader.load()
 
     def get_env(
-        self, key: str, default: Optional[str] = None, required: bool = False
-    ) -> Optional[str]:
+        self, key: str, default: str | None = None, required: bool = False
+    ) -> str | None:
         """
         Get environment variable with fallback to .env file.
 

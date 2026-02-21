@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 
 def extract_lesson_info(filepath: Path) -> Dict:
     """Extract key information from a lesson markdown file."""
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         content = f.read()
 
     # Extract title (first # heading)

@@ -4,7 +4,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult
 

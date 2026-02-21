@@ -4,7 +4,6 @@ import json
 import tempfile
 from pathlib import Path
 
-
 from gptme_lessons_extras.effectiveness_tracker import (
     EffectivenessTracker,
     LessonStats,

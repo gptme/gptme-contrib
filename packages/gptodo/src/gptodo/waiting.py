@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import frontmatter
 
@@ -49,10 +48,10 @@ class WaitCondition:
 
     type: WaitType
     ref: str  # Reference (PR URL, task ID, ISO timestamp)
-    pattern: Optional[str] = None  # For comment type
+    pattern: str | None = None  # For comment type
     resolved: bool = False
-    resolution_time: Optional[datetime] = None
-    error: Optional[str] = None
+    resolution_time: datetime | None = None
+    error: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "WaitCondition":
@@ -139,7 +138,7 @@ def parse_github_ref(ref: str) -> tuple[str, str, int]:
     raise ValueError(f"Cannot parse GitHub reference: {ref}")
 
 
-def check_pr_ci(ref: str) -> tuple[bool, Optional[str]]:
+def check_pr_ci(ref: str) -> tuple[bool, str | None]:
     """Check if PR CI checks have all passed.
 
     Args:
@@ -185,7 +184,7 @@ def check_pr_ci(ref: str) -> tuple[bool, Optional[str]]:
         return False, f"Error checking PR CI: {e}"
 
 
-def check_pr_merged(ref: str) -> tuple[bool, Optional[str]]:
+def check_pr_merged(ref: str) -> tuple[bool, str | None]:
     """Check if PR has been merged.
 
     Args:
@@ -234,7 +233,7 @@ def check_pr_merged(ref: str) -> tuple[bool, Optional[str]]:
         return False, f"Error checking PR: {e}"
 
 
-def check_comment(ref: str, pattern: str) -> tuple[bool, Optional[str]]:
+def check_comment(ref: str, pattern: str) -> tuple[bool, str | None]:
     """Check if issue/PR has a comment matching the pattern.
 
     Args:
@@ -278,7 +277,7 @@ def check_comment(ref: str, pattern: str) -> tuple[bool, Optional[str]]:
         return False, f"Error checking comments: {e}"
 
 
-def check_time(ref: str) -> tuple[bool, Optional[str]]:
+def check_time(ref: str) -> tuple[bool, str | None]:
     """Check if the specified time has passed.
 
     Args:

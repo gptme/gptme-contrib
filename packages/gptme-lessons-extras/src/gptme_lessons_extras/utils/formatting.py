@@ -7,7 +7,7 @@ Contains helper functions used across analysis and lesson generation.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import click
 
@@ -21,7 +21,7 @@ def load_conversation(log_path: Path) -> List[Dict]:
         click.echo(f"Error: Conversation file not found: {conversation_file}", err=True)
         return messages
 
-    with open(conversation_file, "r", encoding="utf-8") as f:
+    with open(conversation_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -64,7 +64,7 @@ def save_json(data: Any, output_path: Path, indent: int = 2) -> Path:
     return output_path
 
 
-def parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
+def parse_timestamp(ts: str | None) -> datetime | None:
     """Parse ISO format timestamp string."""
     if not ts:
         return None
@@ -99,7 +99,7 @@ def is_success_message(content: str) -> bool:
     return any(k in content for k in keywords)
 
 
-def extract_tool_name_from_content(content: str) -> Optional[str]:
+def extract_tool_name_from_content(content: str) -> str | None:
     """Extract tool name from message content (simple heuristic)."""
     if not isinstance(content, str):
         return None
@@ -137,7 +137,7 @@ def count_tool_invocations(messages: List[Dict], start_idx: int, end_idx: int) -
     return count
 
 
-def format_duration(minutes: Optional[float]) -> str:
+def format_duration(minutes: float | None) -> str:
     """Format duration in minutes to human-readable string."""
     if minutes is None:
         return "unknown"

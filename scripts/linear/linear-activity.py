@@ -50,7 +50,6 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-
 # ============================================================================
 # Custom Exceptions
 # ============================================================================
@@ -419,7 +418,7 @@ def get_access_token() -> str:
                 tokens.get("accessToken") or tokens.get("access_token")
             ):
                 return str(access_token)
-        except (json.JSONDecodeError, IOError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             raise AuthenticationError(f"Failed to read tokens file: {e}")
 
     raise AuthenticationError(

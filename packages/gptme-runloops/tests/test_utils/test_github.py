@@ -5,7 +5,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-
 from gptme_runloops.utils.github import (
     CommentLoopDetector,
     is_bot_review_author,

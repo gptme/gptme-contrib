@@ -56,10 +56,10 @@ Notes:
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple, Any, Dict
+from typing import Any, Dict, Tuple
 
 import click
-from atproto import Client, models, client_utils  # type: ignore
+from atproto import Client, client_utils, models  # type: ignore
 from dotenv import load_dotenv
 from rich.console import Console
 
@@ -140,7 +140,7 @@ def format_post_time(created_at: str) -> str:
         return "N/A"
 
 
-def display_post(feed_view, author_info: Optional[str] = None) -> None:
+def display_post(feed_view, author_info: str | None = None) -> None:
     """Display a single post with consistent formatting"""
     # For timeline view, the post is nested in feed_view.post
     post = getattr(feed_view, "post", feed_view)
@@ -199,7 +199,7 @@ def cli() -> None:
     default=None,
     help="Pagination cursor for older posts (obtained from previous request)",
 )
-def feed(limit: int, cursor: Optional[str]) -> None:
+def feed(limit: int, cursor: str | None) -> None:
     """Show your Bluesky feed (posts from accounts you follow)
 
     Displays posts from accounts you follow, including:
@@ -249,7 +249,7 @@ def feed(limit: int, cursor: Optional[str]) -> None:
     default=None,
     help="Pagination cursor for older posts (obtained from previous request)",
 )
-def me(limit: int, cursor: Optional[str]) -> None:
+def me(limit: int, cursor: str | None) -> None:
     """Show your own Bluesky posts and reposts
 
     Displays your recent activity, including:
@@ -407,7 +407,7 @@ def get_reply_refs(client: Client, parent_uri: str) -> dict:
 @click.option("--reply-to", help="Post URI to reply to")
 @click.option("--thread", is_flag=True, help="Post as thread (split by ---)")
 @click.option("--stdin", is_flag=True, help="Read text from stdin")
-def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
+def post(text: str, reply_to: str | None, thread: bool, stdin: bool) -> None:
     """Post to Bluesky (requires authentication)
 
     Examples:
@@ -436,7 +436,7 @@ def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
     # Handle thread posting
     if thread:
         post_texts = text.split("\n---\n")
-        reply_to_uri: Optional[str] = None
+        reply_to_uri: str | None = None
 
         for post_text in post_texts:
             try:
@@ -533,7 +533,7 @@ def post(text: str, reply_to: Optional[str], thread: bool, stdin: bool) -> None:
     default=None,
     help="Pagination cursor for older posts (obtained from previous request)",
 )
-def user(handle: str, limit: int, cursor: Optional[str]) -> None:
+def user(handle: str, limit: int, cursor: str | None) -> None:
     """Show posts from a specific Bluesky user
 
     Displays posts from the specified user, including:

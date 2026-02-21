@@ -8,11 +8,12 @@ When a task is marked as done, automatically update dependent tasks:
 """
 
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Dict, List, Tuple
+
 import frontmatter
 
 from gptodo.utils import TaskInfo
-from gptodo.waiting import parse_waiting_for, WaitType
+from gptodo.waiting import WaitType, parse_waiting_for
 
 
 def find_dependent_tasks(
@@ -65,7 +66,7 @@ def auto_unblock_tasks(
     completed_task_ids: List[str],
     all_tasks: List[TaskInfo],
     tasks_dir: Path,
-    issue_cache: Optional[Dict] = None,
+    issue_cache: Dict | None = None,
 ) -> List[Tuple[str, str]]:
     """Auto-unblock tasks that were waiting on completed tasks.
 
@@ -248,7 +249,7 @@ def auto_unblock_with_fan_in(
     completed_task_ids: List[str],
     all_tasks: list,
     tasks_dir: Path,
-    issue_cache: Optional[Dict] = None,
+    issue_cache: Dict | None = None,
 ) -> List[Tuple[str, str]]:
     """Auto-unblock tasks and handle fan-in completion aggregation.
 

@@ -29,11 +29,19 @@ from typing import (
     AsyncGenerator,
     Callable,
     Dict,
-    Optional,
     TypeAlias,
-    Union,
 )
 
+import discord
+from communication_utils.monitoring.metrics import MetricsCollector
+from communication_utils.state.tracking import (
+    ConversationTracker,
+    MessageState,
+)
+from discord.ext import commands
+
+# Import per-user rate limiting and state management
+from discord.rate_limiting import PerUserRateLimiter
 from dotenv import load_dotenv
 from gptme.chat import Message, step
 from gptme.config import get_project_config
@@ -50,17 +58,6 @@ from gptme.tools import (
 )
 from rich.logging import RichHandler
 
-import discord
-from discord.ext import commands
-
-# Import per-user rate limiting and state management
-from discord.rate_limiting import PerUserRateLimiter
-from communication_utils.state.tracking import (
-    ConversationTracker,
-    MessageState,
-)
-from communication_utils.monitoring.metrics import MetricsCollector
-
 os.environ["GPTME_CHECK"] = "false"
 
 # Max chars in a Discord message
@@ -68,7 +65,7 @@ DISCORD_MSG_LIMIT = 2000
 
 # Type aliases
 ChannelID: TypeAlias = int
-CommandPrefix = Union[str, Callable[..., str]]  # Type for command prefix
+CommandPrefix = str | Callable[..., str]  # Type for command prefix
 Settings: TypeAlias = Dict[ChannelID, "ChannelSettings"]
 Conversations: TypeAlias = Dict[ChannelID, Log]
 
@@ -176,7 +173,7 @@ def is_command(content: str) -> bool:
     return content.startswith(COMMAND_PREFIX)
 
 
-async def check_permissions(bot_user: Optional[discord.ClientUser]) -> list[str]:
+async def check_permissions(bot_user: discord.ClientUser | None) -> list[str]:
     """Check if bot has required permissions in all channels."""
     if not bot_user:
         return ["Bot user not initialized"]
@@ -476,8 +473,8 @@ def split_on_codeblocks(content: str, max_length: int = DISCORD_MSG_LIMIT) -> li
 async def send_discord_message(
     channel: discord.abc.Messageable,
     content: str,
-    current_response: Optional[discord.Message] = None,
-) -> tuple[Optional[discord.Message], bool]:
+    current_response: discord.Message | None = None,
+) -> tuple[discord.Message | None, bool]:
     """Send a message to Discord, handling length limits and logging.
 
     Args:
@@ -542,9 +539,9 @@ async def process_message(
     msg: Message,
     channel: discord.abc.Messageable,
     log: Log,
-    current_response: Optional[discord.Message] = None,
+    current_response: discord.Message | None = None,
     accumulated_content: str = "",
-) -> tuple[Optional[discord.Message], bool, Log, str]:
+) -> tuple[discord.Message | None, bool, Log, str]:
     """Process a message from the assistant or system.
 
     Tracks operation with metrics for monitoring message processing performance.
@@ -602,7 +599,7 @@ async def process_message(
 
 
 @bot.command()
-async def model(ctx: commands.Context, new_model: Optional[str] = None) -> None:
+async def model(ctx: commands.Context, new_model: str | None = None) -> None:
     """Get or set the model for this channel."""
     settings = get_settings(ctx.channel.id)
 
@@ -845,8 +842,8 @@ async def about(ctx: commands.Context) -> None:
 
 async def update_reaction(
     message: discord.Message,
-    remove_emoji: Optional[str] = None,
-    add_emoji: Optional[str] = None,
+    remove_emoji: str | None = None,
+    add_emoji: str | None = None,
 ) -> None:
     """Update reaction on a message."""
     if not bot.user:
@@ -891,8 +888,8 @@ async def handle_new_dm(message: discord.Message) -> None:
 async def process_conversation_step(
     message: discord.Message,
     channel_id: int,
-    current_response: Optional[discord.Message] = None,
-) -> tuple[Optional[discord.Message], bool]:
+    current_response: discord.Message | None = None,
+) -> tuple[discord.Message | None, bool]:
     """Process a single conversation step."""
     had_error = False
     accumulated_content = ""

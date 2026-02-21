@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 # Try importing sklearn, but provide fallback
 try:
@@ -68,7 +68,7 @@ class LessonDiscovery:
     """Main discovery system for lesson recommendations and similarity detection."""
 
     def __init__(
-        self, lessons_dir: Optional[Path] = None, history_dir: Optional[Path] = None
+        self, lessons_dir: Path | None = None, history_dir: Path | None = None
     ):
         """Initialize discovery system.
 
@@ -213,8 +213,8 @@ class LessonDiscovery:
 
     def recommend(
         self,
-        context: Optional[str] = None,
-        keywords: Optional[List[str]] = None,
+        context: str | None = None,
+        keywords: List[str] | None = None,
         top_k: int = 5,
     ) -> List[RecommendationScore]:
         """Recommend lessons based on context.

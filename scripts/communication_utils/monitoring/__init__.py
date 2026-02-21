@@ -5,7 +5,7 @@ Provides consistent logging, metrics tracking, and error reporting
 across email, Twitter, Discord, and other platforms.
 """
 
-from .loggers import get_logger, configure_logging, PlatformLogger
+from .loggers import PlatformLogger, configure_logging, get_logger
 from .metrics import MetricsCollector, OperationMetrics
 
 __all__ = [

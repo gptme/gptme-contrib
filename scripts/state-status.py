@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import (
     Dict,
     List,
-    Optional,
     Tuple,
 )
 
@@ -87,7 +86,7 @@ class FileStatus:
     """Status of a file in a state directory."""
 
     path: Path
-    state: Optional[str]  # Current state from frontmatter
+    state: str | None  # Current state from frontmatter
     issues: List[str]  # Any issues with the file
     created: datetime
     modified: datetime

@@ -43,9 +43,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+import frontmatter
 from rich.console import Console
 from rich.table import Table
-import frontmatter
 
 
 @dataclass

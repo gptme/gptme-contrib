@@ -54,7 +54,7 @@ class HistoryEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "HistoryEntry":
+    def from_dict(cls, data: dict) -> HistoryEntry:
         """Create from dict."""
         return cls(
             timestamp=data["timestamp"],

@@ -10,13 +10,12 @@ Identifies lessons that may need review based on:
 Generates report of stale lessons for manual review.
 """
 
-import sys
-
-import subprocess
-from pathlib import Path
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
 import json
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 
 def get_lesson_files(lessons_dir: Path) -> List[Path]:

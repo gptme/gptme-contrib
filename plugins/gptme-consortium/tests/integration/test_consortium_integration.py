@@ -5,7 +5,6 @@ They require API keys to be set in environment variables.
 """
 
 import pytest
-
 from gptme_consortium.tools.consortium import ConsortiumResult, query_consortium
 
 

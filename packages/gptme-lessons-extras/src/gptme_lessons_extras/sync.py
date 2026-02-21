@@ -17,7 +17,6 @@ import subprocess
 import sys
 import sys as _sys
 from pathlib import Path
-from typing import Optional
 
 try:
     from gptme_lessons_extras.export import export_all_lessons
@@ -139,7 +138,7 @@ def export_to_network(
 
 
 def push_lessons(
-    network_dir: Path = DEFAULT_NETWORK_DIR, message: Optional[str] = None
+    network_dir: Path = DEFAULT_NETWORK_DIR, message: str | None = None
 ) -> bool:
     """
     Commit and push changes to network repository.
@@ -216,7 +215,7 @@ def pull_lessons(network_dir: Path = DEFAULT_NETWORK_DIR) -> bool:
 
 
 def list_network_lessons(
-    network_dir: Path = DEFAULT_NETWORK_DIR, exclude_agent: Optional[str] = None
+    network_dir: Path = DEFAULT_NETWORK_DIR, exclude_agent: str | None = None
 ) -> dict[str, list[Path]]:
     """
     List available lessons from other agents in network.

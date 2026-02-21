@@ -6,9 +6,10 @@ and token refresh across different platforms.
 """
 
 from dataclasses import dataclass
-from typing import Optional
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import parse_qs, urlencode, urlparse
+
 import requests
+
 from .tokens import TokenInfo
 
 
@@ -23,7 +24,7 @@ class OAuthConfig:
     token_url: str  # Token exchange endpoint
     scopes: list[str]
 
-    def get_authorization_url(self, state: Optional[str] = None) -> str:
+    def get_authorization_url(self, state: str | None = None) -> str:
         """
         Generate OAuth authorization URL.
 
@@ -63,7 +64,7 @@ class OAuthManager:
         """
         self.config = config
 
-    def get_authorization_url(self, state: Optional[str] = None) -> str:
+    def get_authorization_url(self, state: str | None = None) -> str:
         """
         Get authorization URL for user to visit.
 
@@ -77,7 +78,7 @@ class OAuthManager:
 
     def exchange_code_for_token(
         self, authorization_code: str
-    ) -> tuple[Optional[TokenInfo], Optional[str]]:
+    ) -> tuple[TokenInfo | None, str | None]:
         """
         Exchange authorization code for access token.
 
@@ -105,7 +106,7 @@ class OAuthManager:
         except requests.RequestException as e:
             return None, f"Token exchange failed: {e}"
 
-    def refresh_token(self, refresh_token: str) -> tuple[Optional[TokenInfo], Optional[str]]:
+    def refresh_token(self, refresh_token: str) -> tuple[TokenInfo | None, str | None]:
         """
         Refresh an expired access token.
 
@@ -133,7 +134,7 @@ class OAuthManager:
             return None, f"Token refresh failed: {e}"
 
     @staticmethod
-    def parse_callback_url(callback_url: str) -> tuple[Optional[str], Optional[str]]:
+    def parse_callback_url(callback_url: str) -> tuple[str | None, str | None]:
         """
         Parse authorization callback URL to extract code and state.
 

@@ -8,7 +8,6 @@ structured logging support, and configurable output formats.
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 
 class PlatformLogger:
@@ -19,7 +18,7 @@ class PlatformLogger:
     timing information, and error tracking.
     """
 
-    def __init__(self, name: str, platform: str, log_dir: Optional[Path] = None):
+    def __init__(self, name: str, platform: str, log_dir: Path | None = None):
         """
         Initialize platform logger.
 
@@ -60,8 +59,8 @@ class PlatformLogger:
 
 def configure_logging(
     level: str = "INFO",
-    log_file: Optional[Path] = None,
-    format_string: Optional[str] = None,
+    log_file: Path | None = None,
+    format_string: str | None = None,
 ) -> None:
     """
     Configure logging for communication systems.
@@ -94,9 +93,7 @@ def configure_logging(
         root_logger.addHandler(file_handler)
 
 
-def get_logger(
-    name: str, platform: str, log_dir: Optional[Path] = None
-) -> PlatformLogger:
+def get_logger(name: str, platform: str, log_dir: Path | None = None) -> PlatformLogger:
     """
     Get platform-specific logger.
 

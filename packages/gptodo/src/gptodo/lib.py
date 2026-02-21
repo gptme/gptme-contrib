@@ -15,11 +15,11 @@ import json
 import logging
 import subprocess
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 def fetch_github_issues(
-    repo: str, state: str, labels: List[str], assignee: Optional[str], limit: int
+    repo: str, state: str, labels: List[str], assignee: str | None, limit: int
 ) -> List[Dict[str, Any]]:
     """Fetch issues from GitHub using gh CLI.
 
@@ -213,7 +213,7 @@ def generate_task_filename(title: str, number: str | int, source: str) -> str:
     return f"{slug}-{number}.md"
 
 
-def map_priority_from_labels(labels: List[str]) -> Optional[str]:
+def map_priority_from_labels(labels: List[str]) -> str | None:
     """Map priority from issue labels.
 
     Args:
@@ -232,7 +232,7 @@ def map_priority_from_labels(labels: List[str]) -> Optional[str]:
     return None
 
 
-def generate_task_content(issue: Dict[str, Any], source: str, priority: Optional[str]) -> str:
+def generate_task_content(issue: Dict[str, Any], source: str, priority: str | None) -> str:
     """Generate task file content from issue data.
 
     Args:
@@ -297,7 +297,7 @@ def generate_task_content(issue: Dict[str, Any], source: str, priority: Optional
 
 
 def poll_github_notifications(
-    since: Optional[str] = None,
+    since: str | None = None,
     all_notifications: bool = False,
 ) -> List[Dict[str, Any]]:
     """Poll GitHub notifications for recent updates.

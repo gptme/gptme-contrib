@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import click
@@ -88,7 +88,7 @@ def load_search_history(
         return []
 
     try:
-        with open(cache_path, "r") as f:
+        with open(cache_path) as f:
             data = json_lib.load(f)
         return [SearchHistoryEntry(**entry) for entry in data]
     except (json_lib.JSONDecodeError, TypeError):
@@ -285,7 +285,7 @@ def format_entry(
     entry: feedparser.FeedParserDict,
     source: str,
     dt: datetime,
-    template: Optional[str],
+    template: str | None,
     date_format: str,
     include_summary: bool = False,
 ) -> str:
@@ -321,8 +321,8 @@ def format_entry(
 
 def apply_filters(
     entries: list[tuple[datetime, str, feedparser.FeedParserDict]],
-    filter_title: Optional[str],
-    filter_source: Optional[str],
+    filter_title: str | None,
+    filter_source: str | None,
 ) -> list[tuple[datetime, str, feedparser.FeedParserDict]]:
     """Apply filtering to entries based on title and source patterns."""
     import re
@@ -761,15 +761,15 @@ def get_entry_summary(entry: feedparser.FeedParserDict) -> str | None:
 
 def format_entries(
     feed: feedparser.FeedParserDict,
-    exclude_urls: Optional[list[str]] = None,
-    max_entries: Optional[int] = None,
+    exclude_urls: list[str] | None = None,
+    max_entries: int | None = None,
     include_summary: bool = False,
     time: bool = False,
     order: Literal["asc", "desc"] = "asc",
-    format_template: Optional[str] = None,
+    format_template: str | None = None,
     date_format: str = "%Y-%m-%d",
-    filter_title: Optional[str] = None,
-    filter_source: Optional[str] = None,
+    filter_title: str | None = None,
+    filter_source: str | None = None,
 ) -> str:
     """Format feed entries in a clean, LLM-friendly format."""
     # Get feed title for source name
@@ -915,12 +915,12 @@ def discover_feeds(url: str, timeout: int = 10) -> list[str]:
 def format_multi_feed_output(
     feeds: dict[str, feedparser.FeedParserDict],
     config: dict[str, Any],
-    max_entries: Optional[int] = None,
+    max_entries: int | None = None,
     include_summary: bool = False,
-    format_template: Optional[str] = None,
+    format_template: str | None = None,
     date_format: str = "%Y-%m-%d",
-    filter_title: Optional[str] = None,
-    filter_source: Optional[str] = None,
+    filter_title: str | None = None,
+    filter_source: str | None = None,
 ) -> str:
     """Format output for multiple feeds, grouped by domain."""
     output = []
@@ -994,12 +994,12 @@ def format_multi_feed_output(
 def format_by_tag_groups(
     all_entries: list[tuple[str, feedparser.FeedParserDict]],
     config: dict[str, Any],
-    max_entries: Optional[int] = None,
+    max_entries: int | None = None,
     include_summary: bool = False,
-    format_template: Optional[str] = None,
+    format_template: str | None = None,
     date_format: str = "%Y-%m-%d",
-    filter_title: Optional[str] = None,
-    filter_source: Optional[str] = None,
+    filter_title: str | None = None,
+    filter_source: str | None = None,
 ) -> str:
     """
     Group and format entries by tags instead of domains.
@@ -1193,15 +1193,15 @@ def format_by_tag_groups(
     help="Save search to history (default: true)",
 )
 def main(
-    url: Optional[str],
+    url: str | None,
     exclude_url: tuple[str, ...],
-    max_entries: Optional[int],
+    max_entries: int | None,
     summary: bool,
     time: bool,
     order: str,
     json_output: bool,
-    config: Optional[str],
-    domain: Optional[str],
+    config: str | None,
+    domain: str | None,
     all_domains: bool,
     no_cache: bool,
     clear_cache: bool,
@@ -1212,15 +1212,15 @@ def main(
     validate_all: bool,
     validate_verbose: bool,
     discover: bool,
-    format: Optional[str],
+    format: str | None,
     date_format: str,
-    filter_title: Optional[str],
-    filter_source: Optional[str],
-    tags: Optional[str],
+    filter_title: str | None,
+    filter_source: str | None,
+    tags: str | None,
     tag_match: str,
     list_tags: bool,
     group_by: str,
-    search: Optional[str],
+    search: str | None,
     search_in: str,
     search_history_flag: bool,
     save_search: bool,

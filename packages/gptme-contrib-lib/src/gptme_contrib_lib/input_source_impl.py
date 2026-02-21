@@ -8,7 +8,7 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .config import get_agent_config_dir, get_default_repo, get_workspace_path
 from .input_sources import (
@@ -58,7 +58,7 @@ class GitHubInputSource(InputSource):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as e:
-            raise ConnectionError(f"Failed to fetch GitHub issues: {e.stderr}")
+            raise ConnectionError(f"Failed to fetch GitHub issues: {e.stderr}") from e
 
         issues = json.loads(result.stdout)
         requests = []
@@ -91,7 +91,7 @@ class GitHubInputSource(InputSource):
 
         return requests
 
-    def _extract_priority(self, labels: List[Dict[str, Any]]) -> Optional[str]:
+    def _extract_priority(self, labels: List[Dict[str, Any]]) -> str | None:
         """Extract priority from GitHub labels.
 
         Args:
@@ -388,7 +388,7 @@ class EmailInputSource(InputSource):
         except Exception:
             return datetime.now()
 
-    def _extract_priority_from_email(self, subject: str, body: str) -> Optional[str]:
+    def _extract_priority_from_email(self, subject: str, body: str) -> str | None:
         """Extract priority from email content.
 
         Args:

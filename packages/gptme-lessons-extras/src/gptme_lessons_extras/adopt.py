@@ -8,9 +8,8 @@ Provides tools to:
 - Track adoption metrics
 """
 
-import sys
-
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -75,7 +74,7 @@ def adopt_lesson(
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Read source content
-        with open(lesson_file, "r") as f:
+        with open(lesson_file) as f:
             content = f.read()
 
         # Parse frontmatter to update adoption_count
@@ -139,7 +138,7 @@ def record_adoption(
 
     # Load existing metrics
     if metrics_file.exists():
-        with open(metrics_file, "r") as f:
+        with open(metrics_file) as f:
             metrics = json.load(f)
     else:
         metrics = {"adoptions": []}
@@ -223,7 +222,7 @@ def report_adoption_metrics(lessons_dir: Path) -> dict[str, Any]:
     if not metrics_file.exists():
         return {"total_adoptions": 0, "by_agent": {}, "recent": []}
 
-    with open(metrics_file, "r") as f:
+    with open(metrics_file) as f:
         data = json.load(f)
 
     adoptions = data.get("adoptions", [])

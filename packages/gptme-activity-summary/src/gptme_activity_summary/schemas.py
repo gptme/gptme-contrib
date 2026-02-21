@@ -9,7 +9,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from typing import Optional
 
 # Linkify owner/repo#NNN references into GitHub URLs.
 _GITHUB_REF_RE = re.compile(r"(?<![/\w])([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)#(\d+)")
@@ -45,7 +44,7 @@ class Decision:
     topic: str
     decision: str
     rationale: str
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -54,8 +53,8 @@ class Blocker:
 
     issue: str
     status: BlockerStatus
-    resolution: Optional[str] = None
-    escalated_to: Optional[str] = None
+    resolution: str | None = None
+    escalated_to: str | None = None
 
 
 @dataclass
@@ -262,7 +261,7 @@ class DailySummary:
     session_count: int = 0
     interactions: list[Interaction] = field(default_factory=list)
     external_signals: list[ExternalSignal] = field(default_factory=list)
-    generated_at: Optional[datetime] = None
+    generated_at: datetime | None = None
 
     def to_markdown(self) -> str:
         """Render as human-readable markdown."""
@@ -380,7 +379,7 @@ class WeeklySummary:
     interactions: list[Interaction] = field(default_factory=list)
     external_contributions: list[ExternalContribution] = field(default_factory=list)
     external_signals: list[ExternalSignal] = field(default_factory=list)
-    generated_at: Optional[datetime] = None
+    generated_at: datetime | None = None
 
     def to_markdown(self) -> str:
         """Render as human-readable markdown."""
@@ -488,7 +487,7 @@ class MonthlySummary:
     highlights: list[str] = field(default_factory=list)
     external_contributions: list[ExternalContribution] = field(default_factory=list)
     external_signals: list[ExternalSignal] = field(default_factory=list)
-    generated_at: Optional[datetime] = None
+    generated_at: datetime | None = None
 
     def to_markdown(self) -> str:
         """Render as human-readable markdown."""

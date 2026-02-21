@@ -5,13 +5,11 @@ Provides consistent error hierarchy for handling failures
 across email, Twitter, Discord, and other platforms.
 """
 
-from typing import Optional
-
 
 class CommunicationError(Exception):
     """Base exception for all communication errors."""
 
-    def __init__(self, message: str, platform: str, details: Optional[dict] = None):
+    def __init__(self, message: str, platform: str, details: dict | None = None):
         """
         Initialize communication error.
 
@@ -31,7 +29,7 @@ class RateLimitError(CommunicationError):
     def __init__(
         self,
         platform: str,
-        retry_after: Optional[int] = None,
+        retry_after: int | None = None,
         message: str = "Rate limit exceeded",
     ):
         """
@@ -66,7 +64,7 @@ class NetworkError(CommunicationError):
     def __init__(
         self,
         platform: str,
-        status_code: Optional[int] = None,
+        status_code: int | None = None,
         message: str = "Network error",
     ):
         """
@@ -101,7 +99,7 @@ class MessageError(CommunicationError):
     def __init__(
         self,
         platform: str,
-        message_id: Optional[str] = None,
+        message_id: str | None = None,
         message: str = "Message processing failed",
     ):
         """

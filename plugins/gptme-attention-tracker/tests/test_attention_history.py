@@ -52,8 +52,8 @@ def test_record_turn(temp_history_file, reset_session):
 def test_query_session(temp_history_file, reset_session):
     """Test querying session history."""
     from gptme_attention_tracker.tools.attention_history import (
-        record_turn,
         query_session,
+        record_turn,
         start_new_session,
     )
 
@@ -67,7 +67,7 @@ def test_query_session(temp_history_file, reset_session):
 
 def test_query_file(temp_history_file, reset_session):
     """Test querying file statistics."""
-    from gptme_attention_tracker.tools.attention_history import record_turn, query_file
+    from gptme_attention_tracker.tools.attention_history import query_file, record_turn
 
     record_turn(turn_number=1, hot_files=["tracked.md"])
     record_turn(turn_number=2, hot_files=["tracked.md"])
@@ -82,8 +82,8 @@ def test_query_file(temp_history_file, reset_session):
 def test_query_coactivation(temp_history_file, reset_session):
     """Test co-activation analysis."""
     from gptme_attention_tracker.tools.attention_history import (
-        record_turn,
         query_coactivation,
+        record_turn,
     )
 
     # Files A and B appear together
@@ -104,8 +104,8 @@ def test_query_coactivation(temp_history_file, reset_session):
 def test_query_keyword_effectiveness(temp_history_file, reset_session):
     """Test keyword effectiveness analysis."""
     from gptme_attention_tracker.tools.attention_history import (
-        record_turn,
         query_keyword_effectiveness,
+        record_turn,
     )
 
     record_turn(turn_number=1, hot_files=["file.md"], activated_keywords=["git"])
@@ -122,8 +122,8 @@ def test_query_keyword_effectiveness(temp_history_file, reset_session):
 def test_get_summary(temp_history_file, reset_session):
     """Test getting summary statistics."""
     from gptme_attention_tracker.tools.attention_history import (
-        record_turn,
         get_summary,
+        record_turn,
         start_new_session,
     )
 
@@ -144,9 +144,9 @@ def test_get_summary(temp_history_file, reset_session):
 def test_clear_history(temp_history_file, reset_session):
     """Test clearing history."""
     from gptme_attention_tracker.tools.attention_history import (
-        record_turn,
         clear_history,
         get_summary,
+        record_turn,
     )
 
     record_turn(turn_number=1, hot_files=["file.md"])
@@ -159,9 +159,9 @@ def test_clear_history(temp_history_file, reset_session):
 def test_start_new_session(temp_history_file, reset_session):
     """Test starting new session."""
     from gptme_attention_tracker.tools.attention_history import (
-        start_new_session,
-        record_turn,
         query_session,
+        record_turn,
+        start_new_session,
     )
 
     start_new_session("custom_session")

@@ -8,14 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-
 from gptme_ace.metrics import CurationRun, InsightQuality, LessonImpact
 from gptme_ace.visualization import (
     _format_datetime,
     _load_deltas,
     cli,
 )
-
 
 # ============================================================================
 # Fixtures

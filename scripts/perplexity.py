@@ -13,12 +13,11 @@
 import json
 import logging
 import os
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import click
+import tomllib
 from dotenv import load_dotenv
 from openai import OpenAI
 from rich.console import Console
@@ -45,7 +44,7 @@ class SearchResult:
 class PerplexitySearch:
     """Handles searching with Perplexity's API"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or self._get_api_key()
         self.client = OpenAI(
             api_key=self.api_key,

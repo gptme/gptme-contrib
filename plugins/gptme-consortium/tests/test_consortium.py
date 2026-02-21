@@ -3,11 +3,10 @@
 from unittest.mock import patch
 
 import pytest
-
 from gptme_consortium.tools.consortium import (
     ConsortiumResult,
-    query_consortium,
     _synthesize_consensus,
+    query_consortium,
 )
 
 

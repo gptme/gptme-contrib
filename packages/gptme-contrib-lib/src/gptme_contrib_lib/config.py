@@ -6,7 +6,7 @@ All paths and identifiers are configurable via environment variables.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -192,7 +192,7 @@ class WebhookSourceConfig(BaseModel):
     queue_dir: Path = Field(default=Path.home() / ".local/share/webhook-queue")
     workspace_path: Path = Field(default_factory=get_workspace_path)
     poll_interval_seconds: int = Field(default=60, ge=10)
-    auth_token: Optional[str] = Field(default=None)
+    auth_token: str | None = Field(default=None)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
     @field_validator("queue_dir", "workspace_path", mode="before")

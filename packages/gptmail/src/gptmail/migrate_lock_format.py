@@ -3,8 +3,8 @@
 
 import json
 import uuid
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 lock_file = Path("email/locks/email.json")
 

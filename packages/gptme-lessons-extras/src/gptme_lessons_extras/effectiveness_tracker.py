@@ -225,7 +225,7 @@ class EffectivenessTracker:
 
                     except json.JSONDecodeError:
                         continue
-        except (OSError, IOError) as e:
+        except OSError as e:
             print(f"Warning: Could not read {conv_file}: {e}")
 
         return lessons_found

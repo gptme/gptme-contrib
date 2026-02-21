@@ -12,16 +12,15 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
+from typing import Dict, List, Tuple
 
 # Default agent names to match in log files
 DEFAULT_AGENT_NAMES = ["Assistant", "Bob", "Alice", "Agent"]
 
 
 def parse_log_file(
-    log_path: Path, agent_names: Optional[List[str]] = None
-) -> Tuple[Optional[datetime], List[str]]:
+    log_path: Path, agent_names: List[str] | None = None
+) -> Tuple[datetime | None, List[str]]:
     """Parse a single log file and extract included lessons.
 
     Args:
@@ -45,7 +44,7 @@ def parse_log_file(
     timestamp = datetime.strptime(f"{date_str}{time_str}", "%Y%m%d%H%M%S")
 
     lessons = []
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(log_path, encoding="utf-8", errors="ignore") as f:
         content = f.read()
 
         # Find all "Auto-included X lessons:" sections
@@ -73,7 +72,7 @@ def parse_log_file(
     return timestamp, lessons
 
 
-def analyze_logs(logs_dir: Path, days: Optional[int] = None) -> Dict:
+def analyze_logs(logs_dir: Path, days: int | None = None) -> Dict:
     """Analyze all logs in directory.
 
     Args:

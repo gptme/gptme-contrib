@@ -39,7 +39,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List
 
 
 @dataclass
@@ -63,9 +63,9 @@ class InsightMetadata:
     created_at: str  # ISO timestamp
     source_agent: str  # generator or reflector
     status: str  # pending, approved, rejected, converted
-    converted_to_lesson: Optional[str] = None  # Lesson file if converted
-    reviewed_by: Optional[str] = None  # Who reviewed (human or auto)
-    reviewed_at: Optional[str] = None  # When reviewed
+    converted_to_lesson: str | None = None  # Lesson file if converted
+    reviewed_by: str | None = None  # Who reviewed (human or auto)
+    reviewed_at: str | None = None  # When reviewed
 
 
 @dataclass
@@ -99,8 +99,8 @@ class StoredInsight:
     metadata: InsightMetadata
 
     # Optional refinement data (from Reflector)
-    refinement_notes: Optional[str] = None
-    pattern_type: Optional[str] = None  # success, failure, recurring, emergent
+    refinement_notes: str | None = None
+    pattern_type: str | None = None  # success, failure, recurring, emergent
 
 
 class InsightStorage:
@@ -296,7 +296,7 @@ class InsightStorage:
 
     def get_insight(
         self, insight_id: str, source_agent: str = "raw"
-    ) -> Optional[StoredInsight]:
+    ) -> StoredInsight | None:
         """
         Retrieve insight by ID.
 
@@ -324,8 +324,8 @@ class InsightStorage:
         insight_id: str,
         source_agent: str,
         new_status: str,
-        reviewer: Optional[str] = None,
-        converted_to_lesson: Optional[str] = None,
+        reviewer: str | None = None,
+        converted_to_lesson: str | None = None,
     ) -> None:
         """
         Update insight status.
@@ -372,8 +372,8 @@ class InsightStorage:
     def list_insights(
         self,
         source_agent: str = "raw",
-        status: Optional[str] = None,
-        category: Optional[str] = None,
+        status: str | None = None,
+        category: str | None = None,
     ) -> List[dict]:
         """
         List insights with optional filtering.

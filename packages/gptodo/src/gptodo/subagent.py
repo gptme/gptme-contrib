@@ -14,10 +14,10 @@ import os
 import shlex
 import subprocess
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +35,13 @@ class AgentSession:
     backend: Literal["gptme", "claude", "codex"]
     started: str
     status: Literal["running", "completed", "failed", "killed"]
-    tmux_session: Optional[str] = None
-    output_file: Optional[str] = None
-    error: Optional[str] = None
-    completed_at: Optional[str] = None
+    tmux_session: str | None = None
+    output_file: str | None = None
+    error: str | None = None
+    completed_at: str | None = None
 
 
-def get_sessions_dir(workspace: Optional[Path] = None) -> Path:
+def get_sessions_dir(workspace: Path | None = None) -> Path:
     """Get the sessions directory, creating if needed."""
     if workspace is None:
         workspace = Path.cwd()
@@ -50,7 +50,7 @@ def get_sessions_dir(workspace: Optional[Path] = None) -> Path:
     return sessions_dir
 
 
-def load_session(session_id: str, workspace: Optional[Path] = None) -> Optional[AgentSession]:
+def load_session(session_id: str, workspace: Path | None = None) -> AgentSession | None:
     """Load a session by ID."""
     sessions_dir = get_sessions_dir(workspace)
     session_file = sessions_dir / f"{session_id}.json"
@@ -66,7 +66,7 @@ def load_session(session_id: str, workspace: Optional[Path] = None) -> Optional[
         return None
 
 
-def save_session(session: AgentSession, workspace: Optional[Path] = None) -> Path:
+def save_session(session: AgentSession, workspace: Path | None = None) -> Path:
     """Save a session to disk."""
     sessions_dir = get_sessions_dir(workspace)
     session_file = sessions_dir / f"{session.session_id}.json"
@@ -74,9 +74,7 @@ def save_session(session: AgentSession, workspace: Optional[Path] = None) -> Pat
     return session_file
 
 
-def list_sessions(
-    workspace: Optional[Path] = None, status: Optional[str] = None
-) -> list[AgentSession]:
+def list_sessions(workspace: Path | None = None, status: str | None = None) -> list[AgentSession]:
     """List all sessions, optionally filtered by status."""
     sessions_dir = get_sessions_dir(workspace)
     sessions = []
@@ -94,7 +92,7 @@ def list_sessions(
 
 def _setup_coordination(
     workspace: Path,
-    coordination_db: Optional[str] = None,
+    coordination_db: str | None = None,
 ) -> tuple[str, str, str]:
     """Set up coordination for a spawned agent.
 
@@ -155,13 +153,13 @@ def spawn_agent(
     agent_type: Literal["general", "explore", "plan", "execute"] = "general",
     backend: Literal["gptme", "claude", "codex"] = "gptme",
     background: bool = False,
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     timeout: int = 3000,
-    model: Optional[str] = None,
-    clear_keys: Optional[bool] = None,
-    system_prompt_file: Optional[str] = None,
+    model: str | None = None,
+    clear_keys: bool | None = None,
+    system_prompt_file: str | None = None,
     coordination: bool = False,
-    coordination_db: Optional[str] = None,
+    coordination_db: str | None = None,
 ) -> AgentSession:
     """Spawn a sub-agent to work on a task.
 
@@ -190,7 +188,7 @@ def spawn_agent(
         workspace = Path.cwd()
 
     # Handle coordination setup
-    coord_db_path: Optional[str] = None
+    coord_db_path: str | None = None
     if coordination or coordination_db:
         # Raises FileNotFoundError if coordination package not installed — let it propagate
         # so the user knows coordination is NOT active (fail loudly, not silently).
@@ -395,7 +393,7 @@ def spawn_agent(
     return session
 
 
-def check_session(session_id: str, workspace: Optional[Path] = None) -> Optional[AgentSession]:
+def check_session(session_id: str, workspace: Path | None = None) -> AgentSession | None:
     """Check status of a session and update if completed.
 
     For background sessions, checks if tmux session still exists and
@@ -436,7 +434,7 @@ def check_session(session_id: str, workspace: Optional[Path] = None) -> Optional
     return session
 
 
-def get_session_output(session_id: str, workspace: Optional[Path] = None) -> str:
+def get_session_output(session_id: str, workspace: Path | None = None) -> str:
     """Get output from a session."""
     session = load_session(session_id, workspace)
     if session is None:
@@ -461,7 +459,7 @@ def get_session_output(session_id: str, workspace: Optional[Path] = None) -> str
     return output or "No output available"
 
 
-def kill_session(session_id: str, workspace: Optional[Path] = None) -> bool:
+def kill_session(session_id: str, workspace: Path | None = None) -> bool:
     """Kill a running session."""
     session = load_session(session_id, workspace)
     if session is None:
@@ -485,7 +483,7 @@ def kill_session(session_id: str, workspace: Optional[Path] = None) -> bool:
 
 
 def cleanup_sessions(
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     older_than_hours: int = 24,
 ) -> int:
     """Remove old session files and reconcile stale state.

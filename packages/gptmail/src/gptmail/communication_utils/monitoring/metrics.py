@@ -8,7 +8,6 @@ across communication platforms.
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -18,18 +17,18 @@ class OperationMetrics:
     operation: str
     platform: str
     start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    success: Optional[bool] = None
-    error: Optional[str] = None
+    end_time: float | None = None
+    success: bool | None = None
+    error: str | None = None
 
     @property
-    def duration(self) -> Optional[float]:
+    def duration(self) -> float | None:
         """Get operation duration in seconds."""
         if self.end_time is None:
             return None
         return self.end_time - self.start_time
 
-    def complete(self, success: bool = True, error: Optional[str] = None) -> None:
+    def complete(self, success: bool = True, error: str | None = None) -> None:
         """Mark operation as complete."""
         self.end_time = time.time()
         self.success = success
@@ -63,7 +62,7 @@ class MetricsCollector:
         self.operations.append(metrics)
         return metrics
 
-    def get_stats(self, platform: Optional[str] = None) -> dict:
+    def get_stats(self, platform: str | None = None) -> dict:
         """
         Get aggregated statistics.
 
@@ -104,7 +103,7 @@ class MetricsCollector:
             "error_count": len(failed),
         }
 
-    def get_recent_errors(self, limit: int = 10, platform: Optional[str] = None) -> list[dict]:
+    def get_recent_errors(self, limit: int = 10, platform: str | None = None) -> list[dict]:
         """
         Get recent error details.
 

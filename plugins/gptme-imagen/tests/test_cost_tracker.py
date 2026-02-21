@@ -8,8 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
-from gptme_imagen.tools.cost_tracker import CostTracker, PROVIDER_COSTS
+from gptme_imagen.tools.cost_tracker import PROVIDER_COSTS, CostTracker
 
 
 @pytest.fixture

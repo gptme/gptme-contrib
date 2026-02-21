@@ -5,16 +5,16 @@ Provides decorators and utilities for retrying failed operations
 with configurable backoff strategies and error handling.
 """
 
-import time
 import functools
+import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 
 class RetryError(Exception):
     """Raised when all retry attempts fail."""
 
-    def __init__(self, message: str, attempts: int, last_error: Optional[Exception]):
+    def __init__(self, message: str, attempts: int, last_error: Exception | None):
         """
         Initialize retry error.
 
@@ -73,10 +73,10 @@ def exponential_backoff(
 
 
 def retry(
-    config: Optional[RetryConfig] = None,
-    max_attempts: Optional[int] = None,
-    initial_delay: Optional[float] = None,
-    retryable_exceptions: Optional[tuple] = None,
+    config: RetryConfig | None = None,
+    max_attempts: int | None = None,
+    initial_delay: float | None = None,
+    retryable_exceptions: tuple | None = None,
 ):
     """
     Decorator for retrying failed operations with exponential backoff.
@@ -143,7 +143,7 @@ def retry(
 def retry_with_rate_limit(
     max_attempts: int = 3,
     initial_delay: float = 1.0,
-    rate_limit_exceptions: Optional[tuple] = None,
+    rate_limit_exceptions: tuple | None = None,
 ):
     """
     Decorator for retrying with rate limit awareness.

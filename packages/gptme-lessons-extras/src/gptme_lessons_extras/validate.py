@@ -17,14 +17,12 @@ Combines functionality from:
 - scripts/lesson-checker.py (length checks, companion doc validation)
 """
 
-import sys
-
 import re
+import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import yaml
-
 
 # Configuration
 TARGET_LENGTH = 100  # lines (soft target for primary lessons)
@@ -91,7 +89,7 @@ class LessonValidator:
         self.content = filepath.read_text()
         self.errors: List[str] = []
         self.warnings: List[str] = []
-        self.format_type: Optional[str] = None
+        self.format_type: str | None = None
 
     def _detect_format(self) -> str:
         """Detect which format this lesson uses.

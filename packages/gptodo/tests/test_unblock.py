@@ -6,8 +6,8 @@ from typing import List
 
 import frontmatter
 
-from gptodo.unblock import find_dependent_tasks, auto_unblock_tasks
-from gptodo.utils import TaskInfo, SubtaskCount
+from gptodo.unblock import auto_unblock_tasks, find_dependent_tasks
+from gptodo.utils import SubtaskCount, TaskInfo
 
 
 def create_task_file(tasks_dir: Path, name: str, metadata: dict, content: str = "") -> Path:

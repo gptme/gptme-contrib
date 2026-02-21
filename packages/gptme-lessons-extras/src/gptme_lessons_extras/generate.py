@@ -16,30 +16,28 @@ lesson format. Generates lessons that can be reviewed and merged into the lesson
 directory.
 """
 
-import sys
-
 import json
+import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 if __name__ == "__main__" and __package__ is None:
     workspace_root = Path(__file__).parent.parent.parent
 
 import click
 
-from gptme_lessons_extras.utils.llm import llm_author_reflect, llm_judge_score
-from gptme_lessons_extras.utils.similarity import (
-    deduplicate_lessons,
-    find_similar_lessons,
-)
+from gptme_lessons_extras.utils.evolution import format_pareto_summary, gepa_lite_evolve
 from gptme_lessons_extras.utils.formatting import ensure_dir, generate_slug
 from gptme_lessons_extras.utils.keywords import (
     extract_keywords_from_lesson,
     replace_placeholder_keywords,
     strip_preamble_before_frontmatter,
 )
-from gptme_lessons_extras.utils.evolution import gepa_lite_evolve, format_pareto_summary
-
+from gptme_lessons_extras.utils.llm import llm_author_reflect, llm_judge_score
+from gptme_lessons_extras.utils.similarity import (
+    deduplicate_lessons,
+    find_similar_lessons,
+)
 
 # Removed: categorize_insight() - was used by old insight-based generation
 # Removed: create_lesson_from_learnable_moment() - old format, heuristic-based
@@ -85,13 +83,13 @@ def generate_lessons_with_evolution(
     analysis_file: Path,
     output_dir: Path,
     min_confidence: float = 0.6,
-    max_lessons: Optional[int] = None,
+    max_lessons: int | None = None,
     num_variants: int = 5,
     check_existing: bool = True,
-    existing_lessons_dir: Optional[Path] = None,
+    existing_lessons_dir: Path | None = None,
     similarity_threshold: float = 0.7,
     skip_duplicates: bool = True,
-    judge_threshold: Optional[float] = None,
+    judge_threshold: float | None = None,
     verbose: bool = False,
 ) -> List[Path]:
     """Generate lesson drafts using GEPA-lite evolution loop.
@@ -118,7 +116,7 @@ def generate_lessons_with_evolution(
     Returns:
         List of paths to generated lesson files
     """
-    with open(analysis_file, "r") as f:
+    with open(analysis_file) as f:
         analysis = json.load(f)
 
     # Support both formats: top-level "experiences" or nested "learnable_moments"
@@ -206,12 +204,12 @@ def generate_lessons_from_analysis(
     analysis_file: Path,
     output_dir: Path,
     min_confidence: float = 0.6,
-    max_lessons: Optional[int] = None,
+    max_lessons: int | None = None,
     check_existing: bool = True,
-    existing_lessons_dir: Optional[Path] = None,
+    existing_lessons_dir: Path | None = None,
     similarity_threshold: float = 0.7,
     skip_duplicates: bool = True,
-    judge_threshold: Optional[float] = None,
+    judge_threshold: float | None = None,
 ) -> List[Path]:
     """Generate lesson drafts from conversation analysis using LLM Author.
 
@@ -236,7 +234,7 @@ def generate_lessons_from_analysis(
 
     Returns list of generated lesson file paths.
     """
-    with open(analysis_file, "r", encoding="utf-8") as f:
+    with open(analysis_file, encoding="utf-8") as f:
         analysis = json.load(f)
 
     conversation_id = analysis["conversation_id"]
@@ -562,7 +560,7 @@ def workflow(
         click.echo("\n=== Step 3: Judging lessons ===")
         try:
             # Load analysis for context
-            with open(analysis_file, "r", encoding="utf-8") as f:
+            with open(analysis_file, encoding="utf-8") as f:
                 analysis_data = json.load(f)
 
             experiences = analysis_data.get("metadata", {}).get("experiences", [])
@@ -572,7 +570,7 @@ def workflow(
             for i, lesson_file in enumerate(generated_files):
                 click.echo(f"  Judging lesson {i + 1}/{len(generated_files)}...")
 
-                with open(lesson_file, "r", encoding="utf-8") as f:
+                with open(lesson_file, encoding="utf-8") as f:
                     lesson_md = f.read()
 
                 # Use corresponding experience for context
@@ -672,7 +670,7 @@ def generate(
     analysis_file: str,
     output_dir: str,
     min_confidence: float,
-    max_lessons: Optional[int],
+    max_lessons: int | None,
     no_check_existing: bool,
     existing_lessons_dir: str,
     similarity_threshold: float,
@@ -881,7 +879,7 @@ def judge(analysis_file: str, lesson_file: str, verbose: bool):
             knowledge/meta/lessons-draft/patterns/celebrating-breakthrough-moments.md
     """
     try:
-        with open(analysis_file, "r", encoding="utf-8") as f:
+        with open(analysis_file, encoding="utf-8") as f:
             analysis = json.load(f)
 
         conversation_id = analysis["conversation_id"]
@@ -891,7 +889,7 @@ def judge(analysis_file: str, lesson_file: str, verbose: bool):
             click.echo("Error: No experiences found in analysis file", err=True)
             sys.exit(1)
 
-        with open(lesson_file, "r", encoding="utf-8") as f:
+        with open(lesson_file, encoding="utf-8") as f:
             lesson_markdown = f.read()
 
         moment = experiences[0]

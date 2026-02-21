@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +115,8 @@ class DeltaReviewer:
 
     def __init__(
         self,
-        delta_dir: Optional[Path] = None,
-        lessons_dir: Optional[Path] = None,
+        delta_dir: Path | None = None,
+        lessons_dir: Path | None = None,
         approve_threshold: float = 0.7,
         reject_threshold: float = 0.4,
         auto_approve: bool = False,
@@ -164,7 +163,7 @@ class DeltaReviewer:
             return []
         return [p.stem for p in pending_dir.glob("*.json")]
 
-    def load_lesson_context(self, lesson_id: str) -> Optional[str]:
+    def load_lesson_context(self, lesson_id: str) -> str | None:
         """Load the existing lesson content for context"""
         # Try direct path first
         lesson_path = self.lessons_dir / f"{lesson_id}.md"
@@ -182,7 +181,7 @@ class DeltaReviewer:
         self,
         criterion: ReviewCriterion,
         delta: dict,
-        lesson_content: Optional[str],
+        lesson_content: str | None,
     ) -> ReviewCriterion:
         """
         Evaluate a single criterion for a delta.
@@ -290,7 +289,7 @@ class DeltaReviewer:
         self,
         delta_id: str,
         reviewer: str = "ace_reviewer",
-        criteria: Optional[list[ReviewCriterion]] = None,
+        criteria: list[ReviewCriterion] | None = None,
     ) -> ReviewResult:
         """
         Review a single delta and return the result.
@@ -505,7 +504,7 @@ class DeltaReviewer:
 
     def batch_review(
         self,
-        delta_ids: Optional[list[str]] = None,
+        delta_ids: list[str] | None = None,
         reviewer_name: str = "ace_reviewer",
     ) -> list[ReviewResult]:
         """

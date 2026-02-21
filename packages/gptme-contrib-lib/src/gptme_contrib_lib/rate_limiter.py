@@ -5,7 +5,7 @@ Token bucket algorithm implementation for controlling request rates.
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 
 @dataclass
@@ -328,7 +328,7 @@ class MultiSourceRateLimiter:
 
         return self.limiters[source_name].get_wait_time(source_name, count)
 
-    def get_status(self, source_name: str) -> Optional[Dict]:
+    def get_status(self, source_name: str) -> Dict | None:
         """Get current rate limit status for a source.
 
         Args:

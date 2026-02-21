@@ -9,9 +9,9 @@ import asyncio
 import base64
 import json
 import logging
-from pathlib import Path
-from typing import Callable, Optional, Any
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
 
 import websockets  # type: ignore
 from gptme.config import get_config, get_project_config
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_INSTRUCTIONS = "You are a helpful assistant with access to tools via gptme."
 
 
-def _get_openai_api_key() -> Optional[str]:
+def _get_openai_api_key() -> str | None:
     """Get OpenAI API key from gptme config (env var, project, or user config)."""
     config = get_config()
     return config.get_env("OPENAI_API_KEY")
@@ -34,7 +34,7 @@ _PERSONALITY_FILES = ["ABOUT.md", "README.md"]
 _MAX_INSTRUCTIONS_LEN = 4096
 
 
-def _detect_agent_repo() -> Optional[str]:
+def _detect_agent_repo() -> str | None:
     """Auto-detect the agent repo root.
 
     Assumes gptme-contrib is a subdirectory of the agent repo
@@ -51,7 +51,7 @@ def _detect_agent_repo() -> Optional[str]:
     return None
 
 
-def _load_project_instructions(workspace: Optional[str] = None) -> str:
+def _load_project_instructions(workspace: str | None = None) -> str:
     """Load personality/instructions from gptme project config files.
 
     Loads personality-relevant files from the workspace's gptme.toml config,
@@ -154,12 +154,12 @@ class OpenAIRealtimeClient:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        session_config: Optional[SessionConfig] = None,
-        on_audio: Optional[Callable[[bytes], None]] = None,
-        on_audio_end: Optional[Callable[[], None]] = None,
-        on_transcript: Optional[Callable[[str], None]] = None,
-        on_function_call: Optional[Callable[[str, dict], Any]] = None,
+        api_key: str | None = None,
+        session_config: SessionConfig | None = None,
+        on_audio: Callable[[bytes], None] | None = None,
+        on_audio_end: Callable[[], None] | None = None,
+        on_transcript: Callable[[str], None] | None = None,
+        on_function_call: Callable[[str, dict], Any] | None = None,
     ):
         self.api_key = api_key or _get_openai_api_key()
         if not self.api_key:
@@ -173,8 +173,8 @@ class OpenAIRealtimeClient:
         self.on_transcript = on_transcript
         self.on_function_call = on_function_call
 
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._receive_task: Optional[asyncio.Task] = None
+        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
 
     async def connect(self) -> None:

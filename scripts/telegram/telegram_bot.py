@@ -24,21 +24,21 @@ from __future__ import annotations
 
 import logging
 import os
+
+# Add these imports
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Dict
-
-# Add these imports
-import re
 
 # Add scripts directory to path for imports
 SCRIPTS_DIR = Path(__file__).parent.parent
 sys.path.append(str(SCRIPTS_DIR))
 
 from dotenv import load_dotenv
-from rich.logging import RichHandler
 from gptme.config import get_project_config
+from rich.logging import RichHandler
 
 os.environ["GPTME_CHECK"] = "false"
 
@@ -97,19 +97,26 @@ def main() -> None:
     # Import telegram here to avoid issues with type checking in pre-commit
     try:
         from telegram import Update
+        from telegram.constants import ChatAction
         from telegram.ext import (
             Application,
             CommandHandler,
             MessageHandler,
             filters,
         )
-        from telegram.constants import ChatAction
     except ImportError:
         logger.error(
             "python-telegram-bot not installed. Run: pip install python-telegram-bot"
         )
         sys.exit(1)
 
+    # Import shared utilities from communication_utils
+    from communication_utils.state.tracking import (
+        ConversationTracker,
+    )
+    from communication_utils.state.tracking import (
+        MessageState as MsgState,
+    )
     from gptme.chat import step
     from gptme.dirs import get_project_gptme_dir
     from gptme.init import init
@@ -118,12 +125,6 @@ def main() -> None:
     from gptme.prompts import get_prompt
     from gptme.telemetry import init_telemetry, shutdown_telemetry
     from gptme.tools import ToolSpec, ToolUse, get_tools, init_tools
-
-    # Import shared utilities from communication_utils
-    from communication_utils.state.tracking import (
-        ConversationTracker,
-        MessageState as MsgState,
-    )
 
     # Get workspace folder
     workspace_root = get_project_gptme_dir()

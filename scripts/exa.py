@@ -13,12 +13,12 @@ import json
 import logging
 import os
 import sys
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Dict, List
 
 import click
+import tomllib
 from dotenv import load_dotenv
 from exa_py import Exa
 from rich.console import Console
@@ -45,7 +45,7 @@ class SearchResult:
 class ExaSearch:
     """Handles searching with Exa's API"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or self._get_api_key()
         self.client = Exa(api_key=self.api_key)
 

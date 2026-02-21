@@ -25,9 +25,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
-from flask import Flask, request, jsonify
 import httpx
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
 
 
 # Configure structured logging
@@ -198,7 +198,7 @@ def get_access_token() -> str | None:
             # Support both camelCase and snake_case keys
             access_token = tokens.get("accessToken") or tokens.get("access_token")
             return str(access_token) if access_token else None
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             pass
 
     return None

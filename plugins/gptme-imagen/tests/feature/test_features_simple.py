@@ -5,7 +5,6 @@ Phase 1-2 already provide comprehensive unit/integration tests with real APIs.
 """
 
 import pytest
-
 from gptme_imagen.tools.image_gen import ImageResult, generate_image
 
 

@@ -5,13 +5,13 @@ Provides retry decorators, exponential backoff, and common error
 handling patterns for resilient communication systems.
 """
 
-from .retry import retry, exponential_backoff, RetryConfig, RetryError
 from .errors import (
-    CommunicationError,
-    RateLimitError,
     AuthenticationError,
+    CommunicationError,
     NetworkError,
+    RateLimitError,
 )
+from .retry import RetryConfig, RetryError, exponential_backoff, retry
 
 __all__ = [
     "retry",

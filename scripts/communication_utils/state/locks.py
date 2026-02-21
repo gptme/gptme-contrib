@@ -10,7 +10,6 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
 
 
 class LockError(Exception):
@@ -27,7 +26,7 @@ class FileLock:
     race conditions when multiple processes access shared files.
     """
 
-    def __init__(self, lock_path: str | Path, timeout: Optional[float] = None):
+    def __init__(self, lock_path: str | Path, timeout: float | None = None):
         """
         Initialize file lock.
 
@@ -37,7 +36,7 @@ class FileLock:
         """
         self.lock_path = Path(lock_path)
         self.timeout = timeout
-        self._lock_file: Optional[int] = None
+        self._lock_file: int | None = None
 
     def acquire(self) -> bool:
         """
@@ -122,7 +121,7 @@ class FileLock:
 
 
 @contextmanager
-def file_lock(lock_path: str | Path, timeout: Optional[float] = 10.0):
+def file_lock(lock_path: str | Path, timeout: float | None = 10.0):
     """
     Convenience context manager for file locking.
 

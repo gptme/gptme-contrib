@@ -30,7 +30,6 @@ from typing import (
     Any,
     Dict,
     List,
-    Optional,
     Set,
 )
 
@@ -40,108 +39,106 @@ from rich.console import Console
 from rich.table import Table
 from tabulate import tabulate
 
-# Import utilities directly from utils
-# Using absolute imports (not relative) for uv script compatibility
-from gptodo.utils import (
-    # Data classes
-    DirectoryConfig,
-    TaskInfo,
-    # Constants
-    CONFIGS,
-    STATE_STYLES,
-    STATE_EMOJIS,
-    # Core utilities
-    find_repo_root,
-    load_tasks,
-    task_to_dict,
-    is_task_ready,
-    resolve_tasks,
-    StateChecker,
-    # Phase 4: Effective state computation (bob#240)
-    parse_tracking_ref,
-    fetch_github_issue_state,
-    fetch_github_issue_details,
-    fetch_linear_issue_state,
-    update_task_state,
-    has_new_activity,
-    normalize_state,
-    # Phase 5: Effective state CLI (bob#240)
-    compute_effective_state,
-    get_blocking_reasons,
-    # Cache
-    get_cache_path,
-    load_cache,
-    save_cache,
-    # URLs
-    extract_external_urls,
-    fetch_url_state,
+# Import agent registry (Phase 1 of multi-agent coordination)
+from gptodo.agents import (
+    DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
+    cleanup_stale_agents,
+    list_agents,
+)
+
+# Import checker functionality (Issue #255: Claude Code-inspired patterns)
+from gptodo.checker import (
+    VALID_TRANSITIONS,
+    CheckerConfig,
+    poll_task_completion,
+    run_checker,
+)
+
+# Import dependency tree visualization (Issue #255)
+from gptodo.deptree import (
+    build_dependency_graph,
+    detect_circular_dependencies,
+    get_dependency_tree,
 )
 
 # Import core business logic from lib
 from gptodo.lib import (
     fetch_github_issues,
     fetch_linear_issues,
+    generate_task_content,
     generate_task_filename,
     map_priority_from_labels,
-    generate_task_content,
 )
 
 # Import locking functionality (Phase 3 of Issue #240)
 from gptodo.locks import (
-    acquire_lock,
-    release_lock,
-    list_locks,
-    cleanup_expired_locks,
     DEFAULT_LOCK_TIMEOUT_HOURS,
+    acquire_lock,
+    cleanup_expired_locks,
+    list_locks,
+    release_lock,
+)
+
+# Import subagent functionality (Issue #255: Multi-Agent Collaboration)
+from gptodo.subagent import (
+    check_session,
+    cleanup_sessions,
+    get_session_output,
+    kill_session,
+    list_sessions,
+    spawn_agent,
 )
 
 # Import unblocking functionality with fan-in support
 from gptodo.unblock import auto_unblock_with_fan_in
 
-
-# Import subagent functionality (Issue #255: Multi-Agent Collaboration)
-from gptodo.subagent import (
-    spawn_agent,
-    list_sessions,
-    check_session,
-    get_session_output,
-    kill_session,
-    cleanup_sessions,
-)
-
-# Import agent registry (Phase 1 of multi-agent coordination)
-from gptodo.agents import (
-    list_agents,
-    cleanup_stale_agents,
-    DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
-)
-
-# Import checker functionality (Issue #255: Claude Code-inspired patterns)
-from gptodo.checker import (
-    run_checker,
-    poll_task_completion,
-    CheckerConfig,
-    VALID_TRANSITIONS,
-)
-
-# Import dependency tree visualization (Issue #255)
-from gptodo.deptree import (
-    get_dependency_tree,
-    build_dependency_graph,
-    detect_circular_dependencies,
+# Import utilities directly from utils
+# Using absolute imports (not relative) for uv script compatibility
+from gptodo.utils import (
+    # Constants
+    CONFIGS,
+    STATE_EMOJIS,
+    STATE_STYLES,
+    # Data classes
+    DirectoryConfig,
+    StateChecker,
+    TaskInfo,
+    # Phase 5: Effective state CLI (bob#240)
+    compute_effective_state,
+    # URLs
+    extract_external_urls,
+    fetch_github_issue_details,
+    fetch_github_issue_state,
+    fetch_linear_issue_state,
+    fetch_url_state,
+    # Core utilities
+    find_repo_root,
+    get_blocking_reasons,
+    # Cache
+    get_cache_path,
+    has_new_activity,
+    is_task_ready,
+    load_cache,
+    load_tasks,
+    normalize_state,
+    # Phase 4: Effective state computation (bob#240)
+    parse_tracking_ref,
+    resolve_tasks,
+    save_cache,
+    task_to_dict,
+    update_task_state,
 )
 
 # Import worktree workflow (Issue #246)
 from gptodo.worktree import (
-    create_worktree,
-    list_worktrees,
-    remove_worktree,
-    create_pr_from_worktree,
-    merge_worktree,
-    get_worktree_status,
     cleanup_merged_worktrees,
+    create_pr_from_worktree,
+    create_worktree,
+    get_worktree_status,
+    list_worktrees,
+    merge_worktree,
+    remove_worktree,
 )
-
 
 # Keep console instance for CLI output
 console = Console()
@@ -980,7 +977,7 @@ def check_waiting(fix: bool, verbose: bool):
           type: pr_ci
           ref: "gptme/gptme#1217"
     """
-    from gptodo.waiting import parse_waiting_for, check_condition, WaitType
+    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
 
     console = Console()
 
@@ -1096,7 +1093,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     import signal
     import time
 
-    from gptodo.waiting import parse_waiting_for, check_condition, WaitType
+    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -1544,7 +1541,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
 @click.option("--state", help="Filter by task state")
 @click.option("--list", "show_tasks", is_flag=True, help="List tasks for each tag")
 @click.argument("filter_tags", nargs=-1)
-def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
+def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
     """List all tags and their task counts.
 
     Examples:
@@ -1693,7 +1690,7 @@ def ready(state, output_json, output_jsonl, use_cache):
     tasks_dict = {task.name: task for task in all_tasks}
 
     # Load cache if requested
-    issue_cache: Optional[Dict[str, Any]] = None
+    issue_cache: Dict[str, Any] | None = None
     if use_cache:
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
@@ -1841,7 +1838,7 @@ def next_(output_json, use_cache):
     tasks_dict = {task.name: task for task in all_tasks}
 
     # Load cache if requested
-    issue_cache: Optional[Dict[str, Any]] = None
+    issue_cache: Dict[str, Any] | None = None
     if use_cache:
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
@@ -2130,7 +2127,7 @@ def sync(update, output_json, use_cache, light, full, changes_only):
     - OPEN issue -> task should be active/new
     - CLOSED issue -> task should be done
     """
-    from .lib import poll_github_notifications, extract_urls_from_notification
+    from .lib import extract_urls_from_notification, poll_github_notifications
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2912,11 +2909,11 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
 )
 def import_issues(
     source: str,
-    repo: Optional[str],
-    team: Optional[str],
+    repo: str | None,
+    team: str | None,
     state: str,
     label: tuple,
-    assignee: Optional[str],
+    assignee: str | None,
     limit: int,
     dry_run: bool,
     output_json: bool,
@@ -3115,7 +3112,7 @@ def import_issues(
 )
 @click.option("--force", "-f", is_flag=True, help="Force acquire even if locked by another")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def lock_task(task_id: str, worker: Optional[str], timeout: float, force: bool, output_json: bool):
+def lock_task(task_id: str, worker: str | None, timeout: float, force: bool, output_json: bool):
     """Acquire a lock on a task.
 
     Prevents multiple agents/processes from working on the same task.
@@ -3198,7 +3195,7 @@ def lock_task(task_id: str, worker: Optional[str], timeout: float, force: bool, 
 )
 @click.option("--force", "-f", is_flag=True, help="Force release even if not owner")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def unlock_task(task_id: str, worker: Optional[str], force: bool, output_json: bool):
+def unlock_task(task_id: str, worker: str | None, force: bool, output_json: bool):
     """Release a lock on a task.
 
     By default, only the lock owner can release. Use --force to override.
@@ -3368,7 +3365,7 @@ def list_all_locks(cleanup: bool, output_json: bool):
 def add(
     title: str,
     priority: str,
-    tags: Optional[str],
+    tags: str | None,
     assigned_to: str,
     state: str,
     task_type: str,
@@ -3474,16 +3471,16 @@ def add(
 
 def _execute_task_agent(
     task_id: str,
-    prompt: Optional[str],
+    prompt: str | None,
     agent_type: str,
     backend: str,
     background: bool,
-    model: Optional[str],
+    model: str | None,
     timeout: int,
     max_concurrent: int = 4,
-    system_prompt_file: Optional[str] = None,
+    system_prompt_file: str | None = None,
     coordination: bool = False,
-    coordination_db: Optional[str] = None,
+    coordination_db: str | None = None,
 ):
     """Shared logic for run and spawn commands."""
     repo_root = find_repo_root(Path.cwd())
@@ -3491,7 +3488,7 @@ def _execute_task_agent(
 
     # Check concurrency limit for background spawns
     if background and max_concurrent > 0:
-        from .subagent import list_sessions, check_session
+        from .subagent import check_session, list_sessions
 
         running = list_sessions(repo_root, status="running")
         # Reconcile with actual tmux state
@@ -3557,7 +3554,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
     if background:
         console.print(f"  Background: {background}")
 
-    from typing import cast, Literal
+    from typing import Literal, cast
 
     session = spawn_agent(
         task_id=task.name,
@@ -3644,14 +3641,14 @@ Focus on making progress on this task. When done, summarize what you accomplishe
 )
 def run_cmd(
     task_id: str,
-    prompt: Optional[str],
+    prompt: str | None,
     agent_type: str,
     backend: str,
-    model: Optional[str],
+    model: str | None,
     timeout: int,
-    system_prompt_file: Optional[str],
+    system_prompt_file: str | None,
     coordination: bool,
-    coordination_db: Optional[str],
+    coordination_db: str | None,
 ):
     """Run a task synchronously (foreground).
 
@@ -3747,16 +3744,16 @@ def run_cmd(
 )
 def spawn_cmd(
     task_id: str,
-    prompt: Optional[str],
+    prompt: str | None,
     agent_type: str,
     backend: str,
     foreground: bool,
-    model: Optional[str],
+    model: str | None,
     timeout: int,
     max_concurrent: int,
-    system_prompt_file: Optional[str],
+    system_prompt_file: str | None,
     coordination: bool,
-    coordination_db: Optional[str],
+    coordination_db: str | None,
 ):
     """Spawn a sub-agent in background (tmux).
 
@@ -3841,7 +3838,7 @@ def loop_cmd(
     max_tasks: int,
     agent_type: str,
     backend: str,
-    model: Optional[str],
+    model: str | None,
     timeout: int,
     dry_run: bool,
     parallel: int,
@@ -3946,7 +3943,7 @@ def loop_cmd(
     is_flag=True,
     help="Output as JSON",
 )
-def sessions_cmd(status: Optional[str], as_json: bool):
+def sessions_cmd(status: str | None, as_json: bool):
     """List all sub-agent sessions.
 
     Shows active and recent sub-agent sessions spawned via 'gptodo spawn'.
@@ -4642,7 +4639,7 @@ def worktree_group():
     help="Base branch to branch from (default: origin/master)",
 )
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def worktree_create_cmd(task_id: str, branch: Optional[str], base: str, output_json: bool):
+def worktree_create_cmd(task_id: str, branch: str | None, base: str, output_json: bool):
     """Create a worktree for isolated agent execution.
 
     Creates a new git worktree with a fresh branch for the agent to
@@ -4691,7 +4688,7 @@ def worktree_create_cmd(task_id: str, branch: Optional[str], base: str, output_j
             print(json.dumps({"error": str(e)}, indent=2))
         else:
             console.print(f"[red]❌ Error: {e}[/]")
-        raise SystemExit(1)
+        raise SystemExit(1) from e
 
 
 @worktree_group.command("list")
@@ -4780,7 +4777,7 @@ def worktree_remove_cmd(worktree_path: str, force: bool):
 @click.option("--title", "-t", required=True, help="PR title")
 @click.option("--body", "-b", help="PR body/description")
 @click.option("--draft", is_flag=True, help="Create as draft PR")
-def worktree_pr_cmd(worktree_path: str, title: str, body: Optional[str], draft: bool):
+def worktree_pr_cmd(worktree_path: str, title: str, body: str | None, draft: bool):
     """Create a PR from a worktree branch.
 
     Pushes the worktree branch to origin and creates a GitHub PR.

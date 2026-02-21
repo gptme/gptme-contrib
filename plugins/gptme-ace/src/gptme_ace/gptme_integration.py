@@ -9,9 +9,8 @@ import logging
 import os
 from typing import Any
 
-
 from .embedder import LessonEmbedder
-from .hybrid_retriever import HybridLessonMatcher, HybridConfig
+from .hybrid_retriever import HybridConfig, HybridLessonMatcher
 from .retrieval_analytics import RetrievalTracker
 
 logger = logging.getLogger(__name__)

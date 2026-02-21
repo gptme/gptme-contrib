@@ -26,14 +26,13 @@ Optimizations:
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import click
-
-import logging
 
 _logger = logging.getLogger(__name__)
 
@@ -237,7 +236,7 @@ class ThoughtActionObservation:
     action: str
     observation: str
     session_id: str
-    timestamp: Optional[str] = None
+    timestamp: str | None = None
 
 
 @dataclass
@@ -310,7 +309,7 @@ class TrajectoryParser:
 class GeneratorAgent:
     """ACE Generator Agent: analyzes trajectories and generates insights."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str | None = None):
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         """
         Initialize with Anthropic API.
 
@@ -329,7 +328,7 @@ class GeneratorAgent:
         self,
         chains: List[ThoughtActionObservation],
         session_id: str,
-        existing_lessons: Optional[List[str]] = None,
+        existing_lessons: List[str] | None = None,
     ) -> List[Insight]:
         """
         Analyze TAO chains to extract insights.
@@ -495,8 +494,8 @@ def cli():
 )
 def analyze(
     log_path: str,
-    output: Optional[str],
-    api_key: Optional[str],
+    output: str | None,
+    api_key: str | None,
     dry_run: bool,
     workspace: str,
     no_lessons: bool,
