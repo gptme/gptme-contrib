@@ -31,6 +31,8 @@ def execute_gptme(
     env: dict | None = None,
     run_type: str = "run",
     tools: str | None = None,
+    model: str | None = None,
+    tool_format: str | None = None,
 ) -> ExecutionResult:
     """Execute gptme with the given prompt.
 
@@ -43,6 +45,8 @@ def execute_gptme(
         env: Additional environment variables
         run_type: Type of run (for log file naming)
         tools: Tool allowlist string (e.g. "gptodo,save,append")
+        model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
+        tool_format: Tool format override (markdown/xml/tool)
 
     Returns:
         ExecutionResult with exit code and status
@@ -65,6 +69,12 @@ def execute_gptme(
         cmd = [gptme_path]
         if non_interactive:
             cmd.append("--non-interactive")
+
+        if model:
+            cmd.extend(["--model", model])
+
+        if tool_format:
+            cmd.extend(["--tool-format", tool_format])
 
         if tools:
             cmd.extend(["--tools", tools])

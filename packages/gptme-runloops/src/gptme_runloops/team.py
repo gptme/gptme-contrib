@@ -83,18 +83,28 @@ class TeamRun(BaseRunLoop):
     # Note: ipython is required because gptodo functions are registered there
     COORDINATOR_TOOLS = "gptodo,ipython,save,append,read,todoread,todowrite,complete"
 
-    def __init__(self, workspace: Path, tools: str | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        tools: str | None = None,
+        model: str | None = None,
+        tool_format: str | None = None,
+    ):
         """Initialize team run.
 
         Args:
             workspace: Path to workspace directory
             tools: Override coordinator tools (default: gptodo,save,append,...)
+            model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
+            tool_format: Tool format override (markdown/xml/tool)
         """
         super().__init__(
             workspace=workspace,
             run_type="team",
             timeout=3000,  # 50 minutes
             lock_wait=False,
+            model=model,
+            tool_format=tool_format,
         )
         self.tools = tools or self.COORDINATOR_TOOLS
 

@@ -36,6 +36,8 @@ class BaseRunLoop(ABC):
         run_type: str,
         timeout: int = 3000,
         lock_wait: bool = False,
+        model: str | None = None,
+        tool_format: str | None = None,
     ):
         """Initialize run loop.
 
@@ -44,11 +46,15 @@ class BaseRunLoop(ABC):
             run_type: Type of run (for logging and locking)
             timeout: Maximum execution time in seconds
             lock_wait: Whether to wait for lock or fail immediately
+            model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
+            tool_format: Tool format override (markdown/xml/tool)
         """
         self.workspace = Path(workspace)
         self.run_type = run_type
         self.timeout = timeout
         self.lock_wait = lock_wait
+        self.model = model
+        self.tool_format = tool_format
 
         # Initialize utilities
         lock_dir = self.workspace / "logs"
@@ -135,6 +141,8 @@ class BaseRunLoop(ABC):
             timeout=self.timeout,
             non_interactive=True,
             run_type=self.run_type,
+            model=self.model,
+            tool_format=self.tool_format,
         )
 
         if result.timed_out:

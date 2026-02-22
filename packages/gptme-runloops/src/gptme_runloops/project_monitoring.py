@@ -42,6 +42,8 @@ class ProjectMonitoringRun(BaseRunLoop):
         target_repos: list[str] | None = None,
         author: str = "",
         agent_name: str = "Agent",
+        model: str | None = None,
+        tool_format: str | None = None,
     ):
         """Initialize project monitoring run.
 
@@ -51,12 +53,16 @@ class ProjectMonitoringRun(BaseRunLoop):
             target_repos: Specific repositories to monitor (owner/repo format)
             author: GitHub username for filtering (GitHub handle)
             agent_name: Name of the agent for prompts
+            model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
+            tool_format: Tool format override (markdown/xml/tool)
         """
         super().__init__(
             workspace=workspace,
             run_type="project-monitoring",
             timeout=1800,  # 30 minutes
             lock_wait=False,  # Don't wait for lock
+            model=model,
+            tool_format=tool_format,
         )
 
         self.target_orgs = target_orgs or []

@@ -25,9 +25,20 @@ def main():
     default=Path.cwd(),
     help="Workspace directory (default: current directory)",
 )
-def autonomous(workspace: Path):
+@click.option(
+    "--model",
+    default=None,
+    help="Model override (e.g. 'openai-subscription/gpt-5.3-codex')",
+)
+@click.option(
+    "--tool-format",
+    default=None,
+    type=click.Choice(["markdown", "xml", "tool"]),
+    help="Tool format override",
+)
+def autonomous(workspace: Path, model: str | None, tool_format: str | None):
     """Run autonomous operation loop."""
-    run = AutonomousRun(workspace)
+    run = AutonomousRun(workspace, model=model, tool_format=tool_format)
     exit_code = run.run()
     sys.exit(exit_code)
 
@@ -39,9 +50,20 @@ def autonomous(workspace: Path):
     default=Path.cwd(),
     help="Workspace directory (default: current directory)",
 )
-def email(workspace: Path):
+@click.option(
+    "--model",
+    default=None,
+    help="Model override (e.g. 'openai-subscription/gpt-5.3-codex')",
+)
+@click.option(
+    "--tool-format",
+    default=None,
+    type=click.Choice(["markdown", "xml", "tool"]),
+    help="Tool format override",
+)
+def email(workspace: Path, model: str | None, tool_format: str | None):
     """Run email processing loop."""
-    run = EmailRun(workspace)
+    run = EmailRun(workspace, model=model, tool_format=tool_format)
     exit_code = run.run()
     sys.exit(exit_code)
 
@@ -58,13 +80,26 @@ def email(workspace: Path):
     default=None,
     help="Override coordinator tools (default: gptodo,save,append,...)",
 )
-def team(workspace: Path, tools: str | None):
+@click.option(
+    "--model",
+    default=None,
+    help="Model override (e.g. 'openai-subscription/gpt-5.3-codex')",
+)
+@click.option(
+    "--tool-format",
+    default=None,
+    type=click.Choice(["markdown", "xml", "tool"]),
+    help="Tool format override",
+)
+def team(
+    workspace: Path, tools: str | None, model: str | None, tool_format: str | None
+):
     """Run autonomous team coordination loop.
 
     The coordinator agent runs with restricted tools and delegates
     all work to subagents via gptodo. Inspired by Claude Code Agent Teams.
     """
-    run = TeamRun(workspace, tools=tools)
+    run = TeamRun(workspace, tools=tools, model=model, tool_format=tool_format)
     exit_code = run.run()
     sys.exit(exit_code)
 
@@ -98,12 +133,25 @@ def team(workspace: Path, tools: str | None):
     default=os.environ.get("AGENT_NAME", "Agent"),
     help="Agent name for prompts (default: $AGENT_NAME env var or 'Agent')",
 )
+@click.option(
+    "--model",
+    default=None,
+    help="Model override (e.g. 'openai-subscription/gpt-5.3-codex')",
+)
+@click.option(
+    "--tool-format",
+    default=None,
+    type=click.Choice(["markdown", "xml", "tool"]),
+    help="Tool format override",
+)
 def monitoring(
     workspace: Path,
     orgs: tuple[str, ...],
     repos: tuple[str, ...],
     author: str,
     agent_name: str,
+    model: str | None,
+    tool_format: str | None,
 ):
     """Run project monitoring loop."""
     run = ProjectMonitoringRun(
@@ -112,6 +160,8 @@ def monitoring(
         target_repos=list(repos) if repos else None,
         author=author,
         agent_name=agent_name,
+        model=model,
+        tool_format=tool_format,
     )
     exit_code = run.run()
     sys.exit(exit_code)
