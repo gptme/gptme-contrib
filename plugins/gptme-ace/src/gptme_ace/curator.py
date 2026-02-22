@@ -29,7 +29,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import click
 from dotenv import load_dotenv
@@ -53,9 +53,9 @@ class DeltaOperation:
 
     type: str  # add, remove, modify
     section: str  # Target lesson section
-    content: Optional[str] = None  # For ADD/MODIFY
-    position: Optional[str] = None  # For ADD: append, prepend, after:hash
-    target: Optional[Dict[str, str]] = None  # For REMOVE/MODIFY
+    content: str | None = None  # For ADD/MODIFY
+    position: str | None = None  # For ADD: append, prepend, after:hash
+    target: Dict[str, str] | None = None  # For REMOVE/MODIFY
 
 
 @dataclass
@@ -70,8 +70,8 @@ class Delta:
     operations: List[DeltaOperation]
     rationale: str
     review_status: str  # pending, approved, rejected
-    applied_at: Optional[str] = None
-    applied_by: Optional[str] = None
+    applied_at: str | None = None
+    applied_by: str | None = None
 
 
 class CuratorAgent:
@@ -79,7 +79,7 @@ class CuratorAgent:
     ACE Curator Agent: Synthesizes refined insights into delta operations
     """
 
-    def __init__(self, api_key: Optional[str] = None, dry_run: bool = False):
+    def __init__(self, api_key: str | None = None, dry_run: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.dry_run = dry_run
         if not dry_run and not HAS_ANTHROPIC:
@@ -96,7 +96,7 @@ class CuratorAgent:
         (self.delta_dir / "rejected").mkdir(exist_ok=True)
 
     def generate_delta(
-        self, insight: StoredInsight, lesson_content: Optional[str] = None
+        self, insight: StoredInsight, lesson_content: str | None = None
     ) -> Delta:
         """
         Generate delta operations from refined insight
@@ -268,7 +268,7 @@ Respond now:"""
             return False, f"Validation failed: {e}"
 
     def _generate_operations(
-        self, insight: StoredInsight, lesson_content: Optional[str]
+        self, insight: StoredInsight, lesson_content: str | None
     ) -> List[DeltaOperation]:
         """
         Use Claude to generate appropriate delta operations with retry logic
@@ -321,7 +321,7 @@ Respond now:"""
         raise RuntimeError("Retry loop exhausted without success")
 
     def _build_curator_prompt(
-        self, insight: StoredInsight, lesson_content: Optional[str]
+        self, insight: StoredInsight, lesson_content: str | None
     ) -> str:
         """Build prompt for Claude to generate delta operations"""
         return f"""You are the ACE Curator Agent. Generate delta operations to update a lesson based on this refined insight.
@@ -411,7 +411,7 @@ Generate the delta operations now:"""
             review_status="pending",
         )
 
-    def _find_lesson(self, category: str) -> Optional[Path]:
+    def _find_lesson(self, category: str) -> Path | None:
         """Find existing lesson file by category"""
         lessons_dir = Path("lessons")
         if not lessons_dir.exists():
@@ -427,7 +427,7 @@ Generate the delta operations now:"""
         return None
 
     def _determine_lesson_id(
-        self, insight: StoredInsight, lesson_content: Optional[str]
+        self, insight: StoredInsight, lesson_content: str | None
     ) -> str:
         """
         Determine lesson_id for delta
@@ -556,7 +556,7 @@ def generate(insight_id: str, dry_run: bool):
     "--dry-run", is_flag=True, help="Don't call Claude API, use mock operations"
 )
 @click.option("--limit", type=int, help="Maximum insights to process")
-def batch(status: str, dry_run: bool, limit: Optional[int]):
+def batch(status: str, dry_run: bool, limit: int | None):
     """Generate deltas for batch of insights"""
     curator = CuratorAgent(dry_run=dry_run)
 

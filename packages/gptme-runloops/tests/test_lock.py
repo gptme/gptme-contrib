@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from threading import Thread
 
-
 from gptme_runloops.utils.lock import RunLoopLock
 
 

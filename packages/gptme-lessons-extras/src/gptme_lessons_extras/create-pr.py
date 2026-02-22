@@ -6,14 +6,12 @@ Usage:
     ./create-pr.py <lesson-file> [--scores <scores-file>] [--conversation <link>] [--dry-run]
 """
 
-import sys
-
 import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -88,8 +86,8 @@ def validate_lesson(lesson_path: Path) -> tuple[bool, list[str]]:
 
 def create_lesson_pr(
     lesson_file: Path,
-    judge_scores: Optional[dict] = None,
-    conversation_link: Optional[str] = None,
+    judge_scores: dict | None = None,
+    conversation_link: str | None = None,
     dry_run: bool = False,
 ) -> bool:
     """

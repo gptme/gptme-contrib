@@ -8,7 +8,7 @@ flexibility and direct JSON serialization.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -17,7 +17,7 @@ class ConversationAnalysis:
 
     conversation_id: str
     timestamp: datetime
-    duration_minutes: Optional[float]
+    duration_minutes: float | None
     message_count: int
     user_messages: int
     assistant_messages: int

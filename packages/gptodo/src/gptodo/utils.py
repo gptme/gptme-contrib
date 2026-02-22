@@ -24,7 +24,6 @@ from typing import (
     Dict,
     List,
     NamedTuple,
-    Optional,
     Tuple,
 )
 
@@ -252,29 +251,29 @@ class TaskInfo:
 
     path: Path
     name: str
-    state: Optional[str]
+    state: str | None
     created: datetime
     modified: datetime
-    priority: Optional[str]
+    priority: str | None
     tags: List[str]
     depends: List[str]  # Deprecated, use requires instead
     requires: List[str]  # Required dependencies (task IDs or URLs)
     related: List[str]  # Related items (informational)
-    parent: Optional[str]  # Parent task ID
+    parent: str | None  # Parent task ID
     discovered_from: List[str]  # Tasks this was discovered from
     subtasks: SubtaskCount
     issues: List[str]
     metadata: Dict
     # Multi-agent coordination fields (Phase 2)
     parallelizable: bool = False  # Can run concurrently with other work
-    isolation: Optional[str] = None  # none, worktree, container
-    worktree_path: Optional[str] = None  # If using worktree isolation
-    assigned_to: Optional[str] = None  # Which agent instance owns this
-    assigned_at: Optional[datetime] = None  # When assignment started
-    lock_timeout_hours: Optional[int] = None  # Override default lock timeout
-    spawned_from: Optional[str] = None  # Parent task that spawned this
+    isolation: str | None = None  # none, worktree, container
+    worktree_path: str | None = None  # If using worktree isolation
+    assigned_to: str | None = None  # Which agent instance owns this
+    assigned_at: datetime | None = None  # When assignment started
+    lock_timeout_hours: int | None = None  # Override default lock timeout
+    spawned_from: str | None = None  # Parent task that spawned this
     spawned_tasks: List[str] = field(default_factory=list)  # Child tasks
-    coordination_mode: Optional[str] = None  # sequential, parallel, fan-out-fan-in
+    coordination_mode: str | None = None  # sequential, parallel, fan-out-fan-in
 
     @property
     def id(self) -> str:
@@ -410,7 +409,7 @@ def format_time_ago(dt: datetime) -> str:
         return dt.strftime("%Y-%m-%d")
 
 
-def has_new_activity(updated_at: Optional[str], waiting_since: Optional[str | date]) -> bool:
+def has_new_activity(updated_at: str | None, waiting_since: str | date | None) -> bool:
     """Check if there's been new activity since waiting_since.
 
     Args:
@@ -483,7 +482,7 @@ def count_subtasks(content: str) -> SubtaskCount:
 # =============================================================================
 
 
-def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
+def validate_task_file(file: Path, post: fm.Post) -> List[str]:
     """Validate a task file's format and required fields.
 
     Args:
@@ -563,7 +562,7 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
     return issues
 
 
-def load_task(file: Path) -> Tuple["fm.Post", SubtaskCount]:
+def load_task(file: Path) -> Tuple[fm.Post, SubtaskCount]:
     """Load a single task file and count its subtasks."""
     frontmatter = _get_frontmatter()
     post = frontmatter.load(file)
@@ -572,7 +571,7 @@ def load_task(file: Path) -> Tuple["fm.Post", SubtaskCount]:
 
 
 def load_tasks(
-    tasks_dir: Path, recursive: bool = False, single_file: Optional[Path] = None
+    tasks_dir: Path, recursive: bool = False, single_file: Path | None = None
 ) -> List[TaskInfo]:
     """Load tasks from directory or single file with metadata.
 
@@ -798,7 +797,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
 def is_task_ready(
     task: TaskInfo,
     all_tasks: Dict[str, TaskInfo],
-    issue_cache: Optional[Dict[str, Any]] = None,
+    issue_cache: Dict[str, Any] | None = None,
 ) -> bool:
     """Check if a task is ready (unblocked) to work on.
 
@@ -859,7 +858,7 @@ def is_task_ready(
 def compute_effective_state(
     task: TaskInfo,
     all_tasks: Dict[str, TaskInfo],
-    issue_cache: Optional[Dict[str, Any]] = None,
+    issue_cache: Dict[str, Any] | None = None,
 ) -> str:
     """Compute the effective state of a task including virtual 'blocked' state.
 
@@ -918,7 +917,7 @@ def compute_effective_state(
 def get_blocking_reasons(
     task: TaskInfo,
     all_tasks: Dict[str, TaskInfo],
-    issue_cache: Optional[Dict[str, Any]] = None,
+    issue_cache: Dict[str, Any] | None = None,
 ) -> List[str]:
     """Get list of reasons why a task is blocked.
 
@@ -1050,7 +1049,7 @@ class StateChecker:
 # =============================================================================
 
 
-def parse_tracking_ref(ref: str) -> Optional[Dict[str, str]]:
+def parse_tracking_ref(ref: str) -> Dict[str, str] | None:
     """Parse tracking reference to extract repo and issue number.
 
     Supports formats:
@@ -1089,7 +1088,7 @@ def parse_tracking_ref(ref: str) -> Optional[Dict[str, str]]:
     return None
 
 
-def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
+def fetch_github_issue_state(repo: str, number: str) -> str | None:
     """Fetch GitHub issue/PR state using gh CLI.
 
     Note: For state + updatedAt, use fetch_github_issue_details() instead.
@@ -1100,7 +1099,7 @@ def fetch_github_issue_state(repo: str, number: str) -> Optional[str]:
     return None
 
 
-def fetch_github_issue_details(repo: str, number: str) -> Optional[Dict[str, Any]]:
+def fetch_github_issue_details(repo: str, number: str) -> Dict[str, Any] | None:
     """Fetch GitHub issue/PR state and metadata including updatedAt.
 
     Returns:
@@ -1156,7 +1155,7 @@ def fetch_github_issue_details(repo: str, number: str) -> Optional[Dict[str, Any
     return None
 
 
-def fetch_linear_issue_state(identifier: str) -> Optional[str]:
+def fetch_linear_issue_state(identifier: str) -> str | None:
     """Fetch Linear issue state using GraphQL API.
 
     Args:
@@ -1244,7 +1243,7 @@ def load_cache(cache_path: Path) -> Dict[str, Any]:
             with open(cache_path) as f:
                 data = json.load(f)
                 return dict(data) if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             return {}
     return {}
 
@@ -1257,7 +1256,7 @@ def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
         with open(temp_path, "w") as f:
             json.dump(cache, f, indent=2)
         temp_path.rename(cache_path)
-    except IOError as e:
+    except OSError as e:
         # Log but don't crash - cache is non-critical
         import sys
 
@@ -1301,7 +1300,7 @@ def extract_external_urls(task: TaskInfo) -> List[str]:
     return urls
 
 
-def fetch_url_state(url: str) -> Optional[Dict[str, Any]]:
+def fetch_url_state(url: str) -> Dict[str, Any] | None:
     """Fetch state and metadata for a GitHub/Linear URL.
 
     Returns:

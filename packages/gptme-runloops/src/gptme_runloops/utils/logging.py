@@ -4,11 +4,10 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 
 def get_logger(
-    name: str, log_file: Optional[Path] = None, level: int = logging.INFO
+    name: str, log_file: Path | None = None, level: int = logging.INFO
 ) -> logging.Logger:
     """Get a configured logger for run loops.
 

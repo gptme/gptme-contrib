@@ -8,21 +8,20 @@ voice conversations with gptme tool access.
 import base64
 import json
 import logging
-from typing import Optional
 
+import uvicorn
 from starlette.applications import Starlette
-from starlette.routing import Route, WebSocketRoute
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
-import uvicorn
+from starlette.routing import Route, WebSocketRoute
 
 from .audio import AudioConverter
 from .openai_client import (
     OpenAIRealtimeClient,
     SessionConfig,
+    _detect_agent_repo,
     _get_openai_api_key,
     _load_project_instructions,
-    _detect_agent_repo,
 )
 from .tool_bridge import GptmeToolBridge
 
@@ -38,8 +37,8 @@ class VoiceServer:
         self,
         host: str = "0.0.0.0",
         port: int = 8080,
-        openai_api_key: Optional[str] = None,
-        workspace: Optional[str] = None,
+        openai_api_key: str | None = None,
+        workspace: str | None = None,
     ):
         self.host = host
         self.port = port
@@ -75,8 +74,8 @@ class VoiceServer:
         """
         await websocket.accept()
 
-        call_sid: Optional[str] = None
-        openai_client: Optional[OpenAIRealtimeClient] = None
+        call_sid: str | None = None
+        openai_client: OpenAIRealtimeClient | None = None
         audio_converter = AudioConverter()
 
         try:
@@ -160,7 +159,7 @@ class VoiceServer:
         """
         await websocket.accept()
 
-        openai_client: Optional[OpenAIRealtimeClient] = None
+        openai_client: OpenAIRealtimeClient | None = None
 
         try:
             # Create OpenAI client first, then tool bridge with inject callback

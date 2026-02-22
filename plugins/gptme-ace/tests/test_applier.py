@@ -6,8 +6,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-
-from gptme_ace.applier import DeltaApplier, ApplierError
+from gptme_ace.applier import ApplierError, DeltaApplier
 from gptme_ace.curator import DeltaOperation
 
 

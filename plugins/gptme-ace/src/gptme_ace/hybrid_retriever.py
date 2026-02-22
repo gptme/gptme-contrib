@@ -3,10 +3,10 @@
 Implements Phase 5.2 of ACE context optimization.
 """
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-import math
 
 import numpy as np
 

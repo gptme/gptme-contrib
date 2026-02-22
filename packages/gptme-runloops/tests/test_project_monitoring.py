@@ -4,7 +4,6 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from gptme_runloops.project_monitoring import ProjectMonitoringRun, WorkItem
 
 

@@ -34,7 +34,6 @@ Example:
 
 import email.charset
 import logging
-from typing import Dict, Tuple
 import os
 import re
 import subprocess
@@ -48,7 +47,7 @@ from email.mime.text import MIMEText
 from email.policy import default
 from email.utils import format_datetime, parseaddr, parsedate_to_datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Tuple
 
 import markdown
 
@@ -542,9 +541,9 @@ class AgentEmail:
         to: str,
         subject: str,
         content: str,
-        from_address: Optional[str] = None,
-        reply_to: Optional[str] = None,
-        references: Optional[list[str]] = None,
+        from_address: str | None = None,
+        reply_to: str | None = None,
+        references: list[str] | None = None,
     ) -> str:
         """Create new email in drafts directory.
 
@@ -615,7 +614,7 @@ class AgentEmail:
             if not test_headers or not test_body:
                 raise ValueError("Failed to validate message format")
         except Exception as e:
-            raise ValueError(f"Invalid message format: {e}")
+            raise ValueError(f"Invalid message format: {e}") from e
 
         # Save to drafts
         filename = self._format_filename(message_id)
@@ -1167,7 +1166,7 @@ class AgentEmail:
         ):
             return False
 
-    def _get_msmtp_account_for_address(self, from_address: str) -> Optional[str]:
+    def _get_msmtp_account_for_address(self, from_address: str) -> str | None:
         """Get the appropriate msmtp account for a given from address.
 
         Args:

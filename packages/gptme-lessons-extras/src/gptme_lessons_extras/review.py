@@ -10,7 +10,6 @@ Provides tools to:
 """
 
 import sys
-
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +45,7 @@ def list_network_lessons(network_dir: Path, agent: str) -> list[dict[str, Any]]:
             for lesson_file in category_dir.glob("*.md"):
                 try:
                     # Parse lesson to extract metadata
-                    with open(lesson_file, "r") as f:
+                    with open(lesson_file) as f:
                         content = f.read()
 
                     # Simple frontmatter extraction
@@ -87,7 +86,7 @@ def show_lesson_preview(lesson_file: Path, lines: int = 20) -> str:
         Preview string
     """
     try:
-        with open(lesson_file, "r") as f:
+        with open(lesson_file) as f:
             content_lines = f.readlines()
 
         # Skip frontmatter

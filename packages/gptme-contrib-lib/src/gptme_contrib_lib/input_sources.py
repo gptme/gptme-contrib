@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 class InputSourceType(Enum):
@@ -42,8 +42,8 @@ class TaskRequest:
 
     # Metadata
     created_at: datetime
-    author: Optional[str] = None
-    priority: Optional[str] = None  # "high", "medium", "low"
+    author: str | None = None
+    priority: str | None = None  # "high", "medium", "low"
     tags: List[str] = field(default_factory=list)
 
     # Source-specific data
@@ -56,7 +56,7 @@ class ValidationResult:
 
     status: ValidationStatus
     message: str
-    details: Optional[Dict[str, Any]] = None
+    details: Dict[str, Any] | None = None
 
     @property
     def is_valid(self) -> bool:
@@ -69,9 +69,9 @@ class TaskCreationResult:
     """Result of creating a task from a request."""
 
     success: bool
-    task_path: Optional[Path] = None
-    task_id: Optional[str] = None
-    error: Optional[str] = None
+    task_path: Path | None = None
+    task_id: str | None = None
+    error: str | None = None
 
 
 class InputSource(ABC):

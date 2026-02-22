@@ -8,7 +8,6 @@ Design: knowledge/technical-designs/agent-network-protocol.md
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -32,7 +31,7 @@ class NetworkMetadata:
 
     # Quality Metrics
     confidence: float  # 0.0-1.0: How confident is this lesson?
-    success_rate: Optional[float] = None  # 0.0-1.0: Empirical effectiveness
+    success_rate: float | None = None  # 0.0-1.0: Empirical effectiveness
 
     # Network Metrics
     adoption_count: int = 0  # How many agents use this?

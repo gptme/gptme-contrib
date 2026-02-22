@@ -11,8 +11,6 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
 
 # Known bot patterns in GitHub usernames
 BOT_USERNAME_PATTERNS = [
@@ -32,7 +30,7 @@ BOT_USERNAME_PATTERNS = [
 ]
 
 
-def is_bot_user(username: str, user_type: Optional[str] = None) -> bool:
+def is_bot_user(username: str, user_type: str | None = None) -> bool:
     """Check if a GitHub user is a bot.
 
     Args:
@@ -58,7 +56,7 @@ def is_bot_user(username: str, user_type: Optional[str] = None) -> bool:
     return False
 
 
-def get_user_type(username: str, repo: str) -> Optional[str]:
+def get_user_type(username: str, repo: str) -> str | None:
     """Get user type from GitHub API.
 
     Args:

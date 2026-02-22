@@ -1,7 +1,6 @@
 """Platform-specific configuration classes."""
 
 from pathlib import Path
-from typing import Optional
 
 from .base import BaseConfig
 
@@ -19,7 +18,7 @@ class EmailConfig(BaseConfig):
 
     def __init__(
         self,
-        workspace_dir: Optional[Path] = None,
+        workspace_dir: Path | None = None,
         env_file: str = ".env",
     ):
         """Initialize email configuration."""
@@ -105,9 +104,9 @@ class TwitterConfig(BaseConfig):
 
     def __init__(
         self,
-        workspace_dir: Optional[Path] = None,
+        workspace_dir: Path | None = None,
         env_file: str = ".env",
-        config_file: Optional[Path] = None,
+        config_file: Path | None = None,
     ):
         """
         Initialize Twitter configuration.
@@ -201,7 +200,7 @@ class DiscordConfig(BaseConfig):
 
     def __init__(
         self,
-        workspace_dir: Optional[Path] = None,
+        workspace_dir: Path | None = None,
         env_file: str = ".env.discord",
     ):
         """

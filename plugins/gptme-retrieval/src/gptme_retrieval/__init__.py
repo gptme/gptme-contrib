@@ -16,10 +16,10 @@ collections = []         # Optional: filter by collection names
 ```
 """
 
+import json
 import logging
 import shlex
 import subprocess
-import json
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
 

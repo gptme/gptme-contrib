@@ -1,15 +1,17 @@
 """Tests for gptodo waiting module."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from gptodo.waiting import (
     WaitCondition,
     WaitType,
-    parse_waiting_for,
-    parse_github_ref,
+    check_condition,
     check_pr_ci,
     check_pr_merged,
-    check_condition,
+    parse_github_ref,
+    parse_waiting_for,
 )
 
 
@@ -192,8 +194,9 @@ class TestCheckTime:
 
     def test_time_in_past(self):
         """Test time that has already passed."""
-        from gptodo.waiting import check_time
         from datetime import datetime, timedelta
+
+        from gptodo.waiting import check_time
 
         # Use a time clearly in the past
         past_time = (datetime.now() - timedelta(hours=1)).isoformat()
@@ -203,8 +206,9 @@ class TestCheckTime:
 
     def test_time_in_future(self):
         """Test time that hasn't passed yet."""
-        from gptodo.waiting import check_time
         from datetime import datetime, timedelta
+
+        from gptodo.waiting import check_time
 
         # Use a time clearly in the future
         future_time = (datetime.now() + timedelta(hours=1)).isoformat()
@@ -214,8 +218,9 @@ class TestCheckTime:
 
     def test_time_with_utc_suffix(self):
         """Test time with Z suffix (UTC)."""
-        from gptodo.waiting import check_time
         from datetime import datetime, timedelta, timezone
+
+        from gptodo.waiting import check_time
 
         # Past time in UTC
         past_utc = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -225,8 +230,9 @@ class TestCheckTime:
 
     def test_time_with_timezone_offset(self):
         """Test time with explicit timezone offset."""
-        from gptodo.waiting import check_time
         from datetime import datetime, timedelta, timezone
+
+        from gptodo.waiting import check_time
 
         # Past time with explicit timezone
         past_with_tz = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
@@ -238,8 +244,9 @@ class TestCheckTime:
 
     def test_time_naive_timestamp(self):
         """Test timezone-naive timestamp (no crash)."""
-        from gptodo.waiting import check_time
         from datetime import datetime, timedelta
+
+        from gptodo.waiting import check_time
 
         # Naive timestamp in the past - should not crash
         naive_past = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -337,6 +344,7 @@ class TestWatchCommand:
     def test_watch_once(self, tmp_path, monkeypatch):
         """Test watch command with --once flag."""
         from click.testing import CliRunner
+
         from gptodo.cli import cli
 
         # Create minimal tasks directory
@@ -366,6 +374,7 @@ Test content
     def test_watch_help(self):
         """Test watch command help text."""
         from click.testing import CliRunner
+
         from gptodo.cli import cli
 
         runner = CliRunner()

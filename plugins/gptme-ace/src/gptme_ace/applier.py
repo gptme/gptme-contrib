@@ -23,7 +23,6 @@ import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .curator import Delta, DeltaOperation
 
@@ -41,8 +40,8 @@ class DeltaApplier:
 
     def __init__(
         self,
-        lessons_dir: Optional[Path] = None,
-        delta_dir: Optional[Path] = None,
+        lessons_dir: Path | None = None,
+        delta_dir: Path | None = None,
         dry_run: bool = False,
     ):
         """
@@ -98,7 +97,7 @@ class DeltaApplier:
             applied_by=delta_dict.get("applied_by"),
         )
 
-    def find_lesson_file(self, lesson_id: str) -> Optional[Path]:
+    def find_lesson_file(self, lesson_id: str) -> Path | None:
         """Find the lesson file for a given lesson_id"""
         # lesson_id format: category/name (e.g., workflow/git-workflow)
         # File path: lessons/category/name.md

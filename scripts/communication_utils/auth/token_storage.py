@@ -1,21 +1,21 @@
 """Token storage utilities for managing authentication tokens in .env files."""
 
-from pathlib import Path
-from typing import List, Optional
 import shutil
 import tempfile
+from pathlib import Path
+from typing import List
 
 
 def _read_env_lines(env_path: Path) -> List[str]:
     """Read lines from .env file."""
     try:
-        with open(env_path, "r") as f:
+        with open(env_path) as f:
             return f.readlines()
     except FileNotFoundError:
         return []
 
 
-def _find_token_line_index(env_lines: List[str], token_name: str) -> Optional[int]:
+def _find_token_line_index(env_lines: List[str], token_name: str) -> int | None:
     """Find index of existing token line."""
     search_prefix = f"{token_name}="
     for i, line in enumerate(env_lines):
@@ -45,8 +45,8 @@ def _write_env_atomically(env_path: Path, env_lines: List[str]) -> bool:
 def save_token_to_env(
     token_name: str,
     token_value: str,
-    env_path: Optional[Path] = None,
-    comment: Optional[str] = None,
+    env_path: Path | None = None,
+    comment: str | None = None,
 ) -> bool:
     """Save or update a token in .env file.
 

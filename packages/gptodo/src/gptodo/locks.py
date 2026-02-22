@@ -20,10 +20,10 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Iterator
-from dataclasses import dataclass, asdict
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ DEFAULT_LOCK_TIMEOUT_HOURS = 4
 
 
 @contextmanager
-def _atomic_lock_file(path: Path, write: bool = False) -> Iterator[tuple[Optional[dict], Path]]:
+def _atomic_lock_file(path: Path, write: bool = False) -> Iterator[tuple[dict | None, Path]]:
     """Context manager for atomic file operations with flock.
 
     Uses fcntl.flock to ensure atomic read-modify-write operations,
@@ -140,7 +140,7 @@ class TaskLock:
         return (now - started).total_seconds() / 3600
 
 
-def get_locks_dir(repo_root: Optional[Path] = None) -> Path:
+def get_locks_dir(repo_root: Path | None = None) -> Path:
     """Get the locks directory path.
 
     Uses TASKS_REPO_ROOT env var if set (for wrapper script),
@@ -151,7 +151,7 @@ def get_locks_dir(repo_root: Optional[Path] = None) -> Path:
     return repo_root / "state" / "locks"
 
 
-def get_lock_path(task_id: str, repo_root: Optional[Path] = None) -> Path:
+def get_lock_path(task_id: str, repo_root: Path | None = None) -> Path:
     """Get the lock file path for a task."""
     # Sanitize task_id for use as filename (replace / with -)
     safe_id = task_id.replace("/", "-").replace("\\", "-")
@@ -162,9 +162,9 @@ def acquire_lock(
     task_id: str,
     worker: str,
     timeout_hours: float = DEFAULT_LOCK_TIMEOUT_HOURS,
-    repo_root: Optional[Path] = None,
+    repo_root: Path | None = None,
     force: bool = False,
-) -> tuple[bool, Optional[TaskLock]]:
+) -> tuple[bool, TaskLock | None]:
     """Attempt to acquire a lock on a task.
 
     Uses fcntl.flock for atomic check-and-write operations, preventing race
@@ -191,7 +191,7 @@ def acquire_lock(
     # Use atomic file operation with flock to prevent race conditions
     with _atomic_lock_file(lock_path, write=True) as (existing_data, path):
         # Parse existing lock if present
-        existing: Optional[TaskLock] = None
+        existing: TaskLock | None = None
         if existing_data:
             try:
                 existing = TaskLock(**existing_data)
@@ -237,9 +237,9 @@ def _write_lock_atomic(path: Path, lock: TaskLock) -> None:
 def release_lock(
     task_id: str,
     worker: str,
-    repo_root: Optional[Path] = None,
+    repo_root: Path | None = None,
     force: bool = False,
-) -> tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """Release a lock on a task.
 
     Uses fcntl.flock for atomic check-and-delete operations.
@@ -290,13 +290,13 @@ def release_lock(
         return True, None
 
 
-def get_lock(task_id: str, repo_root: Optional[Path] = None) -> Optional[TaskLock]:
+def get_lock(task_id: str, repo_root: Path | None = None) -> TaskLock | None:
     """Get the current lock on a task, if any."""
     lock_path = get_lock_path(task_id, repo_root)
     return TaskLock.from_file(lock_path)
 
 
-def list_locks(repo_root: Optional[Path] = None) -> list[TaskLock]:
+def list_locks(repo_root: Path | None = None) -> list[TaskLock]:
     """List all current locks."""
     locks_dir = get_locks_dir(repo_root)
     if not locks_dir.exists():
@@ -310,7 +310,7 @@ def list_locks(repo_root: Optional[Path] = None) -> list[TaskLock]:
     return locks
 
 
-def cleanup_expired_locks(repo_root: Optional[Path] = None) -> list[TaskLock]:
+def cleanup_expired_locks(repo_root: Path | None = None) -> list[TaskLock]:
     """Remove all expired locks.
 
     Returns:
@@ -333,7 +333,7 @@ def cleanup_expired_locks(repo_root: Optional[Path] = None) -> list[TaskLock]:
 
 
 def is_task_locked(
-    task_id: str, repo_root: Optional[Path] = None, exclude_worker: Optional[str] = None
+    task_id: str, repo_root: Path | None = None, exclude_worker: str | None = None
 ) -> bool:
     """Check if a task is currently locked.
 

@@ -16,7 +16,6 @@ from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
 from gptme_runloops.utils.prompt import get_agent_name
 
-
 TEAM_PROMPT_TEMPLATE = """\
 You are {agent_name}, running in **autonomous-team coordinator mode**.
 

@@ -17,6 +17,7 @@ import json
 import sys
 from datetime import date, datetime, timedelta
 
+from .cc_session_data import fetch_cc_session_stats_range
 from .generator import (
     JOURNAL_DIR,
     SUMMARIES_DIR,
@@ -37,7 +38,6 @@ from .schemas import (
     ModelUsage,
     MonthlySummary,
 )
-from .cc_session_data import fetch_cc_session_stats_range
 from .session_data import (
     SessionStats,
     fetch_session_stats,
@@ -366,7 +366,7 @@ def cmd_daily(args):
 def generate_weekly_summary_cc(week: str, verbose: bool = False):
     """Generate weekly summary using Claude Code backend."""
     from .cc_backend import summarize_weekly_with_cc
-    from .schemas import WeeklySummary, Metrics, Decision
+    from .schemas import Decision, Metrics, WeeklySummary
 
     # Parse week string
     year, week_num = int(week[:4]), int(week[6:])
@@ -512,7 +512,7 @@ def cmd_weekly(args):
 def generate_monthly_summary_cc(month: str, verbose: bool = False):
     """Generate monthly summary using Claude Code backend."""
     from .cc_backend import summarize_monthly_with_cc
-    from .schemas import Metrics, Decision
+    from .schemas import Decision, Metrics
 
     # Parse month to get weeks
     year, month_num = int(month[:4]), int(month[5:])

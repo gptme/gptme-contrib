@@ -33,19 +33,19 @@ from gptme.message import Message
 from gptme.tools.base import ConfirmFunc, Parameter, ToolSpec
 
 from ..lsp_client import (
-    LSPServer,
-    LSPManager,
     KNOWN_SERVERS,
-    Location,
-    HoverInfo,
-    WorkspaceEdit,
-    SignatureInfo,
-    TextEdit,
-    InlayHint,
-    CallHierarchyItem,
     CallHierarchyCall,
-    SymbolInfo,
+    CallHierarchyItem,
+    HoverInfo,
+    InlayHint,
+    Location,
+    LSPManager,
+    LSPServer,
     SemanticToken,
+    SignatureInfo,
+    SymbolInfo,
+    TextEdit,
+    WorkspaceEdit,
 )
 
 if TYPE_CHECKING:

@@ -28,7 +28,6 @@ from typing import (
     Dict,
     List,
     Literal,
-    Optional,
     Tuple,
     Type,
     TypeVar,
@@ -116,7 +115,7 @@ class TweetResponse:
     text: str
     type: str
     thread_needed: bool
-    follow_up: Optional[str]
+    follow_up: str | None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TweetResponse":
@@ -421,7 +420,7 @@ def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
 
 def generate_response(
     tweet: Dict, eval_result: EvaluationResponse
-) -> Optional[TweetResponse]:
+) -> TweetResponse | None:
     """Generate response using LLM"""
     if eval_result.action != "respond":
         return None
@@ -462,7 +461,7 @@ def review_draft(draft: Dict) -> ReviewResponse:
     return parse_llm_response(response.content, ReviewResponse, TaskType.REVIEW)
 
 
-def process_tweet(tweet: Dict) -> Tuple[EvaluationResponse, Optional[TweetResponse]]:
+def process_tweet(tweet: Dict) -> Tuple[EvaluationResponse, TweetResponse | None]:
     """Process a tweet through evaluation and response generation"""
     # Evaluate tweet
     eval_result = evaluate_tweet(tweet)

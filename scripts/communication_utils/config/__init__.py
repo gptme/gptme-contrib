@@ -7,7 +7,7 @@ with platform-specific configurations and validation.
 
 from .base import BaseConfig, ConfigError
 from .loaders import DotEnvLoader, YAMLLoader
-from .platform_configs import EmailConfig, TwitterConfig, DiscordConfig
+from .platform_configs import DiscordConfig, EmailConfig, TwitterConfig
 from .validation import ConfigValidator
 
 __all__ = [

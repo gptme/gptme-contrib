@@ -21,10 +21,10 @@ Tracking: ErikBjare/bob#263
 
 import json
 import logging
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List, Literal
+from typing import List, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class AgentInfo:
     instance_type: str = "autonomous"
     started: str = ""
     last_heartbeat: str = ""
-    current_task: Optional[str] = None
+    current_task: str | None = None
     tasks_completed: int = 0
     status: AgentStatus = "starting"
     workspace: str = ""
@@ -85,7 +85,7 @@ class AgentInfo:
         return cls(**filtered)
 
 
-def get_agents_dir(workspace: Optional[Path] = None) -> Path:
+def get_agents_dir(workspace: Path | None = None) -> Path:
     """Get the agents status directory path.
 
     Args:
@@ -101,7 +101,7 @@ def get_agents_dir(workspace: Optional[Path] = None) -> Path:
 
 def register_agent(
     agent_id: str,
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     instance_type: str = "autonomous",
 ) -> AgentInfo:
     """Register a new agent or update existing registration.
@@ -155,9 +155,9 @@ def register_agent(
 def update_agent_status(
     agent_id: str,
     status: AgentStatus,
-    current_task: Optional[str] = None,
-    workspace: Optional[Path] = None,
-) -> Optional[AgentInfo]:
+    current_task: str | None = None,
+    workspace: Path | None = None,
+) -> AgentInfo | None:
     """Update agent status and heartbeat.
 
     Args:
@@ -196,7 +196,7 @@ def update_agent_status(
     return agent_info
 
 
-def unregister_agent(agent_id: str, workspace: Optional[Path] = None) -> bool:
+def unregister_agent(agent_id: str, workspace: Path | None = None) -> bool:
     """Remove agent registration.
 
     Args:
@@ -217,7 +217,7 @@ def unregister_agent(agent_id: str, workspace: Optional[Path] = None) -> bool:
 
 
 def list_agents(
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     include_stale: bool = False,
     timeout_minutes: int = DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
 ) -> List[AgentInfo]:
@@ -256,7 +256,7 @@ def list_agents(
 
 
 def cleanup_stale_agents(
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     timeout_minutes: int = DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
 ) -> List[str]:
     """Remove stale agent registrations.
@@ -291,7 +291,7 @@ def cleanup_stale_agents(
     return cleaned
 
 
-def get_agent(agent_id: str, workspace: Optional[Path] = None) -> Optional[AgentInfo]:
+def get_agent(agent_id: str, workspace: Path | None = None) -> AgentInfo | None:
     """Get info for a specific agent.
 
     Args:

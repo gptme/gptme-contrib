@@ -806,7 +806,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                     data = json.loads(f.read_text())
                     if not data.get("processed", True) and data.get("error"):
                         failed_notifications.append((f, data))
-                except (json.JSONDecodeError, IOError):
+                except (OSError, json.JSONDecodeError):
                     continue
 
             if not failed_notifications:

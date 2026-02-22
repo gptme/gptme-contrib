@@ -1,8 +1,8 @@
 """Tests for gptme-retrieval plugin."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from gptme_retrieval import get_retrieval_config, retrieve_context, DEFAULT_CONFIG
+from gptme_retrieval import DEFAULT_CONFIG, get_retrieval_config, retrieve_context
 
 
 def test_get_retrieval_config_defaults():

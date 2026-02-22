@@ -1,17 +1,17 @@
 """Tests for Claude Code plugin."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
 from gptme_claude_code.tools.claude_code import (
+    ClaudeCodeResult,
+    _check_claude_available,
     analyze,
     ask,
+    check_session,
     fix,
     implement,
-    check_session,
     kill_session,
-    _check_claude_available,
-    ClaudeCodeResult,
 )
 
 

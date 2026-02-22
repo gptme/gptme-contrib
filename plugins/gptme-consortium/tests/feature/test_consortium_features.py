@@ -8,7 +8,6 @@ import time
 from unittest.mock import patch
 
 import pytest
-
 from gptme_consortium.tools.consortium import (
     _synthesize_consensus,
     query_consortium,
@@ -245,7 +244,7 @@ class TestErrorHandling:
 
             # Should handle gracefully with fallback
             assert result["consensus"]
-            assert isinstance(result["confidence"], (int, float))
+            assert isinstance(result["confidence"], int | float)
 
     def test_missing_json_fields(self):
         """Test handling when JSON response missing required fields."""

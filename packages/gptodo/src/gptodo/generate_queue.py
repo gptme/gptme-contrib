@@ -26,7 +26,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 try:
     import frontmatter
@@ -46,10 +46,10 @@ class Task:
         priority: str,
         state: str,
         source: str,
-        details: Optional[str] = None,
-        blockers: Optional[List[str]] = None,
+        details: str | None = None,
+        blockers: List[str] | None = None,
         assigned: bool = False,
-        requires: Optional[List[str]] = None,
+        requires: List[str] | None = None,
     ):
         self.id = id
         self.title = title
@@ -133,11 +133,11 @@ class QueueGenerator:
     def __init__(
         self,
         workspace_path: Path,
-        github_username: Optional[str] = None,
+        github_username: str | None = None,
         journal_dir: str = "journal",
         tasks_dir: str = "tasks",
         state_dir: str = "state",
-        user: Optional[str] = None,
+        user: str | None = None,
     ):
         self.workspace = workspace_path
         self.github_username = github_username

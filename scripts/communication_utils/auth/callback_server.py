@@ -7,8 +7,7 @@ during authorization flows. Supports configurable ports and paths.
 
 import html
 import threading
-from queue import Queue, Empty
-from typing import Optional
+from queue import Empty, Queue
 
 from flask import Flask, request
 from werkzeug.serving import BaseWSGIServer, make_server
@@ -41,8 +40,8 @@ class CallbackServer:
         self.timeout = timeout
 
         self.app = Flask(__name__)
-        self.server: Optional[BaseWSGIServer] = None
-        self.server_thread: Optional[threading.Thread] = None
+        self.server: BaseWSGIServer | None = None
+        self.server_thread: threading.Thread | None = None
         self.code_queue: Queue = Queue()
 
         # Register routes
@@ -114,8 +113,8 @@ class CallbackServer:
         self.server_thread = None
 
     def wait_for_callback(
-        self, timeout: Optional[int] = None
-    ) -> tuple[Optional[str], Optional[str]]:
+        self, timeout: int | None = None
+    ) -> tuple[str | None, str | None]:
         """
         Wait for OAuth callback with authorization code.
 
@@ -155,7 +154,7 @@ class CallbackServer:
 
 def run_oauth_callback(
     port: int = 8080, callback_path: str = "/callback", timeout: int = 300
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """
     Convenience function to run callback server and wait for code.
 
@@ -176,5 +175,5 @@ def run_oauth_callback(
     """
     server = CallbackServer(port=port, callback_path=callback_path, timeout=timeout)
     with server:
-        result: tuple[Optional[str], Optional[str]] = server.wait_for_callback()
+        result: tuple[str | None, str | None] = server.wait_for_callback()
         return result

@@ -11,7 +11,7 @@ import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class WorktreeInfo:
     status: Literal["active", "merged", "pr_created", "removed"] = "active"
 
 
-def get_worktrees_dir(workspace: Optional[Path] = None) -> Path:
+def get_worktrees_dir(workspace: Path | None = None) -> Path:
     """Get the worktrees directory, creating if needed.
 
     Worktrees are stored in .worktrees/ by default to keep them
@@ -40,7 +40,7 @@ def get_worktrees_dir(workspace: Optional[Path] = None) -> Path:
     return worktrees_dir
 
 
-def _run_git(args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     """Run a git command and return the result."""
     cmd = ["git"] + args
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -48,9 +48,9 @@ def _run_git(args: list[str], cwd: Optional[Path] = None) -> subprocess.Complete
 
 def create_worktree(
     task_id: str,
-    branch_name: Optional[str] = None,
+    branch_name: str | None = None,
     base_branch: str = "origin/master",
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
 ) -> WorktreeInfo:
     """Create a git worktree for isolated agent execution.
 
@@ -125,7 +125,7 @@ def create_worktree(
     )
 
 
-def list_worktrees(workspace: Optional[Path] = None) -> list[dict]:
+def list_worktrees(workspace: Path | None = None) -> list[dict]:
     """List all git worktrees in the repository.
 
     Returns list of dicts with worktree info from git.
@@ -168,7 +168,7 @@ def list_worktrees(workspace: Optional[Path] = None) -> list[dict]:
 def remove_worktree(
     worktree_path: Path,
     force: bool = False,
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
 ) -> bool:
     """Remove a git worktree.
 
@@ -200,10 +200,10 @@ def remove_worktree(
 def create_pr_from_worktree(
     worktree_path: Path,
     title: str,
-    body: Optional[str] = None,
+    body: str | None = None,
     draft: bool = False,
-    workspace: Optional[Path] = None,
-) -> Optional[str]:
+    workspace: Path | None = None,
+) -> str | None:
     """Create a GitHub PR from a worktree branch.
 
     Pushes the branch and creates a PR using gh CLI.
@@ -257,7 +257,7 @@ def create_pr_from_worktree(
 def merge_worktree(
     worktree_path: Path,
     target_branch: str = "master",
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     delete_after_merge: bool = True,
 ) -> bool:
     """Merge a worktree branch into target branch (for local swarm work).
@@ -357,7 +357,7 @@ def get_worktree_status(worktree_path: Path, base_branch: str = "origin/master")
 
 # FIX #4 & #5: Add base_branch parameter and fix unsafe lstrip
 def cleanup_merged_worktrees(
-    workspace: Optional[Path] = None, base_branch: str = "origin/master"
+    workspace: Path | None = None, base_branch: str = "origin/master"
 ) -> int:
     """Remove worktrees whose branches have been merged.
 

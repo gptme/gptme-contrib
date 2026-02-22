@@ -4,7 +4,6 @@ import fcntl
 import os
 import time
 from pathlib import Path
-from typing import Optional
 
 
 class RunLoopLock:
@@ -28,8 +27,8 @@ class RunLoopLock:
         self.lock_dir = Path(lock_dir)
         self.lock_name = lock_name
         self.lock_file = self.lock_dir / f"gptme-{lock_name}.lock"
-        self.lock_fd: Optional[int] = None
-        self._work_description: Optional[str] = None  # Description of work for calendar
+        self.lock_fd: int | None = None
+        self._work_description: str | None = None  # Description of work for calendar
 
         # Ensure lock directory exists
         self.lock_dir.mkdir(parents=True, exist_ok=True)
@@ -57,7 +56,7 @@ class RunLoopLock:
             pid = os.getpid()
             # Try to get script name from process
             try:
-                with open(f"/proc/{pid}/cmdline", "r") as f:
+                with open(f"/proc/{pid}/cmdline") as f:
                     cmdline = f.read().split("\0")
                     script_name = Path(cmdline[0]).name if cmdline else "python"
             except Exception:
