@@ -25,9 +25,20 @@ def main():
     default=Path.cwd(),
     help="Workspace directory (default: current directory)",
 )
-def autonomous(workspace: Path):
+@click.option(
+    "--model",
+    default=None,
+    help="Model override (e.g. 'openai-subscription/gpt-5.3-codex')",
+)
+@click.option(
+    "--tool-format",
+    default=None,
+    type=click.Choice(["markdown", "xml", "tool"]),
+    help="Tool format override",
+)
+def autonomous(workspace: Path, model: str | None, tool_format: str | None):
     """Run autonomous operation loop."""
-    run = AutonomousRun(workspace)
+    run = AutonomousRun(workspace, model=model, tool_format=tool_format)
     exit_code = run.run()
     sys.exit(exit_code)
 

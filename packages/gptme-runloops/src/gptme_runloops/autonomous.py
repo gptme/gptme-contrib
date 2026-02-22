@@ -16,17 +16,26 @@ class AutonomousRun(BaseRunLoop):
     - Session validation
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        model: str | None = None,
+        tool_format: str | None = None,
+    ):
         """Initialize autonomous run.
 
         Args:
             workspace: Path to workspace directory
+            model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
+            tool_format: Tool format override (markdown/xml/tool)
         """
         super().__init__(
             workspace=workspace,
             run_type="autonomous",
             timeout=3000,  # 50 minutes
             lock_wait=False,  # Don't wait for lock
+            model=model,
+            tool_format=tool_format,
         )
 
     def generate_prompt(self) -> str:
