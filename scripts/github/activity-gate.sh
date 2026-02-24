@@ -268,22 +268,43 @@ check_merge_conflicts() {
 }
 
 # Check for actionable unread notifications (review requests, mentions, assigns)
+# State-tracked by notification ID to avoid re-triggering for the same unread notification.
 # Returns individual notification items in jsonl mode, count in markdown mode.
 check_notifications() {
+    local notifs
+    notifs=$(gh api notifications \
+        --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign")' \
+        2>/dev/null) || return 0
+    [ -z "$notifs" ] && return 0
+
     if [ "$FORMAT" = "jsonl" ]; then
-        gh api notifications \
-            --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign")' \
-            2>/dev/null | jq -c '{
-                type: "notification",
-                repo: .repository.full_name,
-                number: 0,
-                title: .subject.title,
-                detail: .reason
-            }' 2>/dev/null || true
+        echo "$notifs" | jq -c '{
+            id: .id,
+            type: "notification",
+            repo: .repository.full_name,
+            number: (.subject.url // "" | split("/") | last | tonumber? // 0),
+            title: .subject.title,
+            detail: .reason
+        }' 2>/dev/null | while IFS= read -r item; do
+            local notif_id state_file
+            notif_id=$(echo "$item" | jq -r '.id')
+            state_file="$STATE_DIR/notif-${notif_id}.state"
+            if [ ! -f "$state_file" ]; then
+                touch "$state_file"
+                # Strip the id field before emitting (consumer doesn't need it)
+                echo "$item" | jq -c 'del(.id)'
+            fi
+        done
     else
-        gh api notifications \
-            --jq '[.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign")] | length' \
-            2>/dev/null || echo "0"
+        # Count new notifications and create state files (process substitution avoids subshell)
+        local new_count=0
+        while IFS= read -r notif_id; do
+            if [ ! -f "$STATE_DIR/notif-${notif_id}.state" ]; then
+                touch "$STATE_DIR/notif-${notif_id}.state"
+                new_count=$((new_count + 1))
+            fi
+        done < <(echo "$notifs" | jq -r '.id' 2>/dev/null)
+        echo "$new_count"
     fi
 }
 
