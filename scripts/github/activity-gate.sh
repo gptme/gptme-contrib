@@ -7,6 +7,7 @@
 # Exit codes:
 #   0 = actionable work found (work items printed to stdout)
 #   1 = no actionable work found (nothing printed)
+#   2 = usage error
 #
 # Usage:
 #   activity-gate.sh --author AUTHOR --org ORG [--repo EXTRA_REPO]... [--state-dir DIR]
@@ -22,6 +23,39 @@
 #   else
 #       echo "Nothing to do."
 #   fi
+#
+# Design notes & gotchas:
+#
+#   State tracking: Each check type uses files in STATE_DIR to remember what
+#   it last saw. On first run, all items are seeded (state created) but NOT
+#   reported — only changes after the first run trigger output.
+#
+#   PR update filtering: Not all updatedAt bumps are worth a session.
+#   We skip: (1) the AUTHOR's own comments (self-triggered), and
+#   (2) comments that @-mention someone other than AUTHOR (e.g. "@greptileai
+#   review" — human talking to a bot, not to us). Bot reviews (Greptile etc.)
+#   ARE allowed through — they contain actionable feedback.
+#
+#   GitHub comment types: `gh pr list --json comments` returns issue-style
+#   comments only (the general discussion thread). Inline review comments
+#   (left on specific lines of code) only appear in `latestReviews`. Both
+#   can bump updatedAt, so we check both and compare timestamps.
+#
+#   CI failure dedup: Tracked by a hash of all check conclusions. Re-triggers
+#   only when CI state actually changes (e.g. new failure, or failure resolves).
+#   Caveat: pending/in-progress checks have empty conclusions that change when
+#   they complete, causing a state change even if the final result is the same.
+#
+#   Merge conflicts: NOT state-tracked (intentionally). A conflicting PR should
+#   nag every run until resolved.
+#
+#   Notifications: State-tracked by notification ID. State files accumulate in
+#   STATE_DIR/notif-*.state. GitHub notifications clear when marked as read
+#   upstream, so old state files become inert (matching no current notification).
+#
+#   Subshell note: Several checks pipe into `while read` loops, which run in
+#   subshells. Variable modifications inside these loops don't propagate to the
+#   parent. This is fine because output is captured via stdout, not variables.
 
 set -euo pipefail
 
@@ -113,12 +147,76 @@ discover_repos() {
     for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
 }
 
+# Check whether the last activity on a PR was from someone worth responding to.
+# Returns 0 (true) if actionable, 1 if it should be skipped.
+# Skips only two cases:
+#   1. AUTHOR's own activity (self-triggered update)
+#   2. Comments that @-mention someone else but NOT the AUTHOR
+#      (e.g., "@greptileai review" — human talking to a bot, not to us)
+# Bot reviews (Greptile, Codecov, etc.) are NOT filtered — they contain
+# actionable feedback the agent should respond to.
+#
+# Checks both issue-style comments (.comments) and inline review comments
+# (.latestReviews) since either can bump updatedAt.
+has_actionable_update() {
+    local pr_data=$1
+    # pr_data is a JSON object with comments and latestReviews already included
+
+    # Determine the most recent actor across both comments and reviews.
+    # .comments are issue-style comments (chronological).
+    # .latestReviews are the latest review per user (with submittedAt).
+    # We use jq to find whichever is most recent by timestamp.
+    local last_actor last_body
+    last_actor=$(echo "$pr_data" | jq -r '
+        [
+            (.comments[-1] | select(. != null) | {login: .author.login, time: .createdAt, body: .body}),
+            (.latestReviews | sort_by(.submittedAt) | last | select(. != null) | {login: .author.login, time: .submittedAt, body: .body})
+        ]
+        | sort_by(.time) | last | .login // empty
+    ' 2>/dev/null)
+    last_body=$(echo "$pr_data" | jq -r '
+        [
+            (.comments[-1] | select(. != null) | {time: .createdAt, body: .body}),
+            (.latestReviews | sort_by(.submittedAt) | last | select(. != null) | {time: .submittedAt, body: .body})
+        ]
+        | sort_by(.time) | last | .body // empty
+    ' 2>/dev/null)
+
+    # If no activity found, this might be a push — allow it
+    [ -z "$last_actor" ] && return 0
+
+    # Skip if the last actor is the author (self-triggered update)
+    if [ "$last_actor" = "$AUTHOR" ]; then
+        return 1
+    fi
+
+    # Skip if the comment/review @-mentions someone else but NOT the AUTHOR.
+    # This catches cases like "@greptileai review" or "@someone what do you think?"
+    # where the commenter is clearly addressing someone other than the agent.
+    if [ -n "$last_body" ]; then
+        local mentions_anyone mentions_author
+        # Match GitHub-style @mentions (start of line or after whitespace).
+        # Avoids false positives from emails like user@example.com.
+        mentions_anyone=$(echo "$last_body" | grep -cP '(^|\s)@\w+' || true)
+        # Case-insensitive: GitHub usernames are case-insensitive
+        mentions_author=$(echo "$last_body" | grep -ci "@${AUTHOR}" || true)
+        if [ "${mentions_anyone:-0}" -gt 0 ] && [ "${mentions_author:-0}" -eq 0 ]; then
+            # Mentions others but not us — not directed at AUTHOR
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
 # Check for PR updates since last check (state-tracked via updatedAt timestamps)
+# Filters out self-triggered updates and comments directed at others.
+# Fetches comments + latestReviews in the same query to avoid extra API calls.
 check_pr_updates() {
     local repo=$1
     local prs
     prs=$(gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,updatedAt 2>/dev/null || echo "[]")
+        --json number,title,updatedAt,comments,latestReviews 2>/dev/null || echo "[]")
     [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
@@ -131,9 +229,13 @@ check_pr_updates() {
             local last_check
             last_check=$(cat "$state_file")
             if [[ "$updated_at" > "$last_check" ]]; then
-                local pr_title
-                pr_title=$(echo "$pr_data" | jq -r '.title')
-                emit_item "pr_update" "$repo" "$pr_number" "$pr_title" "updated: $updated_at"
+                # Check if the update was from someone we should respond to
+                if has_actionable_update "$pr_data"; then
+                    local pr_title
+                    pr_title=$(echo "$pr_data" | jq -r '.title')
+                    emit_item "pr_update" "$repo" "$pr_number" "$pr_title" "updated: $updated_at"
+                fi
+                # Always advance state to avoid rechecking this timestamp
                 echo "$updated_at" > "$state_file"
             fi
         else
@@ -159,7 +261,11 @@ check_ci_failures() {
             local pr_number pr_title ci_hash state_file
             pr_number=$(echo "$pr_data" | jq -r '.number')
             pr_title=$(echo "$pr_data" | jq -r '.title')
-            # Hash the CI conclusions to detect state changes
+            # Hash the CI conclusions to detect state changes.
+            # Note: in-progress checks have empty conclusions (mapped to "pending").
+            # When they complete, the hash changes — this can cause a re-trigger even
+            # if the final result matches the previous run. Acceptable trade-off vs
+            # missing genuine state changes.
             ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")' | portable_hash)
             state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
 
@@ -250,7 +356,8 @@ check_master_ci() {
     done
 }
 
-# Check for merge conflicts on open PRs (DIRTY or CONFLICTING status)
+# Check for merge conflicts on open PRs (DIRTY or CONFLICTING status).
+# Intentionally NOT state-tracked — conflicts should nag every run until resolved.
 check_merge_conflicts() {
     local repo=$1
     local prs
