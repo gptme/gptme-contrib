@@ -84,11 +84,13 @@ emit_item() {
     else
         local label
         case "$type" in
-            pr_update)       label="PR" ;;
-            ci_failure)      label="CI FAIL" ;;
-            assigned_issue)  label="Issue" ;;
-            notification)    label="Notification" ;;
-            *)               label="$type" ;;
+            pr_update)         label="PR" ;;
+            ci_failure)        label="CI FAIL" ;;
+            assigned_issue)    label="Issue" ;;
+            notification)      label="Notification" ;;
+            master_ci_failure) label="MASTER CI" ;;
+            merge_conflict)    label="CONFLICT" ;;
+            *)                 label="$type" ;;
         esac
         echo "$repo — $label #$number: $title ($detail)"
     fi
@@ -194,6 +196,65 @@ check_assigned_issues() {
     done
 }
 
+# Check for master/main branch CI failures (state-tracked by conclusion hash)
+# These indicate regressions that slipped through — not tied to any specific PR.
+check_master_ci() {
+    local repo=$1
+    local runs
+    runs=$(gh run list --repo "$repo" --branch master --limit 3 \
+        --json databaseId,name,conclusion,createdAt 2>/dev/null || echo "[]")
+    # Also try 'main' if master returned nothing
+    if [ "$runs" = "[]" ]; then
+        runs=$(gh run list --repo "$repo" --branch main --limit 3 \
+            --json databaseId,name,conclusion,createdAt 2>/dev/null || echo "[]")
+    fi
+    [ "$runs" = "[]" ] || [ -z "$runs" ] && return 0
+
+    # Check for any recent failures
+    local failures
+    failures=$(echo "$runs" | jq -c '[.[] | select(.conclusion == "failure")]')
+    local fail_count
+    fail_count=$(echo "$failures" | jq 'length')
+    [ "$fail_count" -eq 0 ] && return 0
+
+    # State-track by hash of failure IDs to avoid re-triggering
+    local ci_hash state_file
+    ci_hash=$(echo "$failures" | jq -r '[.[].databaseId] | sort | join(",")' | md5sum | cut -c1-16)
+    state_file="$STATE_DIR/${repo//\//-}-master-ci.state"
+
+    if [ -f "$state_file" ]; then
+        local last_hash
+        last_hash=$(cat "$state_file")
+        [ "$ci_hash" = "$last_hash" ] && return 0
+    fi
+    echo "$ci_hash" > "$state_file"
+
+    # Emit one item per failing run
+    echo "$failures" | jq -c '.[]' | while read -r run; do
+        local run_id run_name
+        run_id=$(echo "$run" | jq -r '.databaseId')
+        run_name=$(echo "$run" | jq -r '.name')
+        emit_item "master_ci_failure" "$repo" "$run_id" "$run_name" "master branch CI failing"
+    done
+}
+
+# Check for merge conflicts on open PRs (DIRTY or CONFLICTING status)
+check_merge_conflicts() {
+    local repo=$1
+    local prs
+    prs=$(gh pr list --repo "$repo" --author "$AUTHOR" --state open \
+        --json number,title,mergeable,mergeStateStatus 2>/dev/null || echo "[]")
+    [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
+
+    echo "$prs" | jq -c '.[] | select(.mergeStateStatus == "DIRTY" or .mergeable == "CONFLICTING")' | while read -r pr_data; do
+        local pr_number pr_title merge_status
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+        merge_status=$(echo "$pr_data" | jq -r '.mergeStateStatus')
+        emit_item "merge_conflict" "$repo" "$pr_number" "$pr_title" "status: $merge_status"
+    done
+}
+
 # Check for actionable unread notifications (review requests, mentions, assigns)
 # Returns individual notification items in jsonl mode, count in markdown mode.
 check_notifications() {
@@ -227,6 +288,12 @@ for repo in $all_repos; do
     [ -n "$items" ] && all_items+="$items"$'\n'
 
     items=$(check_assigned_issues "$repo" 2>/dev/null || true)
+    [ -n "$items" ] && all_items+="$items"$'\n'
+
+    items=$(check_master_ci "$repo" 2>/dev/null || true)
+    [ -n "$items" ] && all_items+="$items"$'\n'
+
+    items=$(check_merge_conflicts "$repo" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
 done
 
