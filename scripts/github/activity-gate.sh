@@ -74,6 +74,18 @@ mkdir -p "$STATE_DIR"
 
 # --- Functions ---
 
+# Portable hash function (works on both Linux and macOS)
+portable_hash() {
+    if command -v md5sum &>/dev/null; then
+        md5sum | cut -c1-16
+    elif command -v shasum &>/dev/null; then
+        shasum -a 256 | cut -c1-16
+    else
+        # Fallback: use cksum (POSIX, always available)
+        cksum | cut -d' ' -f1
+    fi
+}
+
 # Emit a work item in the configured format.
 # Args: type repo number title detail
 emit_item() {
@@ -148,7 +160,7 @@ check_ci_failures() {
             pr_number=$(echo "$pr_data" | jq -r '.number')
             pr_title=$(echo "$pr_data" | jq -r '.title')
             # Hash the CI conclusions to detect state changes
-            ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")' | md5sum | cut -c1-16)
+            ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")' | portable_hash)
             state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
 
             if [ -f "$state_file" ]; then
@@ -219,7 +231,7 @@ check_master_ci() {
 
     # State-track by hash of failure IDs to avoid re-triggering
     local ci_hash state_file
-    ci_hash=$(echo "$failures" | jq -r '[.[].databaseId] | sort | join(",")' | md5sum | cut -c1-16)
+    ci_hash=$(echo "$failures" | jq -r '[.[].databaseId] | sort | join(",")' | portable_hash)
     state_file="$STATE_DIR/${repo//\//-}-master-ci.state"
 
     if [ -f "$state_file" ]; then
