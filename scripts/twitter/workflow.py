@@ -42,7 +42,7 @@ import logging
 import os
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import (
     Any,
@@ -229,9 +229,15 @@ class TweetDraft:
 
     @classmethod
     def from_dict(cls, data: Dict) -> "TweetDraft":
-        """Create from dictionary"""
+        """Create from dictionary.
+
+        Resilient to alternate field names used in manually-created draft files:
+        - ``content`` as fallback for ``text``
+        - ``created`` as fallback for ``created_at``
+        - ``context`` is optional (defaults to empty dict)
+        """
         draft = cls(
-            text=data["text"],
+            text=data.get("text", data.get("content", "")),
             type=data["type"],
             in_reply_to=data.get("in_reply_to"),
             scheduled_time=(
@@ -243,16 +249,20 @@ class TweetDraft:
                     else None
                 )
             ),
-            context=data["context"],
+            context=data.get("context", {}),
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
             quality_score=data.get("quality_score"),  # Optional, backward compatible
             thread=data.get("thread"),  # Optional, backward compatible
         )
-        created_at = data["created_at"]
-        if isinstance(created_at, str):
+        created_at = data.get("created_at", data.get("created"))
+        if created_at is None:
+            draft.created_at = datetime.now()
+        elif isinstance(created_at, str):
             draft.created_at = datetime.fromisoformat(created_at)
         elif isinstance(created_at, datetime):
             draft.created_at = created_at
+        elif isinstance(created_at, date):
+            draft.created_at = datetime.combine(created_at, datetime.min.time())
         else:
             raise ValueError(f"Invalid created_at format: {type(created_at)}")
         return draft
