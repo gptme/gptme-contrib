@@ -11,6 +11,7 @@ match:
   - "external repository PR"
   - "multiple branches simultaneously"
   - "work on PR in separate directory"
+status: active
 ---
 
 # Git Worktree Workflow for External Repositories

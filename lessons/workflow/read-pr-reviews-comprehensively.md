@@ -1,6 +1,7 @@
 ---
 match:
   keywords: ["gh pr view", "pull request", "pr review", "review comments", "inline comments", "gh api"]
+status: active
 ---
 
 # Read PR Reviews Comprehensively

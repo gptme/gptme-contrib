@@ -5,6 +5,7 @@ match:
   - command dumped 10k+ tokens
   - large output 1000+ lines
   - token efficiency shell
+status: active
 ---
 
 # Shell Output Filtering for Token Efficiency

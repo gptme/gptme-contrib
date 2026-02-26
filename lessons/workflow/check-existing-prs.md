@@ -7,6 +7,7 @@ match:
   - gh pr list --search
   - issue has been open for a while
   - duplicate PR risk
+status: active
 ---
 
 # Check for Existing PRs Before Creating

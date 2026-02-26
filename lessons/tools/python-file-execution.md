@@ -8,6 +8,7 @@ match:
   - shebang
   - uv run
   - poetry run
+status: active
 ---
 
 # Python File Execution

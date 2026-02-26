@@ -6,6 +6,7 @@ match:
   - spaces quoting
   - cd
   - too many arguments
+status: active
 ---
 
 # Shell Path Quoting for Spaces

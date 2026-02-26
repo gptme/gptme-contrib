@@ -17,6 +17,7 @@ match:
   - "git push"
   - "git checkout"
   - "stage files"
+status: active
 ---
 
 # Git Workflow

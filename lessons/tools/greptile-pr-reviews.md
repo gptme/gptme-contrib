@@ -9,6 +9,7 @@ match:
     - "greptile review"
     - "greptile PR"
     - "request greptile review"
+status: active
 ---
 
 # Triggering Greptile PR Reviews

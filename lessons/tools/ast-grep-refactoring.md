@@ -6,6 +6,7 @@ match:
   - code refactoring across files
   - replace pattern in codebase
   - AST-based code transformation
+status: active
 ---
 
 # Using ast-grep for Code Refactoring
