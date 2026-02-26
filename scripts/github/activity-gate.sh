@@ -53,6 +53,11 @@
 #   STATE_DIR/notif-*.state. GitHub notifications clear when marked as read
 #   upstream, so old state files become inert (matching no current notification).
 #
+#   Item grouping: This gate emits one item per event (a PR can produce separate
+#   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
+#   per-item sessions should group items by repo#number before dispatching to
+#   avoid redundant sessions investigating the same PR/issue independently.
+#
 #   Subshell note: Several checks pipe into `while read` loops, which run in
 #   subshells. Variable modifications inside these loops don't propagate to the
 #   parent. This is fine because output is captured via stdout, not variables.
