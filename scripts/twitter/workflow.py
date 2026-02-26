@@ -238,7 +238,7 @@ class TweetDraft:
         """
         draft = cls(
             text=data.get("text", data.get("content", "")),
-            type=data["type"],
+            type=data.get("type", "tweet"),
             in_reply_to=data.get("in_reply_to"),
             scheduled_time=(
                 data["scheduled_time"]
