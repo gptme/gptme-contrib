@@ -30,7 +30,18 @@ from rich.console import Console
 console = Console(stderr=True)
 
 VALID_STATES = {
-    "tasks": ["new", "active", "paused", "done", "cancelled", "someday"],
+    "tasks": [
+        "backlog",
+        "todo",
+        "new",
+        "active",
+        "ready_for_review",
+        "waiting",
+        "paused",
+        "done",
+        "cancelled",
+        "someday",
+    ],
     "tweets": ["new", "queued", "approved", "posted"],
 }
 

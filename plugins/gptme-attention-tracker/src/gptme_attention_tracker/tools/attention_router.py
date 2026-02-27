@@ -294,8 +294,11 @@ def process_turn(message: str, apply_now: bool = False) -> dict:
         if _cache_awareness_available:
             try:
                 turns = get_turns_since_invalidation()
-                # Flush at batch threshold based on actual turns since cache invalidation
-                should_flush = turns >= DEFAULT_BATCH_SIZE
+                # Use cache_awareness turns if actively tracking (> 0),
+                # otherwise fall back to internal counter (e.g. in tests
+                # or when no conversation is running)
+                effective_turns = turns if turns > 0 else state.pending_turns
+                should_flush = effective_turns >= DEFAULT_BATCH_SIZE
             except Exception:
                 # Fall back to internal counter
                 should_flush = state.pending_turns >= DEFAULT_BATCH_SIZE
