@@ -51,7 +51,7 @@ def tool_pre_execute_hook(
     """Hook that runs before any tool executes.
 
     Demonstrates:
-    - TOOL_EXECUTE_PRE hook type
+    - TOOL_PRE_EXECUTE hook type
     - Accessing tool information
     - Validating or logging tool usage
 
@@ -74,10 +74,10 @@ def tool_pre_execute_hook(
 def message_post_process_hook(
     manager: "LogManager",
 ) -> Generator[Message, None, None]:
-    """Hook that runs after a complete turn (all steps done).
+    """Hook that runs after processing a message.
 
     Demonstrates:
-    - TURN_POST hook type
+    - MESSAGE_POST_PROCESS hook type
     - Accessing conversation state via LogManager
     - Reacting to processed messages
 
@@ -126,15 +126,15 @@ def register() -> None:
     # Register tool pre-execute hook (default priority 0)
     register_hook(
         name="example_hooks.tool_pre_execute",
-        hook_type=HookType.TOOL_EXECUTE_PRE,
+        hook_type=HookType.TOOL_PRE_EXECUTE,
         func=tool_pre_execute_hook,
         priority=0,
     )
 
-    # Register turn post hook (priority -100 - runs late)
+    # Register message post-process hook (priority -100 - runs late)
     register_hook(
-        name="example_hooks.turn_post",
-        hook_type=HookType.TURN_POST,
+        name="example_hooks.message_post_process",
+        hook_type=HookType.MESSAGE_POST_PROCESS,
         func=message_post_process_hook,
         priority=-100,
     )
