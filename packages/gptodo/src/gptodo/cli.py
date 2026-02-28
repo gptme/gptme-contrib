@@ -919,7 +919,6 @@ def check(fix: bool, task_files: list[str]):
 
     # Check for broken links in task content
     link_issues: list[str] = []
-    frontmatter = __import__("frontmatter")
     for task in tasks_to_validate:
         try:
             post = frontmatter.load(task.path)
