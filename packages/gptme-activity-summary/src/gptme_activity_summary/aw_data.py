@@ -1,19 +1,16 @@
 """Fetch ActivityWatch data for summarization context.
 
-Uses the AW REST API directly (no aw-client dependency required) to query
-window activity and time tracking data from a local ActivityWatch server.
+Uses the aw-client library to query window activity and time tracking data
+from a local ActivityWatch server.
 
 Default AW server: http://localhost:5600 (configurable via AW_SERVER env var)
 """
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -55,36 +52,44 @@ class AWActivity:
         return self.total_active_seconds / 3600
 
 
-def _aw_request(path: str, method: str = "GET", body: dict | None = None) -> dict | list | None:
-    """Make a request to the AW REST API.
+def _get_client() -> Any:
+    """Create an aw-client instance.
 
-    Returns parsed JSON or None on failure.
+    Returns the client or None if aw-client is not available.
     """
-    url = f"{AW_SERVER}{path}"
     try:
-        headers = {"Content-Type": "application/json"}
-        data = json.dumps(body).encode() if body else None
-        req = Request(url, data=data, headers=headers, method=method)
-        with urlopen(req, timeout=AW_TIMEOUT) as resp:
-            return cast("dict[Any, Any] | list[Any]", json.loads(resp.read().decode()))
-    except URLError as e:
-        logger.debug("AW server not reachable: %s", e)
-        return None
-    except Exception as e:
-        logger.debug("AW request failed (%s %s): %s", method, path, e)
+        from aw_client import ActivityWatchClient
+    except ImportError:
+        logger.debug("aw-client not installed")
         return None
 
+    # Parse host and port from AW_SERVER
+    host = "localhost"
+    port = 5600
+    server = AW_SERVER.replace("http://", "").replace("https://", "")
+    if ":" in server:
+        parts = server.split(":")
+        host = parts[0]
+        try:
+            port = int(parts[1].rstrip("/"))
+        except ValueError:
+            pass
+    elif server:
+        host = server.rstrip("/")
 
-def _aw_available() -> bool:
-    """Check if the ActivityWatch server is running."""
-    result = _aw_request("/api/0/info")
-    return result is not None
+    return ActivityWatchClient(
+        "gptme-activity-summary",
+        host=host,
+        port=port,
+        testing=False,
+    )
 
 
-def _find_bucket(prefix: str) -> str | None:
+def _find_bucket(client: Any, prefix: str) -> str | None:
     """Find a bucket by prefix (e.g. 'aw-watcher-window_')."""
-    buckets = _aw_request("/api/0/buckets/")
-    if not isinstance(buckets, dict):
+    try:
+        buckets = client.get_buckets()
+    except Exception:
         return None
     for bucket_id in buckets:
         if str(bucket_id).startswith(prefix):
@@ -92,8 +97,8 @@ def _find_bucket(prefix: str) -> str | None:
     return None
 
 
-def _build_timeperiod(start: date, end: date) -> str:
-    """Build an AW-compatible ISO 8601 interval string.
+def _build_timeperiod(start: date, end: date) -> tuple[datetime, datetime]:
+    """Build a (start_dt, end_dt) tuple for aw-client query.
 
     Args:
         start: Start date (inclusive)
@@ -102,31 +107,34 @@ def _build_timeperiod(start: date, end: date) -> str:
     start_dt = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=timezone.utc)
     end_next = end + timedelta(days=1)
     end_dt = datetime(end_next.year, end_next.month, end_next.day, 0, 0, 0, tzinfo=timezone.utc)
-    return f"{start_dt.isoformat()}/{end_dt.isoformat()}"
+    return (start_dt, end_dt)
 
 
-def _run_aw_query(query: list[str], timeperiod: str) -> list | None:
-    """Run an AW query and return the result list.
+def _run_aw_query(
+    client: Any, query: list[str], timeperiod: tuple[datetime, datetime]
+) -> list | None:
+    """Run an AW query via aw-client and return the result list.
 
     Args:
+        client: ActivityWatchClient instance
         query: List of AW query language statements
-        timeperiod: ISO 8601 interval string, e.g. "2024-01-01T00:00:00/2024-01-02T00:00:00"
+        timeperiod: (start, end) datetime tuple
 
     Returns:
         Query result list, or None on failure
     """
-    body = {
-        "query": query,
-        "timeperiods": [timeperiod],
-    }
-    result = _aw_request("/api/0/query/", method="POST", body=body)
-    if isinstance(result, list) and result:
-        return cast("list[Any]", result[0])  # First (only) timeperiod result
+    try:
+        query_str = "\n".join(query)
+        result = client.query(query_str, [timeperiod])
+        if isinstance(result, list) and result:
+            return cast(list, result[0])  # First (only) timeperiod result
+    except Exception as e:
+        logger.debug("AW query failed: %s", e)
     return None
 
 
 def _fetch_app_usage(
-    window_bucket: str, afk_bucket: str | None, timeperiod: str
+    client: Any, window_bucket: str, afk_bucket: str | None, timeperiod: tuple[datetime, datetime]
 ) -> tuple[list[AppUsage], float]:
     """Fetch per-app time usage, filtering out AFK periods when possible.
 
@@ -140,24 +148,24 @@ def _fetch_app_usage(
         # Filter window events to only include time when user was not AFK.
         # This is the standard AW pattern used by aw-webui.
         query = [
-            f'afk_events = query_bucket("{afk_bucket}")',
-            'afk_events = filter_keyvals(afk_events, "status", ["not-afk"])',
-            f'window_events = query_bucket("{window_bucket}")',
-            "events = filter_period_intersect(window_events, afk_events)",
-            'events = merge_events_by_keys(events, ["app"])',
-            "events = sort_by_duration(events)",
-            "RETURN = events",
+            f'afk_events = query_bucket("{afk_bucket}");',
+            'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
+            f'window_events = query_bucket("{window_bucket}");',
+            "events = filter_period_intersect(window_events, afk_events);",
+            'events = merge_events_by_keys(events, ["app"]);',
+            "events = sort_by_duration(events);",
+            "RETURN = events;",
         ]
     else:
         # No AFK bucket — fall back to raw window events
         query = [
-            f'events = query_bucket("{window_bucket}")',
-            'events = merge_events_by_keys(events, ["app"])',
-            "events = sort_by_duration(events)",
-            "RETURN = events",
+            f'events = query_bucket("{window_bucket}");',
+            'events = merge_events_by_keys(events, ["app"]);',
+            "events = sort_by_duration(events);",
+            "RETURN = events;",
         ]
 
-    results = _run_aw_query(query, timeperiod)
+    results = _run_aw_query(client, query, timeperiod)
     if results is None:
         return [], 0.0
 
@@ -179,28 +187,28 @@ def _fetch_app_usage(
 
 
 def _fetch_browser_domains(
-    web_bucket: str, afk_bucket: str | None, timeperiod: str
+    client: Any, web_bucket: str, afk_bucket: str | None, timeperiod: tuple[datetime, datetime]
 ) -> list[BrowserDomain]:
     """Fetch top domains from aw-watcher-web, with optional AFK filtering."""
     if afk_bucket:
         query = [
-            f'afk_events = query_bucket("{afk_bucket}")',
-            'afk_events = filter_keyvals(afk_events, "status", ["not-afk"])',
-            f'web_events = query_bucket("{web_bucket}")',
-            "events = filter_period_intersect(web_events, afk_events)",
-            'events = merge_events_by_keys(events, ["$domain"])',
-            "events = sort_by_duration(events)",
-            "RETURN = events",
+            f'afk_events = query_bucket("{afk_bucket}");',
+            'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
+            f'web_events = query_bucket("{web_bucket}");',
+            "events = filter_period_intersect(web_events, afk_events);",
+            'events = merge_events_by_keys(events, ["$domain"]);',
+            "events = sort_by_duration(events);",
+            "RETURN = events;",
         ]
     else:
         query = [
-            f'web_events = query_bucket("{web_bucket}")',
-            'events = merge_events_by_keys(web_events, ["$domain"])',
-            "events = sort_by_duration(events)",
-            "RETURN = events",
+            f'web_events = query_bucket("{web_bucket}");',
+            'events = merge_events_by_keys(web_events, ["$domain"]);',
+            "events = sort_by_duration(events);",
+            "RETURN = events;",
         ]
 
-    results = _run_aw_query(query, timeperiod)
+    results = _run_aw_query(client, query, timeperiod)
     if results is None:
         return []
 
@@ -235,23 +243,30 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
     """
     activity = AWActivity(start_date=start, end_date=end)
 
-    if not _aw_available():
+    client = _get_client()
+    if client is None:
+        logger.debug("aw-client not available")
+        return activity
+
+    try:
+        client.get_info()
+    except Exception:
         logger.debug("ActivityWatch server not available at %s", AW_SERVER)
         return activity
 
-    window_bucket = _find_bucket("aw-watcher-window_")
+    window_bucket = _find_bucket(client, "aw-watcher-window_")
     if not window_bucket:
         logger.debug("No aw-watcher-window bucket found")
         activity.available = True  # AW is running, just no window bucket
         return activity
 
-    afk_bucket = _find_bucket("aw-watcher-afk_")
-    web_bucket = _find_bucket("aw-watcher-web-")
+    afk_bucket = _find_bucket(client, "aw-watcher-afk_")
+    web_bucket = _find_bucket(client, "aw-watcher-web-")
 
     timeperiod = _build_timeperiod(start, end)
 
     # Fetch app usage (with AFK filtering when available)
-    top_apps, total_seconds = _fetch_app_usage(window_bucket, afk_bucket, timeperiod)
+    top_apps, total_seconds = _fetch_app_usage(client, window_bucket, afk_bucket, timeperiod)
     if not top_apps:
         activity.available = True
         return activity
@@ -262,7 +277,7 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
 
     # Fetch browser domains (optional — only if web watcher is present)
     if web_bucket:
-        activity.top_domains = _fetch_browser_domains(web_bucket, afk_bucket, timeperiod)
+        activity.top_domains = _fetch_browser_domains(client, web_bucket, afk_bucket, timeperiod)
 
     return activity
 

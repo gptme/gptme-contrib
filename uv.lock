@@ -78,6 +78,15 @@ wheels = [
 ]
 
 [[package]]
+name = "appdirs"
+version = "1.4.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/d8/05696357e0311f5b5c316d7b95f46c669dd9c15aaeecbb48c7d0aeb88c40/appdirs-1.4.4.tar.gz", hash = "sha256:7d5d0167b2b1ba821647616af46a749d1c653740dd0d2415100fe26e27afdf41", size = 13470, upload-time = "2020-05-11T07:59:51.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/00/2344469e2084fb287c2e0b57b72910309874c3245463acd6cf5e3db69324/appdirs-1.4.4-py2.py3-none-any.whl", hash = "sha256:a841dacd6b99318a741b166adb07e19ee71a274450e68237b4650ca1055ab128", size = 9566, upload-time = "2020-05-11T07:59:49.499Z" },
+]
+
+[[package]]
 name = "asttokens"
 version = "3.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -149,6 +158,44 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/13/c3/c3dc3f564ce6877ecd2a05f8d751b9b27a8c320c2533a98b0c86349778d0/audioop_lts-0.2.2-cp314-cp314t-win32.whl", hash = "sha256:068aa17a38b4e0e7de771c62c60bbca2455924b67a8814f3b0dee92b5820c0b3", size = 27331, upload-time = "2025-08-05T16:43:14.19Z" },
     { url = "https://files.pythonhosted.org/packages/72/bb/b4608537e9ffcb86449091939d52d24a055216a36a8bf66b936af8c3e7ac/audioop_lts-0.2.2-cp314-cp314t-win_amd64.whl", hash = "sha256:a5bf613e96f49712073de86f20dbdd4014ca18efd4d34ed18c75bd808337851b", size = 31697, upload-time = "2025-08-05T16:43:15.193Z" },
     { url = "https://files.pythonhosted.org/packages/f6/22/91616fe707a5c5510de2cac9b046a30defe7007ba8a0c04f9c08f27df312/audioop_lts-0.2.2-cp314-cp314t-win_arm64.whl", hash = "sha256:b492c3b040153e68b9fdaff5913305aaaba5bb433d8a7f73d5cf6a64ed3cc1dd", size = 25206, upload-time = "2025-08-05T16:43:16.444Z" },
+]
+
+[[package]]
+name = "aw-client"
+version = "0.5.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aw-core" },
+    { name = "click" },
+    { name = "persist-queue" },
+    { name = "requests" },
+    { name = "tabulate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1d/ac/0c80c62b0417d23f7550224acb8909fee750e83db1d0ab2778b808779e9e/aw_client-0.5.12.tar.gz", hash = "sha256:824b5e83abe755d5f089bbbf87eaabdc8895220c1642904a5aa6b66fba09b6ba", size = 19994, upload-time = "2023-05-05T20:04:05.991Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/3b/7787f889fc1b568528a36d7bda82bfded1f331a55e9916fa632cafaf97b1/aw_client-0.5.12-py3-none-any.whl", hash = "sha256:12bd6cbc02a06e970267f7f192a31a0036b4a9f9ae0852bd0a8bc718b9b8ea5a", size = 21205, upload-time = "2023-05-05T20:04:02.159Z" },
+]
+
+[[package]]
+name = "aw-core"
+version = "0.5.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "appdirs" },
+    { name = "deprecation" },
+    { name = "iso8601" },
+    { name = "jsonschema" },
+    { name = "peewee" },
+    { name = "rfc3339-validator" },
+    { name = "strict-rfc3339" },
+    { name = "takethetime" },
+    { name = "timeslot" },
+    { name = "tomlkit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/97/a8/995d460e4c18c69941abbb85f153f026a89c4bc45e491a3e915a6f0fbf94/aw_core-0.5.13.tar.gz", hash = "sha256:4e41cd056602216ddbececa74073caa5f4920f33f68a20a306556f6dd13af61e", size = 35570, upload-time = "2023-05-15T07:57:57.317Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/39/3fa82d04ce85f252f5cb5b9fdbb4761a80617997799486e8aea883ac1bf1/aw_core-0.5.13-py3-none-any.whl", hash = "sha256:dc77b19701a120dd4c86a8b75203230a23fff2bdc3017d50093098c138b8ae08", size = 47586, upload-time = "2023-05-15T07:57:55.655Z" },
 ]
 
 [[package]]
@@ -607,6 +654,18 @@ wheels = [
 ]
 
 [[package]]
+name = "deprecation"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/d3/8ae2869247df154b64c1884d7346d412fed0c49df84db635aab2d1c40e62/deprecation-2.1.0.tar.gz", hash = "sha256:72b3bde64e5d778694b0cf68178aed03d15e15477116add3fb773e581f9518ff", size = 173788, upload-time = "2020-04-20T14:23:38.738Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/c3/253a89ee03fc9b9682f1541728eb66db7db22148cd94f89ab22528cd1e1b/deprecation-2.1.0-py2.py3-none-any.whl", hash = "sha256:a10811591210e1fb0e768a8c25517cabeabcba6f0bf96564f8ff45189f90b14a", size = 11178, upload-time = "2020-04-20T14:23:36.581Z" },
+]
+
+[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -843,6 +902,7 @@ name = "gptme-activity-summary"
 version = "0.1.0"
 source = { editable = "packages/gptme-activity-summary" }
 dependencies = [
+    { name = "aw-client" },
     { name = "click" },
     { name = "gptme" },
 ]
@@ -860,6 +920,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aw-client", specifier = ">=0.5.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -1434,6 +1495,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/85/31/10ac88f3357fc276dc8a64e8880c82e80e7459326ae1d0a211b40abf6665/ipython-8.37.0.tar.gz", hash = "sha256:ca815841e1a41a1e6b73a0b08f3038af9b2252564d01fc405356d34033012216", size = 5606088, upload-time = "2025-05-31T16:39:09.613Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/91/d0/274fbf7b0b12643cbbc001ce13e6a5b1607ac4929d1b11c72460152c9fc3/ipython-8.37.0-py3-none-any.whl", hash = "sha256:ed87326596b878932dbcb171e3e698845434d8c61b8d8cd474bf663041a9dcf2", size = 831864, upload-time = "2025-05-31T16:39:06.38Z" },
+]
+
+[[package]]
+name = "iso8601"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/8c/1c342fdd2f4af0857684d16af766201393ef53318c15fa785fcb6c3b7c32/iso8601-1.1.0.tar.gz", hash = "sha256:32811e7b81deee2063ea6d2e94f8819a86d1f3811e49d23623a41fa832bef03f", size = 12836, upload-time = "2022-09-28T14:52:51.354Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/6c/9d72435c72adfa6e4ed1824b6df7fffbeaaf15c653881e9b041a318ba572/iso8601-1.1.0-py3-none-any.whl", hash = "sha256:8400e90141bf792bce2634df533dc57e3bee19ea120a87bebcd3da89a58ad73f", size = 9893, upload-time = "2022-09-28T14:52:50.046Z" },
 ]
 
 [[package]]
@@ -2381,6 +2451,24 @@ wheels = [
 ]
 
 [[package]]
+name = "peewee"
+version = "3.19.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/b0/79462b42e89764998756e0557f2b58a15610a5b4512fbbcccae58fba7237/peewee-3.19.0.tar.gz", hash = "sha256:f88292a6f0d7b906cb26bca9c8599b8f4d8920ebd36124400d0cbaaaf915511f", size = 974035, upload-time = "2026-01-07T17:24:59.597Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/41/19c65578ef9a54b3083253c68a607f099642747168fe00f3a2bceb7c3a34/peewee-3.19.0-py3-none-any.whl", hash = "sha256:de220b94766e6008c466e00ce4ba5299b9a832117d9eb36d45d0062f3cfd7417", size = 411885, upload-time = "2026-01-07T17:24:58.33Z" },
+]
+
+[[package]]
+name = "persist-queue"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2f/9e/865b2a173a272d2f52b0f50534e13c38c159877251a987e0863fc7376acd/persist_queue-1.1.0.tar.gz", hash = "sha256:4c042a3d39c9af4fa24497da76697fb4fff7abe6af04bcf55f099e0c23bc2c67", size = 39294, upload-time = "2025-10-25T13:21:28.339Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/88/7248345679ad5001cdc0211eb83303c62659f86ae7024170c0bc0afd4e4e/persist_queue-1.1.0-py3-none-any.whl", hash = "sha256:be431ad90cd57621be5563dcd2424e21d81db3bb8cdfb918ade722369d640763", size = 53076, upload-time = "2025-10-25T13:21:26.577Z" },
+]
+
+[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3122,6 +3210,18 @@ wheels = [
 ]
 
 [[package]]
+name = "rfc3339-validator"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/28/ea/a9387748e2d111c3c2b275ba970b735e04e15cdb1eb30693b6b5708c4dbd/rfc3339_validator-0.1.4.tar.gz", hash = "sha256:138a2abdf93304ad60530167e51d2dfb9549521a836871b88d7f4695d0022f6b", size = 5513, upload-time = "2021-05-12T16:37:54.178Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/44/4e421b96b67b2daff264473f7465db72fbdf36a07e05494f50300cc7b0c6/rfc3339_validator-0.1.4-py2.py3-none-any.whl", hash = "sha256:24f6ec1eda14ef823da9e36ec7113124b39c04d50a4d3d3a3c2859577e7791fa", size = 3490, upload-time = "2021-05-12T16:37:52.536Z" },
+]
+
+[[package]]
 name = "rich"
 version = "13.9.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3647,6 +3747,12 @@ wheels = [
 ]
 
 [[package]]
+name = "strict-rfc3339"
+version = "0.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/e4/879ef1dbd6ddea1c77c0078cd59b503368b0456bcca7d063a870ca2119d3/strict-rfc3339-0.7.tar.gz", hash = "sha256:5cad17bedfc3af57b399db0fed32771f18fc54bbd917e85546088607ac5e1277", size = 17552, upload-time = "2016-04-24T04:24:04.403Z" }
+
+[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3666,6 +3772,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/ec/fe/802052aecb21e3797
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl", hash = "sha256:024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f", size = 35252, upload-time = "2022-10-06T17:21:44.262Z" },
 ]
+
+[[package]]
+name = "takethetime"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/d4/b54162383d2a8799117ba22293a99a2ea78f610e8a32f61ba6d916d718a5/TakeTheTime-0.3.1.tar.gz", hash = "sha256:dbe30453a1b596a38f9e2e3fa8e1adc5af2dbf646ca0837ad5c2059a16fe2ff9", size = 2072, upload-time = "2019-05-20T12:00:56.627Z" }
 
 [[package]]
 name = "tenacity"
@@ -3744,6 +3856,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/28/c0/3c7a39ff68022ddfd7d93f3337ad90389a342f761c4d71de99a3ccc57857/tiktoken-0.12.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:54c891b416a0e36b8e2045b12b33dd66fb34a4fe7965565f1b482da50da3e86a", size = 1194908, upload-time = "2025-10-06T20:22:32.073Z" },
     { url = "https://files.pythonhosted.org/packages/ab/0d/c1ad6f4016a3968c048545f5d9b8ffebf577774b2ede3e2e352553b685fe/tiktoken-0.12.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:5edb8743b88d5be814b1a8a8854494719080c28faaa1ccbef02e87354fe71ef0", size = 1253706, upload-time = "2025-10-06T20:22:33.385Z" },
     { url = "https://files.pythonhosted.org/packages/af/df/c7891ef9d2712ad774777271d39fdef63941ffba0a9d59b7ad1fd2765e57/tiktoken-0.12.0-cp314-cp314t-win_amd64.whl", hash = "sha256:f61c0aea5565ac82e2ec50a05e02a6c44734e91b51c10510b084ea1b8e633a71", size = 920667, upload-time = "2025-10-06T20:22:34.444Z" },
+]
+
+[[package]]
+name = "timeslot"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/ab/50226e1b98551c4d6af8a7764978dab67523ec6c34a38f228866bed4f1af/timeslot-0.1.2.tar.gz", hash = "sha256:a2ac998657e3f3b9ca928757b4906add2c05390c5fc14ed792bb9028d08547b1", size = 3156, upload-time = "2021-04-19T19:38:32.892Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/11/c38eaff640ce7a4b948591bdbddc9983dabcc3438de5a898202f66cca134/timeslot-0.1.2-py3-none-any.whl", hash = "sha256:2f8efaec7b0a4c1e56a92ec05533219332dd9d8b577539077664c233996911b5", size = 3143, upload-time = "2021-04-19T19:38:31.775Z" },
 ]
 
 [[package]]

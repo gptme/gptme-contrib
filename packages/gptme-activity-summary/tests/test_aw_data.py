@@ -1,6 +1,6 @@
 """Tests for aw_data.py — ActivityWatch integration."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -11,6 +11,7 @@ from gptme_activity_summary.aw_data import (
     fetch_aw_activity,
     format_aw_activity_for_prompt,
     _build_timeperiod,
+    _get_client,
 )
 
 
@@ -131,17 +132,17 @@ def test_aw_activity_total_hours():
 
 
 def test_build_timeperiod():
-    """Time period string is built correctly."""
-    tp = _build_timeperiod(date(2026, 2, 28), date(2026, 2, 28))
-    assert "2026-02-28" in tp
-    assert "2026-03-01" in tp  # exclusive end = next day
+    """Time period tuple is built correctly."""
+    start_dt, end_dt = _build_timeperiod(date(2026, 2, 28), date(2026, 2, 28))
+    assert start_dt == datetime(2026, 2, 28, 0, 0, 0, tzinfo=timezone.utc)
+    assert end_dt == datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)  # exclusive end = next day
 
 
 def test_build_timeperiod_multi_day():
     """Multi-day time period works correctly."""
-    tp = _build_timeperiod(date(2026, 2, 25), date(2026, 2, 28))
-    assert "2026-02-25" in tp
-    assert "2026-03-01" in tp  # exclusive end = day after end date
+    start_dt, end_dt = _build_timeperiod(date(2026, 2, 25), date(2026, 2, 28))
+    assert start_dt == datetime(2026, 2, 25, 0, 0, 0, tzinfo=timezone.utc)
+    assert end_dt == datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc)  # day after end date
 
 
 def test_browser_domain_dataclass():
@@ -149,3 +150,23 @@ def test_browser_domain_dataclass():
     d = BrowserDomain(domain="github.com", duration=3600)
     assert d.domain == "github.com"
     assert d.duration == 3600
+
+
+def test_get_client_returns_client():
+    """_get_client returns a client instance when aw-client is installed."""
+    client = _get_client()
+    assert client is not None
+
+
+def test_get_client_custom_server():
+    """_get_client parses custom AW_SERVER."""
+    from gptme_activity_summary import aw_data
+
+    original_server = aw_data.AW_SERVER
+    aw_data.AW_SERVER = "http://10.0.0.1:5601"
+
+    try:
+        client = _get_client()
+        assert client is not None
+    finally:
+        aw_data.AW_SERVER = original_server
