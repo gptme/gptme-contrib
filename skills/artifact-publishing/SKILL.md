@@ -8,9 +8,9 @@ compatibility: "Requires git and GitHub Pages or similar hosting"
 metadata:
   author: bob
   version: "1.0.0"
-  tags: "publishing,artifacts,html,demos,visualization,github-pages"
-  requires_tools: "git,gh"
-  requires_skills: ""
+  tags: [publishing, artifacts, html, demos, visualization, github-pages]
+  requires_tools: [git, gh]
+  requires_skills: []
 ---
 
 # Artifact Publishing

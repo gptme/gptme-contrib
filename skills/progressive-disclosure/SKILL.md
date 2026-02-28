@@ -6,9 +6,9 @@ compatibility: "Standalone, no special dependencies"
 metadata:
   author: bob
   version: "1.0.0"
-  tags: "documentation,context-optimization,token-efficiency,restructuring"
-  requires_tools: ""
-  requires_skills: ""
+  tags: [documentation, context-optimization, token-efficiency, restructuring]
+  requires_tools: []
+  requires_skills: []
 ---
 
 # Progressive Disclosure for Documentation

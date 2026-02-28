@@ -6,9 +6,9 @@ compatibility: "Requires gptme"
 metadata:
   author: bob
   version: "1.0.0"
-  tags: "onboarding,trust,user-experience,agent-setup,first-interaction"
-  requires_tools: ""
-  requires_skills: ""
+  tags: [onboarding, trust, user-experience, agent-setup, first-interaction]
+  requires_tools: []
+  requires_skills: []
 ---
 
 # Agent Onboarding Skill

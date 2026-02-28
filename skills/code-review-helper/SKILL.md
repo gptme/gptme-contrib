@@ -6,9 +6,9 @@ compatibility: "Standalone, no special dependencies"
 metadata:
   author: bob
   version: "1.0.0"
-  tags: "code-review,pull-requests,quality,patterns,feedback"
-  requires_tools: "git,gh"
-  requires_skills: ""
+  tags: [code-review, pull-requests, quality, patterns, feedback]
+  requires_tools: [git, gh]
+  requires_skills: []
 ---
 
 # Code Review Helper Skill
