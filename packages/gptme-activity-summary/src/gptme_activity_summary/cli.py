@@ -8,7 +8,7 @@ Usage:
     summarize smart [--date DATE]  # Daily job that auto-runs weekly/monthly when due
     summarize backfill [--from DATE] [--to DATE]
     summarize stats
-    summarize human [--date DATE] [--period PERIOD] [--github-user USER]
+    summarize human [--date DATE] [--github-user USER] [--raw]
 
 All summarization uses Claude Code backend for high-quality results.
 """

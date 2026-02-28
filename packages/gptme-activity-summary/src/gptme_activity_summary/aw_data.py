@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 from urllib.error import URLError
 from urllib.request import urlopen, Request
@@ -132,8 +132,6 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
     # AW timeperiods are ISO 8601 intervals: start/end (exclusive end)
     start_dt = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=timezone.utc)
     # Add one day to end to make it inclusive
-    from datetime import timedelta
-
     end_next = end + timedelta(days=1)
     end_dt = datetime(end_next.year, end_next.month, end_next.day, 0, 0, 0, tzinfo=timezone.utc)
     timeperiod = f"{start_dt.isoformat()}/{end_dt.isoformat()}"
