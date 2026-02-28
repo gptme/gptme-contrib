@@ -2,7 +2,7 @@
 name: code-review-helper
 description: Systematic code review workflows with bundled utilities for analyzing code quality, detecting patterns, and providing structured feedback. Use this skill when reviewing pull requests or conducting code audits.
 license: MIT
-compatibility: "Standalone, no special dependencies"
+compatibility: "Requires git and GitHub CLI (gh)"
 metadata:
   author: bob
   version: "1.0.0"
