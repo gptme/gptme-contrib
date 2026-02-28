@@ -1,6 +1,14 @@
 ---
 name: code-review-helper
 description: Systematic code review workflows with bundled utilities for analyzing code quality, detecting patterns, and providing structured feedback. Use this skill when reviewing pull requests or conducting code audits.
+license: MIT
+compatibility: "Standalone, no special dependencies"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags: "code-review,pull-requests,quality,patterns,feedback"
+  requires_tools: "git,gh"
+  requires_skills: ""
 ---
 
 # Code Review Helper Skill

@@ -3,6 +3,14 @@ name: artifact-publishing
 description: |
   Workflow for publishing HTML artifacts (demos, visualizations, interactive content) to the web.
   Enables agents to share work products publicly via GitHub Pages or similar hosting.
+license: MIT
+compatibility: "Requires git and GitHub Pages or similar hosting"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags: "publishing,artifacts,html,demos,visualization,github-pages"
+  requires_tools: "git,gh"
+  requires_skills: ""
 ---
 
 # Artifact Publishing
