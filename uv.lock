@@ -843,6 +843,7 @@ name = "gptme-activity-summary"
 version = "0.1.0"
 source = { editable = "packages/gptme-activity-summary" }
 dependencies = [
+    { name = "click" },
     { name = "gptme" },
 ]
 
@@ -859,6 +860,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },

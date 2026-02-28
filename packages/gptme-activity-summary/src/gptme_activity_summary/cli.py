@@ -1,22 +1,24 @@
 """
-CLI for journal summarization.
+CLI for activity summarization.
 
-Usage:
+Agent mode (journal-based, for AI agents):
     summarize daily [--date DATE]
     summarize weekly [--week WEEK]
     summarize monthly [--month MONTH]
     summarize smart [--date DATE]  # Daily job that auto-runs weekly/monthly when due
     summarize backfill [--from DATE] [--to DATE]
     summarize stats
-    summarize human [--date DATE] [--github-user USER] [--raw]
+
+Human mode (AW time tracking + optional GitHub, for end users):
+    summarize human [--date DATE] [--github-user USER] [--period daily|weekly|monthly] [--raw]
 
 All summarization uses Claude Code backend for high-quality results.
 """
 
-import argparse
 import json
-import sys
 from datetime import date, datetime, timedelta
+
+import click
 
 from .cc_session_data import fetch_cc_session_stats_range
 from .generator import (
@@ -179,7 +181,7 @@ def _build_extra_context(
     if activity_text:
         parts.append(activity_text)
         if verbose:
-            print(
+            click.echo(
                 f"  GitHub: {activity.total_commits} commits, {activity.total_prs_merged} PRs, {activity.total_issues_closed} issues"
             )
 
@@ -187,7 +189,7 @@ def _build_extra_context(
     if session_text:
         parts.append(session_text)
         if verbose:
-            print(
+            click.echo(
                 f"  Sessions: {session_stats.session_count}, tokens: {session_stats.total_tokens:,}"
             )
 
@@ -197,7 +199,7 @@ def _build_extra_context(
     if ws_text:
         parts.append(ws_text)
         if verbose:
-            print(
+            click.echo(
                 f"  Workspace: {len(ws_activity.tweets)} tweets, {len(ws_activity.emails)} emails"
             )
 
@@ -210,7 +212,7 @@ def _build_extra_context(
             domain_info = (
                 f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
             )
-            print(
+            click.echo(
                 f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active"
                 f", {len(aw_activity.top_apps)} apps{domain_info}"
             )
@@ -296,7 +298,7 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
 
     # Fetch data once, use for both prompt context and metrics
     if verbose:
-        print("Fetching real data sources...")
+        click.echo("Fetching real data sources...")
     activity, session_stats = _fetch_data(target_date, target_date)
     extra_context = _build_extra_context(
         target_date, target_date, activity, session_stats, verbose=verbose
@@ -350,39 +352,6 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
     )
 
 
-def cmd_daily(args):
-    """Generate daily summary."""
-    if args.date == "today":
-        target_date = date.today()
-    elif args.date == "yesterday":
-        target_date = date.today() - timedelta(days=1)
-    else:
-        target_date = date.fromisoformat(args.date)
-
-    entries = get_journal_entries_for_date(target_date)
-    if not entries:
-        print(f"No journal entries found for {target_date}")
-        return 1
-
-    print(f"Generating daily summary for {target_date} ({len(entries)} entries)...")
-
-    summary = generate_daily_with_cc(target_date, verbose=args.verbose)
-
-    if args.dry_run:
-        print("\n--- DRY RUN OUTPUT ---")
-        print(summary.to_markdown())
-        return 0
-
-    output_path = save_summary(summary)
-    print(f"Saved to {output_path}")
-
-    if args.verbose:
-        print("\n--- Summary ---")
-        print(summary.to_markdown())
-
-    return 0
-
-
 def generate_weekly_summary_cc(week: str, verbose: bool = False):
     """Generate weekly summary using Claude Code backend."""
     from .cc_backend import summarize_weekly_with_cc
@@ -418,7 +387,7 @@ def generate_weekly_summary_cc(week: str, verbose: bool = False):
 
     # Fetch data once, use for both prompt context and metrics
     if verbose:
-        print("Fetching real data sources...")
+        click.echo("Fetching real data sources...")
     activity, session_stats = _fetch_data(start_date, end_date)
     extra_context = _build_extra_context(
         start_date, end_date, activity, session_stats, verbose=verbose
@@ -499,36 +468,6 @@ def extract_single_from_md(content: str, section: str) -> str:
     return ""
 
 
-def cmd_weekly(args):
-    """Generate weekly summary."""
-    if args.week == "current":
-        today = date.today()
-        week = today.strftime("%G-W%V")
-    elif args.week == "last":
-        last_week = date.today() - timedelta(days=7)
-        week = last_week.strftime("%G-W%V")
-    else:
-        week = args.week
-
-    print(f"Generating weekly summary for {week}...")
-
-    summary = generate_weekly_summary_cc(week, verbose=args.verbose)
-
-    if args.dry_run:
-        print("\n--- DRY RUN OUTPUT ---")
-        print(summary.to_markdown())
-        return 0
-
-    output_path = save_summary(summary)
-    print(f"Saved to {output_path}")
-
-    if args.verbose:
-        print("\n--- Summary ---")
-        print(summary.to_markdown())
-
-    return 0
-
-
 def generate_monthly_summary_cc(month: str, verbose: bool = False):
     """Generate monthly summary using Claude Code backend."""
     from .cc_backend import summarize_monthly_with_cc
@@ -563,7 +502,7 @@ def generate_monthly_summary_cc(month: str, verbose: bool = False):
 
     # Fetch data once, use for both prompt context and metrics
     if verbose:
-        print("Fetching real data sources...")
+        click.echo("Fetching real data sources...")
     activity, session_stats = _fetch_data(first_day, last_day)
     extra_context = _build_extra_context(
         first_day, last_day, activity, session_stats, verbose=verbose
@@ -604,516 +543,466 @@ def generate_monthly_summary_cc(month: str, verbose: bool = False):
     )
 
 
-def cmd_monthly(args):
+def _parse_date_arg(date_str: str) -> date:
+    """Parse a date argument that can be 'today', 'yesterday', or YYYY-MM-DD."""
+    if date_str == "today":
+        return date.today()
+    elif date_str == "yesterday":
+        return date.today() - timedelta(days=1)
+    else:
+        return date.fromisoformat(date_str)
+
+
+@click.group()
+@click.option("-v", "--verbose", is_flag=True, help="Verbose output")
+@click.option("--dry-run", is_flag=True, help="Print output without saving")
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool, dry_run: bool) -> None:
+    """Activity summarization — journals, GitHub, sessions, tweets, email."""
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    ctx.obj["dry_run"] = dry_run
+
+
+@cli.command()
+@click.option(
+    "--date",
+    "date_str",
+    default="yesterday",
+    help="Date to summarize (YYYY-MM-DD, 'today', or 'yesterday')",
+)
+@click.pass_context
+def daily(ctx: click.Context, date_str: str) -> None:
+    """Generate daily summary."""
+    verbose = ctx.obj["verbose"]
+    dry_run = ctx.obj["dry_run"]
+    target_date = _parse_date_arg(date_str)
+
+    entries = get_journal_entries_for_date(target_date)
+    if not entries:
+        click.echo(f"No journal entries found for {target_date}")
+        ctx.exit(1)
+        return
+
+    click.echo(f"Generating daily summary for {target_date} ({len(entries)} entries)...")
+
+    summary = generate_daily_with_cc(target_date, verbose=verbose)
+
+    if dry_run:
+        click.echo("\n--- DRY RUN OUTPUT ---")
+        click.echo(summary.to_markdown())
+        return
+
+    output_path = save_summary(summary)
+    click.echo(f"Saved to {output_path}")
+
+    if verbose:
+        click.echo("\n--- Summary ---")
+        click.echo(summary.to_markdown())
+
+
+@cli.command()
+@click.option(
+    "--week",
+    default="last",
+    help="Week to summarize (YYYY-Www, 'current', or 'last')",
+)
+@click.pass_context
+def weekly(ctx: click.Context, week: str) -> None:
+    """Generate weekly summary."""
+    verbose = ctx.obj["verbose"]
+    dry_run = ctx.obj["dry_run"]
+
+    if week == "current":
+        today = date.today()
+        week = today.strftime("%G-W%V")
+    elif week == "last":
+        last_week = date.today() - timedelta(days=7)
+        week = last_week.strftime("%G-W%V")
+
+    click.echo(f"Generating weekly summary for {week}...")
+
+    summary = generate_weekly_summary_cc(week, verbose=verbose)
+
+    if dry_run:
+        click.echo("\n--- DRY RUN OUTPUT ---")
+        click.echo(summary.to_markdown())
+        return
+
+    output_path = save_summary(summary)
+    click.echo(f"Saved to {output_path}")
+
+    if verbose:
+        click.echo("\n--- Summary ---")
+        click.echo(summary.to_markdown())
+
+
+@cli.command()
+@click.option(
+    "--month",
+    default="last",
+    help="Month to summarize (YYYY-MM, 'current', or 'last')",
+)
+@click.pass_context
+def monthly(ctx: click.Context, month: str) -> None:
     """Generate monthly summary."""
-    if args.month == "current":
+    verbose = ctx.obj["verbose"]
+    dry_run = ctx.obj["dry_run"]
+
+    if month == "current":
         month = date.today().strftime("%Y-%m")
-    elif args.month == "last":
+    elif month == "last":
         first_of_month = date.today().replace(day=1)
         last_month = first_of_month - timedelta(days=1)
         month = last_month.strftime("%Y-%m")
-    else:
-        month = args.month
 
-    print(f"Generating monthly summary for {month}...")
+    click.echo(f"Generating monthly summary for {month}...")
 
-    summary = generate_monthly_summary_cc(month, verbose=args.verbose)
+    summary = generate_monthly_summary_cc(month, verbose=verbose)
 
-    if args.dry_run:
-        print("\n--- DRY RUN OUTPUT ---")
-        print(summary.to_markdown())
-        return 0
+    if dry_run:
+        click.echo("\n--- DRY RUN OUTPUT ---")
+        click.echo(summary.to_markdown())
+        return
 
     output_path = save_summary(summary)
-    print(f"Saved to {output_path}")
+    click.echo(f"Saved to {output_path}")
 
-    if args.verbose:
-        print("\n--- Summary ---")
-        print(summary.to_markdown())
-
-    return 0
+    if verbose:
+        click.echo("\n--- Summary ---")
+        click.echo(summary.to_markdown())
 
 
-def cmd_smart(args):
+@cli.command()
+@click.option(
+    "--date",
+    "date_str",
+    default="yesterday",
+    help="Date to process (YYYY-MM-DD, 'today', or 'yesterday')",
+)
+@click.pass_context
+def smart(ctx: click.Context, date_str: str) -> None:
+    """Smart summarization: daily + auto weekly/monthly when due.
+
+    Weekly summaries run on Mondays. Monthly summaries run on the 1st.
     """
-    Smart summarization: runs daily, and automatically runs weekly/monthly when due.
-
-    Weekly: Run on Mondays
-    Monthly: Run on the 1st of each month
-    """
-    if args.date == "today":
-        target_date = date.today()
-    elif args.date == "yesterday":
-        target_date = date.today() - timedelta(days=1)
-    else:
-        target_date = date.fromisoformat(args.date)
+    verbose = ctx.obj["verbose"]
+    dry_run = ctx.obj["dry_run"]
+    target_date = _parse_date_arg(date_str)
 
     results: list[tuple[str, bool | None]] = []
 
     # 1. Always run daily summarization
-    print(f"=== Daily Summary for {target_date} ===")
+    click.echo(f"=== Daily Summary for {target_date} ===")
     entries = get_journal_entries_for_date(target_date)
     if entries:
         try:
-            summary = generate_daily_with_cc(target_date, verbose=args.verbose)
-            if not args.dry_run:
+            summary = generate_daily_with_cc(target_date, verbose=verbose)
+            if not dry_run:
                 output_path = save_summary(summary)
-                print(f"Daily: Saved to {output_path}")
+                click.echo(f"Daily: Saved to {output_path}")
             else:
-                print("Daily: Would generate (dry run)")
+                click.echo("Daily: Would generate (dry run)")
             results.append(("daily", True))
         except Exception as e:
-            print(f"Daily: Failed - {e}")
+            click.echo(f"Daily: Failed - {e}")
             results.append(("daily", False))
     else:
-        print(f"Daily: No entries for {target_date}")
+        click.echo(f"Daily: No entries for {target_date}")
         results.append(("daily", None))
 
     # 2. Check if weekly summarization is due (Monday)
     if target_date.weekday() == 0:  # Monday
-        print("\n=== Weekly Summary (Monday) ===")
+        click.echo("\n=== Weekly Summary (Monday) ===")
         last_week = target_date - timedelta(days=7)
         week = last_week.strftime("%G-W%V")
         try:
-            summary = generate_weekly_summary_cc(week, verbose=args.verbose)
-            if not args.dry_run:
+            summary = generate_weekly_summary_cc(week, verbose=verbose)
+            if not dry_run:
                 output_path = save_summary(summary)
-                print(f"Weekly: Saved to {output_path}")
+                click.echo(f"Weekly: Saved to {output_path}")
             else:
-                print("Weekly: Would generate (dry run)")
+                click.echo("Weekly: Would generate (dry run)")
             results.append(("weekly", True))
         except Exception as e:
-            print(f"Weekly: Failed - {e}")
+            click.echo(f"Weekly: Failed - {e}")
             results.append(("weekly", False))
     else:
-        print("\nWeekly: Not due (not Monday)")
+        click.echo("\nWeekly: Not due (not Monday)")
 
     # 3. Check if monthly summarization is due (1st of month)
     if target_date.day == 1:
-        print("\n=== Monthly Summary (1st of month) ===")
+        click.echo("\n=== Monthly Summary (1st of month) ===")
         first_of_month = target_date.replace(day=1)
         last_month = first_of_month - timedelta(days=1)
         month = last_month.strftime("%Y-%m")
         try:
-            summary = generate_monthly_summary_cc(month, verbose=args.verbose)
-            if not args.dry_run:
+            summary = generate_monthly_summary_cc(month, verbose=verbose)
+            if not dry_run:
                 output_path = save_summary(summary)
-                print(f"Monthly: Saved to {output_path}")
+                click.echo(f"Monthly: Saved to {output_path}")
             else:
-                print("Monthly: Would generate (dry run)")
+                click.echo("Monthly: Would generate (dry run)")
             results.append(("monthly", True))
         except Exception as e:
-            print(f"Monthly: Failed - {e}")
+            click.echo(f"Monthly: Failed - {e}")
             results.append(("monthly", False))
     else:
-        print("\nMonthly: Not due (not 1st of month)")
+        click.echo("\nMonthly: Not due (not 1st of month)")
 
     # Summary
-    print("\n=== Summary ===")
+    click.echo("\n=== Summary ===")
     for name, success in results:
         if success is True:
-            print(f"  {name}: OK")
+            click.echo(f"  {name}: OK")
         elif success is False:
-            print(f"  {name}: FAILED")
+            click.echo(f"  {name}: FAILED")
         else:
-            print(f"  {name}: skipped")
-
-    return 0
+            click.echo(f"  {name}: skipped")
 
 
-def cmd_backfill(args):
+@cli.command()
+@click.option("--from", "from_date", required=True, help="Start date (YYYY-MM-DD)")
+@click.option("--to", "to_date", default=None, help="End date (YYYY-MM-DD, defaults to today)")
+@click.option("--force", is_flag=True, help="Overwrite existing summaries")
+@click.pass_context
+def backfill(ctx: click.Context, from_date: str, to_date: str | None, force: bool) -> None:
     """Backfill summaries for a date range."""
-    from_date = date.fromisoformat(args.from_date)
-    to_date = date.fromisoformat(args.to_date) if args.to_date else date.today()
+    verbose = ctx.obj["verbose"]
+    start = date.fromisoformat(from_date)
+    end = date.fromisoformat(to_date) if to_date else date.today()
 
-    print(f"Backfilling daily summaries from {from_date} to {to_date}...")
+    click.echo(f"Backfilling daily summaries from {start} to {end}...")
 
-    current = from_date
+    current = start
     generated = 0
     skipped = 0
     failed = 0
 
-    while current <= to_date:
+    while current <= end:
         entries = get_journal_entries_for_date(current)
         if entries:
             output_path = SUMMARIES_DIR / "daily" / f"{current.isoformat()}.md"
-            if output_path.exists() and not args.force:
-                if args.verbose:
-                    print(f"  Skipping {current} (already exists)")
+            if output_path.exists() and not force:
+                if verbose:
+                    click.echo(f"  Skipping {current} (already exists)")
                 skipped += 1
             else:
                 try:
-                    summary = generate_daily_with_cc(current, verbose=args.verbose)
+                    summary = generate_daily_with_cc(current, verbose=verbose)
                     save_summary(summary)
                     generated += 1
-                    if args.verbose:
-                        print(f"  Generated {current}")
+                    if verbose:
+                        click.echo(f"  Generated {current}")
                 except Exception as e:
-                    print(f"  Failed {current}: {e}")
+                    click.echo(f"  Failed {current}: {e}")
                     failed += 1
         current += timedelta(days=1)
 
-    print(f"\nBackfill complete: {generated} generated, {skipped} skipped, {failed} failed")
-    return 0
+    click.echo(f"\nBackfill complete: {generated} generated, {skipped} skipped, {failed} failed")
 
 
-def cmd_stats(args):
+@cli.command()
+def stats() -> None:
     """Show statistics about journal entries."""
-    print("Journal Statistics")
-    print("=" * 40)
+    click.echo("Journal Statistics")
+    click.echo("=" * 40)
 
     if not JOURNAL_DIR.exists():
-        print("Journal directory not found!")
-        return 1
+        click.echo("Journal directory not found!")
+        raise SystemExit(1)
 
     all_entries = list(JOURNAL_DIR.glob("*.md"))
-    print(f"Total entries: {len(all_entries)}")
+    click.echo(f"Total entries: {len(all_entries)}")
 
     # Count by date
+    import re
+
     dates: dict[str, int] = {}
     for entry in all_entries:
-        import re
-
         date_match = re.match(r"(\d{4}-\d{2}-\d{2})", entry.name)
         if date_match:
             d = date_match.group(1)
             dates[d] = dates.get(d, 0) + 1
 
-    print(f"Unique dates: {len(dates)}")
+    click.echo(f"Unique dates: {len(dates)}")
 
     if dates:
         first_date = min(dates.keys())
         last_date = max(dates.keys())
-        print(f"Date range: {first_date} to {last_date}")
+        click.echo(f"Date range: {first_date} to {last_date}")
 
         # Most active days
         top_days = sorted(dates.items(), key=lambda x: -x[1])[:5]
-        print("\nMost active days:")
+        click.echo("\nMost active days:")
         for d, count in top_days:
-            print(f"  {d}: {count} entries")
+            click.echo(f"  {d}: {count} entries")
 
     # Check existing summaries
-    print("\nExisting summaries:")
+    click.echo("\nExisting summaries:")
     for level in ["daily", "weekly", "monthly"]:
         summary_dir = SUMMARIES_DIR / level
         if summary_dir.exists():
             count = len(list(summary_dir.glob("*.md")))
-            print(f"  {level}: {count}")
+            click.echo(f"  {level}: {count}")
         else:
-            print(f"  {level}: 0")
-
-    return 0
+            click.echo(f"  {level}: 0")
 
 
-def cmd_human(args):
-    """Generate a daily summary for a human user (AW + optional GitHub)."""
-    # Parse date
-    if args.date == "today":
-        target_date = date.today()
-    elif args.date == "yesterday":
-        target_date = date.today() - timedelta(days=1)
-    else:
-        target_date = date.fromisoformat(args.date)
+@cli.command()
+@click.option(
+    "--date",
+    "date_str",
+    default="yesterday",
+    help="Reference date (YYYY-MM-DD, 'today', or 'yesterday')",
+)
+@click.option(
+    "--period",
+    type=click.Choice(["daily", "weekly", "monthly"]),
+    default="daily",
+    help="Time period to summarize (default: daily)",
+)
+@click.option(
+    "--github-user",
+    default=None,
+    help="GitHub username to include GitHub activity (optional)",
+)
+@click.option("--raw", is_flag=True, help="Print raw data without LLM summarization")
+@click.pass_context
+def human(
+    ctx: click.Context,
+    date_str: str,
+    period: str,
+    github_user: str | None,
+    raw: bool,
+) -> None:
+    """Summarize human activity using AW time tracking + optional GitHub."""
+    verbose = ctx.obj["verbose"]
+    ref_date = _parse_date_arg(date_str)
 
-    print(f"Generating human activity summary for {target_date.isoformat()}...")
+    # Calculate date range based on period
+    if period == "weekly":
+        end_date = ref_date
+        start_date = end_date - timedelta(days=6)
+        period_str = f"{start_date.isoformat()} to {end_date.isoformat()}"
+    elif period == "monthly":
+        end_date = ref_date
+        start_date = end_date.replace(day=1)
+        period_str = f"{start_date.isoformat()} to {end_date.isoformat()}"
+    else:  # daily
+        start_date = end_date = ref_date
+        period_str = ref_date.isoformat()
+
+    click.echo(f"Generating human activity summary for {period_str}...")
 
     parts: list[str] = []
 
-    # ActivityWatch time tracking (primary source for humans)
-    aw_activity = fetch_aw_activity(target_date, target_date)
+    # ActivityWatch time tracking (primary source, most useful for daily)
+    aw_activity = fetch_aw_activity(start_date, end_date)
     aw_text = format_aw_activity_for_prompt(aw_activity)
     if aw_text:
         parts.append(aw_text)
-        if args.verbose:
+        if verbose:
             domain_info = (
                 f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
             )
-            print(
+            click.echo(
                 f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, "
                 f"{len(aw_activity.top_apps)} apps{domain_info}"
             )
     elif not aw_activity.available:
-        print("  Note: ActivityWatch server not reachable — no time tracking data")
+        click.echo("  Note: ActivityWatch server not reachable — no time tracking data")
 
-    # GitHub activity (optional, for developers)
-    if args.github_user:
+    # GitHub activity (optional, primary for weekly/monthly when AW unavailable)
+    if github_user:
         from .github_data import fetch_user_activity, format_activity_for_prompt as fmt_gh
 
-        gh_activity = fetch_user_activity(target_date, target_date, args.github_user)
+        gh_activity = fetch_user_activity(start_date, end_date, github_user)
         gh_text = fmt_gh(gh_activity)
         if gh_text:
             parts.append(gh_text)
-            if args.verbose:
-                print(
+            if verbose:
+                click.echo(
                     f"  GitHub: {gh_activity.total_commits} commits, "
                     f"{gh_activity.total_prs_merged} PRs, "
                     f"{gh_activity.total_issues_closed} issues"
                 )
 
     if not parts:
-        print("No activity data found for this date.")
-        return 0
+        click.echo("No activity data found for this period.")
+        return
 
     combined_context = "\n".join(parts)
 
-    if args.raw:
-        print(f"\n{combined_context}")
-        return 0
+    if raw:
+        click.echo(f"\n{combined_context}")
+        return
 
     # Generate LLM summary
-    from .cc_backend import summarize_human_day_with_cc
+    if github_user and period != "daily":
+        from .cc_backend import summarize_github_activity_with_cc
 
-    username = args.github_user or "user"
-    print("Generating summary with Claude Code...")
-    result = summarize_human_day_with_cc(combined_context, username, target_date.isoformat())
+        click.echo("Generating summary with Claude Code...")
+        result = summarize_github_activity_with_cc(combined_context, github_user, period_str)
 
-    print(f"\n## Daily Summary: {target_date.isoformat()}")
-    if args.github_user:
-        print(f"**GitHub**: @{args.github_user}\n")
+        click.echo(f"\n## Activity Summary: @{github_user}")
+        click.echo(f"**Period**: {period_str}\n")
+    else:
+        from .cc_backend import summarize_human_day_with_cc
+
+        username = github_user or "user"
+        click.echo("Generating summary with Claude Code...")
+        result = summarize_human_day_with_cc(combined_context, username, period_str)
+
+        click.echo(f"\n## Daily Summary: {period_str}")
+        if github_user:
+            click.echo(f"**GitHub**: @{github_user}\n")
 
     if result.get("narrative"):
-        print(result["narrative"])
-        print()
+        click.echo(result["narrative"])
+        click.echo()
 
     if result.get("highlights"):
-        print("### Highlights")
+        click.echo("### Highlights")
         for h in result["highlights"]:
-            print(f"- {h}")
-        print()
+            click.echo(f"- {h}")
+        click.echo()
 
     if result.get("time_breakdown"):
-        print("### Time Breakdown")
+        click.echo("### Time Breakdown")
         for entry in result["time_breakdown"]:
-            print(f"- {entry}")
-        print()
-
-    return 0
-
-
-def cmd_github(args):
-    """Generate activity summary for a GitHub user (human mode)."""
-    from .cc_backend import summarize_github_activity_with_cc
-    from .github_data import fetch_user_activity, format_activity_for_prompt
-
-    username = args.user
-
-    # Parse period
-    if args.period == "daily":
-        if args.date == "today":
-            target_date = date.today()
-        elif args.date == "yesterday":
-            target_date = date.today() - timedelta(days=1)
-        else:
-            target_date = date.fromisoformat(args.date)
-        start = target_date
-        end = target_date
-        period_str = target_date.isoformat()
-    elif args.period == "weekly":
-        end = date.today() if args.date == "today" else date.today() - timedelta(days=1)
-        start = end - timedelta(days=6)
-        period_str = f"{start.isoformat()} to {end.isoformat()}"
-    elif args.period == "monthly":
-        end = date.today() if args.date == "today" else date.today() - timedelta(days=1)
-        start = end.replace(day=1)
-        period_str = f"{start.isoformat()} to {end.isoformat()}"
-    else:
-        print(f"Unknown period: {args.period}")
-        return 1
-
-    print(f"Fetching GitHub activity for @{username} ({period_str})...")
-
-    # Fetch GitHub activity for this user
-    activity = fetch_user_activity(start, end, username)
-
-    if args.verbose:
-        print(
-            f"  Found: {activity.total_commits} commits, "
-            f"{activity.total_prs_merged} PRs, "
-            f"{activity.total_issues_closed} issues, "
-            f"{len(activity.repos)} repos"
-        )
-
-    github_text = format_activity_for_prompt(activity)
-
-    if not github_text:
-        print(f"No GitHub activity found for @{username} in this period.")
-        return 0
-
-    if args.raw:
-        # Just print the raw GitHub data without LLM summarization
-        print(f"\n{github_text}")
-        return 0
-
-    print("Generating summary with Claude Code...")
-    result = summarize_github_activity_with_cc(github_text, username, period_str)
-
-    # Format output
-    print(f"\n## GitHub Activity Summary: @{username}")
-    print(f"**Period**: {period_str}\n")
-
-    if result.get("narrative"):
-        print(result["narrative"])
-        print()
-
-    if result.get("highlights"):
-        print("### Highlights")
-        for h in result["highlights"]:
-            print(f"- {h}")
-        print()
+            click.echo(f"- {entry}")
+        click.echo()
 
     if result.get("projects_active"):
-        print("### Active Projects")
+        click.echo("### Active Projects")
         for p in result["projects_active"]:
             desc = p.get("description", "")
             repo = p.get("repo", "")
             prs = p.get("prs", 0)
             issues = p.get("issues", 0)
-            print(f"- **{repo}**: {desc} ({prs} PRs, {issues} issues)")
-        print()
+            click.echo(f"- **{repo}**: {desc} ({prs} PRs, {issues} issues)")
+        click.echo()
 
     if result.get("themes"):
-        print("### Themes")
+        click.echo("### Themes")
         for t in result["themes"]:
-            print(f"- {t}")
-        print()
+            click.echo(f"- {t}")
+        click.echo()
 
     stats = result.get("stats", {})
     if stats:
-        print("### Stats")
-        print(f"- Commits: {stats.get('total_commits', 0)}")
-        print(f"- PRs: {stats.get('total_prs', 0)}")
-        print(f"- Issues: {stats.get('total_issues', 0)}")
-        print(f"- Repos active: {stats.get('repos_active', 0)}")
-
-    return 0
+        click.echo("### Stats")
+        click.echo(f"- Commits: {stats.get('total_commits', 0)}")
+        click.echo(f"- PRs: {stats.get('total_prs', 0)}")
+        click.echo(f"- Issues: {stats.get('total_issues', 0)}")
+        click.echo(f"- Repos active: {stats.get('repos_active', 0)}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Activity summarization — journals, GitHub, sessions, tweets, email",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--dry-run", action="store_true", help="Print output without saving")
-
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
-
-    # daily command
-    daily_parser = subparsers.add_parser("daily", help="Generate daily summary")
-    daily_parser.add_argument(
-        "--date",
-        default="yesterday",
-        help="Date to summarize (YYYY-MM-DD, 'today', or 'yesterday')",
-    )
-
-    # weekly command
-    weekly_parser = subparsers.add_parser("weekly", help="Generate weekly summary")
-    weekly_parser.add_argument(
-        "--week",
-        default="last",
-        help="Week to summarize (YYYY-Www, 'current', or 'last')",
-    )
-
-    # monthly command
-    monthly_parser = subparsers.add_parser("monthly", help="Generate monthly summary")
-    monthly_parser.add_argument(
-        "--month",
-        default="last",
-        help="Month to summarize (YYYY-MM, 'current', or 'last')",
-    )
-
-    # smart command (new)
-    smart_parser = subparsers.add_parser(
-        "smart", help="Smart summarization: daily + auto weekly/monthly when due"
-    )
-    smart_parser.add_argument(
-        "--date",
-        default="yesterday",
-        help="Date to process (YYYY-MM-DD, 'today', or 'yesterday')",
-    )
-
-    # backfill command
-    backfill_parser = subparsers.add_parser("backfill", help="Backfill summaries")
-    backfill_parser.add_argument(
-        "--from", dest="from_date", required=True, help="Start date (YYYY-MM-DD)"
-    )
-    backfill_parser.add_argument(
-        "--to", dest="to_date", help="End date (YYYY-MM-DD, defaults to today)"
-    )
-    backfill_parser.add_argument(
-        "--force", action="store_true", help="Overwrite existing summaries"
-    )
-
-    # stats command
-    subparsers.add_parser("stats", help="Show journal statistics")
-
-    # human command (multi-source: AW + optional GitHub)
-    human_parser = subparsers.add_parser(
-        "human",
-        help="Summarize a human's day using AW time tracking + optional GitHub activity",
-    )
-    human_parser.add_argument(
-        "--date",
-        default="yesterday",
-        help="Date to summarize (YYYY-MM-DD, 'today', or 'yesterday')",
-    )
-    human_parser.add_argument(
-        "--github-user",
-        default=None,
-        help="GitHub username to include GitHub activity (optional)",
-    )
-    human_parser.add_argument(
-        "--raw",
-        action="store_true",
-        help="Print raw data without LLM summarization",
-    )
-
-    # github command (GitHub-only human mode)
-    github_parser = subparsers.add_parser(
-        "github",
-        help="Summarize GitHub activity for any user (no journal needed)",
-    )
-    github_parser.add_argument(
-        "--user",
-        required=True,
-        help="GitHub username to summarize activity for",
-    )
-    github_parser.add_argument(
-        "--period",
-        default="weekly",
-        choices=["daily", "weekly", "monthly"],
-        help="Time period to summarize (default: weekly)",
-    )
-    github_parser.add_argument(
-        "--date",
-        default="today",
-        help="Reference date (YYYY-MM-DD or 'today'/'yesterday'). Period is calculated relative to this.",
-    )
-    github_parser.add_argument(
-        "--raw",
-        action="store_true",
-        help="Print raw GitHub data without LLM summarization",
-    )
-
-    args = parser.parse_args()
-
-    if not args.command:
-        parser.print_help()
-        return 1
-
-    commands = {
-        "daily": cmd_daily,
-        "weekly": cmd_weekly,
-        "monthly": cmd_monthly,
-        "smart": cmd_smart,
-        "backfill": cmd_backfill,
-        "stats": cmd_stats,
-        "human": cmd_human,
-        "github": cmd_github,
-    }
-
-    return commands[args.command](args)
+def main() -> None:
+    """Entry point for the CLI."""
+    cli()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
