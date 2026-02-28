@@ -7,8 +7,10 @@ import pytest
 from gptme_activity_summary.aw_data import (
     AppUsage,
     AWActivity,
+    BrowserDomain,
     fetch_aw_activity,
     format_aw_activity_for_prompt,
+    _build_timeperiod,
 )
 
 
@@ -64,28 +66,58 @@ def test_format_aw_activity_percentages():
     assert "25%" in text
 
 
+def test_format_aw_activity_with_domains():
+    """Activity with browser domains includes websites section."""
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=7200,
+        top_apps=[
+            AppUsage(app="Firefox", duration=5400),
+            AppUsage(app="Terminal", duration=1800),
+        ],
+        top_domains=[
+            BrowserDomain(domain="github.com", duration=3600),
+            BrowserDomain(domain="docs.python.org", duration=1800),
+        ],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Top Websites" in text
+    assert "github.com" in text
+    assert "docs.python.org" in text
+
+
+def test_format_aw_activity_domain_minutes():
+    """Short domain durations are formatted as minutes, not hours."""
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=3600,
+        top_apps=[AppUsage(app="Firefox", duration=3600)],
+        top_domains=[
+            BrowserDomain(domain="short-visit.com", duration=120),  # 2 minutes
+        ],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "2min" in text
+
+
 def test_fetch_aw_activity_returns_unavailable_when_no_server():
     """fetch_aw_activity returns empty activity if AW server not running."""
-    import os
+    from gptme_activity_summary import aw_data
 
-    # Point to a port that definitely has nothing running
-    original_server = os.environ.get("AW_SERVER")
-    os.environ["AW_SERVER"] = "http://localhost:59999"
+    original_server = aw_data.AW_SERVER
+    aw_data.AW_SERVER = "http://localhost:59999"
 
     try:
-        from gptme_activity_summary import aw_data
-
-        aw_data.AW_SERVER = "http://localhost:59999"
         activity = fetch_aw_activity(date.today(), date.today())
         assert not activity.available
         assert activity.top_apps == []
         assert activity.total_active_seconds == 0.0
     finally:
-        aw_data.AW_SERVER = original_server or "http://localhost:5600"
-        if original_server is not None:
-            os.environ["AW_SERVER"] = original_server
-        elif "AW_SERVER" in os.environ:
-            del os.environ["AW_SERVER"]
+        aw_data.AW_SERVER = original_server
 
 
 def test_aw_activity_total_hours():
@@ -96,3 +128,24 @@ def test_aw_activity_total_hours():
         total_active_seconds=5400,  # 1.5 hours
     )
     assert activity.total_active_hours == pytest.approx(1.5)
+
+
+def test_build_timeperiod():
+    """Time period string is built correctly."""
+    tp = _build_timeperiod(date(2026, 2, 28), date(2026, 2, 28))
+    assert "2026-02-28" in tp
+    assert "2026-03-01" in tp  # exclusive end = next day
+
+
+def test_build_timeperiod_multi_day():
+    """Multi-day time period works correctly."""
+    tp = _build_timeperiod(date(2026, 2, 25), date(2026, 2, 28))
+    assert "2026-02-25" in tp
+    assert "2026-03-01" in tp  # exclusive end = day after end date
+
+
+def test_browser_domain_dataclass():
+    """BrowserDomain dataclass works correctly."""
+    d = BrowserDomain(domain="github.com", duration=3600)
+    assert d.domain == "github.com"
+    assert d.duration == 3600

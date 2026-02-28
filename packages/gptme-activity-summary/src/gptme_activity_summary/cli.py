@@ -207,8 +207,12 @@ def _build_extra_context(
     if aw_text:
         parts.append(aw_text)
         if verbose:
+            domain_info = (
+                f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
+            )
             print(
-                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, {len(aw_activity.top_apps)} apps"
+                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active"
+                f", {len(aw_activity.top_apps)} apps{domain_info}"
             )
 
     return "\n".join(parts)
@@ -821,9 +825,12 @@ def cmd_human(args):
     if aw_text:
         parts.append(aw_text)
         if args.verbose:
+            domain_info = (
+                f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
+            )
             print(
                 f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, "
-                f"{len(aw_activity.top_apps)} apps"
+                f"{len(aw_activity.top_apps)} apps{domain_info}"
             )
     elif not aw_activity.available:
         print("  Note: ActivityWatch server not reachable — no time tracking data")
