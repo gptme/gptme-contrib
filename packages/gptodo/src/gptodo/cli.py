@@ -112,6 +112,7 @@ from gptodo.utils import (
     fetch_linear_issue_state,
     fetch_url_state,
     # Core utilities
+    check_links,
     find_repo_root,
     get_blocking_reasons,
     # Cache
@@ -916,9 +917,15 @@ def check(fix: bool, task_files: list[str]):
         if has_cycle(task.id, set(), set()):
             cycle_issues.append(f"Circular dependency detected involving task {task.id}")
 
-    # TODO: Implement link checking
-    # for task in tasks:
-    #     check_links(task)
+    # Check for broken links in task content
+    link_issues: list[str] = []
+    for task in tasks_to_validate:
+        try:
+            post = frontmatter.load(task.path)
+            broken = check_links(post.content, task.path, repo_root)
+            link_issues.extend(f"{task.id}: {b}" for b in broken)
+        except Exception as e:
+            link_issues.append(f"{task.id}: Error reading file: {e}")
 
     # Report results by category
     has_issues = False
@@ -941,6 +948,12 @@ def check(fix: bool, task_files: list[str]):
         for issue in cycle_issues:
             console.print(f"  • {issue}")
 
+    if link_issues:
+        has_issues = True
+        console.print("\n[bold red]Broken Links:[/]")
+        for issue in link_issues:
+            console.print(f"  • {issue}")
+
     if has_issues:
         if fix:
             console.print("\n[yellow]Auto-fix not implemented yet[/]")
@@ -949,6 +962,7 @@ def check(fix: bool, task_files: list[str]):
             console.print("  • Fix invalid state values")
             console.print("  • Update or remove invalid dependencies")
             console.print("  • Break circular dependencies")
+            console.print("  • Fix or remove broken links")
         sys.exit(1)
     else:
         total = len(tasks_to_validate)

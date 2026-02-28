@@ -459,6 +459,42 @@ def has_new_activity(updated_at: str | None, waiting_since: str | date | None) -
         return False
 
 
+def check_links(content: str, task_path: Path, repo_root: Path) -> List[str]:
+    """Check markdown links in task content for broken file references.
+
+    Validates relative file paths referenced in markdown links.
+    Skips URLs (http/https), anchors (#), and mailto links.
+
+    Args:
+        content: Markdown content of the task
+        task_path: Path to the task file (for resolving relative links)
+        repo_root: Repository root path (for resolving repo-relative links)
+
+    Returns:
+        List of broken link descriptions
+    """
+    broken: List[str] = []
+    # Match markdown links: [text](path) — but not images ![...](...)
+    link_pattern = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)")
+    for match in link_pattern.finditer(content):
+        text, target = match.group(1), match.group(2)
+        # Skip URLs, anchors, and mailto
+        if target.startswith(("http://", "https://", "#", "mailto:")):
+            continue
+        # Strip anchor fragments from file paths (e.g., path/to/file.md#section)
+        file_target = target.split("#")[0]
+        if not file_target:
+            continue
+        # Resolve relative to task file's parent directory
+        resolved = (task_path.parent / file_target).resolve()
+        if not resolved.exists():
+            # Also try relative to repo root
+            resolved_from_root = (repo_root / file_target).resolve()
+            if not resolved_from_root.exists():
+                broken.append(f"Broken link: [{text}]({target})")
+    return broken
+
+
 def count_subtasks(content: str) -> SubtaskCount:
     """Count completed and total subtasks in markdown content.
 
