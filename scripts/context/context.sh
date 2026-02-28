@@ -18,11 +18,13 @@ export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Default AGENT_DIR: use git toplevel if available, else resolve from $0 (symlink-safe)
+# Find agent root via shared helper (walks up from $PWD to find gptme.toml)
 if [ -n "${1:-}" ]; then
     AGENT_DIR="$1"
 else
-    AGENT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+    # shellcheck source=scripts/context/find-agent-root.sh
+    . "$SCRIPT_DIR/find-agent-root.sh"
+    AGENT_DIR="$(find_agent_root)"
 fi
 
 echo "# Context Summary"

@@ -16,20 +16,14 @@ if [ -n "${1:-}" ]; then
 elif [ -n "${WORKSPACE:-}" ]; then
     : # Use existing WORKSPACE
 else
-    # Walk up from CWD to find gptme.toml (agent root, not gptme-contrib root)
-    _dir="$PWD"
-    while [ "$_dir" != "/" ]; do
-        if [ -f "$_dir/gptme.toml" ]; then
-            WORKSPACE="$_dir"
-            break
-        fi
-        _dir="$(dirname "$_dir")"
-    done
-    if [ -z "${WORKSPACE:-}" ]; then
+    # Find agent root (directory with gptme.toml) via shared helper
+    # shellcheck source=scripts/context/find-agent-root.sh
+    . "$(dirname "$0")/find-agent-root.sh"
+    WORKSPACE="$(find_agent_root)" || {
         echo "Error: Could not find gptme.toml in any parent directory of $PWD" >&2
         echo "Run from your agent workspace directory, or pass WORKSPACE=/path/to/agent" >&2
         exit 1
-    fi
+    }
 fi
 
 # --- Read gptme.toml config ---
