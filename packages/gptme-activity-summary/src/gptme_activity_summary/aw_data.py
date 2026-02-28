@@ -11,6 +11,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from typing import Any, cast
 from urllib.error import URLError
 from urllib.request import urlopen, Request
 
@@ -56,7 +57,7 @@ def _aw_request(path: str, method: str = "GET", body: dict | None = None) -> dic
         data = json.dumps(body).encode() if body else None
         req = Request(url, data=data, headers=headers, method=method)
         with urlopen(req, timeout=AW_TIMEOUT) as resp:
-            return json.loads(resp.read().decode())
+            return cast("dict[Any, Any] | list[Any]", json.loads(resp.read().decode()))
     except URLError as e:
         logger.debug("AW server not reachable: %s", e)
         return None
@@ -77,8 +78,8 @@ def _get_window_bucket() -> str | None:
     if not isinstance(buckets, dict):
         return None
     for bucket_id in buckets:
-        if bucket_id.startswith("aw-watcher-window_"):
-            return bucket_id
+        if str(bucket_id).startswith("aw-watcher-window_"):
+            return str(bucket_id)
     return None
 
 
@@ -98,7 +99,7 @@ def _run_aw_query(query: list[str], timeperiod: str) -> list | None:
     }
     result = _aw_request("/api/0/query/", method="POST", body=body)
     if isinstance(result, list) and result:
-        return result[0]  # First (only) timeperiod result
+        return cast("list[Any]", result[0])  # First (only) timeperiod result
     return None
 
 
