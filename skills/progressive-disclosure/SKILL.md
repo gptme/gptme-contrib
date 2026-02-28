@@ -1,6 +1,14 @@
 ---
 name: progressive-disclosure
 description: Template and guide for restructuring large documentation files into token-efficient directory structures. Reduces context bloat by 40-60% while maintaining accessibility.
+license: MIT
+compatibility: "Standalone, no special dependencies"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags: [documentation, context-optimization, token-efficiency, restructuring]
+  requires_tools: []
+  requires_skills: []
 ---
 
 # Progressive Disclosure for Documentation

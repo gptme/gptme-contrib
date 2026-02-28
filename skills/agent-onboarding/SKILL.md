@@ -1,7 +1,14 @@
 ---
 name: agent-onboarding
 description: Comprehensive framework for effective gptme agent onboarding that builds user trust, communicates capabilities clearly, and establishes productive working relationships from the first interaction.
-status: active
+license: MIT
+compatibility: "Requires gptme"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags: [onboarding, trust, user-experience, agent-setup, first-interaction]
+  requires_tools: []
+  requires_skills: []
 ---
 
 # Agent Onboarding Skill
