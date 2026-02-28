@@ -18,7 +18,12 @@ export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="${1:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+# Default AGENT_DIR: use git toplevel if available, else resolve from $0 (symlink-safe)
+if [ -n "${1:-}" ]; then
+    AGENT_DIR="$1"
+else
+    AGENT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+fi
 
 # Ensure component scripts are executable
 chmod +x "$SCRIPT_DIR"/context-*.sh

@@ -11,7 +11,13 @@
 
 set -euo pipefail
 
-WORKSPACE="${1:-${WORKSPACE:-$(cd "$(dirname "$0")/../.." && pwd)}}"
+if [ -n "${1:-}" ]; then
+    WORKSPACE="$1"
+elif [ -n "${WORKSPACE:-}" ]; then
+    : # Use existing WORKSPACE
+else
+    WORKSPACE="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+fi
 
 # --- Read gptme.toml config ---
 read_toml_config() {

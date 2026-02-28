@@ -54,7 +54,7 @@ Each script accepts an optional `AGENT_DIR` argument:
 ./scripts/context/context-git.sh /path/to/agent
 ```
 
-If not provided, they default to two levels up from the script's location (i.e., the repo root when scripts are at `gptme-contrib/scripts/context/`).
+If not provided, they default to `git rev-parse --show-toplevel` (the repo root). This makes them safe to call via symlink from any location within a git repo.
 
 ## Design
 

@@ -11,7 +11,11 @@
 
 set -e
 
-AGENT_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+if [ -n "${1:-}" ]; then
+    AGENT_DIR="$1"
+else
+    AGENT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+fi
 pushd "$AGENT_DIR" > /dev/null
 
 if [ ! -d journal ]; then
