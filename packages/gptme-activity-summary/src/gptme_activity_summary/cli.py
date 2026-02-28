@@ -8,6 +8,7 @@ Usage:
     summarize smart [--date DATE]  # Daily job that auto-runs weekly/monthly when due
     summarize backfill [--from DATE] [--to DATE]
     summarize stats
+    summarize human [--date DATE] [--period PERIOD] [--github-user USER]
 
 All summarization uses Claude Code backend for high-quality results.
 """
@@ -44,6 +45,10 @@ from .session_data import (
     fetch_session_stats_range,
     format_sessions_for_prompt,
     merge_session_stats,
+)
+from .aw_data import (
+    fetch_aw_activity,
+    format_aw_activity_for_prompt,
 )
 from .workspace_data import (
     fetch_workspace_activity,
@@ -166,6 +171,7 @@ def _build_extra_context(
     - GitHub activity (commits, PRs, issues via gh CLI)
     - gptme session stats (models, tokens, cost from log files)
     - Workspace activity (posted tweets, sent emails from workspace dirs)
+    - ActivityWatch time tracking (if AW server is running)
     """
     parts: list[str] = []
 
@@ -193,6 +199,16 @@ def _build_extra_context(
         if verbose:
             print(
                 f"  Workspace: {len(ws_activity.tweets)} tweets, {len(ws_activity.emails)} emails"
+            )
+
+    # Fetch ActivityWatch time tracking data (optional, graceful fallback)
+    aw_activity = fetch_aw_activity(start, end)
+    aw_text = format_aw_activity_for_prompt(aw_activity)
+    if aw_text:
+        parts.append(aw_text)
+        if verbose:
+            print(
+                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, {len(aw_activity.top_apps)} apps"
             )
 
     return "\n".join(parts)
@@ -785,6 +801,88 @@ def cmd_stats(args):
     return 0
 
 
+def cmd_human(args):
+    """Generate a daily summary for a human user (AW + optional GitHub)."""
+    # Parse date
+    if args.date == "today":
+        target_date = date.today()
+    elif args.date == "yesterday":
+        target_date = date.today() - timedelta(days=1)
+    else:
+        target_date = date.fromisoformat(args.date)
+
+    print(f"Generating human activity summary for {target_date.isoformat()}...")
+
+    parts: list[str] = []
+
+    # ActivityWatch time tracking (primary source for humans)
+    aw_activity = fetch_aw_activity(target_date, target_date)
+    aw_text = format_aw_activity_for_prompt(aw_activity)
+    if aw_text:
+        parts.append(aw_text)
+        if args.verbose:
+            print(
+                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, "
+                f"{len(aw_activity.top_apps)} apps"
+            )
+    elif not aw_activity.available:
+        print("  Note: ActivityWatch server not reachable — no time tracking data")
+
+    # GitHub activity (optional, for developers)
+    if args.github_user:
+        from .github_data import fetch_user_activity, format_activity_for_prompt as fmt_gh
+
+        gh_activity = fetch_user_activity(target_date, target_date, args.github_user)
+        gh_text = fmt_gh(gh_activity)
+        if gh_text:
+            parts.append(gh_text)
+            if args.verbose:
+                print(
+                    f"  GitHub: {gh_activity.total_commits} commits, "
+                    f"{gh_activity.total_prs_merged} PRs, "
+                    f"{gh_activity.total_issues_closed} issues"
+                )
+
+    if not parts:
+        print("No activity data found for this date.")
+        return 0
+
+    combined_context = "\n".join(parts)
+
+    if args.raw:
+        print(f"\n{combined_context}")
+        return 0
+
+    # Generate LLM summary
+    from .cc_backend import summarize_human_day_with_cc
+
+    username = args.github_user or "user"
+    print("Generating summary with Claude Code...")
+    result = summarize_human_day_with_cc(combined_context, username, target_date.isoformat())
+
+    print(f"\n## Daily Summary: {target_date.isoformat()}")
+    if args.github_user:
+        print(f"**GitHub**: @{args.github_user}\n")
+
+    if result.get("narrative"):
+        print(result["narrative"])
+        print()
+
+    if result.get("highlights"):
+        print("### Highlights")
+        for h in result["highlights"]:
+            print(f"- {h}")
+        print()
+
+    if result.get("time_breakdown"):
+        print("### Time Breakdown")
+        for entry in result["time_breakdown"]:
+            print(f"- {entry}")
+        print()
+
+    return 0
+
+
 def cmd_github(args):
     """Generate activity summary for a GitHub user (human mode)."""
     from .cc_backend import summarize_github_activity_with_cc
@@ -942,7 +1040,28 @@ def main():
     # stats command
     subparsers.add_parser("stats", help="Show journal statistics")
 
-    # github command (human mode)
+    # human command (multi-source: AW + optional GitHub)
+    human_parser = subparsers.add_parser(
+        "human",
+        help="Summarize a human's day using AW time tracking + optional GitHub activity",
+    )
+    human_parser.add_argument(
+        "--date",
+        default="yesterday",
+        help="Date to summarize (YYYY-MM-DD, 'today', or 'yesterday')",
+    )
+    human_parser.add_argument(
+        "--github-user",
+        default=None,
+        help="GitHub username to include GitHub activity (optional)",
+    )
+    human_parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Print raw data without LLM summarization",
+    )
+
+    # github command (GitHub-only human mode)
     github_parser = subparsers.add_parser(
         "github",
         help="Summarize GitHub activity for any user (no journal needed)",
@@ -982,6 +1101,7 @@ def main():
         "smart": cmd_smart,
         "backfill": cmd_backfill,
         "stats": cmd_stats,
+        "human": cmd_human,
         "github": cmd_github,
     }
 

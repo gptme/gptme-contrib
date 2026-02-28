@@ -446,6 +446,61 @@ Return ONLY the JSON."""
     return result
 
 
+def summarize_human_day_with_cc(
+    context: str,
+    username: str,
+    day: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """
+    Summarize a human's day using multi-source context (AW + GitHub).
+
+    Args:
+        context: Combined context string (AW time tracking + GitHub activity)
+        username: Username or display name for the person
+        day: Date string (YYYY-MM-DD)
+        timeout: Maximum time to wait for response
+
+    Returns:
+        Dictionary with structured daily summary
+    """
+    prompt = f"""Analyze this activity data for {username} on {day} and create a daily summary.
+
+{context}
+
+Return ONLY valid JSON (no explanation) with this structure:
+{{
+    "narrative": "2-3 sentence summary of what {username} worked on today",
+    "highlights": ["top 3-5 most notable activities or achievements"],
+    "time_breakdown": ["Category: Xh (description)", ...],
+    "themes": ["main focus areas or themes for the day"]
+}}
+
+Guidelines:
+- Focus on what the person worked on and accomplished
+- For time tracking data, identify categories (coding, communication, browsing, etc.)
+- Keep the narrative concise and human-readable
+- If both time tracking and GitHub data are present, synthesize them together
+
+Return ONLY the JSON."""
+
+    response = call_claude_code(prompt, timeout=timeout)
+    result = extract_json_from_response(response)
+
+    defaults: dict[str, Any] = {
+        "narrative": "",
+        "highlights": [],
+        "time_breakdown": [],
+        "themes": [],
+    }
+
+    for key, default in defaults.items():
+        if key not in result:
+            result[key] = default
+
+    return result
+
+
 def summarize_monthly_with_cc(
     weekly_summaries: list[dict[str, Any]],
     month: str,
