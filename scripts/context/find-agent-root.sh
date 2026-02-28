@@ -14,14 +14,27 @@
 
 find_agent_root() {
     local dir="${1:-$PWD}"
+    local fallback=""
     while [ "$dir" != "/" ]; do
         if [ -f "$dir/gptme.toml" ]; then
-            echo "$dir"
-            return 0
+            # Prefer gptme.toml with [agent] section — marks an actual agent workspace.
+            # A bare gptme.toml (e.g. in gptme-contrib itself if it ever gets one)
+            # should not be mistaken for an agent root.
+            if grep -q '^\[agent\]' "$dir/gptme.toml"; then
+                echo "$dir"
+                return 0
+            fi
+            # Remember first gptme.toml without [agent] as fallback
+            [ -z "$fallback" ] && fallback="$dir"
         fi
         dir="$(dirname "$dir")"
     done
-    # Fallback: git toplevel (works even without gptme.toml)
+    # Use fallback (gptme.toml without [agent]) if no agent-specific one found
+    if [ -n "$fallback" ]; then
+        echo "$fallback"
+        return 0
+    fi
+    # Last resort: git toplevel (works even without gptme.toml)
     git -C "${1:-$PWD}" rev-parse --show-toplevel 2>/dev/null && return 0
     return 1
 }
