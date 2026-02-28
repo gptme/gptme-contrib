@@ -1,7 +1,9 @@
 """
-CLI for activity summarization.
+CLI for activity summarization — journals, GitHub, sessions, tweets, email.
 
-Agent mode (journal-based, for AI agents):
+Supports two modes:
+
+Agent mode (journal-based, default):
     summarize daily [--date DATE]
     summarize weekly [--week WEEK]
     summarize monthly [--month MONTH]
@@ -9,8 +11,10 @@ Agent mode (journal-based, for AI agents):
     summarize backfill [--from DATE] [--to DATE]
     summarize stats
 
-Human mode (AW time tracking + optional GitHub, for end users):
-    summarize human [--date DATE] [--github-user USER] [--period daily|weekly|monthly] [--raw]
+Human mode (AW time tracking + optional GitHub):
+    summarize daily --mode human [--date DATE] [--github-user USER] [--raw]
+    summarize weekly --mode human [--week WEEK] [--github-user USER] [--raw]
+    summarize monthly --mode human [--month MONTH] [--github-user USER] [--raw]
 
 All summarization uses Claude Code backend for high-quality results.
 """
@@ -28,7 +32,12 @@ from .generator import (
     get_journal_entries_for_date,
     save_summary,
 )
-from .github_data import GitHubActivity, fetch_activity, format_activity_for_prompt
+from .github_data import (
+    GitHubActivity,
+    fetch_activity,
+    fetch_user_activity,
+    format_activity_for_prompt,
+)
 from .schemas import (
     Blocker,
     BlockerStatus,
@@ -553,6 +562,121 @@ def _parse_date_arg(date_str: str) -> date:
         return date.fromisoformat(date_str)
 
 
+def _run_human_summary(
+    ctx: click.Context,
+    start_date: date,
+    end_date: date,
+    period_str: str,
+    period: str,
+    github_user: str | None,
+    raw: bool,
+    verbose: bool,
+) -> None:
+    """Shared implementation for human mode across daily/weekly/monthly."""
+    click.echo(f"Generating human activity summary for {period_str}...")
+
+    parts: list[str] = []
+
+    # ActivityWatch time tracking (primary source)
+    aw_activity = fetch_aw_activity(start_date, end_date)
+    aw_text = format_aw_activity_for_prompt(aw_activity)
+    if aw_text:
+        parts.append(aw_text)
+        if verbose:
+            domain_info = (
+                f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
+            )
+            click.echo(
+                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, "
+                f"{len(aw_activity.top_apps)} apps{domain_info}"
+            )
+    elif not aw_activity.available:
+        click.echo("  Note: ActivityWatch server not reachable — no time tracking data")
+
+    # GitHub activity (optional)
+    if github_user:
+        gh_activity = fetch_user_activity(start_date, end_date, github_user)
+        gh_text = format_activity_for_prompt(gh_activity)
+        if gh_text:
+            parts.append(gh_text)
+            if verbose:
+                click.echo(
+                    f"  GitHub: {gh_activity.total_commits} commits, "
+                    f"{gh_activity.total_prs_merged} PRs, "
+                    f"{gh_activity.total_issues_closed} issues"
+                )
+
+    if not parts:
+        click.echo("No activity data found for this period.")
+        return
+
+    combined_context = "\n".join(parts)
+
+    if raw:
+        click.echo(f"\n{combined_context}")
+        return
+
+    # Generate LLM summary
+    if github_user and period != "daily":
+        from .cc_backend import summarize_github_activity_with_cc
+
+        click.echo("Generating summary with Claude Code...")
+        result = summarize_github_activity_with_cc(combined_context, github_user, period_str)
+
+        click.echo(f"\n## Activity Summary: @{github_user}")
+        click.echo(f"**Period**: {period_str}\n")
+    else:
+        from .cc_backend import summarize_human_day_with_cc
+
+        username = github_user or "user"
+        click.echo("Generating summary with Claude Code...")
+        result = summarize_human_day_with_cc(combined_context, username, period_str)
+
+        click.echo(f"\n## Daily Summary: {period_str}")
+        if github_user:
+            click.echo(f"**GitHub**: @{github_user}\n")
+
+    if result.get("narrative"):
+        click.echo(result["narrative"])
+        click.echo()
+
+    if result.get("highlights"):
+        click.echo("### Highlights")
+        for h in result["highlights"]:
+            click.echo(f"- {h}")
+        click.echo()
+
+    if result.get("time_breakdown"):
+        click.echo("### Time Breakdown")
+        for entry in result["time_breakdown"]:
+            click.echo(f"- {entry}")
+        click.echo()
+
+    if result.get("projects_active"):
+        click.echo("### Active Projects")
+        for p in result["projects_active"]:
+            desc = p.get("description", "")
+            repo = p.get("repo", "")
+            prs = p.get("prs", 0)
+            issues = p.get("issues", 0)
+            click.echo(f"- **{repo}**: {desc} ({prs} PRs, {issues} issues)")
+        click.echo()
+
+    if result.get("themes"):
+        click.echo("### Themes")
+        for t in result["themes"]:
+            click.echo(f"- {t}")
+        click.echo()
+
+    stats_data = result.get("stats", {})
+    if stats_data:
+        click.echo("### Stats")
+        click.echo(f"- Commits: {stats_data.get('total_commits', 0)}")
+        click.echo(f"- PRs: {stats_data.get('total_prs', 0)}")
+        click.echo(f"- Issues: {stats_data.get('total_issues', 0)}")
+        click.echo(f"- Repos active: {stats_data.get('repos_active', 0)}")
+
+
 @click.group()
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 @click.option("--dry-run", is_flag=True, help="Print output without saving")
@@ -571,12 +695,37 @@ def cli(ctx: click.Context, verbose: bool, dry_run: bool) -> None:
     default="yesterday",
     help="Date to summarize (YYYY-MM-DD, 'today', or 'yesterday')",
 )
+@click.option(
+    "--mode",
+    type=click.Choice(["agent", "human"]),
+    default="agent",
+    help="Summary mode: agent (journal-based) or human (AW + GitHub)",
+)
+@click.option(
+    "--github-user",
+    default=None,
+    help="GitHub username for human mode (optional)",
+)
+@click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
 @click.pass_context
-def daily(ctx: click.Context, date_str: str) -> None:
+def daily(ctx: click.Context, date_str: str, mode: str, github_user: str | None, raw: bool) -> None:
     """Generate daily summary."""
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
     target_date = _parse_date_arg(date_str)
+
+    if mode == "human":
+        _run_human_summary(
+            ctx,
+            start_date=target_date,
+            end_date=target_date,
+            period_str=target_date.isoformat(),
+            period="daily",
+            github_user=github_user,
+            raw=raw,
+            verbose=verbose,
+        )
+        return
 
     entries = get_journal_entries_for_date(target_date)
     if not entries:
@@ -607,8 +756,20 @@ def daily(ctx: click.Context, date_str: str) -> None:
     default="last",
     help="Week to summarize (YYYY-Www, 'current', or 'last')",
 )
+@click.option(
+    "--mode",
+    type=click.Choice(["agent", "human"]),
+    default="agent",
+    help="Summary mode: agent (journal-based) or human (AW + GitHub)",
+)
+@click.option(
+    "--github-user",
+    default=None,
+    help="GitHub username for human mode (optional)",
+)
+@click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
 @click.pass_context
-def weekly(ctx: click.Context, week: str) -> None:
+def weekly(ctx: click.Context, week: str, mode: str, github_user: str | None, raw: bool) -> None:
     """Generate weekly summary."""
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
@@ -619,6 +780,27 @@ def weekly(ctx: click.Context, week: str) -> None:
     elif week == "last":
         last_week = date.today() - timedelta(days=7)
         week = last_week.strftime("%G-W%V")
+
+    if mode == "human":
+        # Parse week string to date range
+        year, week_num = int(week[:4]), int(week[6:])
+        jan1 = date(year, 1, 1)
+        first_monday = jan1 - timedelta(days=jan1.weekday())
+        if jan1.weekday() > 3:
+            first_monday += timedelta(weeks=1)
+        start_date = first_monday + timedelta(weeks=week_num - 1)
+        end_date = start_date + timedelta(days=6)
+        _run_human_summary(
+            ctx,
+            start_date=start_date,
+            end_date=end_date,
+            period_str=f"{start_date.isoformat()} to {end_date.isoformat()}",
+            period="weekly",
+            github_user=github_user,
+            raw=raw,
+            verbose=verbose,
+        )
+        return
 
     click.echo(f"Generating weekly summary for {week}...")
 
@@ -643,8 +825,20 @@ def weekly(ctx: click.Context, week: str) -> None:
     default="last",
     help="Month to summarize (YYYY-MM, 'current', or 'last')",
 )
+@click.option(
+    "--mode",
+    type=click.Choice(["agent", "human"]),
+    default="agent",
+    help="Summary mode: agent (journal-based) or human (AW + GitHub)",
+)
+@click.option(
+    "--github-user",
+    default=None,
+    help="GitHub username for human mode (optional)",
+)
+@click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
 @click.pass_context
-def monthly(ctx: click.Context, month: str) -> None:
+def monthly(ctx: click.Context, month: str, mode: str, github_user: str | None, raw: bool) -> None:
     """Generate monthly summary."""
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
@@ -655,6 +849,25 @@ def monthly(ctx: click.Context, month: str) -> None:
         first_of_month = date.today().replace(day=1)
         last_month = first_of_month - timedelta(days=1)
         month = last_month.strftime("%Y-%m")
+
+    if mode == "human":
+        year, month_num = int(month[:4]), int(month[5:])
+        start_date = date(year, month_num, 1)
+        if month_num == 12:
+            end_date = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end_date = date(year, month_num + 1, 1) - timedelta(days=1)
+        _run_human_summary(
+            ctx,
+            start_date=start_date,
+            end_date=end_date,
+            period_str=month,
+            period="monthly",
+            github_user=github_user,
+            raw=raw,
+            verbose=verbose,
+        )
+        return
 
     click.echo(f"Generating monthly summary for {month}...")
 
@@ -847,156 +1060,6 @@ def stats() -> None:
             click.echo(f"  {level}: {count}")
         else:
             click.echo(f"  {level}: 0")
-
-
-@cli.command()
-@click.option(
-    "--date",
-    "date_str",
-    default="yesterday",
-    help="Reference date (YYYY-MM-DD, 'today', or 'yesterday')",
-)
-@click.option(
-    "--period",
-    type=click.Choice(["daily", "weekly", "monthly"]),
-    default="daily",
-    help="Time period to summarize (default: daily)",
-)
-@click.option(
-    "--github-user",
-    default=None,
-    help="GitHub username to include GitHub activity (optional)",
-)
-@click.option("--raw", is_flag=True, help="Print raw data without LLM summarization")
-@click.pass_context
-def human(
-    ctx: click.Context,
-    date_str: str,
-    period: str,
-    github_user: str | None,
-    raw: bool,
-) -> None:
-    """Summarize human activity using AW time tracking + optional GitHub."""
-    verbose = ctx.obj["verbose"]
-    ref_date = _parse_date_arg(date_str)
-
-    # Calculate date range based on period
-    if period == "weekly":
-        end_date = ref_date
-        start_date = end_date - timedelta(days=6)
-        period_str = f"{start_date.isoformat()} to {end_date.isoformat()}"
-    elif period == "monthly":
-        end_date = ref_date
-        start_date = end_date.replace(day=1)
-        period_str = f"{start_date.isoformat()} to {end_date.isoformat()}"
-    else:  # daily
-        start_date = end_date = ref_date
-        period_str = ref_date.isoformat()
-
-    click.echo(f"Generating human activity summary for {period_str}...")
-
-    parts: list[str] = []
-
-    # ActivityWatch time tracking (primary source, most useful for daily)
-    aw_activity = fetch_aw_activity(start_date, end_date)
-    aw_text = format_aw_activity_for_prompt(aw_activity)
-    if aw_text:
-        parts.append(aw_text)
-        if verbose:
-            domain_info = (
-                f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
-            )
-            click.echo(
-                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, "
-                f"{len(aw_activity.top_apps)} apps{domain_info}"
-            )
-    elif not aw_activity.available:
-        click.echo("  Note: ActivityWatch server not reachable — no time tracking data")
-
-    # GitHub activity (optional, primary for weekly/monthly when AW unavailable)
-    if github_user:
-        from .github_data import fetch_user_activity, format_activity_for_prompt as fmt_gh
-
-        gh_activity = fetch_user_activity(start_date, end_date, github_user)
-        gh_text = fmt_gh(gh_activity)
-        if gh_text:
-            parts.append(gh_text)
-            if verbose:
-                click.echo(
-                    f"  GitHub: {gh_activity.total_commits} commits, "
-                    f"{gh_activity.total_prs_merged} PRs, "
-                    f"{gh_activity.total_issues_closed} issues"
-                )
-
-    if not parts:
-        click.echo("No activity data found for this period.")
-        return
-
-    combined_context = "\n".join(parts)
-
-    if raw:
-        click.echo(f"\n{combined_context}")
-        return
-
-    # Generate LLM summary
-    if github_user and period != "daily":
-        from .cc_backend import summarize_github_activity_with_cc
-
-        click.echo("Generating summary with Claude Code...")
-        result = summarize_github_activity_with_cc(combined_context, github_user, period_str)
-
-        click.echo(f"\n## Activity Summary: @{github_user}")
-        click.echo(f"**Period**: {period_str}\n")
-    else:
-        from .cc_backend import summarize_human_day_with_cc
-
-        username = github_user or "user"
-        click.echo("Generating summary with Claude Code...")
-        result = summarize_human_day_with_cc(combined_context, username, period_str)
-
-        click.echo(f"\n## Daily Summary: {period_str}")
-        if github_user:
-            click.echo(f"**GitHub**: @{github_user}\n")
-
-    if result.get("narrative"):
-        click.echo(result["narrative"])
-        click.echo()
-
-    if result.get("highlights"):
-        click.echo("### Highlights")
-        for h in result["highlights"]:
-            click.echo(f"- {h}")
-        click.echo()
-
-    if result.get("time_breakdown"):
-        click.echo("### Time Breakdown")
-        for entry in result["time_breakdown"]:
-            click.echo(f"- {entry}")
-        click.echo()
-
-    if result.get("projects_active"):
-        click.echo("### Active Projects")
-        for p in result["projects_active"]:
-            desc = p.get("description", "")
-            repo = p.get("repo", "")
-            prs = p.get("prs", 0)
-            issues = p.get("issues", 0)
-            click.echo(f"- **{repo}**: {desc} ({prs} PRs, {issues} issues)")
-        click.echo()
-
-    if result.get("themes"):
-        click.echo("### Themes")
-        for t in result["themes"]:
-            click.echo(f"- {t}")
-        click.echo()
-
-    stats = result.get("stats", {})
-    if stats:
-        click.echo("### Stats")
-        click.echo(f"- Commits: {stats.get('total_commits', 0)}")
-        click.echo(f"- PRs: {stats.get('total_prs', 0)}")
-        click.echo(f"- Issues: {stats.get('total_issues', 0)}")
-        click.echo(f"- Repos active: {stats.get('repos_active', 0)}")
 
 
 def main() -> None:
