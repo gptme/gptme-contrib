@@ -152,12 +152,14 @@ def test_browser_domain_dataclass():
     assert d.duration == 3600
 
 
+@pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")
 def test_get_client_returns_client():
     """_get_client returns a client instance when aw-client is installed."""
     client = _get_client()
     assert client is not None
 
 
+@pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")
 def test_get_client_custom_server():
     """_get_client parses custom AW_SERVER."""
     from gptme_activity_summary import aw_data
