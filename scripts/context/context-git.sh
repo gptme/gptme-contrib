@@ -18,7 +18,12 @@ fi
 echo -e "# Git\n"
 
 echo '```git status'
-git -C "$AGENT_DIR" status | head -200
+GIT_STATUS=$(git -C "$AGENT_DIR" status)
+TOTAL_LINES=$(echo "$GIT_STATUS" | wc -l)
+echo "$GIT_STATUS" | head -200
+if [ "$TOTAL_LINES" -gt 200 ]; then
+    echo "(... truncated: $TOTAL_LINES total lines, showing first 200)"
+fi
 echo '```'
 echo
 

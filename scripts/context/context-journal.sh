@@ -69,19 +69,24 @@ JOURNALS_BY_MTIME=$(
         if [ -d "journal/${DATE}" ]; then
             find "journal/${DATE}" -maxdepth 1 -name "*.md" -type f 2>/dev/null
         fi
-    } | while read -r f; do stat -c '%Y %n' "$f" 2>/dev/null; done | sort -rn | cut -d' ' -f2
+    } | while read -r f; do python3 -c "import os,sys; print(int(os.stat(sys.argv[1]).st_mtime), sys.argv[1])" "$f" 2>/dev/null; done | sort -rn | cut -d' ' -f2
 )
 
 # Header
+YESTERDAY=$(python3 -c "from datetime import date, timedelta; print((date.today() - timedelta(days=1)).isoformat())")
 if [ "$(date +%Y-%m-%d)" = "$DATE" ]; then
     HEADER="Today's Journal Entry"
-elif [ "$(date -d yesterday +%Y-%m-%d)" = "$DATE" ]; then
+elif [ "$YESTERDAY" = "$DATE" ]; then
     HEADER="Yesterday's Journal Entry"
 else
     HEADER="Journal Entry from $DATE"
 fi
 
-JOURNAL_COUNT=$(echo "$JOURNALS_BY_MTIME" | wc -l)
+if [ -z "$JOURNALS_BY_MTIME" ]; then
+    JOURNAL_COUNT=0
+else
+    JOURNAL_COUNT=$(echo "$JOURNALS_BY_MTIME" | wc -l)
+fi
 
 if [ "$JOURNAL_COUNT" -eq 1 ]; then
     echo "$HEADER:"
@@ -100,7 +105,7 @@ fi
 MAX_FULL_ENTRIES=10
 
 # Get most recent N entries by mtime, then re-sort chronologically
-RECENT_JOURNALS=$(echo "$JOURNALS_BY_MTIME" | head -n $MAX_FULL_ENTRIES | while read -r f; do stat -c '%Y %n' "$f"; done | sort -n | cut -d' ' -f2)
+RECENT_JOURNALS=$(echo "$JOURNALS_BY_MTIME" | head -n $MAX_FULL_ENTRIES | while read -r f; do python3 -c "import os,sys; print(int(os.stat(sys.argv[1]).st_mtime), sys.argv[1])" "$f"; done | sort -n | cut -d' ' -f2)
 OLDER_JOURNALS=$(echo "$JOURNALS_BY_MTIME" | tail -n +$((MAX_FULL_ENTRIES + 1)))
 
 for JOURNAL in $RECENT_JOURNALS; do

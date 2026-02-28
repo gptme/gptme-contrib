@@ -25,9 +25,6 @@ else
     AGENT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
 fi
 
-# Ensure component scripts are executable
-chmod +x "$SCRIPT_DIR"/context-*.sh
-
 echo "# Context Summary"
 echo
 echo "Generated on: $(date)"

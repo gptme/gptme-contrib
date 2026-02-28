@@ -16,14 +16,27 @@ if [ -n "${1:-}" ]; then
 elif [ -n "${WORKSPACE:-}" ]; then
     : # Use existing WORKSPACE
 else
-    WORKSPACE="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+    # Walk up from CWD to find gptme.toml (agent root, not gptme-contrib root)
+    _dir="$PWD"
+    while [ "$_dir" != "/" ]; do
+        if [ -f "$_dir/gptme.toml" ]; then
+            WORKSPACE="$_dir"
+            break
+        fi
+        _dir="$(dirname "$_dir")"
+    done
+    if [ -z "${WORKSPACE:-}" ]; then
+        echo "Error: Could not find gptme.toml in any parent directory of $PWD" >&2
+        echo "Run from your agent workspace directory, or pass WORKSPACE=/path/to/agent" >&2
+        exit 1
+    fi
 fi
 
 # --- Read gptme.toml config ---
 read_toml_config() {
-    python3 -c "
-import tomllib, json, sys
-with open('$WORKSPACE/gptme.toml', 'rb') as f:
+    WORKSPACE="$WORKSPACE" python3 -c "
+import tomllib, json, sys, os
+with open(os.environ['WORKSPACE'] + '/gptme.toml', 'rb') as f:
     cfg = tomllib.load(f)
 prompt = cfg.get('prompt', {})
 json.dump({
@@ -57,8 +70,13 @@ echo "# Dynamic Context"
 echo ""
 
 if [ -n "$CONTEXT_CMD" ]; then
+    # Handle both absolute paths and paths relative to workspace
+    case "$CONTEXT_CMD" in
+        /*) CMD="$CONTEXT_CMD" ;;
+        *)  CMD="$WORKSPACE/$CONTEXT_CMD" ;;
+    esac
     # shellcheck disable=SC2086
-    "$WORKSPACE/$CONTEXT_CMD" 2>/dev/null || echo "(context generation failed)"
+    $CMD "$WORKSPACE" 2>/dev/null || echo "(context generation failed)"
 else
     echo "(no context_cmd configured in gptme.toml)"
 fi
