@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
+from gptme_runloops.utils.executor import Executor
 from gptme_runloops.utils.prompt import generate_base_prompt, get_agent_name
 
 
@@ -21,6 +22,7 @@ class AutonomousRun(BaseRunLoop):
         workspace: Path,
         model: str | None = None,
         tool_format: str | None = None,
+        executor: Executor | None = None,
     ):
         """Initialize autonomous run.
 
@@ -28,6 +30,7 @@ class AutonomousRun(BaseRunLoop):
             workspace: Path to workspace directory
             model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
             tool_format: Tool format override (markdown/xml/tool)
+            executor: Backend executor (default: GptmeExecutor)
         """
         super().__init__(
             workspace=workspace,
@@ -36,6 +39,7 @@ class AutonomousRun(BaseRunLoop):
             lock_wait=False,  # Don't wait for lock
             model=model,
             tool_format=tool_format,
+            executor=executor,
         )
 
     def generate_prompt(self) -> str:

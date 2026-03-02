@@ -5,6 +5,13 @@ from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.email import EmailRun
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.team import TeamRun
+from gptme_runloops.utils.executor import (
+    ClaudeCodeExecutor,
+    Executor,
+    GptmeExecutor,
+    get_executor,
+    list_backends,
+)
 
 __all__ = [
     "BaseRunLoop",
@@ -12,4 +19,9 @@ __all__ = [
     "EmailRun",
     "ProjectMonitoringRun",
     "TeamRun",
+    "Executor",
+    "GptmeExecutor",
+    "ClaudeCodeExecutor",
+    "get_executor",
+    "list_backends",
 ]

@@ -10,12 +10,23 @@ from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.email import EmailRun
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.team import TeamRun
+from gptme_runloops.utils.executor import get_executor, list_backends
 
 
 @click.group()
 def main():
     """Run loop framework for autonomous AI agent operation."""
     pass
+
+
+def _backend_option(f):
+    """Shared --backend option for all commands."""
+    return click.option(
+        "--backend",
+        default="gptme",
+        type=click.Choice(list_backends()),
+        help=f"Execution backend (available: {', '.join(list_backends())})",
+    )(f)
 
 
 @main.command()
@@ -36,9 +47,15 @@ def main():
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
-def autonomous(workspace: Path, model: str | None, tool_format: str | None):
+@_backend_option
+def autonomous(
+    workspace: Path, model: str | None, tool_format: str | None, backend: str
+):
     """Run autonomous operation loop."""
-    run = AutonomousRun(workspace, model=model, tool_format=tool_format)
+    executor = get_executor(backend)
+    run = AutonomousRun(
+        workspace, model=model, tool_format=tool_format, executor=executor
+    )
     exit_code = run.run()
     sys.exit(exit_code)
 
@@ -61,9 +78,11 @@ def autonomous(workspace: Path, model: str | None, tool_format: str | None):
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
-def email(workspace: Path, model: str | None, tool_format: str | None):
+@_backend_option
+def email(workspace: Path, model: str | None, tool_format: str | None, backend: str):
     """Run email processing loop."""
-    run = EmailRun(workspace, model=model, tool_format=tool_format)
+    executor = get_executor(backend)
+    run = EmailRun(workspace, model=model, tool_format=tool_format, executor=executor)
     exit_code = run.run()
     sys.exit(exit_code)
 
@@ -91,15 +110,27 @@ def email(workspace: Path, model: str | None, tool_format: str | None):
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
+@_backend_option
 def team(
-    workspace: Path, tools: str | None, model: str | None, tool_format: str | None
+    workspace: Path,
+    tools: str | None,
+    model: str | None,
+    tool_format: str | None,
+    backend: str,
 ):
     """Run autonomous team coordination loop.
 
     The coordinator agent runs with restricted tools and delegates
     all work to subagents via gptodo. Inspired by Claude Code Agent Teams.
     """
-    run = TeamRun(workspace, tools=tools, model=model, tool_format=tool_format)
+    executor = get_executor(backend)
+    run = TeamRun(
+        workspace,
+        tools=tools,
+        model=model,
+        tool_format=tool_format,
+        executor=executor,
+    )
     exit_code = run.run()
     sys.exit(exit_code)
 
@@ -144,6 +175,7 @@ def team(
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
+@_backend_option
 def monitoring(
     workspace: Path,
     orgs: tuple[str, ...],
@@ -152,8 +184,10 @@ def monitoring(
     agent_name: str,
     model: str | None,
     tool_format: str | None,
+    backend: str,
 ):
     """Run project monitoring loop."""
+    executor = get_executor(backend)
     run = ProjectMonitoringRun(
         workspace,
         target_orgs=list(orgs) if orgs else None,
@@ -162,6 +196,7 @@ def monitoring(
         agent_name=agent_name,
         model=model,
         tool_format=tool_format,
+        executor=executor,
     )
     exit_code = run.run()
     sys.exit(exit_code)

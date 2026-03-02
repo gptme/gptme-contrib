@@ -7,7 +7,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
+from gptme_runloops.utils.execution import ExecutionResult
+from gptme_runloops.utils.executor import Executor, GptmeExecutor
 from gptme_runloops.utils.git import git_pull_with_retry
 from gptme_runloops.utils.lock import RunLoopLock
 from gptme_runloops.utils.logging import (
@@ -57,6 +58,7 @@ class BaseRunLoop(ABC):
         lock_wait: bool = False,
         model: str | None = None,
         tool_format: str | None = None,
+        executor: Executor | None = None,
     ):
         """Initialize run loop.
 
@@ -67,6 +69,7 @@ class BaseRunLoop(ABC):
             lock_wait: Whether to wait for lock or fail immediately
             model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
             tool_format: Tool format override (markdown/xml/tool)
+            executor: Backend executor (default: GptmeExecutor)
         """
         self.workspace = Path(workspace)
         self.run_type = run_type
@@ -74,6 +77,7 @@ class BaseRunLoop(ABC):
         self.lock_wait = lock_wait
         self.model = model
         self.tool_format = tool_format
+        self.executor = executor or GptmeExecutor()
 
         # Initialize utilities
         lock_dir = self.workspace / "logs"
@@ -240,7 +244,9 @@ class BaseRunLoop(ABC):
         pass
 
     def execute(self, prompt: str) -> ExecutionResult:
-        """Execute gptme with the generated prompt.
+        """Execute the backend with the generated prompt.
+
+        Uses the configured executor (default: GptmeExecutor).
 
         Args:
             prompt: Prompt text
@@ -248,13 +254,14 @@ class BaseRunLoop(ABC):
         Returns:
             ExecutionResult with exit code and status
         """
-        self.logger.info(f"Starting gptme execution (timeout: {self.timeout}s)...")
+        self.logger.info(
+            f"Starting {self.executor.name} execution (timeout: {self.timeout}s)..."
+        )
 
-        result = execute_gptme(
+        result = self.executor.execute(
             prompt=prompt,
             workspace=self.workspace,
             timeout=self.timeout,
-            non_interactive=True,
             run_type=self.run_type,
             model=self.model,
             tool_format=self.tool_format,

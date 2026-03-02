@@ -9,6 +9,7 @@ from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult
+from gptme_runloops.utils.executor import Executor
 from gptme_runloops.utils.github import CommentLoopDetector, has_unresolved_bot_reviews
 
 
@@ -44,6 +45,7 @@ class ProjectMonitoringRun(BaseRunLoop):
         agent_name: str = "Agent",
         model: str | None = None,
         tool_format: str | None = None,
+        executor: Executor | None = None,
     ):
         """Initialize project monitoring run.
 
@@ -55,6 +57,7 @@ class ProjectMonitoringRun(BaseRunLoop):
             agent_name: Name of the agent for prompts
             model: Model override (e.g. "openai-subscription/gpt-5.3-codex")
             tool_format: Tool format override (markdown/xml/tool)
+            executor: Backend executor (default: GptmeExecutor)
         """
         super().__init__(
             workspace=workspace,
@@ -63,6 +66,7 @@ class ProjectMonitoringRun(BaseRunLoop):
             lock_wait=False,  # Don't wait for lock
             model=model,
             tool_format=tool_format,
+            executor=executor,
         )
 
         self.target_orgs = target_orgs or []
