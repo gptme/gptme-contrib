@@ -4,6 +4,7 @@ Provides a pluggable interface for different AI backend tools (gptme, Claude Cod
 so that run loops can work with any backend without modification.
 """
 
+import logging
 import os
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
+
+logger = logging.getLogger(__name__)
 
 
 class Executor(ABC):
@@ -130,6 +133,20 @@ class ClaudeCodeExecutor(Executor):
         run_type: str = "run",
         system_prompt_file: Path | None = None,
     ) -> ExecutionResult:
+        # Warn about unsupported parameters — Claude Code CLI doesn't support
+        # tool allowlists or tool format flags, so these are silently ignored.
+        # This matters for TeamRun: coordinator tool restrictions won't apply.
+        if tools:
+            logger.warning(
+                "ClaudeCodeExecutor: 'tools' parameter is not supported by Claude Code CLI "
+                "and will be ignored. Tool restrictions from TeamRun will not be enforced."
+            )
+        if tool_format:
+            logger.warning(
+                "ClaudeCodeExecutor: 'tool_format' parameter is not supported by Claude Code CLI "
+                "and will be ignored."
+            )
+
         cmd = ["claude", "-p", prompt]
 
         if system_prompt_file and system_prompt_file.exists():

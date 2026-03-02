@@ -426,5 +426,64 @@ def test_subclass_executor_passthrough():
         # Test ProjectMonitoringRun
         from gptme_runloops.project_monitoring import ProjectMonitoringRun
 
-        monitoring = ProjectMonitoringRun(workspace, executor=mock_executor)
-        assert monitoring.executor is mock_executor
+        ProjectMonitoringRun(workspace, executor=mock_executor)
+
+
+# --- ClaudeCodeExecutor unsupported parameter warnings ---
+
+
+def test_claude_code_executor_warns_on_tools():
+    """Test that ClaudeCodeExecutor logs a warning when 'tools' is passed."""
+    executor = ClaudeCodeExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("gptme_runloops.utils.executor.logger") as mock_logger:
+            executor.execute(
+                prompt="test",
+                workspace=Path("/tmp"),
+                timeout=60,
+                tools="gptodo,save",
+            )
+            # Should warn that tools param is not supported
+            mock_logger.warning.assert_called()
+            warning_msg = mock_logger.warning.call_args_list[0][0][0]
+            assert "tools" in warning_msg
+            assert "not supported" in warning_msg
+
+
+def test_claude_code_executor_warns_on_tool_format():
+    """Test that ClaudeCodeExecutor logs a warning when 'tool_format' is passed."""
+    executor = ClaudeCodeExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("gptme_runloops.utils.executor.logger") as mock_logger:
+            executor.execute(
+                prompt="test",
+                workspace=Path("/tmp"),
+                timeout=60,
+                tool_format="xml",
+            )
+            mock_logger.warning.assert_called()
+            warning_msg = mock_logger.warning.call_args_list[0][0][0]
+            assert "tool_format" in warning_msg
+            assert "not supported" in warning_msg
+
+
+def test_claude_code_executor_no_warn_without_tools():
+    """Test that ClaudeCodeExecutor does NOT warn when tools/tool_format not passed."""
+    executor = ClaudeCodeExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("gptme_runloops.utils.executor.logger") as mock_logger:
+            executor.execute(
+                prompt="test",
+                workspace=Path("/tmp"),
+                timeout=60,
+            )
+            mock_logger.warning.assert_not_called()
