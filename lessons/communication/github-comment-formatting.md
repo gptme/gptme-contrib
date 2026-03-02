@@ -2,13 +2,17 @@
 category: communication
 match:
   keywords:
-    - github
-    - comments
-    - documentation
-    - links
-    - user-experience
-    - file references
-tags: [github, comments, documentation, links, user-experience]
+  - github comment formatting
+  - file reference link
+  - clickable file link
+  - github file reference
+  - format file paths in comments
+  - file references in github
+tags:
+- github-comments
+- file-references
+- formatting
+status: active
 ---
 
 # GitHub Comment Formatting for File References

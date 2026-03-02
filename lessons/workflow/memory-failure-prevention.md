@@ -3,7 +3,6 @@ match:
   keywords:
   - memory failure
   - communication loops
-  - follow-through
   - duplicate work
   - context loss
   - session handoff
@@ -11,6 +10,8 @@ match:
   - catastrophic forgetfulness
   - response loops
   - issue creation
+  - memory follow-through
+status: active
 ---
 
 # Memory Failure Prevention

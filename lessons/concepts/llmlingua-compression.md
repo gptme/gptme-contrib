@@ -7,6 +7,7 @@ match:
     - prompt compression
     - text compression
     - llm compression
+status: active
 ---
 # LLMLingua (Compression Technique)
 

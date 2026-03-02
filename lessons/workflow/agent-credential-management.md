@@ -11,6 +11,7 @@ match:
     - "need to authenticate"
     - "store API key securely"
     - "secret management for agent"
+status: active
 ---
 
 # Agent Credential Management

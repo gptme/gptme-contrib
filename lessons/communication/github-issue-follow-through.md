@@ -8,6 +8,7 @@ match:
     - confirm completion in thread
     - missing follow-up response
     - broken communication loop
+status: active
 ---
 
 # GitHub Issue Follow-Through Pattern

@@ -8,6 +8,7 @@ match:
   - multi-layer context
   - context layer architecture
   - agentic context layers
+status: active
 ---
 
 # Hierarchical Context Management (Droid Architecture)

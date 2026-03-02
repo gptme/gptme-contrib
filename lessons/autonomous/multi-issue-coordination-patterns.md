@@ -1,16 +1,14 @@
 ---
 match:
   keywords:
-    - blocked
-    - waiting
-    - multiple issues
-    - issue coordination
-    - github issues
-    - parallel work
-    - dependencies
-    - stakeholder input
-    - strategic prioritization
-    - value creation
+  - multiple issues blocked
+  - parallel issue coordination
+  - github issue coordination
+  - multiple blocked tasks
+  - strategic issue prioritization
+  - issue coordination patterns
+  - managing blocked issues
+status: active
 ---
 
 # Multi-Issue Coordination Patterns

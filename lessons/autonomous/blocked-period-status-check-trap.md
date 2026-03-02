@@ -10,6 +10,7 @@ match:
     - waiting for input
     - strategic pause
     - productive while blocked
+status: active
 ---
 
 # Blocked Period Status Check Trap

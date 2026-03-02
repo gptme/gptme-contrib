@@ -6,6 +6,7 @@ match:
     - "pre-action check"
     - "memory failure"
     - "work verification"
+status: active
 ---
 
 # Pre-Issue Creation Checklist

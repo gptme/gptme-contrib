@@ -8,6 +8,7 @@ match:
   - blocked on dependencies
   - autonomous session productivity
   - task selection priorities
+status: active
 ---
 
 # Effective Autonomous Work Execution

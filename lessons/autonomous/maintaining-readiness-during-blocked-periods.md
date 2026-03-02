@@ -8,6 +8,7 @@ match:
     - strategic pause framework
     - value creation during blocked
     - waiting for stakeholder input
+status: active
 ---
 
 # Maintaining Readiness During Blocked Periods

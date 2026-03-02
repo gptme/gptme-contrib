@@ -8,6 +8,7 @@ match:
   - autonomous work phases
   - session status check
   - commit and complete
+status: active
 ---
 
 # Autonomous Session Structure

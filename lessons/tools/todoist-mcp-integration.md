@@ -8,6 +8,7 @@ match:
     - "todoist token"
     - "TODOIST_API_TOKEN"
 category: tools
+status: active
 ---
 # Todoist MCP Integration
 

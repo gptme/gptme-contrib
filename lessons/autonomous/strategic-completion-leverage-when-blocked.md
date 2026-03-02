@@ -1,16 +1,15 @@
 ---
 match:
   keywords:
-    - blocked
-    - waiting
-    - external dependencies
-    - value creation
-    - strategic completion
-    - stakeholder approval
-    - documentation
-    - knowledge capture
-    - analysis
-    - frameworks
+  - blocked on external
+  - waiting for stakeholder
+  - external dependencies blocking
+  - strategic value creation
+  - strategic completion leverage
+  - stakeholder approval needed
+  - productive while blocked
+  - create value while waiting
+status: active
 ---
 
 # Strategic Completion Leverage When Blocked
