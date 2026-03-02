@@ -1,15 +1,12 @@
 ---
 match:
   keywords:
-  - tmux
-  - long-running
-  - process killed at 120 seconds
-  - shell timeout exceeded
-  - tmux for long-running process
-  - command timed out
-  - process runs longer than 2 minutes
-  - command timeout
-  - long-running command
+  - "process killed at 120 seconds"
+  - "shell timeout exceeded"
+  - "tmux for long-running process"
+  - "process runs longer than 2 minutes"
+  - "120-second shell timeout"
+  - "long-running command needs tmux"
 status: active
 ---
 

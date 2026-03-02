@@ -1,12 +1,11 @@
 ---
 match:
   keywords:
-    - "session startup"
-    - "recent actions"
-    - "memory failure"
-    - "autonomous session"
-    - "context review"
-    - "phase 1"
+    - "session startup recent actions review protocol"
+    - "prevent memory failure patterns across sessions"
+    - "communication loop verification at startup"
+    - "enhanced phase 1 autonomous session startup"
+    - "duplicate work from missing context continuity"
 status: active
 ---
 
