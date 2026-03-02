@@ -7,6 +7,7 @@ match:
     - "linear-activity"
     - "LINEAR_API_KEY"
 category: tools
+status: active
 ---
 # Linear API Integration
 

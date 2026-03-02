@@ -1,12 +1,14 @@
 ---
 match:
   keywords:
-    - "communication loop"
-    - "github issue"
-    - "memory failure"
-    - "response"
-    - "follow-through"
-    - "request completion"
+  - communication loop
+  - github issue
+  - memory failure
+  - request completion
+  - close the loop
+  - follow-through on communication
+  - respond to thread
+status: active
 ---
 
 # Communication Loop Closure Patterns

@@ -1,6 +1,13 @@
 ---
 match:
-  keywords: ["optimize", "performance", "caching", "speed up", "faster", "efficiency"]
+  keywords:
+  - optimize performance
+  - add caching
+  - speed up
+  - make it faster
+  - improve efficiency
+  - simplify before optimize
+  - premature optimization
 status: active
 ---
 

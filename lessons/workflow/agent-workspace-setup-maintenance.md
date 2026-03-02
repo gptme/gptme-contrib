@@ -7,6 +7,7 @@ match:
     - gptme-agent-template
     - submodule-update
     - symlink-verification
+status: active
 ---
 
 # Agent Workspace Setup and Maintenance

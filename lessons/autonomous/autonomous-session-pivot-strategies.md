@@ -8,6 +8,7 @@ match:
   - autonomous session pivot
   - troubleshooting time limit
   - quick pivot sequence
+status: active
 ---
 
 # Autonomous Session Pivot Strategies

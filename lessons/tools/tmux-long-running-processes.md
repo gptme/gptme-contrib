@@ -1,20 +1,15 @@
 ---
 match:
   keywords:
-  # FOUNDATIONAL KEYWORDS - Keep these general terms!
-  # Tmux is essential for long-running processes. These general terms
-  # ensure the lesson triggers during discussions about timeouts and
-  # long processes. Do NOT remove as "too broad".
-  - "tmux"
-  - "timeout"
-  - "long-running"
-  # PROBLEM SIGNALS - Specific triggers for timeout issues
-  - "process killed at 120 seconds"
-  - "shell timeout exceeded"
-  # WORKFLOW CONTEXT - Medium specificity
-  - "tmux for long-running process"
-  - "command timed out"
-  - "process runs longer than 2 minutes"
+  - tmux
+  - long-running
+  - process killed at 120 seconds
+  - shell timeout exceeded
+  - tmux for long-running process
+  - command timed out
+  - process runs longer than 2 minutes
+  - command timeout
+  - long-running command
 status: active
 ---
 

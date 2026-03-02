@@ -7,6 +7,7 @@ match:
     - "gh-pr-review"
     - "close conversation thread"
     - "mark thread resolved"
+status: active
 ---
 
 # gh-pr-review Extension for Review Thread Management

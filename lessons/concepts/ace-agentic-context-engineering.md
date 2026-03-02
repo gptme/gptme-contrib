@@ -8,6 +8,7 @@ match:
   - context engineering LLM
   - LLM context evolution
   - dynamic context management
+status: active
 ---
 
 # ACE (Agentic Context Engineering)

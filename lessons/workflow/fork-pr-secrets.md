@@ -7,6 +7,7 @@ match:
     - "push directly to repo"
     - "ANTHROPIC_API_KEY not set"
     - "permission denied pushing to org repo"
+status: active
 ---
 
 # Fork PR Secrets Access

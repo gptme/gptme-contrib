@@ -7,6 +7,7 @@ match:
     - "MCP context"
     - "lazy MCP"
 category: tools
+status: active
 ---
 # mcp-cli for Token-Efficient MCP Interactions
 

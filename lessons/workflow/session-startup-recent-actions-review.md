@@ -7,6 +7,7 @@ match:
     - "autonomous session"
     - "context review"
     - "phase 1"
+status: active
 ---
 
 # Session Startup Recent Actions Review

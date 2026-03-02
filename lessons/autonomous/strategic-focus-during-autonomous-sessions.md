@@ -12,6 +12,7 @@ match:
   - darwinian trap avoidance
   - autonomous session planning
   - strategic work selection
+status: active
 ---
 
 # Strategic Focus During Autonomous Sessions

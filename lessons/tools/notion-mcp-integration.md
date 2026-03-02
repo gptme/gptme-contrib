@@ -8,6 +8,7 @@ match:
     - "notion token"
     - "NOTION_TOKEN"
 category: tools
+status: active
 ---
 # Notion MCP Integration
 
