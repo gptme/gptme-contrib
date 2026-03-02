@@ -4,7 +4,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from gptme_runloops.base import BaseRunLoop
+import pytest
+from gptme_runloops.base import BACKOFF_SCHEDULE, BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult
 
 
@@ -122,3 +123,120 @@ def test_base_run_exception_handling():
             assert exit_code == 1
             # Lock should be released in cleanup
             assert run.lock.lock_fd is None
+
+
+# --- Backoff tests ---
+
+
+def test_backoff_state_file_path():
+    """Test that backoff state file uses run_type in path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "mytype")
+        assert run._backoff_state_file == workspace / "state" / "mytype-backoff.json"
+
+
+def test_backoff_initial_state_no_skip():
+    """Test that with no prior state, backoff does not skip."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        # No state file exists — should not skip
+        assert not run._check_backoff("hash1")
+
+
+def test_backoff_resets_on_new_hash():
+    """Test that a new work hash resets the backoff counter."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+
+        # Simulate many failures with hash1
+        run._save_backoff_state({"consecutive_failures": 10, "last_hash": "hash1"})
+
+        # New hash — should reset and not skip
+        assert not run._check_backoff("hash2")
+
+        # Verify state was reset
+        state = run._load_backoff_state()
+        assert state["consecutive_failures"] == 0
+        assert state["last_hash"] == "hash2"
+
+
+def test_backoff_record_success_resets():
+    """Test that recording success resets failure counter."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        run._save_backoff_state({"consecutive_failures": 5, "last_hash": "hash1"})
+
+        run._record_backoff_success()
+
+        state = run._load_backoff_state()
+        assert state["consecutive_failures"] == 0
+        assert state["last_hash"] == ""
+
+
+def test_backoff_record_failure_increments():
+    """Test that recording failure increments counter."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        run._save_backoff_state({"consecutive_failures": 2, "last_hash": "hash1"})
+
+        run._record_backoff_failure("hash1")
+
+        state = run._load_backoff_state()
+        assert state["consecutive_failures"] == 3
+        assert state["last_hash"] == "hash1"
+
+
+@pytest.mark.parametrize("threshold,skip_n,out_of,_desc", BACKOFF_SCHEDULE)
+def test_backoff_schedule_skips_at_threshold(threshold, skip_n, out_of, _desc):
+    """Test that backoff skips runs at the specified threshold."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        run._save_backoff_state(
+            {"consecutive_failures": threshold, "last_hash": "hash1"}
+        )
+
+        # Run many trials — with high skip probability, at least some should skip
+        results = [run._check_backoff("hash1") for _ in range(100)]
+        skip_count = sum(results)
+
+        expected_fraction = skip_n / out_of
+        # Allow ±20% variance from expected fraction
+        assert skip_count >= (expected_fraction - 0.20) * 100
+        assert skip_count <= (expected_fraction + 0.20) * 100
+
+
+def test_backoff_corrupted_state_file():
+    """Test that corrupted state file is handled gracefully."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+        (workspace / "state").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        # Write corrupted JSON
+        run._backoff_state_file.write_text("not valid json{{")
+
+        # Should not raise, should return empty state
+        state = run._load_backoff_state()
+        assert state == {}
+
+        # And check_backoff should work fine (no skip with empty state)
+        assert not run._check_backoff("hash1")
