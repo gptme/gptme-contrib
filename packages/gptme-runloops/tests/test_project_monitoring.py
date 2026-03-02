@@ -350,7 +350,7 @@ def test_generate_prompt_with_work(workspace):
     assert "RED" in prompt
 
 
-@patch("gptme_runloops.base.execute_gptme")
+@patch("gptme_runloops.utils.executor.execute_gptme")
 def test_execute_with_work(mock_execute, workspace):
     """Test execute when work is found."""
     # Mock gptme execution - use ExecutionResult

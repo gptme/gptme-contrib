@@ -100,7 +100,7 @@ def test_has_work_mbsync_failure(mock_run, workspace):
     assert result is False
 
 
-@patch("gptme_runloops.base.execute_gptme")
+@patch("gptme_runloops.utils.executor.execute_gptme")
 def test_execute_runs_gptme(mock_execute, workspace):
     """Test execute calls gptme (has_work already confirmed emails exist)."""
     from gptme_runloops.utils.execution import ExecutionResult
