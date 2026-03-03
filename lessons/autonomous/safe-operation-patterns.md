@@ -5,10 +5,8 @@ match:
   - "GREEN YELLOW RED classification"
   - "safe to execute autonomously"
   - "requires human approval"
-  - classification
-  - GREEN
-  - YELLOW
-  - RED
+  - "operation safety classification"
+  - "risky operation"
 status: active
 ---
 
