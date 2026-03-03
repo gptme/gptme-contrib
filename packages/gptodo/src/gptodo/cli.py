@@ -807,21 +807,12 @@ def _show_github_issues(
     existing_tasks = load_tasks(tasks_dir) if tasks_dir.exists() else []
     tracked_urls: Set[str] = set()
     for task in existing_tasks:
-        tracking = task.metadata.get("tracking")
-        if tracking:
-            if isinstance(tracking, list):
-                tracked_urls.update(str(u) for u in tracking)
-            else:
-                tracked_urls.add(str(tracking))
-        # Also check for issue references in task body/metadata
-        # e.g. "Tracking: Issue ErikBjare/bob#317" in content
-        # Match by URL pattern
         for url in extract_external_urls(task):
             tracked_urls.add(url)
 
     # Fetch open issues from GitHub
     gh_issues = fetch_github_issues(
-        repo=github_repo, state="open", labels=[], assignee=None, limit=50
+        repo=github_repo, state="open", labels=[], assignee=None, limit=500
     )
     if not gh_issues:
         console.print(f"\n🐙 No open GitHub issues in {github_repo}")
