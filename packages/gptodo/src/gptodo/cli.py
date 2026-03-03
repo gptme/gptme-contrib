@@ -36,6 +36,7 @@ from typing import (
 import click
 import frontmatter
 from rich.console import Console
+from rich.markup import escape as markup_escape
 from rich.table import Table
 from tabulate import tabulate
 
@@ -831,8 +832,8 @@ def _show_github_issues(
         for issue in untracked:
             labels_str = ""
             if issue.get("labels"):
-                labels_str = " [" + ", ".join(issue["labels"]) + "]"
-            console.print(f"  #{issue['number']}  {issue['title']}{labels_str}")
+                labels_str = markup_escape(" [" + ", ".join(issue["labels"]) + "]")
+            console.print(f"  #{issue['number']}  {markup_escape(issue['title'])}{labels_str}")
 
         if not compact:
             console.print(
@@ -916,6 +917,8 @@ def status(type, all, compact, summary, issues, github, github_repo):
     # Show GitHub issues not yet tracked as task files
     if github:
         _show_github_issues(console, repo_root, github_repo, compact)
+    elif github_repo:
+        console.print("[yellow]Warning: --repo has no effect without --github[/]")
 
 
 @cli.command()
