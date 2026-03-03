@@ -1,6 +1,11 @@
 ---
 match:
-  keywords: ["gh pr view", "pull request", "pr review", "review comments", "inline comments", "gh api"]
+  keywords:
+    - "read ALL review sources without truncation"
+    - "reply to individual review comment threads"
+    - "batch all review replies in one shell block"
+    - "maintainer says you didn't address review comments"
+    - "unresolved review threads on PR"
 status: active
 ---
 

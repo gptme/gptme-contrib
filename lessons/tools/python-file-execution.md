@@ -1,13 +1,11 @@
 ---
 match:
   keywords:
-  - python execution
-  - script execution
-  - ./script.py
-  - permission denied
-  - shebang
-  - uv run
-  - poetry run
+  - "python script permission denied"
+  - "bash: script.py: Permission denied"
+  - "choose correct python execution method"
+  - "shebang python execution"
+  - "ModuleNotFoundError when dependencies should be available"
 status: active
 ---
 

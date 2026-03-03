@@ -1,22 +1,12 @@
 ---
 match:
   keywords:
-  - "git workflow"
-  - "branch management"
-  - "pr creation"
-  - "git add"
-  - "git restore"
-  - "master branch"
-  - "feature branch"
-  - "conventional commits"
-  - "submodule update"
-  - "secret protection"
-  - "git status"
-  - "commit message format"
-  - "git commit"
-  - "git push"
-  - "git checkout"
-  - "stage files"
+  - "never use git add . or git commit -a"
+  - "stage only intended files explicitly"
+  - "commit trivial docs directly to master"
+  - "accidental staging of unintended files"
+  - "submodule update sequence"
+  - "committed to master by accident"
 status: active
 ---
 

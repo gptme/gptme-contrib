@@ -1,12 +1,12 @@
 ---
 match:
   keywords:
-    - "gh issue view"
-    - "gh pr view"
-    - "--comments"
-    - "| head"
-    - "| tail"
-    - "issue thread"
+    - "truncating github comment output"
+    - "respond to stale context when conversation evolved"
+    - "read entire issue thread before responding"
+    - "missing newer comments that supersede earlier"
+    - "gh pr view --comments | head"
+    - "not reading the whole issue"
 status: active
 ---
 

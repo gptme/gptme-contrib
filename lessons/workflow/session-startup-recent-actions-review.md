@@ -1,12 +1,12 @@
 ---
 match:
   keywords:
-    - "session startup"
-    - "recent actions"
-    - "memory failure"
-    - "autonomous session"
-    - "context review"
-    - "phase 1"
+    - "skipped recent actions review"
+    - "missed previous session context"
+    - "incomplete communication loop"
+    - "duplicate work from missing context"
+    - "context gap from last session"
+    - "didn't check what was done"
 status: active
 ---
 
