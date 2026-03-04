@@ -115,6 +115,9 @@ class SessionRecord:
         elif "T24:" in self.timestamp:
             # Fix invalid hour 24 from filenames like 240000-session.md
             self.timestamp = self.timestamp.replace("T24:00:00", "T23:59:59")
+        # Guard against JSON null for integer field
+        if self.duration_seconds is None:
+            self.duration_seconds = 0
         # Model stored as-is (raw) — use model_normalized for display
         # Normalize run_type — reject numeric values (session numbers)
         if self.run_type and self.run_type.isdigit():

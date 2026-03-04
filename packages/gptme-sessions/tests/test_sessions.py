@@ -377,6 +377,15 @@ def test_normalize_model_none():
     assert normalize_model("") == ""
 
 
+def test_session_record_none_duration_seconds():
+    """duration_seconds=None (from JSON null) is coerced to 0, not left as None."""
+    r = SessionRecord.from_dict({"model": "opus", "duration_seconds": None})
+    assert r.duration_seconds == 0
+    # Verify it doesn't crash in comparison operations used by stats/analytics
+    assert r.duration_seconds > -1
+    assert r.duration_seconds // 60 == 0
+
+
 def test_session_record_none_model_roundtrip():
     """None model survives serialize → deserialize without crashing."""
     r = SessionRecord.from_dict({"run_type": "autonomous", "model": None})
