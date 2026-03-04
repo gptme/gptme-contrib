@@ -328,3 +328,21 @@ def test_session_store_query_by_outcome(tmp_path: Path):
 
     results = store.query(outcome="productive")
     assert len(results) == 2
+
+
+def test_session_record_none_run_type():
+    """SessionRecord with run_type=None (from JSON null) doesn't crash."""
+    r = SessionRecord.from_dict({"model": "opus", "run_type": None})
+    assert r.run_type is None
+
+
+def test_normalize_model_openai_subscription_not_absorbed():
+    """openai-subscription/* models not in aliases pass through unchanged."""
+    from gptme_sessions.record import normalize_model
+
+    # Explicitly listed — should normalize
+    assert normalize_model("openai-subscription/gpt-5.3-codex") == "gpt-5.3-codex"
+    # Not listed — must NOT silently become "gpt-4o" via "openai" catch-all
+    assert normalize_model("openai-subscription/gpt-future") == "openai-subscription/gpt-future"
+    # Bare "openai" legacy still normalizes
+    assert normalize_model("openai") == "gpt-4o"

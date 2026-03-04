@@ -58,8 +58,13 @@ MODEL_ALIASES: dict[str, str] = {
 
 def normalize_model(raw: str) -> str:
     """Normalize a raw model string to its canonical short form."""
+    # Exact match first.
+    if raw in MODEL_ALIASES:
+        return MODEL_ALIASES[raw]
+    # Prefix match — require '/' separator to avoid "openai" absorbing
+    # "openai-subscription/*" or similar unlisted variants.
     for prefix, canonical in MODEL_ALIASES.items():
-        if raw.startswith(prefix):
+        if raw.startswith(prefix + "/"):
             return canonical
     return raw
 
@@ -109,7 +114,7 @@ class SessionRecord:
         if self.run_type and self.run_type.isdigit():
             self.run_type = "autonomous"
         # Clean run_type prefixes
-        if self.run_type.startswith("autonomous-session"):
+        if self.run_type and self.run_type.startswith("autonomous-session"):
             self.run_type = "autonomous"
 
     def to_dict(self) -> dict:

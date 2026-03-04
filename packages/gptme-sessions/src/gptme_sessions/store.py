@@ -60,7 +60,7 @@ class SessionStore:
         with open(tmp_path, "w") as f:
             for record in records:
                 f.write(record.to_json() + "\n")
-        tmp_path.rename(self.path)
+        tmp_path.replace(self.path)
         return self.path
 
     def query(

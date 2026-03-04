@@ -128,7 +128,14 @@ def main() -> int:
         return 0
 
     if args.command == "runs":
-        since_days_runs = int(args.since.rstrip("d"))
+        try:
+            since_days_runs = int(args.since.rstrip("d"))
+        except ValueError:
+            print(
+                f"error: invalid --since value {args.since!r} (expected e.g. 7d, 30d)",
+                file=sys.stderr,
+            )
+            return 1
         records = store.query(since_days=since_days_runs)
         analytics = compute_run_analytics(records)
         if args.json:
