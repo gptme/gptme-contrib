@@ -89,7 +89,7 @@ class SessionStore:
             filtered = []
             for r in records:
                 try:
-                    ts = datetime.fromisoformat(r.timestamp).timestamp()
+                    ts = datetime.fromisoformat(r.timestamp.replace("Z", "+00:00")).timestamp()
                     if ts >= cutoff:
                         filtered.append(r)
                 except (ValueError, TypeError):

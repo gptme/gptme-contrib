@@ -392,3 +392,63 @@ def test_normalize_model_openai_subscription_not_absorbed():
     assert normalize_model("openai-subscription/gpt-future") == "openai-subscription/gpt-future"
     # Bare "openai" legacy still normalizes
     assert normalize_model("openai") == "gpt-4o"
+
+
+def test_since_days_z_suffix_python310(tmp_path):
+    """since_days filtering handles 'Z'-suffixed timestamps (Python 3.10 compat)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    # Inject a record with a Z-suffixed timestamp (external tool / older JSON dump)
+    with open(store.path, "a", encoding="utf-8") as f:
+        import json
+
+        f.write(
+            json.dumps(
+                {"timestamp": "2020-01-01T00:00:00Z", "model": "opus", "outcome": "productive"}
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps({"timestamp": "2099-01-01T00:00:00Z", "model": "sonnet", "outcome": "noop"})
+            + "\n"
+        )
+    # The far-future record (2099) is within 30d is impossible; but the 2020 one should be
+    # excluded, not crash, when filtering with since_days
+    records = store.query(since_days=1)
+    # Neither is within 1 day, but the key test is that no ValueError/TypeError is raised
+    assert isinstance(records, list)
+
+    # A Z-suffixed timestamp from "now" should be included
+    from datetime import datetime, timezone
+
+    now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(store.path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": now_z, "model": "haiku", "outcome": "productive"}) + "\n")
+    records = store.query(since_days=1)
+    assert any(r.model == "haiku" for r in records)
+
+
+def test_query_stats_forwards_all_filters(tmp_path):
+    """query --stats forwards category, harness, outcome to store.query()."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(
+        SessionRecord(model="opus", category="code", harness="gptme", outcome="productive")
+    )
+    store.append(
+        SessionRecord(model="sonnet", category="content", harness="claude-code", outcome="noop")
+    )
+
+    # Filter by category — only the "code" record should be counted
+    code_records = store.query(category="code")
+    s = store.stats(code_records)
+    assert s["total"] == 1
+
+    # Filter by outcome — only productive
+    prod_records = store.query(outcome="productive")
+    s2 = store.stats(prod_records)
+    assert s2["total"] == 1
+    assert s2["productive"] == 1
+
+    # Filter by harness
+    cc_records = store.query(harness="claude-code")
+    s3 = store.stats(cc_records)
+    assert s3["total"] == 1

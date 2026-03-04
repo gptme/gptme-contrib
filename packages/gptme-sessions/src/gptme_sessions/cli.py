@@ -102,6 +102,9 @@ def main() -> int:
         records = store.query(
             model=getattr(args, "model", None),
             run_type=getattr(args, "run_type", None),
+            category=getattr(args, "category", None),
+            harness=getattr(args, "harness", None),
+            outcome=getattr(args, "outcome", None),
             since_days=since_days,
         )
         s = store.stats(records)
