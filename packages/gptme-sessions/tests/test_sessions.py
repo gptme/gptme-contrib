@@ -148,7 +148,7 @@ def test_session_store_corrupted_line(tmp_path: Path):
     store.append(SessionRecord(model="opus", outcome="productive"))
 
     # Inject a corrupted line
-    with open(store.path, "a") as f:
+    with open(store.path, "a", encoding="utf-8") as f:
         f.write("not valid json\n")
 
     store.append(SessionRecord(model="sonnet", outcome="noop"))
