@@ -36,6 +36,7 @@ from typing import (
 import click
 import frontmatter
 from rich.console import Console
+from rich.markup import escape as markup_escape
 from rich.table import Table
 from tabulate import tabulate
 
@@ -763,13 +764,106 @@ def print_total_summary(console: Console, all_results: Dict[str, Dict[str, List[
         console.print(table)
 
 
+def _detect_github_repo() -> str | None:
+    """Auto-detect GitHub repo from current git remote via gh CLI."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _show_github_issues(
+    console: Console,
+    repo_root: Path,
+    github_repo: str | None,
+    compact: bool,
+) -> None:
+    """Show open GitHub issues that don't have matching task files.
+
+    Fetches open issues from the GitHub repo, filters out any that are
+    already tracked via the `tracking` field in existing task files,
+    and displays the remainder as untracked GitHub issues.
+    """
+    # Detect repo if not provided
+    if not github_repo:
+        github_repo = _detect_github_repo()
+        if not github_repo:
+            console.print(
+                "[yellow]Could not detect GitHub repo. " "Use --repo owner/name to specify.[/]"
+            )
+            return
+
+    # Load existing tasks to find already-tracked issue URLs
+    tasks_dir = repo_root / "tasks"
+    existing_tasks = load_tasks(tasks_dir) if tasks_dir.exists() else []
+    tracked_urls: Set[str] = set()
+    for task in existing_tasks:
+        for url in extract_external_urls(task):
+            tracked_urls.add(url)
+
+    # Fetch open issues from GitHub
+    gh_issues = fetch_github_issues(
+        repo=github_repo, state="open", labels=[], assignee=None, limit=500
+    )
+    if not gh_issues:
+        console.print(f"\n🐙 No open GitHub issues in {github_repo}")
+        return
+
+    # Filter out already-tracked issues
+    untracked = [issue for issue in gh_issues if issue["tracking_ref"] not in tracked_urls]
+
+    # Display
+    tracked_count = len(gh_issues) - len(untracked)
+    if untracked:
+        console.print(
+            f"\n🐙 GitHub Issues — {github_repo} "
+            f"({len(untracked)} untracked, {tracked_count} already in tasks):"
+        )
+        for issue in untracked:
+            labels_str = ""
+            if issue.get("labels"):
+                labels_str = markup_escape(" [" + ", ".join(issue["labels"]) + "]")
+            console.print(f"  #{issue['number']}  {markup_escape(issue['title'])}{labels_str}")
+
+        if not compact:
+            console.print(
+                f"\n  [dim]Import with: gptodo import --source github " f"--repo {github_repo}[/]"
+            )
+    else:
+        console.print(
+            f"\n🐙 GitHub Issues — {github_repo}: "
+            f"all {len(gh_issues)} open issues tracked in tasks ✓"
+        )
+
+
 @cli.command()
 @click.option("--type", type=click.Choice(list(CONFIGS.keys())), default="tasks")
 @click.option("--all", is_flag=True, help="Check all directory types")
 @click.option("--compact", is_flag=True, help="Only show new and active tasks")
 @click.option("--summary", is_flag=True, help="Only show summary")
 @click.option("--issues", is_flag=True, help="Only show items with issues")
-def status(type, all, compact, summary, issues):
+@click.option(
+    "--github",
+    is_flag=True,
+    help="Include open GitHub issues not yet tracked as task files",
+)
+@click.option(
+    "--repo",
+    "github_repo",
+    default=None,
+    help="GitHub repo for --github (default: auto-detect via gh CLI)",
+)
+def status(type, all, compact, summary, issues, github, github_repo):
     """Show status of tasks and other tracked items."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -819,6 +913,12 @@ def status(type, all, compact, summary, issues):
         for dir_type, results in all_results.items():
             config = CONFIGS[dir_type]
             print_summary(console, results, config)
+
+    # Show GitHub issues not yet tracked as task files
+    if github:
+        _show_github_issues(console, repo_root, github_repo, compact)
+    elif github_repo:
+        console.print("[yellow]Warning: --repo has no effect without --github[/]")
 
 
 @cli.command()
@@ -1305,6 +1405,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         "related": {"type": "list"},  # Related items (informational)
         "discovered-from": {"type": "list"},  # Tasks this was discovered from
         "output_types": {"type": "list"},
+        "tracking": {"type": "list"},  # External issue/PR tracking URLs
     }
 
     # Validate set operations
