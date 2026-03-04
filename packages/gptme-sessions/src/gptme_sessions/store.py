@@ -144,16 +144,17 @@ class SessionStore:
         # Harness breakdown
         harness_stats: dict[str, dict[str, int]] = {}
         for r in records:
-            if r.harness not in harness_stats:
-                harness_stats[r.harness] = {"total": 0, "productive": 0}
-            harness_stats[r.harness]["total"] += 1
+            h = r.harness or "null"
+            if h not in harness_stats:
+                harness_stats[h] = {"total": 0, "productive": 0}
+            harness_stats[h]["total"] += 1
             if r.outcome == "productive":
-                harness_stats[r.harness]["productive"] += 1
+                harness_stats[h]["productive"] += 1
 
         # Harness × model cross-tab (normalized model for grouping)
         harness_model_tab: dict[str, dict[str, int]] = {}
         for r in records:
-            key = f"{r.harness}×{r.model_normalized or 'null'}"
+            key = f"{r.harness or 'null'}×{r.model_normalized or 'null'}"
             if key not in harness_model_tab:
                 harness_model_tab[key] = {"total": 0, "productive": 0}
             harness_model_tab[key]["total"] += 1

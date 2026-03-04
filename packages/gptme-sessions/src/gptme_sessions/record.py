@@ -90,7 +90,7 @@ class SessionRecord:
     timestamp: str = ""  # ISO 8601
 
     # Operational context
-    harness: str = "unknown"  # claude-code, gptme, codex
+    harness: str | None = "unknown"  # claude-code, gptme, codex
     model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
     run_type: str | None = "unknown"  # autonomous, monitoring, email, review, twitter
 

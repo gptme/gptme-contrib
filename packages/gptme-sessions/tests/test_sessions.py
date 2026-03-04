@@ -251,6 +251,22 @@ def test_format_stats_with_data(tmp_path: Path):
     assert "sonnet" in output
 
 
+def test_format_stats_none_harness(tmp_path: Path):
+    """format_stats does not crash when harness field is None."""
+    import io
+
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", harness=None, outcome="productive"))
+    store.append(SessionRecord(model="sonnet", harness="gptme", outcome="noop"))
+
+    s = store.stats()
+    buf = io.StringIO()
+    format_stats(s, buf)  # must not raise TypeError
+    output = buf.getvalue()
+    assert "null" in output  # None harness displayed as "null"
+    assert "gptme" in output
+
+
 def test_compute_run_analytics(tmp_path: Path):
     """Run analytics computes expected breakdowns."""
     store = SessionStore(sessions_dir=tmp_path)
