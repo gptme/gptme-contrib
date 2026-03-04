@@ -346,6 +346,42 @@ def test_session_record_none_run_type_roundtrip():
     assert r2.run_type is None
 
 
+def test_normalize_model_none():
+    """normalize_model(None) returns None without crashing."""
+    from gptme_sessions.record import normalize_model
+
+    assert normalize_model(None) is None
+    assert normalize_model("") == ""
+
+
+def test_session_record_none_model_roundtrip():
+    """None model survives serialize → deserialize without crashing."""
+    r = SessionRecord.from_dict({"run_type": "autonomous", "model": None})
+    assert r.model is None
+    d = r.to_dict()
+    assert d["model"] is None
+    r2 = SessionRecord.from_dict(d)
+    assert r2.model is None
+
+
+def test_session_store_null_model_in_jsonl(tmp_path: Path):
+    """A JSONL record with model=null doesn't crash load_all."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive"))
+
+    # Inject a record with model: null
+    with open(store.path, "a", encoding="utf-8") as f:
+        import json
+
+        f.write(json.dumps({"model": None, "run_type": "autonomous", "outcome": "noop"}) + "\n")
+
+    store.append(SessionRecord(model="sonnet", outcome="noop"))
+
+    records = store.load_all()
+    assert len(records) == 3  # null model record is valid, not skipped
+    assert records[1].model is None
+
+
 def test_normalize_model_openai_subscription_not_absorbed():
     """openai-subscription/* models not in aliases pass through unchanged."""
     from gptme_sessions.record import normalize_model

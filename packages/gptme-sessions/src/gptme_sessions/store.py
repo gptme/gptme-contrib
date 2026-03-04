@@ -34,7 +34,7 @@ class SessionStore:
     def append(self, record: SessionRecord) -> Path:
         """Append a session record to the JSONL store."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a") as f:
+        with open(self.path, "a", encoding="utf-8") as f:
             f.write(record.to_json() + "\n")
         return self.path
 
@@ -43,13 +43,13 @@ class SessionStore:
         if not self.path.exists():
             return []
         records = []
-        with open(self.path) as f:
+        with open(self.path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
                         records.append(SessionRecord.from_dict(json.loads(line)))
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError, AttributeError):
                         continue
         return records
 
@@ -57,7 +57,7 @@ class SessionStore:
         """Atomically rewrite the JSONL store with updated records."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(".jsonl.tmp")
-        with open(tmp_path, "w") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             for record in records:
                 f.write(record.to_json() + "\n")
         tmp_path.replace(self.path)
@@ -114,25 +114,27 @@ class SessionStore:
         # Model breakdown
         model_stats: dict[str, dict[str, int]] = {}
         for r in records:
-            if r.model not in model_stats:
-                model_stats[r.model] = {"total": 0, "productive": 0}
-            model_stats[r.model]["total"] += 1
+            m = r.model or "null"
+            if m not in model_stats:
+                model_stats[m] = {"total": 0, "productive": 0}
+            model_stats[m]["total"] += 1
             if r.outcome == "productive":
-                model_stats[r.model]["productive"] += 1
+                model_stats[m]["productive"] += 1
 
         # Run-type breakdown
         run_type_stats: dict[str, dict[str, int]] = {}
         for r in records:
-            if r.run_type not in run_type_stats:
-                run_type_stats[r.run_type] = {"total": 0, "productive": 0}
-            run_type_stats[r.run_type]["total"] += 1
+            rt = r.run_type or "null"
+            if rt not in run_type_stats:
+                run_type_stats[rt] = {"total": 0, "productive": 0}
+            run_type_stats[rt]["total"] += 1
             if r.outcome == "productive":
-                run_type_stats[r.run_type]["productive"] += 1
+                run_type_stats[rt]["productive"] += 1
 
         # Model × run-type cross-tab
         cross_tab: dict[str, dict[str, int]] = {}
         for r in records:
-            key = f"{r.model}×{r.run_type}"
+            key = f"{r.model or 'null'}×{r.run_type or 'null'}"
             if key not in cross_tab:
                 cross_tab[key] = {"total": 0, "productive": 0}
             cross_tab[key]["total"] += 1
@@ -151,7 +153,7 @@ class SessionStore:
         # Harness × model cross-tab
         harness_model_tab: dict[str, dict[str, int]] = {}
         for r in records:
-            key = f"{r.harness}×{r.model}"
+            key = f"{r.harness}×{r.model or 'null'}"
             if key not in harness_model_tab:
                 harness_model_tab[key] = {"total": 0, "productive": 0}
             harness_model_tab[key]["total"] += 1
@@ -268,7 +270,7 @@ def compute_run_analytics(records: list[SessionRecord]) -> dict:
     # NOOP rate by run_type
     noop_by_type: dict[str, dict[str, int]] = {}
     for r in records:
-        rt = r.run_type
+        rt = r.run_type or "null"
         if rt not in noop_by_type:
             noop_by_type[rt] = {"total": 0, "noop": 0}
         noop_by_type[rt]["total"] += 1
@@ -279,7 +281,7 @@ def compute_run_analytics(records: list[SessionRecord]) -> dict:
     short_runs: dict[str, int] = {}
     for r in records:
         if 0 < r.duration_seconds < 120:
-            rt = r.run_type
+            rt = r.run_type or "null"
             short_runs[rt] = short_runs.get(rt, 0) + 1
 
     # Daily run count
@@ -294,13 +296,14 @@ def compute_run_analytics(records: list[SessionRecord]) -> dict:
     # Model × outcome cross-tab
     model_outcome: dict[str, dict[str, int]] = {}
     for r in records:
-        if r.model not in model_outcome:
-            model_outcome[r.model] = {"total": 0, "productive": 0, "noop": 0}
-        model_outcome[r.model]["total"] += 1
+        m = r.model or "null"
+        if m not in model_outcome:
+            model_outcome[m] = {"total": 0, "productive": 0, "noop": 0}
+        model_outcome[m]["total"] += 1
         if r.outcome == "productive":
-            model_outcome[r.model]["productive"] += 1
+            model_outcome[m]["productive"] += 1
         elif r.outcome == "noop":
-            model_outcome[r.model]["noop"] += 1
+            model_outcome[m]["noop"] += 1
 
     return {
         "total": total,

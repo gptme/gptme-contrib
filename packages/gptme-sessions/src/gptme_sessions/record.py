@@ -56,8 +56,10 @@ MODEL_ALIASES: dict[str, str] = {
 }
 
 
-def normalize_model(raw: str) -> str:
+def normalize_model(raw: str | None) -> str | None:
     """Normalize a raw model string to its canonical short form."""
+    if not raw:
+        return raw
     # Exact match first.
     if raw in MODEL_ALIASES:
         return MODEL_ALIASES[raw]
@@ -84,8 +86,8 @@ class SessionRecord:
 
     # Operational context
     harness: str = "unknown"  # claude-code, gptme, codex
-    model: str = "unknown"  # opus, sonnet, haiku, gpt-5.3-codex
-    run_type: str = "unknown"  # autonomous, monitoring, email, review, twitter
+    model: str | None = "unknown"  # opus, sonnet, haiku, gpt-5.3-codex
+    run_type: str | None = "unknown"  # autonomous, monitoring, email, review, twitter
 
     # Work classification
     category: str | None = None  # e.g. code, triage, content, strategic
