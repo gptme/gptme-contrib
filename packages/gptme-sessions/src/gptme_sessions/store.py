@@ -56,7 +56,7 @@ class SessionStore:
     def rewrite(self, records: list[SessionRecord]) -> Path:
         """Atomically rewrite the JSONL store with updated records."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(".jsonl.tmp")
+        tmp_path = self.path.with_name(self.path.name + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             for record in records:
                 f.write(record.to_json() + "\n")
