@@ -157,24 +157,31 @@ def test_session_store_corrupted_line(tmp_path: Path):
     assert len(records) == 2  # corrupted line skipped
 
 
-def test_session_record_model_normalization():
-    """Model names are normalized to short canonical forms."""
+def test_session_record_model_stored_raw():
+    """Model field stores the raw string, model_normalized provides short form."""
     r = SessionRecord(model="claude-opus-4-6")
-    assert r.model == "opus"
+    assert r.model == "claude-opus-4-6"  # raw preserved
+    assert r.model_normalized == "opus"  # normalized for display
     r2 = SessionRecord(model="claude-sonnet-4-6")
-    assert r2.model == "sonnet"
+    assert r2.model == "claude-sonnet-4-6"
+    assert r2.model_normalized == "sonnet"
     r3 = SessionRecord(model="claude-haiku-4-5")
-    assert r3.model == "haiku"
-    # Non-matching names pass through
+    assert r3.model == "claude-haiku-4-5"
+    assert r3.model_normalized == "haiku"
+    # Non-matching names pass through both
     r4 = SessionRecord(model="gpt-5.3-codex")
     assert r4.model == "gpt-5.3-codex"
-    # Provider-prefixed model strings normalize
+    assert r4.model_normalized == "gpt-5.3-codex"
+    # Provider-prefixed model strings normalize only via property
     r5 = SessionRecord(model="openai-subscription/gpt-5.3-codex")
-    assert r5.model == "gpt-5.3-codex"
+    assert r5.model == "openai-subscription/gpt-5.3-codex"
+    assert r5.model_normalized == "gpt-5.3-codex"
     r6 = SessionRecord(model="openrouter/z-ai/glm-5@z-ai")
-    assert r6.model == "glm-5"
+    assert r6.model == "openrouter/z-ai/glm-5@z-ai"
+    assert r6.model_normalized == "glm-5"
     r7 = SessionRecord(model="anthropic/claude-opus-4-6")
-    assert r7.model == "opus"
+    assert r7.model == "anthropic/claude-opus-4-6"
+    assert r7.model_normalized == "opus"
 
 
 def test_session_record_run_type_normalization():
@@ -380,6 +387,57 @@ def test_session_store_null_model_in_jsonl(tmp_path: Path):
     records = store.load_all()
     assert len(records) == 3  # null model record is valid, not skipped
     assert records[1].model is None
+
+
+def test_query_by_normalized_model_finds_raw_records(tmp_path: Path):
+    """Querying by normalized name finds records stored with raw model strings."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="claude-opus-4-6", outcome="productive"))
+    store.append(SessionRecord(model="anthropic/claude-sonnet-4-6", outcome="noop"))
+    store.append(SessionRecord(model="gpt-4o", outcome="productive"))
+
+    # Query by normalized name should find records with raw model strings
+    opus_results = store.query(model="opus")
+    assert len(opus_results) == 1
+    assert opus_results[0].model == "claude-opus-4-6"
+    assert opus_results[0].model_normalized == "opus"
+
+    sonnet_results = store.query(model="sonnet")
+    assert len(sonnet_results) == 1
+    assert sonnet_results[0].model == "anthropic/claude-sonnet-4-6"
+
+    # Query by raw name also works
+    raw_results = store.query(model="claude-opus-4-6")
+    assert len(raw_results) == 1
+
+
+def test_model_raw_preserved_in_serialization():
+    """Raw model string survives round-trip serialization."""
+    r = SessionRecord(model="anthropic/claude-opus-4-6", outcome="productive")
+    assert r.model == "anthropic/claude-opus-4-6"
+    assert r.model_normalized == "opus"
+
+    d = r.to_dict()
+    assert d["model"] == "anthropic/claude-opus-4-6"
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.model == "anthropic/claude-opus-4-6"
+    assert r2.model_normalized == "opus"
+
+
+def test_stats_group_by_normalized_model(tmp_path: Path):
+    """Stats groups by normalized model, merging different raw strings."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="claude-opus-4-6", outcome="productive"))
+    store.append(SessionRecord(model="anthropic/claude-opus-4-5", outcome="productive"))
+    store.append(SessionRecord(model="claude-sonnet-4-6", outcome="noop"))
+
+    s = store.stats()
+    # Both opus variants should be grouped together
+    assert "opus" in s["by_model"]
+    assert s["by_model"]["opus"]["total"] == 2
+    assert "sonnet" in s["by_model"]
+    assert s["by_model"]["sonnet"]["total"] == 1
 
 
 def test_normalize_model_openai_subscription_not_absorbed():

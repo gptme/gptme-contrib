@@ -134,7 +134,7 @@ def main() -> int:
                 cat = r.category or "?"
                 dur = f"{r.duration_seconds // 60:3d}m" if r.duration_seconds > 0 else "   ?"
                 print(
-                    f"[{status}] {r.timestamp[:16]}  {(r.model or 'unknown'):8s}  "
+                    f"[{status}] {r.timestamp[:16]}  {(r.model_normalized or 'unknown'):8s}  "
                     f"{(r.run_type or 'unknown'):12s}  {cat:14s}  {dur}  {r.outcome}"
                 )
             print(f"\n{len(records)} records")

@@ -12,7 +12,7 @@ Usage:
     stats = store.stats()
 """
 
-from .record import MODEL_ALIASES, SessionRecord
+from .record import MODEL_ALIASES, SessionRecord, normalize_model
 from .store import SessionStore
 
-__all__ = ["SessionRecord", "SessionStore", "MODEL_ALIASES"]
+__all__ = ["SessionRecord", "SessionStore", "MODEL_ALIASES", "normalize_model"]

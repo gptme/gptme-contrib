@@ -78,6 +78,11 @@ class SessionRecord:
     Captures the operational context of a session: what harness ran it,
     which model, what type of work, and the outcome. Designed to be the
     single source of truth for model effectiveness analysis.
+
+    The ``model`` field stores the **raw** model string as provided
+    (e.g. ``"claude-opus-4-6"``).  Use :pyattr:`model_normalized` for
+    the canonical short form (e.g. ``"opus"``).  This keeps full
+    provenance in storage while allowing convenient grouping in display.
     """
 
     # Identity
@@ -86,7 +91,7 @@ class SessionRecord:
 
     # Operational context
     harness: str = "unknown"  # claude-code, gptme, codex
-    model: str | None = "unknown"  # opus, sonnet, haiku, gpt-5.3-codex
+    model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
     run_type: str | None = "unknown"  # autonomous, monitoring, email, review, twitter
 
     # Work classification
@@ -110,14 +115,18 @@ class SessionRecord:
         elif "T24:" in self.timestamp:
             # Fix invalid hour 24 from filenames like 240000-session.md
             self.timestamp = self.timestamp.replace("T24:00:00", "T23:59:59")
-        # Normalize model names
-        self.model = normalize_model(self.model)
+        # Model stored as-is (raw) — use model_normalized for display
         # Normalize run_type — reject numeric values (session numbers)
         if self.run_type and self.run_type.isdigit():
             self.run_type = "autonomous"
         # Clean run_type prefixes
         if self.run_type and self.run_type.startswith("autonomous-session"):
             self.run_type = "autonomous"
+
+    @property
+    def model_normalized(self) -> str | None:
+        """Canonical short form of the model (e.g. ``"opus"``)."""
+        return normalize_model(self.model)
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict."""

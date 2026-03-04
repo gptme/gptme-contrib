@@ -75,7 +75,7 @@ class SessionStore:
         """Filter session records by criteria."""
         records = self.load_all()
         if model:
-            records = [r for r in records if r.model == model]
+            records = [r for r in records if r.model_normalized == model or r.model == model]
         if run_type:
             records = [r for r in records if r.run_type == run_type]
         if category:
@@ -111,10 +111,10 @@ class SessionStore:
         productive = sum(1 for r in records if r.outcome == "productive")
         noop = sum(1 for r in records if r.outcome == "noop")
 
-        # Model breakdown
+        # Model breakdown (uses normalized names for grouping)
         model_stats: dict[str, dict[str, int]] = {}
         for r in records:
-            m = r.model or "null"
+            m = r.model_normalized or "null"
             if m not in model_stats:
                 model_stats[m] = {"total": 0, "productive": 0}
             model_stats[m]["total"] += 1
@@ -131,10 +131,10 @@ class SessionStore:
             if r.outcome == "productive":
                 run_type_stats[rt]["productive"] += 1
 
-        # Model × run-type cross-tab
+        # Model × run-type cross-tab (normalized model for grouping)
         cross_tab: dict[str, dict[str, int]] = {}
         for r in records:
-            key = f"{r.model or 'null'}×{r.run_type or 'null'}"
+            key = f"{r.model_normalized or 'null'}×{r.run_type or 'null'}"
             if key not in cross_tab:
                 cross_tab[key] = {"total": 0, "productive": 0}
             cross_tab[key]["total"] += 1
@@ -150,10 +150,10 @@ class SessionStore:
             if r.outcome == "productive":
                 harness_stats[r.harness]["productive"] += 1
 
-        # Harness × model cross-tab
+        # Harness × model cross-tab (normalized model for grouping)
         harness_model_tab: dict[str, dict[str, int]] = {}
         for r in records:
-            key = f"{r.harness}×{r.model or 'null'}"
+            key = f"{r.harness}×{r.model_normalized or 'null'}"
             if key not in harness_model_tab:
                 harness_model_tab[key] = {"total": 0, "productive": 0}
             harness_model_tab[key]["total"] += 1
@@ -293,10 +293,10 @@ def compute_run_analytics(records: list[SessionRecord]) -> dict:
         except (ValueError, TypeError):
             continue
 
-    # Model × outcome cross-tab
+    # Model × outcome cross-tab (normalized model for grouping)
     model_outcome: dict[str, dict[str, int]] = {}
     for r in records:
-        m = r.model or "null"
+        m = r.model_normalized or "null"
         if m not in model_outcome:
             model_outcome[m] = {"total": 0, "productive": 0, "noop": 0}
         model_outcome[m]["total"] += 1
