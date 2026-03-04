@@ -119,7 +119,7 @@ class SessionRecord:
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict."""
-        return {k: v for k, v in asdict(self).items() if v is not None}
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> SessionRecord:

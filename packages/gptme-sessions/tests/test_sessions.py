@@ -336,6 +336,16 @@ def test_session_record_none_run_type():
     assert r.run_type is None
 
 
+def test_session_record_none_run_type_roundtrip():
+    """None run_type survives full serialize → deserialize without becoming 'unknown'."""
+    r = SessionRecord.from_dict({"model": "opus", "run_type": None})
+    d = r.to_dict()
+    assert "run_type" in d
+    assert d["run_type"] is None
+    r2 = SessionRecord.from_dict(d)
+    assert r2.run_type is None
+
+
 def test_normalize_model_openai_subscription_not_absorbed():
     """openai-subscription/* models not in aliases pass through unchanged."""
     from gptme_sessions.record import normalize_model

@@ -86,10 +86,17 @@ def main() -> int:
     since_days = None
     since_val = getattr(args, "since", None)
     if since_val:
-        if since_val.endswith("d"):
-            since_days = int(since_val[:-1])
-        else:
-            since_days = int(since_val)
+        try:
+            if since_val.endswith("d"):
+                since_days = int(since_val[:-1])
+            else:
+                since_days = int(since_val)
+        except ValueError:
+            print(
+                f"error: invalid --since value {since_val!r} (expected e.g. 7d, 30d)",
+                file=sys.stderr,
+            )
+            return 1
 
     if args.command == "stats" or (args.command == "query" and getattr(args, "stats", False)):
         records = store.query(
