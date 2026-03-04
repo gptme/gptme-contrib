@@ -242,6 +242,7 @@ def format_stats(stats: dict, out: TextIO = sys.stdout) -> None:
         out.write("By harness × model:\n")
         for key, cs in stats["by_harness_model"].items():
             out.write(f"  {key:30s}  {cs['productive']:3d}/{cs['total']:3d}  ({cs['rate']:.0%})\n")
+        out.write("\n")
 
 
 def compute_run_analytics(records: list[SessionRecord]) -> dict:
