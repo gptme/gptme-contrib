@@ -512,7 +512,7 @@ def test_query_stats_forwards_all_filters(tmp_path):
     assert s3["total"] == 1
 
 
-def test_stats_subcommand_filter_args(tmp_path: Path):
+def test_stats_subcommand_filter_args(tmp_path: Path, monkeypatch):
     """stats subcommand accepts --category, --harness, --outcome and filters correctly."""
     from gptme_sessions.cli import main
 
@@ -524,43 +524,50 @@ def test_stats_subcommand_filter_args(tmp_path: Path):
         SessionRecord(model="sonnet", category="content", harness="claude-code", outcome="noop")
     )
 
-    import sys
-
     # stats --category code should only count 1 record
-    sys.argv = [
-        "gptme-sessions",
-        "--sessions-dir",
-        str(tmp_path),
-        "stats",
-        "--category",
-        "code",
-        "--json",
-    ]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "stats",
+            "--category",
+            "code",
+            "--json",
+        ],
+    )
     result = main()
     assert result == 0
 
     # stats --harness claude-code should only count 1 record
-    sys.argv = [
-        "gptme-sessions",
-        "--sessions-dir",
-        str(tmp_path),
-        "stats",
-        "--harness",
-        "claude-code",
-        "--json",
-    ]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "stats",
+            "--harness",
+            "claude-code",
+            "--json",
+        ],
+    )
     result = main()
     assert result == 0
 
     # stats --outcome productive should only count 1 record
-    sys.argv = [
-        "gptme-sessions",
-        "--sessions-dir",
-        str(tmp_path),
-        "stats",
-        "--outcome",
-        "productive",
-        "--json",
-    ]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "stats",
+            "--outcome",
+            "productive",
+            "--json",
+        ],
+    )
     result = main()
     assert result == 0
