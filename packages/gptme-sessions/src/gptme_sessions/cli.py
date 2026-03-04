@@ -55,6 +55,9 @@ def main() -> int:
     stats_parser = subparsers.add_parser("stats", help="Show summary statistics")
     stats_parser.add_argument("--model", help="Filter by model")
     stats_parser.add_argument("--run-type", help="Filter by run type")
+    stats_parser.add_argument("--category", help="Filter by category")
+    stats_parser.add_argument("--harness", help="Filter by harness")
+    stats_parser.add_argument("--outcome", help="Filter by outcome")
     stats_parser.add_argument("--since", help="Filter by recency (e.g. 7d, 30d)")
     stats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
