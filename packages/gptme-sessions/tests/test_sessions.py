@@ -1565,6 +1565,86 @@ def test_extract_usage_gptme_empty():
     assert extract_usage_gptme([]) == {}
 
 
+def test_extract_usage_gptme_zero_cost_not_falsy():
+    """Zero cost (e.g. free/local model) is preserved, not skipped by or-chaining."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            "usage": {"input_tokens": 100, "output_tokens": 50, "cost": 0.0},
+            "metadata": {
+                "model": "local/llama",
+                # cost also present here with a non-zero value that should NOT win
+                "cost": 9.99,
+            },
+        }
+    ]
+    usage = extract_usage_gptme(msgs)
+    # cost=0.0 from usage should win over metadata.cost=9.99
+    assert usage["cost"] == 0.0
+    assert usage["input_tokens"] == 100
+
+
+def test_extract_usage_gptme_non_assistant_ignored():
+    """Token data on user/system messages must not be accumulated."""
+    msgs = [
+        {
+            "role": "user",
+            "content": "hello",
+            "usage": {"input_tokens": 9999, "output_tokens": 9999, "cost": 99.0},
+        },
+        {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+            "metadata": {"input_tokens": 9999, "output_tokens": 9999},
+        },
+        {
+            "role": "assistant",
+            "content": "Hi!",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cost": 0.001,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    # Only assistant turn should contribute
+    assert usage["input_tokens"] == 50
+    assert usage["output_tokens"] == 10
+    assert abs(usage["cost"] - 0.001) < 1e-9
+
+
+def test_extract_usage_gptme_last_model_wins():
+    """Last-seen model is recorded (consistent with extract_usage_cc)."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "first",
+            "metadata": {
+                "model": "anthropic/claude-haiku-4-5",
+                "input_tokens": 100,
+                "output_tokens": 20,
+            },
+        },
+        {
+            "role": "assistant",
+            "content": "second",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 200,
+                "output_tokens": 40,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    # Last model should win, not first
+    assert usage["model"] == "anthropic/claude-sonnet-4-6"
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 60
+
+
 def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
     """extract_from_path includes usage data for gptme format trajectories."""
     from gptme_sessions.signals import extract_from_path
