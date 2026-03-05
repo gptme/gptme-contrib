@@ -1,4 +1,8 @@
-"""Extract productivity signals from gptme trajectory files (conversation.jsonl).
+"""Extract productivity signals from agent trajectory files.
+
+Supports two trajectory formats:
+- **gptme**: conversation.jsonl with top-level role/content/timestamp fields
+- **Claude Code**: session .jsonl with top-level type/message/timestamp fields
 
 Provides grounded reward signals for Thompson sampling and session analytics
 by analyzing actual transcripts rather than self-reported journals.
@@ -14,9 +18,15 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+# Regex for git commit lines in shell output (works for both harnesses)
+_COMMIT_RE = re.compile(r"\[(?:master|main|[a-z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
+
+# Tools that write files in Claude Code
+_CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "Patch"}
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
-    """Parse a conversation.jsonl file into a list of messages."""
+    """Parse a JSONL trajectory file into a list of records."""
     msgs = []
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
@@ -30,6 +40,35 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
     return msgs
 
 
+def _detect_format(msgs: list[dict]) -> str:
+    """Detect trajectory format: 'claude_code' or 'gptme'.
+
+    Claude Code records have a top-level 'type' field (user/assistant/result).
+    gptme records have a top-level 'role' field (user/assistant/system).
+    """
+    for msg in msgs[:15]:
+        if "role" in msg:
+            return "gptme"
+        if msg.get("type") in ("user", "assistant", "result"):
+            return "claude_code"
+    return "gptme"  # default
+
+
+def _parse_timestamp(ts_str: str) -> datetime | None:
+    """Parse an ISO 8601 timestamp string, returning None on failure."""
+    if not ts_str:
+        return None
+    try:
+        from datetime import timezone as _tz
+
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_tz.utc)
+        return ts
+    except ValueError:
+        return None
+
+
 def _extract_path_from_args(args_str: str) -> str | None:
     """Extract the 'path' field from a tool call's JSON args string."""
     m = re.search(r'"path"\s*:\s*"([^"]+)"', args_str)
@@ -37,7 +76,7 @@ def _extract_path_from_args(args_str: str) -> str | None:
 
 
 def extract_signals(msgs: list[dict]) -> dict:
-    """Extract productivity signals from parsed trajectory messages.
+    """Extract productivity signals from parsed gptme trajectory messages.
 
     Returns a dict with counts and extracted deliverables — no LLM needed.
 
@@ -62,16 +101,9 @@ def extract_signals(msgs: list[dict]) -> dict:
 
         # Parse timestamps for duration
         if ts_str:
-            try:
-                from datetime import timezone as _tz
-
-                ts_clean = ts_str.replace("Z", "+00:00")
-                ts = datetime.fromisoformat(ts_clean)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=_tz.utc)
+            ts = _parse_timestamp(ts_str)
+            if ts is not None:
                 timestamps.append(ts)
-            except ValueError:
-                pass
 
         if role == "assistant":
             # Find all @tool_name(call_id): JSON_ARGS blocks.
@@ -114,10 +146,7 @@ def extract_signals(msgs: list[dict]) -> dict:
                 error_count += 1
 
             # Git commit detection from shell output
-            commit_match = re.search(
-                r"\[(?:master|main|[a-z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)",
-                content,
-            )
+            commit_match = _COMMIT_RE.search(content)
             if commit_match:
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
@@ -198,13 +227,165 @@ def is_productive(signals: dict) -> bool:
     return bool(signals["git_commits"] or len(signals["file_writes"]) >= 2)
 
 
-def extract_from_path(jsonl_path: Path) -> dict:
-    """Parse trajectory and return signals + grade in one call."""
-    msgs = parse_trajectory(jsonl_path)
-    signals = extract_signals(msgs)
-    grade = grade_signals(signals)
+def extract_signals_cc(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Claude Code .jsonl trajectories.
+
+    CC format: each record has a top-level 'type' field.
+    - type='assistant': message.content is a list; tool calls have type='tool_use'
+    - type='user': message.content is a list; tool results have type='tool_result'
+    - type='result': final session result record
+
+    Tool names for file writes: Write, Edit, NotebookEdit, Patch (input.file_path).
+    Errors: tool_result items with is_error=True.
+    Git commits: detected from Bash tool output content via regex.
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    recent_sigs: list[str] = []
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        # Parse top-level timestamp (present on user/assistant/result records)
+        ts = _parse_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        if rec_type == "assistant":
+            content = record.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                tool = item.get("name", "")
+                if not tool:
+                    continue
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+
+                if tool in _CC_WRITE_TOOLS:
+                    path = item.get("input", {}).get("file_path", "")
+                    if path:
+                        if "/journal/" not in path:
+                            file_writes.append(path)
+                        sig = f"{tool}:{path}"
+                        if sig in recent_sigs:
+                            retry_candidates.append(tool)
+                        recent_sigs.append(sig)
+                        if len(recent_sigs) > 20:
+                            recent_sigs.pop(0)
+                    else:
+                        file_writes.append(f"<{tool}>")
+
+        elif rec_type == "user":
+            content = record.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_result":
+                    continue
+
+                if item.get("is_error"):
+                    error_count += 1
+                    continue
+
+                # Content can be a string or a list of content blocks
+                result_content = item.get("content", "")
+                if isinstance(result_content, list):
+                    result_str = " ".join(
+                        c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                        for c in result_content
+                    )
+                else:
+                    result_str = str(result_content)
+
+                # Git commit detection from Bash tool output
+                m = _COMMIT_RE.search(result_str)
+                if m:
+                    commit_hash = m.group(1)
+                    commit_msg = m.group(2).strip()
+                    git_commits.append(f"{commit_msg} ({commit_hash})")
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
     return {
+        "tool_calls": tool_calls,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "session_duration_s": duration_s,
+        "retry_count": len(retry_candidates),
+        "deliverables": deliverables,
+    }
+
+
+def extract_usage_cc(msgs: list[dict]) -> dict:
+    """Extract cumulative token usage from a Claude Code trajectory.
+
+    Sums usage across all assistant turns (each turn has its own usage snapshot).
+    Returns the last-seen model string alongside the totals.
+
+    This is the canonical way to get per-session token counts from CC trajectories,
+    as opposed to parsing systemd journal output (which is fragile).
+    """
+    input_tokens = 0
+    output_tokens = 0
+    cache_creation_tokens = 0
+    cache_read_tokens = 0
+    model: str | None = None
+
+    for record in msgs:
+        if record.get("type") != "assistant":
+            continue
+        msg = record.get("message", {})
+        usage = msg.get("usage") or {}
+        input_tokens += usage.get("input_tokens", 0)
+        output_tokens += usage.get("output_tokens", 0)
+        # cache_creation may be nested under usage or a top-level key
+        cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+        cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+        if msg.get("model"):
+            model = msg["model"]
+
+    total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
+    return {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def extract_from_path(jsonl_path: Path) -> dict:
+    """Parse trajectory and return signals + grade in one call.
+
+    Auto-detects format: gptme (conversation.jsonl) or Claude Code (.jsonl).
+    For CC format, token usage is also extracted from the trajectory.
+    """
+    msgs = parse_trajectory(jsonl_path)
+    fmt = _detect_format(msgs)
+    if fmt == "claude_code":
+        signals = extract_signals_cc(msgs)
+        usage = extract_usage_cc(msgs)
+    else:
+        signals = extract_signals(msgs)
+        usage = {}
+    grade = grade_signals(signals)
+    result: dict = {
         **signals,
+        "format": fmt,
         "productive": is_productive(signals),
         "grade": round(grade, 4),
     }
+    if usage:
+        result["usage"] = usage
+    return result

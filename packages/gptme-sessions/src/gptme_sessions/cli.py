@@ -67,10 +67,10 @@ def main() -> int:
     runs_parser.add_argument("--since", default="14d", help="Time window (e.g. 7d, 30d)")
     runs_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
-    # Signals — extract productivity signals from a gptme trajectory
+    # Signals — extract productivity signals from a trajectory file
     signals_parser = subparsers.add_parser(
         "signals",
-        help="Extract productivity signals from a gptme conversation.jsonl trajectory",
+        help="Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)",
     )
     signals_parser.add_argument(
         "path",
@@ -105,6 +105,7 @@ def main() -> int:
             return 0
         # Human-readable summary
         tc = result["tool_calls"]
+        print(f"Format: {result.get('format', 'gptme')}")
         print(
             f"Tool calls: {sum(tc.values())} "
             f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
@@ -116,6 +117,14 @@ def main() -> int:
         print(f"Duration: {result['session_duration_s']}s")
         print(f"Productive: {result['productive']}")
         print(f"Grade: {result['grade']:.4f}")
+        if result.get("usage"):
+            u = result["usage"]
+            print(
+                f"Tokens: {u['total_tokens']:,} total "
+                f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
+                f"cache_create={u['cache_creation_tokens']:,} "
+                f"cache_read={u['cache_read_tokens']:,})"
+            )
         if result["deliverables"]:
             print("Deliverables:")
             for d in result["deliverables"][:10]:

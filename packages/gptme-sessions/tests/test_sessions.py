@@ -4,6 +4,13 @@ import json
 from pathlib import Path
 
 from gptme_sessions import SessionRecord, SessionStore
+from gptme_sessions.signals import (
+    _detect_format,
+    extract_signals_cc,
+    extract_usage_cc,
+    grade_signals,
+    is_productive,
+)
 from gptme_sessions.store import (
     compute_run_analytics,
     format_run_analytics,
@@ -537,6 +544,251 @@ def test_query_stats_forwards_all_filters(tmp_path):
     assert s3["total"] == 1
 
 
+# ── Signals tests ────────────────────────────────────────────────────────────
+
+
+def _make_gptme_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[dict]:
+    """Build minimal gptme-format trajectory records."""
+    msgs: list[dict] = []
+    for i in range(writes):
+        msgs.append(
+            {
+                "role": "assistant",
+                "content": f'@save(c{i}): {{"path": "/home/bob/file{i}.py"}}',
+                "timestamp": f"2026-03-01T10:0{i}:00+00:00",
+            }
+        )
+    for i in range(commits):
+        msgs.append(
+            {
+                "role": "system",
+                "content": f"[master abc{i:04d}] commit message {i}",
+                "timestamp": f"2026-03-01T10:1{i}:00+00:00",
+            }
+        )
+    for _ in range(errors):
+        msgs.append(
+            {
+                "role": "system",
+                "content": "Error during execution: something went wrong",
+                "timestamp": "2026-03-01T10:20:00+00:00",
+            }
+        )
+    return msgs
+
+
+def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[dict]:
+    """Build minimal Claude Code-format trajectory records."""
+    msgs: list[dict] = []
+    for i in range(writes):
+        msgs.append(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-03-01T10:0{i}:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {"file_path": f"/home/bob/file{i}.py"},
+                        }
+                    ],
+                },
+            }
+        )
+    for i in range(commits):
+        msgs.append(
+            {
+                "type": "user",
+                "timestamp": f"2026-03-01T10:1{i}:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "is_error": False,
+                            "content": f"[master abc{i:04d}] commit message {i}\n 1 file changed",
+                        }
+                    ],
+                },
+            }
+        )
+    for _ in range(errors):
+        msgs.append(
+            {
+                "type": "user",
+                "timestamp": "2026-03-01T10:20:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "is_error": True,
+                            "content": "Exit code 1\nSomething failed",
+                        }
+                    ],
+                },
+            }
+        )
+    return msgs
+
+
+def test_detect_format_gptme():
+    """Detects gptme format from role-keyed messages."""
+    msgs = _make_gptme_msgs(commits=1)
+    assert _detect_format(msgs) == "gptme"
+
+
+def test_detect_format_claude_code():
+    """Detects claude_code format from type-keyed records."""
+    msgs = _make_cc_msgs(commits=1)
+    assert _detect_format(msgs) == "claude_code"
+
+
+def test_detect_format_empty():
+    """Empty messages default to gptme."""
+    assert _detect_format([]) == "gptme"
+
+
+def test_extract_signals_cc_commits():
+    """CC trajectory: git commits extracted from Bash tool results."""
+    msgs = _make_cc_msgs(commits=2)
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 2
+    assert sigs["git_commits"][0].startswith("commit message 0")
+
+
+def test_extract_signals_cc_file_writes():
+    """CC trajectory: Edit tool calls register as file writes."""
+    msgs = _make_cc_msgs(writes=3)
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["file_writes"]) == 3
+
+
+def test_extract_signals_cc_errors():
+    """CC trajectory: tool_result with is_error=True increments error_count."""
+    msgs = _make_cc_msgs(errors=2)
+    sigs = extract_signals_cc(msgs)
+    assert sigs["error_count"] == 2
+
+
+def test_extract_signals_cc_journal_excluded():
+    """CC trajectory: file writes to /journal/ paths are excluded."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": "/home/bob/bob/journal/2026-03-01/session.md"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_cc_tool_call_counts():
+    """CC trajectory: tool call names are counted correctly."""
+    msgs = _make_cc_msgs(writes=2)
+    msgs.append(
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:30:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+            },
+        }
+    )
+    sigs = extract_signals_cc(msgs)
+    assert sigs["tool_calls"].get("Edit", 0) == 2
+    assert sigs["tool_calls"].get("Bash", 0) == 1
+
+
+def test_extract_signals_cc_retry_detection():
+    """CC trajectory: writing the same file twice registers as a retry."""
+    path = "/home/bob/bob/script.py"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": f"2026-03-01T10:0{i}:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": path}}],
+            },
+        }
+        for i in range(2)
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["retry_count"] >= 1
+
+
+def test_grade_signals_noop():
+    """Grade is low (0.25) when no commits or writes."""
+    sigs = extract_signals_cc([])
+    assert grade_signals(sigs) == 0.25
+
+
+def test_grade_signals_productive():
+    """Grade is higher when commits are present."""
+    msgs = _make_cc_msgs(commits=2)
+    sigs = extract_signals_cc(msgs)
+    assert grade_signals(sigs) >= 0.60
+
+
+def test_is_productive_cc():
+    """is_productive returns True for sessions with commits."""
+    msgs = _make_cc_msgs(commits=1)
+    sigs = extract_signals_cc(msgs)
+    assert is_productive(sigs)
+
+
+def test_is_productive_cc_writes_only():
+    """is_productive returns True for sessions with 2+ writes but no commits."""
+    msgs = _make_cc_msgs(writes=3)
+    sigs = extract_signals_cc(msgs)
+    assert is_productive(sigs)
+
+
+def test_extract_from_path_cc(tmp_path: Path):
+    """extract_from_path auto-detects CC format from file contents."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "session.jsonl"
+    msgs = _make_cc_msgs(commits=1, writes=2)
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "claude_code"
+    assert result["productive"] is True
+    assert result["grade"] >= 0.50
+
+
+def test_extract_from_path_gptme(tmp_path: Path):
+    """extract_from_path auto-detects gptme format from file contents."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "conversation.jsonl"
+    msgs = _make_gptme_msgs(commits=1)
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "gptme"
+    assert result["productive"] is True
+
+
 def test_stats_subcommand_filter_args(tmp_path: Path, monkeypatch):
     """stats subcommand accepts --category, --harness, --outcome and filters correctly."""
     from gptme_sessions.cli import main
@@ -596,3 +848,87 @@ def test_stats_subcommand_filter_args(tmp_path: Path, monkeypatch):
     )
     result = main()
     assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# extract_usage_cc
+# ---------------------------------------------------------------------------
+
+
+def _make_cc_assistant_usage(
+    input_tokens: int,
+    output_tokens: int,
+    cache_create: int = 0,
+    cache_read: int = 0,
+    model: str = "claude-sonnet-4-6",
+) -> dict:
+    """Minimal CC assistant record with usage info."""
+    return {
+        "type": "assistant",
+        "message": {
+            "model": model,
+            "content": [],
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": cache_create,
+                "cache_read_input_tokens": cache_read,
+            },
+        },
+    }
+
+
+def test_extract_usage_cc_basic():
+    """Token counts are summed across all assistant turns."""
+    msgs = [
+        _make_cc_assistant_usage(100, 50, 200, 0),
+        _make_cc_assistant_usage(10, 20, 0, 500),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 110
+    assert usage["output_tokens"] == 70
+    assert usage["cache_creation_tokens"] == 200
+    assert usage["cache_read_tokens"] == 500
+    assert usage["total_tokens"] == 880
+    assert usage["model"] == "claude-sonnet-4-6"
+
+
+def test_extract_usage_cc_empty():
+    """Empty trajectory returns zero counts."""
+    usage = extract_usage_cc([])
+    assert usage["total_tokens"] == 0
+    assert usage["model"] is None
+
+
+def test_extract_usage_cc_ignores_non_assistant():
+    """User records and other types don't contribute to token counts."""
+    msgs = [
+        {"type": "user", "message": {"content": [], "usage": {"input_tokens": 9999}}},
+        _make_cc_assistant_usage(10, 5),
+        {"type": "queue-operation", "operation": "start"},
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5
+
+
+def test_extract_usage_cc_model_last_wins():
+    """Last seen model in assistant messages is returned."""
+    msgs = [
+        _make_cc_assistant_usage(10, 5, model="claude-sonnet-4-6"),
+        _make_cc_assistant_usage(10, 5, model="claude-opus-4-6"),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["model"] == "claude-opus-4-6"
+
+
+def test_extract_usage_cc_no_usage_field():
+    """Assistant record without usage field doesn't crash."""
+    msgs = [
+        {"type": "assistant", "message": {"model": "claude-sonnet-4-6", "content": []}},
+        _make_cc_assistant_usage(5, 3),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 5
+    assert usage["output_tokens"] == 3
+    assert usage["total_tokens"] == 8
