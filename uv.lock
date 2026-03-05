@@ -28,6 +28,7 @@ members = [
     "gptme-ralph",
     "gptme-retrieval",
     "gptme-runloops",
+    "gptme-sessions",
     "gptme-voice",
     "gptme-warpgrep",
     "gptme-whatsapp",
@@ -1234,6 +1235,28 @@ requires-dist = [
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "gptme-sessions"
+version = "0.1.0"
+source = { editable = "packages/gptme-sessions" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+]
+provides-extras = ["dev", "test"]
 
 [[package]]
 name = "gptme-voice"
