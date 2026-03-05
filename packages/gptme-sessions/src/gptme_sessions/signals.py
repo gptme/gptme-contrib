@@ -129,8 +129,10 @@ def extract_signals(msgs: list[dict]) -> dict:
                             recent_sigs.append(sig)
                             if len(recent_sigs) > 20:
                                 recent_sigs.pop(0)
-                    else:
-                        file_writes.append(f"<{tool}>")
+                    # No else: tool calls without extractable paths are not counted as
+                    # file writes. Placeholder strings like "<save>" would inflate the
+                    # unique-write count used in grade_signals and push unproductive
+                    # sessions into higher reward tiers.
 
         elif role == "system" and ts_str:
             content_stripped = content.strip()
@@ -187,6 +189,8 @@ def grade_signals(signals: dict) -> float:
     errors = signals["error_count"]
     retries = signals["retry_count"]
     total_tools = sum(signals["tool_calls"].values())
+    # gptme has a 'complete' tool that signals intentional session end (as opposed
+    # to running out of context or timing out). Small bonus for structured completion.
     has_complete = "complete" in signals["tool_calls"]
 
     if commits == 0 and writes == 0:
@@ -293,8 +297,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             recent_sigs.append(sig)
                             if len(recent_sigs) > 20:
                                 recent_sigs.pop(0)
-                    else:
-                        file_writes.append(f"<{tool}>")
+                    # No else: tool calls without extractable paths are not counted as
+                    # file writes — same rationale as the gptme path above.
 
         elif rec_type == "user":
             content = record.get("message", {}).get("content", [])

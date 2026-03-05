@@ -6,6 +6,7 @@ from pathlib import Path
 from gptme_sessions import SessionRecord, SessionStore
 from gptme_sessions.signals import (
     _detect_format,
+    extract_signals,
     extract_signals_cc,
     extract_usage_cc,
     grade_signals,
@@ -1110,3 +1111,141 @@ def test_is_productive_deduplication():
     }
     assert not is_productive(sigs_two_writes_same_file)
     assert is_productive(sigs_two_unique_writes)
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for gptme extract_signals path
+# ---------------------------------------------------------------------------
+
+
+def test_extract_signals_gptme_file_writes():
+    """gptme trajectory: save/write/edit/patch tool calls register as file writes."""
+    msgs = _make_gptme_msgs(writes=3)
+    sigs = extract_signals(msgs)
+    assert len(sigs["file_writes"]) == 3
+    assert all(f.startswith("/home/bob/file") for f in sigs["file_writes"])
+
+
+def test_extract_signals_gptme_commits():
+    """gptme trajectory: git commit lines in system messages are extracted."""
+    msgs = _make_gptme_msgs(commits=2)
+    sigs = extract_signals(msgs)
+    assert len(sigs["git_commits"]) == 2
+
+
+def test_extract_signals_gptme_error_detection_guard():
+    """gptme trajectory: 'Ran command:' prefix suppresses error detection.
+
+    This tests the operator-precedence fix: the guard must apply to all three
+    error-detection conditions, not just the last one.
+    """
+    msgs = [
+        # Should NOT be counted as error — starts with "Ran command:"
+        {
+            "role": "system",
+            "content": "Ran command: ls\nError during execution: Permission denied",
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        # Should NOT be counted as error — starts with "Ran command:"
+        {
+            "role": "system",
+            "content": "Ran command: cat file\nError: no such file",
+            "timestamp": "2026-03-01T10:01:00+00:00",
+        },
+        # SHOULD be counted — genuine error output (no "Ran command:" prefix)
+        {
+            "role": "system",
+            "content": "Error during execution: command failed",
+            "timestamp": "2026-03-01T10:02:00+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["error_count"] == 1
+
+
+def test_extract_signals_gptme_retry_detection():
+    """gptme trajectory: writing the same file twice registers as a retry."""
+    path = "/home/bob/bob/script.py"
+    msgs = [
+        {
+            "role": "assistant",
+            "content": f'@save(c{i}): {{"path": "{path}"}}',
+            "timestamp": f"2026-03-01T10:{i:02d}:00+00:00",
+        }
+        for i in range(2)
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["retry_count"] >= 1
+
+
+def test_extract_signals_gptme_journal_excluded():
+    """gptme trajectory: writes to /journal/ paths are excluded from file_writes."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": '@save(c0): {"path": "/home/bob/bob/journal/2026-03-01/session.md"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        }
+    ]
+    sigs = extract_signals(msgs)
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_gptme_no_placeholder_inflation():
+    """gptme trajectory: tool calls with unparseable paths don't inflate file_writes.
+
+    Previously, path-extraction failures caused placeholder strings like '<save>',
+    '<write>', '<patch>' to be appended to file_writes. Three different tool names
+    with unparseable args would then push the session into the writes>=3 grade tier
+    (0.55) even though zero real files were written.
+    """
+    msgs = [
+        # Three different write tools, none with extractable 'path' args
+        {
+            "role": "assistant",
+            "content": '@save(c0): {"content": "no path field here"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@write(c1): {"content": "also no path"}',
+            "timestamp": "2026-03-01T10:01:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@patch(c2): {"diff": "no path either"}',
+            "timestamp": "2026-03-01T10:02:00+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert len(sigs["file_writes"]) == 0
+    # Grade should reflect no real output (active session, non-zero tool calls)
+    assert grade_signals(sigs) == 0.25
+
+
+def test_extract_signals_cc_no_placeholder_inflation():
+    """CC trajectory: write tools with no extractable path don't inflate file_writes.
+
+    Same as gptme version but for Claude Code format — a Write tool call with no
+    'file_path' in its input should not append a placeholder to file_writes.
+    """
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"write_{i}",
+                        "name": "Write",
+                        "input": {"content": "no file_path here"},  # missing file_path
+                    }
+                ],
+            },
+        }
+        for i in range(3)
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["file_writes"]) == 0

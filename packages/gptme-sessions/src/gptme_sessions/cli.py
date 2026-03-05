@@ -115,7 +115,14 @@ def main() -> int:
             f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
         )
         print(f"Git commits: {len(result['git_commits'])}")
-        print(f"File writes: {len(result['file_writes'])}")
+        unique_writes = len(set(result["file_writes"]))
+        total_writes = len(result["file_writes"])
+        write_str = (
+            str(unique_writes)
+            if unique_writes == total_writes
+            else f"{unique_writes} unique ({total_writes} total)"
+        )
+        print(f"File writes: {write_str}")
         print(f"Errors: {result['error_count']}")
         print(f"Retries: {result['retry_count']}")
         print(f"Duration: {result['session_duration_s']}s")
