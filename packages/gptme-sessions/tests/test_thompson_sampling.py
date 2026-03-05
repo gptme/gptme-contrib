@@ -1,6 +1,7 @@
 """Tests for Thompson sampling bandit engine."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,51 @@ def test_bandit_state_prune_stale_contextual():
     assert "infra" not in state.contextual_arms
     # Active global arm survives
     assert "code" in state.arms
+
+
+def test_bandit_state_prune_stale_age_for_selected_arms():
+    """prune_stale age check applies to selected arms — max_age_days is not dead code."""
+    from datetime import timedelta
+
+    state = BanditState()
+    # Arm with selections but last_updated far in the past
+    arm = state.get_or_create_arm("old-but-selected")
+    arm.update(1.0)  # 1 selection
+    old_time = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    arm.last_updated = old_time
+
+    # Also add a recently-updated arm that should survive
+    state.update_session(["recent"], outcome=1.0)
+
+    pruned = state.prune_stale(min_selections=0, max_age_days=90)
+    assert pruned >= 1
+    assert "old-but-selected" not in state.arms
+    assert "recent" in state.arms
+
+
+def test_bandit_state_update_session_unknown_string_raises():
+    """Unknown string outcomes raise ValueError instead of silently mapping to 0.0."""
+    state = BanditState()
+    with pytest.raises(ValueError, match="Unknown string outcome"):
+        state.update_session(["code"], outcome="failure")
+    with pytest.raises(ValueError, match="Unknown string outcome"):
+        state.update_session(["code"], outcome="Productive")  # wrong case
+    # State must be unchanged
+    assert "code" not in state.arms
+
+
+def test_bandit_sample_scores_no_mutation():
+    """sample_scores does not mutate state for unseen arm IDs."""
+    state = BanditState()
+    state.update_session(["known"], outcome=1.0)
+    arms_before = set(state.arms.keys())
+
+    scores = state.sample_scores(["known", "unseen-a", "unseen-b"], seed=42)
+    # Unseen arms get a valid score
+    assert 0.0 <= scores["unseen-a"] <= 1.0
+    assert 0.0 <= scores["unseen-b"] <= 1.0
+    # But state is not mutated
+    assert set(state.arms.keys()) == arms_before
 
 
 # ── Bandit (manager) tests ────────────────────────────────────────────────────

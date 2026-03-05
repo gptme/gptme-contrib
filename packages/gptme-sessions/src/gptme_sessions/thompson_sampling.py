@@ -188,18 +188,25 @@ class BanditState:
         return self.contextual_arms[arm_id][key]
 
     def _resolve_arm_for_sampling(self, arm_id: str, context: tuple[str, ...] | None) -> BanditArm:
-        """Find the best arm for sampling using hierarchical fallback."""
-        if context is None:
-            return self.get_or_create_arm(arm_id)
+        """Find the best arm for sampling using hierarchical fallback.
 
-        for ctx in _context_fallback_chain(context):
-            key = _context_key(ctx)
-            if arm_id in self.contextual_arms and key in self.contextual_arms[arm_id]:
-                arm = self.contextual_arms[arm_id][key]
-                if ctx is None or arm.total_selections >= CONTEXTUAL_MIN_OBSERVATIONS:
-                    return arm
+        Read-only: never creates new arms. Returns a temporary BanditArm with
+        uninformative prior Beta(1, 1) for unknown arms — sampling from it gives
+        an expected score of 0.5, the correct uninformative default.
+        """
+        if context is not None:
+            for ctx in _context_fallback_chain(context):
+                key = _context_key(ctx)
+                if arm_id in self.contextual_arms and key in self.contextual_arms[arm_id]:
+                    arm = self.contextual_arms[arm_id][key]
+                    if ctx is None or arm.total_selections >= CONTEXTUAL_MIN_OBSERVATIONS:
+                        return arm
 
-        return self.get_or_create_arm(arm_id)
+        existing = self.arms.get(arm_id)
+        if existing is not None:
+            return existing
+        # Return a temporary arm with uninformative prior — not stored in state
+        return BanditArm(arm_id=arm_id)
 
     def sample_scores(
         self,
@@ -248,7 +255,15 @@ class BanditState:
             Dict mapping arm_id → bool (True if reward > 0.5).
         """
         if isinstance(outcome, str):
-            base_reward = 1.0 if outcome == "productive" else 0.0
+            if outcome == "productive":
+                base_reward = 1.0
+            elif outcome in ("noop", "failed"):
+                base_reward = 0.0
+            else:
+                raise ValueError(
+                    f"Unknown string outcome: {outcome!r}. "
+                    "Expected 'productive', 'noop', 'failed', or a float in [0, 1]."
+                )
         else:
             base_reward = float(outcome)
 
@@ -318,11 +333,14 @@ class BanditState:
         pruned = 0
 
         def _is_stale(arm: "BanditArm") -> bool:
-            if arm.total_selections > min_selections:
-                return False
+            # Age-based pruning applies to all arms, regardless of selection count
             if arm.last_updated:
                 last = datetime.fromisoformat(arm.last_updated)
-                return (now - last).days > max_age_days
+                if (now - last).days > max_age_days:
+                    return True
+            # Selection guard: protect arms above threshold from being pruned by count alone
+            if arm.total_selections > min_selections:
+                return False
             return arm.total_selections == 0
 
         # Prune global arms
