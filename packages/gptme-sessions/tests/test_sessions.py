@@ -1645,6 +1645,83 @@ def test_extract_usage_gptme_last_model_wins():
     assert usage["output_tokens"] == 60
 
 
+def test_extract_usage_gptme_cache_tokens():
+    """Anthropic cache tokens are extracted and included in total_tokens."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "turn 1",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 400,
+                "cache_read_input_tokens": 0,
+                "cost": 0.005,
+            },
+        },
+        {
+            "role": "assistant",
+            "content": "turn 2",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 10,
+                "output_tokens": 30,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 400,
+                "cost": 0.001,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 110
+    assert usage["output_tokens"] == 80
+    assert usage["cache_creation_tokens"] == 400
+    assert usage["cache_read_tokens"] == 400
+    # total_tokens includes all four fields
+    assert usage["total_tokens"] == 110 + 80 + 400 + 400
+
+
+def test_extract_usage_gptme_cache_tokens_meta_usage():
+    """Cache tokens are extracted from msg.metadata.usage (nested format)."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            "metadata": {
+                "model": "anthropic/claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 300,
+                    "cache_read_input_tokens": 150,
+                    "cost": 0.002,
+                },
+            },
+        }
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["cache_creation_tokens"] == 300
+    assert usage["cache_read_tokens"] == 150
+    assert usage["total_tokens"] == 50 + 20 + 300 + 150
+
+
+def test_extract_usage_gptme_no_cache_tokens_zero():
+    """Cache token keys are always present, defaulting to 0 for non-Anthropic models."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+            "metadata": {"model": "openai/gpt-4o"},
+        }
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["cache_creation_tokens"] == 0
+    assert usage["cache_read_tokens"] == 0
+    assert usage["total_tokens"] == 140
+
+
 def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
     """extract_from_path includes usage data for gptme format trajectories."""
     from gptme_sessions.signals import extract_from_path
