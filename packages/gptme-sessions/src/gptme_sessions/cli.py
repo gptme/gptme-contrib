@@ -94,8 +94,11 @@ def main() -> int:
     # Handle signals before constructing SessionStore (no store needed)
     if args.command == "signals":
         p = args.path
-        if not p.exists():
-            print(f"error: {p} not found", file=sys.stderr)
+        if not p.is_file():
+            if p.is_dir():
+                print(f"error: {p} is a directory, expected a .jsonl file", file=sys.stderr)
+            else:
+                print(f"error: {p} not found", file=sys.stderr)
             return 1
         result = extract_from_path(p)
         if args.grade:
