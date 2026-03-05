@@ -323,7 +323,7 @@ class BanditState:
         Prunes both global arms and contextual arms.
 
         Args:
-            min_selections: Only prune arms with fewer than this many selections.
+            min_selections: Prune arms with at most this many selections (total_selections <= min_selections). Default 0 prunes only never-selected arms.
             max_age_days: Prune arms not updated in this many days.
 
         Returns:

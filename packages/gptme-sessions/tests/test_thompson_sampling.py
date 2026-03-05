@@ -491,3 +491,21 @@ def test_bandit_state_prune_stale_min_selections_threshold():
     assert pruned == 1, f"Expected 1 pruned, got {pruned}"
     assert "low-selections" not in state.arms, "Arm with 1 selection should be pruned"
     assert "high-selections" in state.arms, "Arm with 5 selections should survive"
+
+
+def test_bandit_state_prune_stale_min_selections_boundary():
+    """Arms with exactly min_selections selections ARE pruned (semantics: total_selections <= min_selections)."""
+    state = BanditState()
+    # Arm with exactly min_selections=3 selections — at the boundary, gets pruned
+    arm_exact = state.get_or_create_arm("exact-threshold")
+    for _ in range(3):
+        arm_exact.update(0.5)
+    # Arm with 4 selections — above threshold, should survive
+    arm_above = state.get_or_create_arm("above-threshold")
+    for _ in range(4):
+        arm_above.update(0.5)
+
+    pruned = state.prune_stale(min_selections=3)
+    assert pruned == 1, f"Expected 1 pruned, got {pruned}"
+    assert "exact-threshold" not in state.arms, "Arm with exactly min_selections should be pruned"
+    assert "above-threshold" in state.arms, "Arm above threshold should survive"
