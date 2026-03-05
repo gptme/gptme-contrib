@@ -58,6 +58,15 @@ def _detect_format(msgs: list[dict]) -> str:
     return "gptme"  # default
 
 
+def detect_format(msgs: list[dict]) -> str:
+    """Public alias for _detect_format.
+
+    Returns 'claude_code' or 'gptme' based on trajectory record structure.
+    Useful for callers that need to know the format before extracting signals.
+    """
+    return _detect_format(msgs)
+
+
 def _parse_timestamp(ts_str: str) -> datetime | None:
     """Parse an ISO 8601 timestamp string, returning None on failure."""
     if not ts_str:

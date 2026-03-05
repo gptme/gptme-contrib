@@ -6,6 +6,7 @@ from pathlib import Path
 from gptme_sessions import SessionRecord, SessionStore
 from gptme_sessions.signals import (
     _detect_format,
+    detect_format,
     extract_signals,
     extract_signals_cc,
     extract_usage_cc,
@@ -1371,3 +1372,64 @@ def test_extract_signals_cc_steps_parallel_tools():
     sigs = extract_signals_cc(msgs)
     assert sigs["steps"] == 1
     assert sigs["tool_calls"]["Bash"] == 4
+
+
+def test_detect_format_public_alias():
+    """detect_format() is the public alias for _detect_format()."""
+    gptme_msgs = [{"role": "assistant", "content": "hi"}]
+    cc_msgs = [{"type": "assistant", "message": {"role": "assistant", "content": []}}]
+    assert detect_format(gptme_msgs) == "gptme"
+    assert detect_format(cc_msgs) == "claude_code"
+    # Both return the same result as the private version
+    assert detect_format(gptme_msgs) == _detect_format(gptme_msgs)
+    assert detect_format(cc_msgs) == _detect_format(cc_msgs)
+
+
+def test_signals_cli_tokens_cc(tmp_path):
+    """signals --tokens outputs total token count for CC trajectories."""
+    import subprocess
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-4-5",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 300,
+                },
+            },
+        }
+    ]
+    p = tmp_path / "session.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--tokens"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "650"  # 100+50+200+300
+
+
+def test_signals_cli_tokens_gptme(tmp_path):
+    """signals --tokens produces no output for gptme format (no embedded usage)."""
+    import subprocess
+
+    msgs = [{"role": "assistant", "content": "hello", "timestamp": "2026-03-01T10:00:00+00:00"}]
+    p = tmp_path / "conversation.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--tokens"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""  # no usage data in gptme format

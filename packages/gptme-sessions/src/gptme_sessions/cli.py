@@ -88,6 +88,11 @@ def main() -> int:
         action="store_true",
         help="Output grade only (float 0.0-1.0)",
     )
+    signals_output_group.add_argument(
+        "--tokens",
+        action="store_true",
+        help="Output total token count only (int; empty if no usage data, e.g. gptme format)",
+    )
 
     args = parser.parse_args()
 
@@ -110,6 +115,12 @@ def main() -> int:
             return 1
         if args.grade:
             print(f"{result['grade']:.4f}")
+            return 0
+        if args.tokens:
+            usage = result.get("usage")
+            if usage:
+                print(usage["total_tokens"])
+            # else: no output (gptme format or CC with no usage data)
             return 0
         if args.json:
             print(json.dumps(result, indent=2))
