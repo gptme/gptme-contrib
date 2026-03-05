@@ -62,6 +62,43 @@ else
 fi
 ```
 
+### Implementing Signal Checks
+
+The `check-*` commands above are abstractions — implement them as simple scripts with no LLM cost:
+
+**File-based signal (standup or event file appeared):**
+```bash
+check_standup_ready() {
+    local agent="$1" date="$2"
+    [[ -f "gptme-superuser/standups/${date}/${agent}.md" ]] && echo 1 || echo 0
+}
+EVENTS=$(check_standup_ready gordon "$(date +%Y-%m-%d)")
+```
+
+**Price proximity check (external API + arithmetic):**
+```bash
+check_price_near_strike() {
+    # Returns 1 if current price is within threshold% of strike
+    local current="$1" strike="$2" threshold="${3:-0.05}"
+    python3 -c "
+c=$current; s=$strike; t=$threshold
+print(1 if abs(c - s) / s <= t else 0)"
+}
+BTC_PRICE=$(curl -sf 'https://api.example.com/price/btc' | jq -r '.usd')
+SIGNALS=$(check_price_near_strike "$BTC_PRICE" 72000 0.01)
+```
+
+**New message check (file modification time):**
+```bash
+check_new_messages() {
+    find gptme-superuser/messages/ -newer .last-check -name "to-*.md" 2>/dev/null | wc -l
+}
+MESSAGES=$(check_new_messages)
+touch .last-check  # update watermark after checking
+```
+
+These run in milliseconds with zero inference cost.
+
 ### Session Cadence Optimization
 
 Pair session gating with adaptive cadence:
