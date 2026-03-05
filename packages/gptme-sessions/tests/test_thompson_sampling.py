@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from gptme_sessions import Bandit, BanditArm, BanditState, SessionRecord
+from gptme_sessions.thompson_sampling import load_bandit_means
 
 
 # ── BanditArm unit tests ─────────────────────────────────────────────────────
@@ -60,18 +61,6 @@ def test_bandit_arm_update_partial_failure():
     assert arm.total_rewards == 0
 
 
-def test_bandit_arm_update_out_of_range():
-    """update raises ValueError for rewards outside [0, 1]."""
-    arm = BanditArm(arm_id="code")
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        arm.update(1.5)
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        arm.update(-0.1)
-    # Boundary values are fine
-    arm.update(0.0)
-    arm.update(1.0)
-
-
 def test_bandit_arm_decay():
     """Decay moves alpha/beta toward prior (1, 1)."""
     arm = BanditArm(arm_id="code", alpha=5.0, beta=3.0)
@@ -103,6 +92,19 @@ def test_bandit_arm_ucb_above_mean():
     """UCB is always >= mean."""
     arm = BanditArm(arm_id="code", alpha=3.0, beta=2.0)
     assert arm.ucb >= arm.mean
+
+
+def test_bandit_arm_update_out_of_range():
+    """Out-of-range reward raises ValueError instead of corrupting Beta params."""
+    arm = BanditArm(arm_id="code")
+    with pytest.raises(ValueError, match=r"reward must be in \[0, 1\]"):
+        arm.update(2.0)
+    with pytest.raises(ValueError, match=r"reward must be in \[0, 1\]"):
+        arm.update(-0.1)
+    # Params must be unchanged after failed update
+    assert arm.alpha == 1.0
+    assert arm.beta == 1.0
+    assert arm.total_selections == 0
 
 
 # ── BanditState unit tests ────────────────────────────────────────────────────
@@ -235,21 +237,19 @@ def test_bandit_state_prune_stale():
 
 
 def test_bandit_state_prune_stale_contextual():
-    """prune_stale also removes stale contextual arms and cleans up empty buckets."""
+    """prune_stale also removes stale contextual arms, not just global ones."""
     state = BanditState()
-    # Contextual arm that was created but never selected
-    state.get_or_create_contextual_arm("code", ("code", "opus"))
-    # Active contextual arm (has selections)
-    state.update_session(["infra"], outcome=0.8, context=("infra", "sonnet"))
+    # Create a stale contextual arm (never selected → zero selections)
+    state.get_or_create_contextual_arm("infra", ("infra", "opus"))  # never updated
+    # Also add an active global arm so prune doesn't wipe state entirely
+    state.update_session(["code"], outcome=1.0)
 
     pruned = state.prune_stale(min_selections=0)
-
-    # Stale contextual arm (and empty bucket) removed
-    assert "code" not in state.contextual_arms
-    # Active contextual arm preserved
-    assert "infra" in state.contextual_arms
-    # Pruned count includes the stale contextual arm
+    # The stale contextual arm for "infra" should be gone
     assert pruned >= 1
+    assert "infra" not in state.contextual_arms
+    # Active global arm survives
+    assert "code" in state.arms
 
 
 # ── Bandit (manager) tests ────────────────────────────────────────────────────
@@ -400,3 +400,31 @@ def test_session_record_from_dict_without_trigger():
     d = {"model": "opus", "outcome": "productive", "run_type": "autonomous"}
     r = SessionRecord.from_dict(d)
     assert r.trigger is None
+
+
+# ── load_bandit_means tests ───────────────────────────────────────────────────
+
+
+def test_load_bandit_means_no_mutation(tmp_path: Path):
+    """load_bandit_means with context does not mutate bandit state on disk."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0, context=("code", "opus"))
+
+    arms_before = set(bandit.state.arms.keys())
+    _ = load_bandit_means(tmp_path, arm_ids=["code", "unseen"], context=("code", "opus"))
+
+    # Reload from disk and verify state is unchanged
+    bandit2 = Bandit(state_dir=tmp_path)
+    assert set(bandit2.state.arms.keys()) == arms_before
+
+
+def test_load_bandit_means_unknown_arm_returns_half(tmp_path: Path):
+    """Unknown arms return 0.5 (uninformative prior) whether or not context given."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+
+    means_no_ctx = load_bandit_means(tmp_path, arm_ids=["unseen"])
+    assert means_no_ctx["unseen"] == pytest.approx(0.5)
+
+    means_ctx = load_bandit_means(tmp_path, arm_ids=["unseen"], context=("code", "opus"))
+    assert means_ctx["unseen"] == pytest.approx(0.5)

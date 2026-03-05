@@ -94,7 +94,7 @@ class BanditArm:
         """
         r = float(reward)
         if not 0.0 <= r <= 1.0:
-            raise ValueError(f"reward must be in [0, 1], got {r!r}")
+            raise ValueError(f"reward must be in [0, 1], got {r}")
         self.alpha += r
         self.beta += 1.0 - r
         self.total_selections += 1
@@ -305,16 +305,19 @@ class BanditState:
     def prune_stale(self, min_selections: int = 0, max_age_days: int = 90) -> int:
         """Remove arms that haven't been selected recently.
 
+        Prunes both global arms and contextual arms.
+
         Args:
             min_selections: Only prune arms with fewer than this many selections.
             max_age_days: Prune arms not updated in this many days.
 
         Returns:
-            Number of arms pruned (global + contextual combined).
+            Number of arms pruned.
         """
         now = datetime.now(timezone.utc)
+        pruned = 0
 
-        def _is_stale(arm: BanditArm) -> bool:
+        def _is_stale(arm: "BanditArm") -> bool:
             if arm.total_selections > min_selections:
                 return False
             if arm.last_updated:
@@ -326,19 +329,17 @@ class BanditState:
         to_prune = [arm_id for arm_id, arm in self.arms.items() if _is_stale(arm)]
         for arm_id in to_prune:
             del self.arms[arm_id]
-        pruned = len(to_prune)
+        pruned += len(to_prune)
 
-        # Prune contextual arms (including empty arm_id buckets)
-        empty_buckets = []
-        for arm_id, contexts in self.contextual_arms.items():
-            stale_keys = [k for k, arm in contexts.items() if _is_stale(arm)]
-            for k in stale_keys:
-                del contexts[k]
+        # Prune contextual arms
+        for arm_id in list(self.contextual_arms.keys()):
+            stale_keys = [k for k, arm in self.contextual_arms[arm_id].items() if _is_stale(arm)]
+            for ctx_key in stale_keys:
+                del self.contextual_arms[arm_id][ctx_key]
             pruned += len(stale_keys)
-            if not contexts:
-                empty_buckets.append(arm_id)
-        for arm_id in empty_buckets:
-            del self.contextual_arms[arm_id]
+            # Remove empty arm_id entries
+            if not self.contextual_arms[arm_id]:
+                del self.contextual_arms[arm_id]
 
         return pruned
 
@@ -510,6 +511,25 @@ class Bandit:
         return "\n".join(lines)
 
 
+def _resolve_mean_readonly(
+    state: "BanditState", arm_id: str, context: tuple[str, ...] | None
+) -> float:
+    """Read-only version of arm resolution — never creates new arms.
+
+    Returns the posterior mean for arm_id under context, or 0.5 (uninformative
+    prior mean) if no matching arm exists.
+    """
+    if context is not None:
+        for ctx in _context_fallback_chain(context):
+            key = _context_key(ctx)
+            if arm_id in state.contextual_arms and key in state.contextual_arms[arm_id]:
+                arm = state.contextual_arms[arm_id][key]
+                if ctx is None or arm.total_selections >= CONTEXTUAL_MIN_OBSERVATIONS:
+                    return arm.mean
+    existing = state.arms.get(arm_id)
+    return existing.mean if existing else 0.5
+
+
 def load_bandit_means(
     state_dir: str | Path,
     state_file: str = "bandit-state.json",
@@ -523,25 +543,18 @@ def load_bandit_means(
     Unknown arms get 0.5 (uninformative prior mean).
 
     When context is provided, uses hierarchical fallback to find the best
-    contextual arm for each arm_id.
+    contextual arm for each arm_id. This function is read-only — it never
+    mutates the bandit state.
     """
     bandit = Bandit(state_dir=state_dir, state_file=state_file)
+    state = bandit.state
     means: dict[str, float] = {}
     if arm_ids:
         for arm_id in arm_ids:
-            if context is not None:
-                arm = bandit.state._resolve_arm_for_sampling(arm_id, context)
-                means[arm_id] = arm.mean
-            else:
-                existing = bandit.state.arms.get(arm_id)
-                means[arm_id] = existing.mean if existing else 0.5
+            means[arm_id] = _resolve_mean_readonly(state, arm_id, context)
     else:
-        for arm_id, arm in bandit.state.arms.items():
-            if context is not None:
-                resolved = bandit.state._resolve_arm_for_sampling(arm_id, context)
-                means[arm_id] = resolved.mean
-            else:
-                means[arm_id] = arm.mean
+        for arm_id in state.arms:
+            means[arm_id] = _resolve_mean_readonly(state, arm_id, context)
     return means
 
 
