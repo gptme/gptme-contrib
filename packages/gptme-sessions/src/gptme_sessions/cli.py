@@ -91,7 +91,7 @@ def main() -> int:
     signals_output_group.add_argument(
         "--tokens",
         action="store_true",
-        help="Output total token count only (int; empty if no usage data, e.g. gptme format)",
+        help="Output total token count only (Claude Code trajectories only)",
     )
 
     args = parser.parse_args()
@@ -116,14 +116,13 @@ def main() -> int:
         if args.grade:
             print(f"{result['grade']:.4f}")
             return 0
+        if args.json:
+            print(json.dumps(result, indent=2))
+            return 0
         if args.tokens:
             usage = result.get("usage")
             if usage and usage.get("total_tokens", 0) > 0:
                 print(usage["total_tokens"])
-            # else: no output (gptme format, or CC with no/zero token data)
-            return 0
-        if args.json:
-            print(json.dumps(result, indent=2))
             return 0
         # Human-readable summary
         tc = result["tool_calls"]

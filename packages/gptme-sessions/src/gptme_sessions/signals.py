@@ -59,10 +59,10 @@ def _detect_format(msgs: list[dict]) -> str:
 
 
 def detect_format(msgs: list[dict]) -> str:
-    """Public alias for _detect_format.
+    """Public alias for trajectory format detection.
 
-    Returns 'claude_code' or 'gptme' based on trajectory record structure.
-    Useful for callers that need to know the format before extracting signals.
+    Exposes format detection as stable API while preserving _detect_format for
+    internal callers and backward compatibility.
     """
     return _detect_format(msgs)
 
