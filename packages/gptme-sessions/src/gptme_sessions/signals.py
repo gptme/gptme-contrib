@@ -534,6 +534,9 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     timestamps: list[datetime] = []
     steps = 0
     recent_sigs: list[str] = []
+    # Track whether the current turn (bounded by turn_context records) has tool calls.
+    # Increment steps once per turn, not once per function_call record.
+    current_turn_has_tool = False
 
     # Track function_call ids for matching with their outputs
     call_id_to_name: dict[str, str] = {}
@@ -545,7 +548,13 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         if ts is not None:
             timestamps.append(ts)
 
-        if rec_type == "response_item":
+        if rec_type == "turn_context":
+            # New turn boundary: flush the previous turn's step
+            if current_turn_has_tool:
+                steps += 1
+                current_turn_has_tool = False
+
+        elif rec_type == "response_item":
             payload = record.get("payload", {})
             payload_type = payload.get("type", "")
 
@@ -553,7 +562,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                 tool = payload.get("name", "")
                 if tool:
                     tool_calls[tool] = tool_calls.get(tool, 0) + 1
-                    steps += 1
+                    current_turn_has_tool = True
                     call_id = payload.get("call_id", "")
                     if call_id:
                         call_id_to_name[call_id] = tool
@@ -601,6 +610,10 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
+
+    # Flush the final turn
+    if current_turn_has_tool:
+        steps += 1
 
     duration_s = 0
     if len(timestamps) >= 2:
