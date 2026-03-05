@@ -18,6 +18,7 @@ from .discovery import (
     discover_gptme_sessions,
     parse_gptme_config,
 )
+from .post_session import PostSessionResult, post_session
 from .record import MODEL_ALIASES, SessionRecord, normalize_model
 from .signals import (
     detect_format,
@@ -53,4 +54,6 @@ __all__ = [
     "BanditArm",
     "BanditState",
     "load_bandit_means",
+    "post_session",
+    "PostSessionResult",
 ]

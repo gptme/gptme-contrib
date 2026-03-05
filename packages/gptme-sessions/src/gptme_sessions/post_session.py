@@ -1,0 +1,197 @@
+"""post_session — post-session recording pipeline for gptme agents.
+
+Replaces the session recording and signal-extraction block in
+``autonomous-run.sh`` (~80 lines of bash).  Any agent run loop can call
+:func:`post_session` after the agent process exits.
+
+Responsibilities:
+- Extract signals + grade from trajectory file (if provided)
+- Determine outcome (productive / noop / failed) from signals + exit code
+- Build and append :class:`~gptme_sessions.record.SessionRecord`
+- Return structured result with grade and raw signals for downstream use
+  (e.g. bandit updates, NOOP counters, logging)
+
+What this function does **not** do (kept in caller scripts):
+- Trajectory *discovery* (sentinel-file timing, CC project dir scanning) —
+  harness-specific, stays in shell or harness adapter
+- Bandit updates — depend on agent-specific scripts; callers receive the
+  ``grade`` in :class:`PostSessionResult` and can update their own bandits
+- Event emission, standup writing, git push — also caller responsibilities
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .record import SessionRecord
+from .signals import extract_from_path
+from .store import SessionStore
+
+
+@dataclass
+class PostSessionResult:
+    """Return value from :func:`post_session`.
+
+    Attributes:
+        record:      The :class:`SessionRecord` that was appended to the store.
+        grade:       Graded reward (0.0–1.0) extracted from the trajectory, or
+                     ``None`` if no trajectory was available.
+        signals:     Raw signal dict from :func:`~gptme_sessions.signals.extract_from_path`,
+                     or ``None`` if no trajectory was available.
+        token_count: Total token count from the trajectory (CC format only),
+                     or ``None`` if not available.
+    """
+
+    record: SessionRecord
+    grade: float | None = None
+    signals: dict[str, Any] | None = None
+    token_count: int | None = None
+
+
+def post_session(
+    *,
+    store: SessionStore,
+    harness: str,
+    model: str | None = None,
+    run_type: str | None = None,
+    trigger: str | None = None,
+    category: str | None = None,
+    exit_code: int = 0,
+    duration_seconds: int = 0,
+    trajectory_path: Path | None = None,
+    start_commit: str | None = None,
+    end_commit: str | None = None,
+    deliverables: list[str] | None = None,
+    journal_path: str | None = None,
+    session_id: str | None = None,
+) -> PostSessionResult:
+    """Record a completed agent session and extract trajectory signals.
+
+    Parameters
+    ----------
+    store:
+        :class:`~gptme_sessions.store.SessionStore` to append the record to.
+    harness:
+        Runtime that ran the session (e.g. ``"claude-code"``, ``"gptme"``).
+    model:
+        Model string as reported by the harness (e.g. ``"claude-opus-4-6"``).
+    run_type:
+        Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
+        Kept for backward compatibility; prefer ``trigger`` going forward.
+    trigger:
+        How the session was started: ``"timer"``, ``"dispatch"``, ``"manual"``,
+        ``"spawn"``.  Records trigger mechanism as metadata without implying
+        bandit treatment.  Added in PR #351.
+    category:
+        Work category for the session (e.g. ``"code"``, ``"triage"``).
+    exit_code:
+        Exit code from the agent process.  Non-zero (except 124 = timeout)
+        marks the session as ``"failed"``.
+    duration_seconds:
+        Wall-clock duration.  Pass ``int(time.monotonic() - start_time)`` or
+        the shell ``$SECONDS`` variable.
+    trajectory_path:
+        Path to the trajectory ``.jsonl`` file for this session.  Supports
+        both gptme (``conversation.jsonl``) and Claude Code formats.
+        Signal extraction is skipped if ``None`` or the file does not exist.
+    start_commit:
+        Git HEAD SHA *before* the session started.  Used for NOOP detection
+        when no trajectory is available.
+    end_commit:
+        Git HEAD SHA *after* the session completed.
+    deliverables:
+        Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``,
+        deliverables are extracted from the trajectory signals.
+    journal_path:
+        Path to the journal entry written during the session, if any.
+    session_id:
+        Override the auto-generated session ID.
+
+    Returns
+    -------
+    PostSessionResult
+        Contains the appended record, grade, signals, and token count.
+
+    Outcome determination (priority order)
+    ---------------------------------------
+    1. ``exit_code not in (0, 124)`` → ``"failed"``
+    2. Trajectory ``is_productive()`` → ``"productive"`` / ``"noop"``
+    3. Git HEAD comparison (``start_commit != end_commit``) → productive / noop
+    4. Default: ``"productive"``
+
+    Note: exit code 124 (timeout) is treated as noop, not failure —
+    the session ran but didn't complete normally.
+    """
+    grade: float | None = None
+    signals: dict[str, Any] | None = None
+    token_count: int | None = None
+    traj_productive: bool | None = None
+
+    # --- Extract signals from trajectory ---
+    if trajectory_path is not None and trajectory_path.is_file():
+        try:
+            result = extract_from_path(trajectory_path)
+            signals = result
+            grade = result.get("grade")
+            traj_productive = result.get("productive")
+            usage = result.get("usage") or {}
+            total = usage.get("total_tokens", 0)
+            if total:
+                token_count = int(total)
+        except Exception:
+            # Signal extraction is non-fatal; proceed without signals
+            pass
+
+    # --- Resolve deliverables ---
+    if deliverables is None:
+        if signals is not None:
+            # Trajectory deliverables: commit messages + file write paths
+            deliverables = signals.get("deliverables", [])
+        else:
+            deliverables = []
+
+    # --- Determine outcome ---
+    if exit_code not in (0, 124):
+        outcome = "failed"
+    elif traj_productive is not None:
+        outcome = "productive" if traj_productive else "noop"
+    elif start_commit is not None and end_commit is not None:
+        outcome = "productive" if start_commit != end_commit else "noop"
+    else:
+        outcome = "productive"
+
+    # Timeout (124) → noop, not failed
+    if exit_code == 124:
+        outcome = "noop"
+
+    # --- Build SessionRecord kwargs ---
+    record_kwargs: dict[str, Any] = {
+        "harness": harness,
+        "model": model or "unknown",
+        "run_type": run_type or "unknown",
+        "outcome": outcome,
+        "duration_seconds": duration_seconds,
+        "deliverables": deliverables,
+    }
+    if trigger is not None:
+        record_kwargs["trigger"] = trigger
+    if category is not None:
+        record_kwargs["category"] = category
+    if journal_path is not None:
+        record_kwargs["journal_path"] = journal_path
+    if session_id is not None:
+        record_kwargs["session_id"] = session_id
+    if token_count is not None:
+        record_kwargs["token_count"] = token_count
+
+    record = SessionRecord(**record_kwargs)
+    store.append(record)
+
+    return PostSessionResult(
+        record=record,
+        grade=grade,
+        signals=signals,
+        token_count=token_count,
+    )
