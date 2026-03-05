@@ -14,5 +14,15 @@ Usage:
 
 from .record import MODEL_ALIASES, SessionRecord, normalize_model
 from .store import SessionStore
+from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 
-__all__ = ["SessionRecord", "SessionStore", "MODEL_ALIASES", "normalize_model"]
+__all__ = [
+    "SessionRecord",
+    "SessionStore",
+    "MODEL_ALIASES",
+    "normalize_model",
+    "Bandit",
+    "BanditArm",
+    "BanditState",
+    "load_bandit_means",
+]

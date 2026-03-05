@@ -92,7 +92,8 @@ class SessionRecord:
     # Operational context
     harness: str | None = "unknown"  # claude-code, gptme, codex
     model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
-    run_type: str | None = "unknown"  # autonomous, monitoring, email, review, twitter
+    run_type: str | None = "unknown"  # deprecated: use trigger instead
+    trigger: str | None = None  # how session started: timer, dispatch, manual, spawn
 
     # Work classification
     category: str | None = None  # e.g. code, triage, content, strategic
