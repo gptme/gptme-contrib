@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Regex for git commit lines in shell output (works for both harnesses)
-_COMMIT_RE = re.compile(r"\[(?:master|main|[a-z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
+_COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
 
 # Tools that write files in Claude Code
 _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "Patch"}
@@ -120,28 +120,23 @@ def extract_signals(msgs: list[dict]) -> dict:
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
-                    else:
-                        file_writes.append(f"<{tool}>")
-
-                if tool in ("save", "write", "patch", "edit"):
-                    path = _extract_path_from_args(args_str)
-                    if path:
                         sig = f"{tool}:{path}"
                         if sig in recent_sigs:
                             retry_candidates.append(tool)
                         recent_sigs.append(sig)
                         if len(recent_sigs) > 20:
                             recent_sigs.pop(0)
+                    else:
+                        file_writes.append(f"<{tool}>")
 
         elif role == "system" and ts_str:
             content_stripped = content.strip()
 
-            # Error detection
-            if (
+            # Error detection (guard applies to all conditions, not just the last)
+            if not content_stripped.startswith("Ran command:") and (
                 content_stripped.startswith("Error")
                 or "Error during execution:" in content[:100]
                 or "error:" in content[:80].lower()
-                and not content_stripped.startswith("Ran command:")
             ):
                 error_count += 1
 
@@ -189,7 +184,8 @@ def grade_signals(signals: dict) -> float:
     has_complete = "complete" in signals["tool_calls"]
 
     if commits == 0 and writes == 0:
-        reward = 0.25
+        # Distinguish dead sessions (zero tool calls) from active-but-unproductive ones
+        reward = 0.10 if total_tools == 0 else 0.25
     elif commits == 0:
         if writes >= 3:
             reward = 0.55

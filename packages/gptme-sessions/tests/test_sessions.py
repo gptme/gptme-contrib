@@ -731,9 +731,21 @@ def test_extract_signals_cc_retry_detection():
     assert sigs["retry_count"] >= 1
 
 
-def test_grade_signals_noop():
-    """Grade is low (0.25) when no commits or writes."""
+def test_grade_signals_dead_session():
+    """Grade is very low (0.10) for dead sessions with zero tool calls."""
     sigs = extract_signals_cc([])
+    assert grade_signals(sigs) == 0.10
+
+
+def test_grade_signals_noop():
+    """Grade is 0.25 when agent was active (made tool calls) but produced no deliverables."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 5},  # active but unproductive
+    }
     assert grade_signals(sigs) == 0.25
 
 
