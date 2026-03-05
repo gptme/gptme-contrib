@@ -4,8 +4,8 @@ match:
     - "adding new code without refactoring"
     - "proposing refactoring without doing it"
     - "shared module created but not used"
-    - "duplicated code after adding abstraction"
-    - "be bold in refactoring"
+    - "PR adds code without removing old"
+    - "refactor when adding abstraction"
 status: active
 ---
 

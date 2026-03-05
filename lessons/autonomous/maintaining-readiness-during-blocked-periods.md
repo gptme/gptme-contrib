@@ -6,8 +6,8 @@ match:
     - blocked period activities
     - all tasks blocked
     - strategic pause framework
-    - value creation during blocked
-    - waiting for stakeholder input
+    - blocked waiting for response
+    - stakeholder hasn't replied
 status: active
 ---
 

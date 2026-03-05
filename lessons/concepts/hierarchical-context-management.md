@@ -1,13 +1,11 @@
 ---
 match:
   keywords:
-  - hierarchical context management
-  - Droid context architecture
-  - agent context layers
-  - Factory Droid context
-  - multi-layer context
-  - context layer architecture
-  - agentic context layers
+  - context window management
+  - organize context across steps
+  - prune older conversation context
+  - layered context approach
+  - context accumulating across steps
 status: active
 ---
 

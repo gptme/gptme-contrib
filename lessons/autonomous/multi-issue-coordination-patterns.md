@@ -1,13 +1,11 @@
 ---
 match:
   keywords:
-  - multiple issues blocked
-  - parallel issue coordination
-  - github issue coordination
-  - multiple blocked tasks
-  - strategic issue prioritization
-  - issue coordination patterns
-  - managing blocked issues
+  - multiple tasks blocked
+  - all work waiting for review
+  - blocked across multiple issues
+  - parallel blocked tasks
+  - coordinate blocked work
 status: active
 ---
 

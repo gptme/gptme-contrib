@@ -7,8 +7,8 @@ match:
     - "monolithic documentation needs restructuring"
     - "restructure large documentation"
     - "split monolithic docs"
-    - "auto-include too large"
-    - "context token budget"
+    - "auto-included file too large"
+    - "context window budget"
 status: active
 ---
 
