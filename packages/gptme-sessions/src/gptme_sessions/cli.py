@@ -116,9 +116,12 @@ def main() -> int:
             return 0
         # Human-readable summary
         tc = result["tool_calls"]
+        total_tools = sum(tc.values())
+        steps = result.get("steps", 0)
         print(f"Format: {result.get('format', 'gptme')}")
+        tools_per_step = f" ({total_tools / steps:.1f} tools/step)" if steps else ""
         print(
-            f"Tool calls: {sum(tc.values())} "
+            f"Tool calls: {total_tools} in {steps} step(s){tools_per_step} "
             f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
         )
         print(f"Git commits: {len(result['git_commits'])}")
