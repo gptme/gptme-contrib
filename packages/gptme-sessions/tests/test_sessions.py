@@ -1526,6 +1526,65 @@ def test_extract_signals_codex_tool_call_counts():
     assert sigs["tool_calls"].get("apply_patch", 0) == 2
 
 
+def test_extract_signals_codex_steps_single_turn():
+    """Codex: multiple tool calls in one turn count as one step."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    # commits=1 + writes=2 → 3 tool calls but all in a single turn_context → 1 step
+    msgs = _make_codex_msgs(commits=1, writes=2)
+    sigs = extract_signals_codex(msgs)
+    assert sigs["steps"] == 1
+
+
+def test_extract_signals_codex_steps_multi_turn():
+    """Codex: each turn_context boundary produces one step if it has tool calls."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    turn_ctx = {
+        "timestamp": "2026-03-01T10:00:00.000Z",
+        "type": "turn_context",
+        "payload": {"turn_id": "t", "model": "gpt-5.3-codex"},
+    }
+    tool_call = {
+        "timestamp": "2026-03-01T10:01:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "c1",
+            "arguments": '{"cmd": "echo hi"}',
+        },
+    }
+    tool_out = {
+        "timestamp": "2026-03-01T10:01:30.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": "Process exited with code 0\nOutput:\nhi",
+        },
+    }
+    # Two turns, each with one tool call
+    msgs = [turn_ctx, tool_call, tool_out, turn_ctx, tool_call, tool_out]
+    sigs = extract_signals_codex(msgs)
+    assert sigs["steps"] == 2
+
+
+def test_extract_signals_codex_steps_zero():
+    """Codex trajectory: no tool calls → steps is 0."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    msgs = [
+        {
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "test"},
+        }
+    ]
+    sigs = extract_signals_codex(msgs)
+    assert sigs["steps"] == 0
+
+
 def test_extract_signals_codex_journal_excluded():
     """Codex trajectory: apply_patch to /journal/ path is excluded from file_writes."""
     from gptme_sessions.signals import extract_signals_codex

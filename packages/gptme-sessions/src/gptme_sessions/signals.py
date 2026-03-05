@@ -450,7 +450,9 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     recent_sigs: list[str] = []
     # Map call_id → tool name so we scan commits only from shell outputs
     call_id_to_name: dict[str, str] = {}
-    step_has_tool = False
+    # Track whether the current turn (bounded by turn_context records) has tools.
+    # Increment steps once per turn, not once per tool call/output pair.
+    current_turn_has_tool = False
 
     for record in msgs:
         ts = _parse_timestamp(record.get("timestamp", ""))
@@ -463,13 +465,19 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
             continue
         p_type = payload.get("type", "")
 
-        if rec_type == "response_item":
+        if rec_type == "turn_context":
+            # New turn boundary: flush previous turn's step count
+            if current_turn_has_tool:
+                steps += 1
+                current_turn_has_tool = False
+
+        elif rec_type == "response_item":
             if p_type == "function_call":
                 name = payload.get("name", "")
                 if not name:
                     continue
                 tool_calls[name] = tool_calls.get(name, 0) + 1
-                step_has_tool = True
+                current_turn_has_tool = True
                 call_id = payload.get("call_id", "")
                 if call_id:
                     call_id_to_name[call_id] = name
@@ -479,7 +487,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                 if not name:
                     continue
                 tool_calls[name] = tool_calls.get(name, 0) + 1
-                step_has_tool = True
+                current_turn_has_tool = True
                 call_id = payload.get("call_id", "")
                 if call_id:
                     call_id_to_name[call_id] = name
@@ -519,9 +527,6 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         git_commits.append(
                             f"{commit_match.group(2).strip()} ({commit_match.group(1)})"
                         )
-                if step_has_tool:
-                    steps += 1
-                    step_has_tool = False
 
             elif p_type == "custom_tool_call_output":
                 output_raw = payload.get("output", "")
@@ -532,9 +537,10 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         error_count += 1
                 except (json.JSONDecodeError, TypeError, AttributeError):
                     pass
-                if step_has_tool:
-                    steps += 1
-                    step_has_tool = False
+
+    # Flush final turn
+    if current_turn_has_tool:
+        steps += 1
 
     duration_s = 0
     if len(timestamps) >= 2:
