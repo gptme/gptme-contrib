@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .record import SessionRecord
+from .signals import extract_from_path
 from .store import (
     SessionStore,
     compute_run_analytics,
@@ -66,7 +67,61 @@ def main() -> int:
     runs_parser.add_argument("--since", default="14d", help="Time window (e.g. 7d, 30d)")
     runs_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # Signals — extract productivity signals from a gptme trajectory
+    signals_parser = subparsers.add_parser(
+        "signals",
+        help="Extract productivity signals from a gptme conversation.jsonl trajectory",
+    )
+    signals_parser.add_argument(
+        "path",
+        type=Path,
+        help="Path to conversation.jsonl",
+    )
+    signals_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON (default: human-readable summary)",
+    )
+    signals_parser.add_argument(
+        "--grade",
+        action="store_true",
+        help="Output grade only (float 0.0-1.0)",
+    )
+
     args = parser.parse_args()
+
+    # Handle signals before constructing SessionStore (no store needed)
+    if args.command == "signals":
+        p = args.path
+        if not p.exists():
+            print(f"error: {p} not found", file=sys.stderr)
+            return 1
+        result = extract_from_path(p)
+        if args.grade:
+            print(f"{result['grade']:.4f}")
+            return 0
+        if args.json:
+            print(json.dumps(result, indent=2))
+            return 0
+        # Human-readable summary
+        tc = result["tool_calls"]
+        print(
+            f"Tool calls: {sum(tc.values())} "
+            f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
+        )
+        print(f"Git commits: {len(result['git_commits'])}")
+        print(f"File writes: {len(result['file_writes'])}")
+        print(f"Errors: {result['error_count']}")
+        print(f"Retries: {result['retry_count']}")
+        print(f"Duration: {result['session_duration_s']}s")
+        print(f"Productive: {result['productive']}")
+        print(f"Grade: {result['grade']:.4f}")
+        if result["deliverables"]:
+            print("Deliverables:")
+            for d in result["deliverables"][:10]:
+                print(f"  - {d}")
+        return 0
+
     store = SessionStore(sessions_dir=args.sessions_dir)
 
     if args.command == "append":
