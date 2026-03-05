@@ -60,6 +60,18 @@ def test_bandit_arm_update_partial_failure():
     assert arm.total_rewards == 0
 
 
+def test_bandit_arm_update_out_of_range():
+    """update raises ValueError for rewards outside [0, 1]."""
+    arm = BanditArm(arm_id="code")
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        arm.update(1.5)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        arm.update(-0.1)
+    # Boundary values are fine
+    arm.update(0.0)
+    arm.update(1.0)
+
+
 def test_bandit_arm_decay():
     """Decay moves alpha/beta toward prior (1, 1)."""
     arm = BanditArm(arm_id="code", alpha=5.0, beta=3.0)
@@ -220,6 +232,24 @@ def test_bandit_state_prune_stale():
     assert pruned == 1
     assert "never-selected" not in state.arms
     assert "active" in state.arms
+
+
+def test_bandit_state_prune_stale_contextual():
+    """prune_stale also removes stale contextual arms and cleans up empty buckets."""
+    state = BanditState()
+    # Contextual arm that was created but never selected
+    state.get_or_create_contextual_arm("code", ("code", "opus"))
+    # Active contextual arm (has selections)
+    state.update_session(["infra"], outcome=0.8, context=("infra", "sonnet"))
+
+    pruned = state.prune_stale(min_selections=0)
+
+    # Stale contextual arm (and empty bucket) removed
+    assert "code" not in state.contextual_arms
+    # Active contextual arm preserved
+    assert "infra" in state.contextual_arms
+    # Pruned count includes the stale contextual arm
+    assert pruned >= 1
 
 
 # ── Bandit (manager) tests ────────────────────────────────────────────────────

@@ -88,8 +88,13 @@ class BanditArm:
                 - True/1.0: alpha += 1 (success)
                 - False/0.0: beta += 1 (failure)
                 - 0.3: mostly unsuccessful → beta grows faster than alpha
+
+        Raises:
+            ValueError: If reward is outside [0, 1].
         """
         r = float(reward)
+        if not 0.0 <= r <= 1.0:
+            raise ValueError(f"reward must be in [0, 1], got {r!r}")
         self.alpha += r
         self.beta += 1.0 - r
         self.total_selections += 1
@@ -305,24 +310,37 @@ class BanditState:
             max_age_days: Prune arms not updated in this many days.
 
         Returns:
-            Number of arms pruned.
+            Number of arms pruned (global + contextual combined).
         """
         now = datetime.now(timezone.utc)
-        to_prune = []
-        for arm_id, arm in self.arms.items():
+
+        def _is_stale(arm: BanditArm) -> bool:
             if arm.total_selections > min_selections:
-                continue
+                return False
             if arm.last_updated:
                 last = datetime.fromisoformat(arm.last_updated)
-                age = (now - last).days
-                if age > max_age_days:
-                    to_prune.append(arm_id)
-            elif arm.total_selections == 0:
-                to_prune.append(arm_id)
+                return (now - last).days > max_age_days
+            return arm.total_selections == 0
 
+        # Prune global arms
+        to_prune = [arm_id for arm_id, arm in self.arms.items() if _is_stale(arm)]
         for arm_id in to_prune:
             del self.arms[arm_id]
-        return len(to_prune)
+        pruned = len(to_prune)
+
+        # Prune contextual arms (including empty arm_id buckets)
+        empty_buckets = []
+        for arm_id, contexts in self.contextual_arms.items():
+            stale_keys = [k for k, arm in contexts.items() if _is_stale(arm)]
+            for k in stale_keys:
+                del contexts[k]
+            pruned += len(stale_keys)
+            if not contexts:
+                empty_buckets.append(arm_id)
+        for arm_id in empty_buckets:
+            del self.contextual_arms[arm_id]
+
+        return pruned
 
 
 class Bandit:
