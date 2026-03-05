@@ -12,6 +12,12 @@ Usage:
     stats = store.stats()
 """
 
+from .discovery import (
+    decode_cc_project_path,
+    discover_cc_sessions,
+    discover_gptme_sessions,
+    parse_gptme_config,
+)
 from .record import MODEL_ALIASES, SessionRecord, normalize_model
 from .signals import (
     detect_format,
@@ -19,6 +25,7 @@ from .signals import (
     extract_signals,
     extract_signals_cc,
     extract_usage_cc,
+    extract_usage_gptme,
     grade_signals,
     is_productive,
 )
@@ -30,15 +37,20 @@ __all__ = [
     "SessionStore",
     "MODEL_ALIASES",
     "normalize_model",
+    "detect_format",
+    "extract_usage_cc",
+    "extract_usage_gptme",
+    "extract_from_path",
+    "extract_signals",
+    "extract_signals_cc",
+    "grade_signals",
+    "is_productive",
+    "discover_gptme_sessions",
+    "discover_cc_sessions",
+    "parse_gptme_config",
+    "decode_cc_project_path",
     "Bandit",
     "BanditArm",
     "BanditState",
     "load_bandit_means",
-    "detect_format",
-    "extract_from_path",
-    "extract_signals",
-    "extract_signals_cc",
-    "extract_usage_cc",
-    "grade_signals",
-    "is_productive",
 ]

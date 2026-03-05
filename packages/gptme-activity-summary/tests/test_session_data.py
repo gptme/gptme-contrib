@@ -8,8 +8,7 @@ from gptme_activity_summary.session_data import (
     ModelBreakdown,
     SessionInfo,
     SessionStats,
-    _session_matches_date,
-    _session_matches_range,
+    _extract_duration,
     fetch_session_stats,
     fetch_session_stats_range,
     format_sessions_for_prompt,
@@ -17,21 +16,19 @@ from gptme_activity_summary.session_data import (
 )
 
 
-def test_session_matches_date():
-    """Test session name matching for a specific date."""
-    assert _session_matches_date("2025-01-15-session1", date(2025, 1, 15))
-    assert not _session_matches_date("2025-01-16-session1", date(2025, 1, 15))
-    assert not _session_matches_date("invalid-name", date(2025, 1, 15))
+def test_extract_duration():
+    """Test duration extraction from message timestamps."""
+    msgs = [
+        {"timestamp": "2025-01-15T10:00:00"},
+        {"timestamp": "2025-01-15T10:05:00"},
+    ]
+    assert _extract_duration(msgs) == 300.0  # 5 minutes
 
 
-def test_session_matches_range():
-    """Test session name matching for a date range."""
-    assert _session_matches_range("2025-01-15-session1", date(2025, 1, 10), date(2025, 1, 20))
-    assert _session_matches_range("2025-01-10-session1", date(2025, 1, 10), date(2025, 1, 20))
-    assert _session_matches_range("2025-01-20-session1", date(2025, 1, 10), date(2025, 1, 20))
-    assert not _session_matches_range("2025-01-09-session1", date(2025, 1, 10), date(2025, 1, 20))
-    assert not _session_matches_range("2025-01-21-session1", date(2025, 1, 10), date(2025, 1, 20))
-    assert not _session_matches_range("invalid", date(2025, 1, 10), date(2025, 1, 20))
+def test_extract_duration_no_timestamps():
+    """Test duration extraction when no timestamps present."""
+    assert _extract_duration([{"content": "hello"}]) == 0.0
+    assert _extract_duration([]) == 0.0
 
 
 def test_format_sessions_empty():
@@ -79,13 +76,12 @@ def test_fetch_session_stats_with_logs(tmp_path):
     config_content = 'model = "claude-3-opus"\nworkspace = "/home/test"\ninteractive = false\n'
     (session_dir / "config.toml").write_text(config_content)
 
-    # Create conversation.jsonl
+    # Create conversation.jsonl — usage is on assistant messages (API responses)
     messages = [
         {
             "role": "user",
             "content": "Hello",
             "timestamp": "2025-01-15T10:00:00",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cost": 0.01},
         },
         {
             "role": "assistant",
@@ -100,9 +96,9 @@ def test_fetch_session_stats_with_logs(tmp_path):
     stats = fetch_session_stats(date(2025, 1, 15), logs_dir=tmp_path)
     assert stats.session_count == 1
     assert stats.models_used == {"claude-3-opus": 1}
-    assert stats.total_input_tokens == 300
-    assert stats.total_output_tokens == 150
-    assert stats.total_cost == 0.03
+    assert stats.total_input_tokens == 200
+    assert stats.total_output_tokens == 100
+    assert stats.total_cost == 0.02
     assert stats.total_duration_seconds == 300.0  # 5 minutes
 
 

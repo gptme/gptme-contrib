@@ -21,6 +21,7 @@ exclude = ["packages/__pycache__", "plugins/__pycache__", "packages/tasks", "pac
 
 [tool.uv.sources]
 gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
+gptme-sessions = { workspace = true }
 
 [tool.pytest.ini_options]
 # Required for cross-package test collection (pytest packages/)

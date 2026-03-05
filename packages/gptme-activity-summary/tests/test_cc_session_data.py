@@ -5,20 +5,9 @@ from datetime import date
 from pathlib import Path
 
 from gptme_activity_summary.cc_session_data import (
-    _decode_project_path,
-    _parse_cc_session,
-    _session_date_from_first_line,
+    _extract_cc_metadata,
     fetch_cc_session_stats_range,
 )
-
-
-def test_decode_project_path():
-    """Test decoding CC project directory names to real paths."""
-    assert _decode_project_path("-home-bob-bob") == "/home/bob/bob"
-    assert _decode_project_path("-home-bob-bob-gptme-contrib") == "/home/bob/bob/gptme/contrib"
-    assert _decode_project_path("-Users-erb-Programming-gptme") == "/Users/erb/Programming/gptme"
-    # Non-encoded paths pass through
-    assert _decode_project_path("plain") == "plain"
 
 
 def _make_session_jsonl(
@@ -71,60 +60,29 @@ def _make_assistant_msg(
     }
 
 
-def test_session_date_from_first_line(tmp_path):
-    """Test quick date extraction from first line of JSONL."""
-    jsonl_path = _make_session_jsonl(
-        tmp_path,
-        "proj",
-        "abc123",
-        [_make_user_msg("2026-02-17T05:00:00Z")],
-    )
-    result = _session_date_from_first_line(jsonl_path)
-    assert result == date(2026, 2, 17)
-
-
-def test_session_date_from_first_line_missing(tmp_path):
-    """Test date extraction when no timestamp present."""
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    jsonl_path = project_dir / "abc.jsonl"
-    jsonl_path.write_text('{"type": "summary"}\n')
-    result = _session_date_from_first_line(jsonl_path)
-    assert result is None
-
-
-def test_parse_cc_session(tmp_path):
-    """Test parsing a synthetic CC session JSONL."""
-    messages = [
+def test_extract_cc_metadata_basic():
+    """Test metadata extraction from CC messages."""
+    msgs = [
         _make_user_msg("2026-02-17T10:00:00Z", bypass=True),
-        _make_assistant_msg("2026-02-17T10:01:00Z", input_tokens=200, output_tokens=100),
+        _make_assistant_msg("2026-02-17T10:01:00Z"),
         _make_user_msg("2026-02-17T10:02:00Z"),
-        _make_assistant_msg("2026-02-17T10:03:00Z", input_tokens=300, output_tokens=150),
+        _make_assistant_msg("2026-02-17T10:03:00Z"),
     ]
-    jsonl_path = _make_session_jsonl(tmp_path, "proj", "session1", messages)
-
-    info = _parse_cc_session(jsonl_path)
-    assert info.name == "session1"
-    assert info.model == "claude-opus-4-6"
-    assert info.input_tokens == 500  # 200 + 300
-    assert info.output_tokens == 250  # 100 + 150
-    assert info.message_count == 4  # 2 user + 2 assistant
-    assert info.cost == 0.0  # subscription
-    assert info.interactive is False  # bypassPermissions
-    assert info.workspace == "/home/bob/bob"
-    assert info.duration_seconds == 180.0  # 3 minutes
+    meta = _extract_cc_metadata(msgs)
+    assert meta["workspace"] == "/home/bob/bob"
+    assert meta["interactive"] is False  # bypassPermissions
+    assert meta["message_count"] == 4  # 2 user + 2 assistant
+    assert meta["duration_seconds"] == 180.0  # 3 minutes
 
 
-def test_parse_cc_session_interactive(tmp_path):
+def test_extract_cc_metadata_interactive():
     """Test that sessions without bypassPermissions are interactive."""
-    messages = [
+    msgs = [
         _make_user_msg("2026-02-17T10:00:00Z", bypass=False),
         _make_assistant_msg("2026-02-17T10:01:00Z"),
     ]
-    jsonl_path = _make_session_jsonl(tmp_path, "proj", "session2", messages)
-
-    info = _parse_cc_session(jsonl_path)
-    assert info.interactive is True
+    meta = _extract_cc_metadata(msgs)
+    assert meta["interactive"] is True
 
 
 def test_fetch_cc_session_stats_range(tmp_path):
