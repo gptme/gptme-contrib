@@ -555,7 +555,7 @@ def _make_gptme_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list
             {
                 "role": "assistant",
                 "content": f'@save(c{i}): {{"path": "/home/bob/file{i}.py"}}',
-                "timestamp": f"2026-03-01T10:0{i}:00+00:00",
+                "timestamp": f"2026-03-01T10:{i:02d}:00+00:00",
             }
         )
     for i in range(commits):
@@ -563,7 +563,7 @@ def _make_gptme_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list
             {
                 "role": "system",
                 "content": f"[master abc{i:04d}] commit message {i}",
-                "timestamp": f"2026-03-01T10:1{i}:00+00:00",
+                "timestamp": f"2026-03-01T11:{i:02d}:00+00:00",
             }
         )
     for _ in range(errors):
@@ -584,7 +584,7 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
         msgs.append(
             {
                 "type": "assistant",
-                "timestamp": f"2026-03-01T10:0{i}:00.000Z",
+                "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
                 "message": {
                     "role": "assistant",
                     "content": [
@@ -604,7 +604,7 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
         msgs.append(
             {
                 "type": "assistant",
-                "timestamp": f"2026-03-01T10:1{i}:00.000Z",
+                "timestamp": f"2026-03-01T11:{i:02d}:00.000Z",
                 "message": {
                     "role": "assistant",
                     "content": [
@@ -621,7 +621,7 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
         msgs.append(
             {
                 "type": "user",
-                "timestamp": f"2026-03-01T10:1{i}:30.000Z",
+                "timestamp": f"2026-03-01T11:{i:02d}:30.000Z",
                 "message": {
                     "role": "user",
                     "content": [
@@ -740,7 +740,7 @@ def test_extract_signals_cc_retry_detection():
     msgs = [
         {
             "type": "assistant",
-            "timestamp": f"2026-03-01T10:0{i}:00.000Z",
+            "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
             "message": {
                 "role": "assistant",
                 "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": path}}],
@@ -992,7 +992,7 @@ def test_extract_signals_cc_journal_no_retry_penalty():
     msgs = [
         {
             "type": "assistant",
-            "timestamp": f"2026-03-01T10:0{i}:00.000Z",
+            "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
             "message": {
                 "role": "assistant",
                 "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": path}}],

@@ -143,8 +143,10 @@ def extract_signals(msgs: list[dict]) -> dict:
             ):
                 error_count += 1
 
-            # Git commit detection from shell output (finditer handles multi-commit pushes)
-            for commit_match in _COMMIT_RE.finditer(content):
+            # Git commit detection from shell output (finditer handles multi-commit pushes).
+            # Restrict to first 500 bytes: real git output appears early; reading a file
+            # that happens to contain git-log-style lines would produce false positives.
+            for commit_match in _COMMIT_RE.finditer(content[:500]):
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
                 git_commits.append(f"{commit_msg} ({commit_hash})")
