@@ -1371,3 +1371,407 @@ def test_extract_signals_cc_steps_parallel_tools():
     sigs = extract_signals_cc(msgs)
     assert sigs["steps"] == 1
     assert sigs["tool_calls"]["Bash"] == 4
+
+
+# ── Codex signals tests ───────────────────────────────────────────────────────
+
+
+def _make_codex_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[dict]:
+    """Build minimal Codex rollout-*.jsonl format trajectory records."""
+    msgs: list[dict] = []
+    # Session meta (always present)
+    msgs.append(
+        {
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "test-session",
+                "model_provider": "openai",
+            },
+        }
+    )
+    # Turn context with model
+    msgs.append(
+        {
+            "timestamp": "2026-03-01T10:00:01.000Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-0",
+                "model": "gpt-5.3-codex",
+            },
+        }
+    )
+    for i in range(writes):
+        call_id = f"call_patch_{i}"
+        msgs.append(
+            {
+                "timestamp": f"2026-03-01T10:{i + 1:02d}:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": call_id,
+                    "input": f"*** Begin Patch\n*** Update File: /home/bob/file{i}.py\n@@\n-old\n+new\n",
+                },
+            }
+        )
+        msgs.append(
+            {
+                "timestamp": f"2026-03-01T10:{i + 1:02d}:30.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": call_id,
+                    "output": '{"output": "Success.", "metadata": {"exit_code": 0}}',
+                },
+            }
+        )
+    for i in range(commits):
+        call_id = f"call_commit_{i}"
+        msgs.append(
+            {
+                "timestamp": f"2026-03-01T11:{i:02d}:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": call_id,
+                    "arguments": f'{{"cmd": "git commit -m \'commit message {i}\'"}}',
+                },
+            }
+        )
+        msgs.append(
+            {
+                "timestamp": f"2026-03-01T11:{i:02d}:30.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": f"Process exited with code 0\nOutput:\n[master abc{i:04d}] commit message {i}\n 1 file changed",
+                },
+            }
+        )
+    for j in range(errors):
+        call_id = f"call_err_{j}"
+        msgs.append(
+            {
+                "timestamp": f"2026-03-01T12:{j:02d}:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": call_id,
+                    "arguments": '{"cmd": "false"}',
+                },
+            }
+        )
+        msgs.append(
+            {
+                "timestamp": f"2026-03-01T12:{j:02d}:30.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": "Process exited with code 1\nOutput:\nError: command failed",
+                },
+            }
+        )
+    return msgs
+
+
+def test_detect_format_codex():
+    """Detects codex format from session_meta record."""
+    msgs = _make_codex_msgs(commits=1)
+    from gptme_sessions.signals import _detect_format
+
+    assert _detect_format(msgs) == "codex"
+
+
+def test_extract_signals_codex_commits():
+    """Codex trajectory: git commits extracted from exec_command output."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    msgs = _make_codex_msgs(commits=2)
+    sigs = extract_signals_codex(msgs)
+    assert len(sigs["git_commits"]) == 2
+    assert "commit message 0" in sigs["git_commits"][0]
+
+
+def test_extract_signals_codex_file_writes():
+    """Codex trajectory: apply_patch calls register as file writes."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    msgs = _make_codex_msgs(writes=3)
+    sigs = extract_signals_codex(msgs)
+    assert len(sigs["file_writes"]) == 3
+    assert all("/home/bob/file" in p for p in sigs["file_writes"])
+
+
+def test_extract_signals_codex_errors():
+    """Codex trajectory: non-zero exit codes increment error_count."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    msgs = _make_codex_msgs(errors=2)
+    sigs = extract_signals_codex(msgs)
+    assert sigs["error_count"] == 2
+
+
+def test_extract_signals_codex_tool_call_counts():
+    """Codex trajectory: tool call names (exec_command, apply_patch) counted."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    msgs = _make_codex_msgs(commits=1, writes=2)
+    sigs = extract_signals_codex(msgs)
+    assert sigs["tool_calls"].get("exec_command", 0) == 1
+    assert sigs["tool_calls"].get("apply_patch", 0) == 2
+
+
+def test_extract_signals_codex_journal_excluded():
+    """Codex trajectory: apply_patch to /journal/ path is excluded from file_writes."""
+    from gptme_sessions.signals import extract_signals_codex
+
+    msgs = [
+        {
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "test"},
+        },
+        {
+            "timestamp": "2026-03-01T10:01:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "c0",
+                "input": "*** Begin Patch\n*** Update File: /home/bob/bob/journal/2026-03-01/session.md\n@@\n-old\n+new\n",
+            },
+        },
+    ]
+    sigs = extract_signals_codex(msgs)
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_from_path_codex(tmp_path: Path):
+    """extract_from_path auto-detects codex format and extracts signals."""
+    from gptme_sessions.signals import extract_from_path
+
+    traj = tmp_path / "rollout-test.jsonl"
+    msgs = _make_codex_msgs(commits=1, writes=2)
+    traj.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+    result = extract_from_path(traj)
+    assert result["format"] == "codex"
+    assert len(result["git_commits"]) == 1
+    assert len(result["file_writes"]) == 2
+    assert result["productive"] is True
+    assert 0.0 <= result["grade"] <= 1.0
+
+
+# ── Copilot signals tests ─────────────────────────────────────────────────────
+
+
+def _make_copilot_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[dict]:
+    """Build minimal Copilot events.jsonl format trajectory records."""
+    msgs: list[dict] = []
+    msgs.append(
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test-session",
+                "selectedModel": "claude-opus-4.6",
+                "startTime": "2026-03-01T10:00:00.000Z",
+                "context": {"cwd": "/home/bob/bob"},
+            },
+            "id": "s0",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+        }
+    )
+    for i in range(writes):
+        call_id = f"tooluse_edit_{i}"
+        msgs.append(
+            {
+                "type": "assistant.turn_start",
+                "data": {"turnId": str(i)},
+                "id": f"ts_{i}",
+                "timestamp": f"2026-03-01T10:{i + 1:02d}:00.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "tool.execution_start",
+                "data": {
+                    "toolCallId": call_id,
+                    "toolName": "edit",
+                    "arguments": {"path": f"/home/bob/file{i}.py"},
+                },
+                "id": f"te_{i}",
+                "timestamp": f"2026-03-01T10:{i + 1:02d}:10.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": call_id,
+                    "success": True,
+                    "result": {"content": "File updated."},
+                },
+                "id": f"tec_{i}",
+                "timestamp": f"2026-03-01T10:{i + 1:02d}:20.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "assistant.turn_end",
+                "data": {"turnId": str(i)},
+                "id": f"tend_{i}",
+                "timestamp": f"2026-03-01T10:{i + 1:02d}:30.000Z",
+            }
+        )
+    for i in range(commits):
+        call_id = f"tooluse_bash_{i}"
+        msgs.append(
+            {
+                "type": "assistant.turn_start",
+                "data": {"turnId": f"c{i}"},
+                "id": f"cts_{i}",
+                "timestamp": f"2026-03-01T11:{i:02d}:00.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "tool.execution_start",
+                "data": {
+                    "toolCallId": call_id,
+                    "toolName": "bash",
+                    "arguments": {"command": f"git commit -m 'commit message {i}'"},
+                },
+                "id": f"cte_{i}",
+                "timestamp": f"2026-03-01T11:{i:02d}:10.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": call_id,
+                    "success": True,
+                    "result": {
+                        "content": f"[master abc{i:04d}] commit message {i}\n 1 file changed"
+                    },
+                },
+                "id": f"ctec_{i}",
+                "timestamp": f"2026-03-01T11:{i:02d}:20.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "assistant.turn_end",
+                "data": {"turnId": f"c{i}"},
+                "id": f"ctend_{i}",
+                "timestamp": f"2026-03-01T11:{i:02d}:30.000Z",
+            }
+        )
+    for j in range(errors):
+        call_id = f"tooluse_err_{j}"
+        msgs.append(
+            {
+                "type": "assistant.turn_start",
+                "data": {"turnId": f"e{j}"},
+                "id": f"ets_{j}",
+                "timestamp": f"2026-03-01T12:{j:02d}:00.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "tool.execution_start",
+                "data": {
+                    "toolCallId": call_id,
+                    "toolName": "bash",
+                    "arguments": {"command": "false"},
+                },
+                "id": f"ete_{j}",
+                "timestamp": f"2026-03-01T12:{j:02d}:10.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": call_id,
+                    "success": False,
+                    "result": {"content": "Exit code 1"},
+                },
+                "id": f"etec_{j}",
+                "timestamp": f"2026-03-01T12:{j:02d}:20.000Z",
+            }
+        )
+        msgs.append(
+            {
+                "type": "assistant.turn_end",
+                "data": {"turnId": f"e{j}"},
+                "id": f"etend_{j}",
+                "timestamp": f"2026-03-01T12:{j:02d}:30.000Z",
+            }
+        )
+    return msgs
+
+
+def test_detect_format_copilot():
+    """Detects copilot format from session.start record."""
+    msgs = _make_copilot_msgs(commits=1)
+    from gptme_sessions.signals import _detect_format
+
+    assert _detect_format(msgs) == "copilot"
+
+
+def test_extract_signals_copilot_commits():
+    """Copilot trajectory: git commits extracted from bash tool results."""
+    from gptme_sessions.signals import extract_signals_copilot
+
+    msgs = _make_copilot_msgs(commits=2)
+    sigs = extract_signals_copilot(msgs)
+    assert len(sigs["git_commits"]) == 2
+    assert "commit message 0" in sigs["git_commits"][0]
+
+
+def test_extract_signals_copilot_file_writes():
+    """Copilot trajectory: edit tool calls register as file writes."""
+    from gptme_sessions.signals import extract_signals_copilot
+
+    msgs = _make_copilot_msgs(writes=3)
+    sigs = extract_signals_copilot(msgs)
+    assert len(sigs["file_writes"]) == 3
+
+
+def test_extract_signals_copilot_errors():
+    """Copilot trajectory: tool.execution_complete with success=False increments error_count."""
+    from gptme_sessions.signals import extract_signals_copilot
+
+    msgs = _make_copilot_msgs(errors=2)
+    sigs = extract_signals_copilot(msgs)
+    assert sigs["error_count"] == 2
+
+
+def test_extract_signals_copilot_tool_call_counts():
+    """Copilot trajectory: tool call names (bash, edit) counted from execution_start."""
+    from gptme_sessions.signals import extract_signals_copilot
+
+    msgs = _make_copilot_msgs(commits=1, writes=2)
+    sigs = extract_signals_copilot(msgs)
+    assert sigs["tool_calls"].get("bash", 0) == 1
+    assert sigs["tool_calls"].get("edit", 0) == 2
+
+
+def test_extract_from_path_copilot(tmp_path: Path):
+    """extract_from_path auto-detects copilot format and extracts signals."""
+    from gptme_sessions.signals import extract_from_path
+
+    traj = tmp_path / "events.jsonl"
+    msgs = _make_copilot_msgs(commits=1, writes=2)
+    traj.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+    result = extract_from_path(traj)
+    assert result["format"] == "copilot"
+    assert len(result["git_commits"]) == 1
+    assert len(result["file_writes"]) == 2
+    assert result["productive"] is True
+    assert 0.0 <= result["grade"] <= 1.0
