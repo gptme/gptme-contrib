@@ -6,8 +6,8 @@ match:
   - memory failure
   - request completion
   - close the loop
-  - follow-through on communication
-  - respond to thread
+  - reply to issue comment
+  - update the requestor
 status: active
 ---
 

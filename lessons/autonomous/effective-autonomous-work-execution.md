@@ -1,13 +1,11 @@
 ---
 match:
   keywords:
-  - autonomous work execution
-  - maximizing session value
-  - work execution patterns
-  - structured work approach
-  - blocked on dependencies
-  - autonomous session productivity
-  - task selection priorities
+  - start of autonomous session
+  - autonomous work workflow
+  - task selection in autonomous
+  - session startup workflow
+  - select what to work on
 status: active
 ---
 
