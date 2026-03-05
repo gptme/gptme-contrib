@@ -126,7 +126,15 @@ def main() -> int:
     ps_parser.add_argument("--start-commit", help="Git HEAD SHA before session (for NOOP detect)")
     ps_parser.add_argument("--end-commit", help="Git HEAD SHA after session (for NOOP detect)")
     ps_parser.add_argument(
-        "--deliverables", nargs="*", default=None, help="Explicit deliverables (commit SHAs, URLs)"
+        "--deliverables",
+        nargs="*",
+        default=None,
+        help=(
+            "Explicit deliverables (commit SHAs, PR URLs). "
+            "Omit this flag to extract deliverables from the trajectory. "
+            "Passing the flag with no values (--deliverables) produces an empty list "
+            "and bypasses trajectory extraction; provide at least one value if using this flag."
+        ),
     )
     ps_parser.add_argument("--journal-path", help="Path to journal entry for this session")
     ps_parser.add_argument("--session-id", help="Override auto-generated session ID")
@@ -221,7 +229,7 @@ def main() -> int:
             trajectory_path=args.trajectory,
             start_commit=args.start_commit,
             end_commit=args.end_commit,
-            deliverables=args.deliverables,
+            deliverables=args.deliverables or None,
             journal_path=args.journal_path,
             session_id=args.session_id,
         )

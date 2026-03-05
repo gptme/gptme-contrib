@@ -122,10 +122,8 @@ def post_session(
     1. ``exit_code not in (0, 124)`` → ``"failed"``
     2. Trajectory ``is_productive()`` → ``"productive"`` / ``"noop"``
     3. Git HEAD comparison (``start_commit != end_commit``) → productive / noop
-    4. Default: ``"productive"``
-
-    Note: exit code 124 (timeout) is treated as noop, not failure —
-    the session ran but didn't complete normally.
+    4. ``exit_code == 124`` (timeout, no other evidence) → ``"noop"``
+    5. Default: ``"productive"``
     """
     grade: float | None = None
     signals: dict[str, Any] | None = None
@@ -168,6 +166,15 @@ def post_session(
         outcome = "productive" if traj_productive else "noop"
     elif start_commit is not None and end_commit is not None:
         outcome = "productive" if start_commit != end_commit else "noop"
+    elif (start_commit is None) != (end_commit is None):
+        logger.warning(
+            "Only one of start_commit/end_commit provided (%s=%r, %s=%r); "
+            "git comparison skipped",
+            "start_commit",
+            start_commit,
+            "end_commit",
+            end_commit,
+        )
     elif exit_code == 124:
         # Timeout with no trajectory or git evidence → noop
         outcome = "noop"
