@@ -20,12 +20,15 @@ Plugins extend gptme's capabilities with custom tools and hooks. See [plugins/RE
 | [gptme-attention-tracker](./plugins/gptme-attention-tracker/) | Attention routing + history tracking for context management |
 | [gptme-claude-code](./plugins/gptme-claude-code/) | Claude Code subagent integration |
 | [gptme-consortium](./plugins/gptme-consortium/) | Multi-model consensus decision-making |
+| [gptme-gptodo](./plugins/gptme-gptodo/) | gptodo delegation plugin — coordinator-only agent mode |
 | [gptme-gupp](./plugins/gptme-gupp/) | Work persistence for session continuity |
 | [gptme-hooks-examples](./plugins/gptme-hooks-examples/) | Example hook implementations |
 | [gptme-imagen](./plugins/gptme-imagen/) | Multi-provider image generation |
 | [gptme-lsp](./plugins/gptme-lsp/) | Language Server Protocol integration |
+| [gptme-ralph](./plugins/gptme-ralph/) | Ralph Loop pattern — iterative execution with context reset between steps |
+| [gptme-retrieval](./plugins/gptme-retrieval/) | Automatic context retrieval before each LLM step |
 | [gptme-warpgrep](./plugins/gptme-warpgrep/) | Enhanced search with Warp-style filtering |
-| [gptme-wrapped](./plugins/gptme-wrapped/) | Wrapped tool definitions for sandboxing |
+| [gptme-wrapped](./plugins/gptme-wrapped/) | Year-end analytics for your gptme usage (Spotify Wrapped-inspired) |
 
 ### Plugin Usage
 
@@ -44,6 +47,10 @@ Reusable Python packages. See [packages/README.md](./packages/README.md).
 | Package | Description |
 |---------|-------------|
 | [gptmail](./packages/gptmail/) | Universal email system for AI agents |
+| [gptme-activity-summary](./packages/gptme-activity-summary/) | Activity summarization — journals, GitHub, sessions, tweets, email |
+| [gptme-sessions](./packages/gptme-sessions/) | Session tracking and analytics |
+| [gptme-voice](./packages/gptme-voice/) | Voice interface using OpenAI Realtime API |
+| [gptme-whatsapp](./packages/gptme-whatsapp/) | WhatsApp integration for agents |
 | [gptodo](./packages/gptodo/) | Task management CLI and utilities |
 | [gptme_lessons_extras](./packages/gptme-lessons-extras/) | Lesson validation and tools |
 | [gptme_runloops](./packages/gptme-runloops/) | Agent run loop patterns |
