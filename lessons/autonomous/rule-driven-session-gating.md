@@ -1,4 +1,5 @@
 ---
+status: active
 category: autonomous
 tags:
 - inference-cost
@@ -127,4 +128,4 @@ Following this pattern results in:
 - [Strategic Focus During Autonomous Sessions](./strategic-focus-during-autonomous-sessions.md) - Prioritizing work
 
 ## Origin
-2026-03-05: Extracted from analysis of Gordon's trading agent inference patterns. Gordon ran 16 sessions/day with ~12-14 producing zero signals. Initial recommendation was model-tier switching, but revised after feedback that Haiku is too unreliable for tool use — the correct pattern is to skip sessions entirely using external rule-based gating, which is already how gptme's monitoring runs work.
+2026-03-05: Extracted from analysis of a price-monitoring trading agent running 16 sessions/day with ~12-14 producing zero signals. Initial recommendation was model-tier switching (Sonnet for decisions, Haiku for routine), but revised after feedback that Haiku is too unreliable for tool use — the correct pattern is to skip sessions entirely using external rule-based gating, which is already how gptme's autonomous and project monitoring runs work.
