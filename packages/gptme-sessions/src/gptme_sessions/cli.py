@@ -89,9 +89,9 @@ def main() -> int:
         help="Output grade only (float 0.0-1.0)",
     )
     signals_output_group.add_argument(
-        "--tokens",
+        "--usage",
         action="store_true",
-        help="Output total token count only (Claude Code trajectories only)",
+        help="Output token usage breakdown: input, output, cache_read, cache_create (CC trajectories only)",
     )
 
     args = parser.parse_args()
@@ -119,10 +119,16 @@ def main() -> int:
         if args.json:
             print(json.dumps(result, indent=2))
             return 0
-        if args.tokens:
+        if args.usage:
             usage = result.get("usage")
             if usage and usage.get("total_tokens", 0) > 0:
-                print(usage["total_tokens"])
+                print(
+                    f"input={usage['input_tokens']} "
+                    f"output={usage['output_tokens']} "
+                    f"cache_read={usage['cache_read_tokens']} "
+                    f"cache_create={usage['cache_creation_tokens']} "
+                    f"total={usage['total_tokens']}"
+                )
             return 0
         # Human-readable summary
         tc = result["tool_calls"]

@@ -1385,8 +1385,8 @@ def test_detect_format_public_alias():
     assert detect_format(cc_msgs) == _detect_format(cc_msgs)
 
 
-def test_signals_cli_tokens_cc(tmp_path):
-    """signals --tokens outputs total token count for CC trajectories."""
+def test_signals_cli_usage_cc(tmp_path):
+    """signals --usage outputs token breakdown for CC trajectories."""
     import subprocess
 
     msgs = [
@@ -1410,16 +1410,21 @@ def test_signals_cli_tokens_cc(tmp_path):
     p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
 
     result = subprocess.run(
-        ["gptme-sessions", "signals", str(p), "--tokens"],
+        ["gptme-sessions", "signals", str(p), "--usage"],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0
-    assert result.stdout.strip() == "650"  # 100+50+200+300
+    out = result.stdout.strip()
+    assert "input=100" in out
+    assert "output=50" in out
+    assert "cache_read=300" in out
+    assert "cache_create=200" in out
+    assert "total=650" in out
 
 
-def test_signals_cli_tokens_gptme(tmp_path):
-    """signals --tokens produces no output for gptme format (no embedded usage)."""
+def test_signals_cli_usage_gptme(tmp_path):
+    """signals --usage produces no output for gptme format (no embedded usage)."""
     import subprocess
 
     msgs = [{"role": "assistant", "content": "hello", "timestamp": "2026-03-01T10:00:00+00:00"}]
@@ -1427,7 +1432,7 @@ def test_signals_cli_tokens_gptme(tmp_path):
     p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
 
     result = subprocess.run(
-        ["gptme-sessions", "signals", str(p), "--tokens"],
+        ["gptme-sessions", "signals", str(p), "--usage"],
         capture_output=True,
         text=True,
     )
@@ -1435,13 +1440,10 @@ def test_signals_cli_tokens_gptme(tmp_path):
     assert result.stdout.strip() == ""  # no usage data in gptme format
 
 
-def test_signals_cli_tokens_cc_zero_usage(tmp_path):
-    """signals --tokens produces no output for CC with model but all-zero usage counters."""
+def test_signals_cli_usage_cc_zero(tmp_path):
+    """signals --usage produces no output for CC with model but all-zero usage counters."""
     import subprocess
 
-    # A CC trajectory where the model field is present but all token counts are zero.
-    # extract_usage_cc returns {model: ..., total_tokens: 0, ...} in this case —
-    # the --tokens flag should still produce no output (consistent with gptme format).
     msgs = [
         {
             "type": "assistant",
@@ -1463,7 +1465,7 @@ def test_signals_cli_tokens_cc_zero_usage(tmp_path):
     p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
 
     result = subprocess.run(
-        ["gptme-sessions", "signals", str(p), "--tokens"],
+        ["gptme-sessions", "signals", str(p), "--usage"],
         capture_output=True,
         text=True,
     )
