@@ -1,8 +1,10 @@
 """Extract productivity signals from agent trajectory files.
 
-Supports two trajectory formats:
+Supports four trajectory formats:
 - **gptme**: conversation.jsonl with top-level role/content/timestamp fields
 - **Claude Code**: session .jsonl with top-level type/message/timestamp fields
+- **Codex CLI**: JSONL with typed entries (session_meta, turn_context, response_item, event_msg)
+- **Copilot CLI**: JSONL with typed events (session.start, assistant.message, tool.*)
 
 Provides grounded reward signals for Thompson sampling and session analytics
 by analyzing actual transcripts rather than self-reported journals.
@@ -42,14 +44,32 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
 
 
 def _detect_format(msgs: list[dict]) -> str:
-    """Detect trajectory format: 'claude_code' or 'gptme'.
+    """Detect trajectory format from parsed JSONL records.
 
-    Claude Code records have a top-level 'type' field (user/assistant/result).
-    gptme records have a top-level 'role' field (user/assistant/system).
+    Returns one of: 'gptme', 'claude_code', 'codex', 'copilot'.
+
+    Detection heuristics (checked in order):
+    - **Codex**: first record has type='session_meta' with originator='codex_exec'
+    - **Copilot**: first record has type='session.start' with producer='copilot-agent'
+    - **gptme**: any record has a top-level 'role' field
+    - **Claude Code**: any record has type in (user, assistant, result)
 
     Scans all records (not just the first few) to handle CC trajectories that
     begin with non-standard record types like 'queue-operation' or 'system_prompt'.
     """
+    if msgs:
+        first = msgs[0]
+        # Codex: first line is always session_meta
+        if first.get("type") == "session_meta":
+            payload = first.get("payload", {})
+            if payload.get("originator") in ("codex_exec", "codex_interactive"):
+                return "codex"
+        # Copilot: first line is always session.start
+        if first.get("type") == "session.start":
+            data = first.get("data", {})
+            if data.get("producer") == "copilot-agent":
+                return "copilot"
+
     for msg in msgs:
         if "role" in msg:
             return "gptme"
@@ -493,17 +513,276 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     }
 
 
+def extract_signals_codex(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Codex CLI .jsonl trajectories.
+
+    Codex format uses typed entries:
+    - session_meta: session start metadata
+    - turn_context: per-turn context (model, cwd)
+    - response_item: messages and tool calls (function_call / function_call_output)
+    - event_msg: events (token_count, task lifecycle)
+
+    Codex uses exec_command for all tool calls (shell-based). File writes are
+    detected from git commits rather than individual tool names since all
+    operations go through the shell.
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0
+    recent_sigs: list[str] = []
+
+    # Track function_call ids for matching with their outputs
+    call_id_to_name: dict[str, str] = {}
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        ts = _parse_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        if rec_type == "response_item":
+            payload = record.get("payload", {})
+            payload_type = payload.get("type", "")
+
+            if payload_type == "function_call":
+                tool = payload.get("name", "")
+                if tool:
+                    tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                    steps += 1
+                    call_id = payload.get("call_id", "")
+                    if call_id:
+                        call_id_to_name[call_id] = tool
+
+                    # Detect file writes from exec_command arguments
+                    if tool == "exec_command":
+                        args = payload.get("arguments", "")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                        if isinstance(args, dict):
+                            cmd = args.get("cmd", "")
+                            # Detect redirects and file-writing commands
+                            write_match = re.search(
+                                r"(?:cat\s*>\s*|tee\s+|>\s*)([^\s<>|&;]+)",
+                                cmd,
+                            )
+                            if write_match:
+                                path = write_match.group(1).strip("'\"")
+                                if "/journal/" not in path:
+                                    file_writes.append(path)
+                                    sig = f"exec_command:{path}"
+                                    if sig in recent_sigs:
+                                        retry_candidates.append("exec_command")
+                                    recent_sigs.append(sig)
+                                    if len(recent_sigs) > 20:
+                                        recent_sigs.pop(0)
+
+            elif payload_type == "function_call_output":
+                output = payload.get("output", "")
+                call_id = payload.get("call_id", "")
+                tool_name = call_id_to_name.get(call_id, "")
+
+                # Error detection from shell output
+                if "Process exited with code " in output:
+                    code_match = re.search(r"Process exited with code (\d+)", output)
+                    if code_match and code_match.group(1) != "0":
+                        error_count += 1
+
+                # Git commit detection from exec_command output
+                if tool_name == "exec_command":
+                    for commit_match in _COMMIT_RE.finditer(output[:500]):
+                        commit_hash = commit_match.group(1)
+                        commit_msg = commit_match.group(2).strip()
+                        git_commits.append(f"{commit_msg} ({commit_hash})")
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "session_duration_s": duration_s,
+        "retry_count": len(retry_candidates),
+        "deliverables": deliverables,
+    }
+
+
+# Tools that write files in Copilot CLI (subset of CC tools, lowercase)
+_COPILOT_WRITE_TOOLS = {"edit", "write", "create"}
+
+
+def extract_signals_copilot(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Copilot CLI events.jsonl trajectories.
+
+    Copilot format uses typed events:
+    - session.start: session metadata (model, cwd, git context)
+    - assistant.message: agent responses with toolRequests[]
+    - tool.execution_complete: tool results with success flag
+    - assistant.turn_start/turn_end: turn boundaries
+
+    Tool names are lowercase (bash, edit, view, glob, grep).
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0
+    recent_sigs: list[str] = []
+
+    # Map toolCallId → tool name for filtering commit detection to bash only
+    call_id_to_name: dict[str, str] = {}
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        ts = _parse_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        if rec_type == "assistant.message":
+            data = record.get("data", {})
+            tool_requests = data.get("toolRequests", [])
+            step_has_tool = False
+
+            for req in tool_requests:
+                tool = req.get("name", "")
+                if not tool:
+                    continue
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
+
+                call_id = req.get("toolCallId", "")
+                if call_id:
+                    call_id_to_name[call_id] = tool
+
+                # File write detection from edit/write tools
+                if tool in _COPILOT_WRITE_TOOLS:
+                    args = req.get("arguments", {})
+                    path = args.get("path", "") or args.get("file_path", "")
+                    if path and "/journal/" not in path:
+                        file_writes.append(path)
+                        sig = f"{tool}:{path}"
+                        if sig in recent_sigs:
+                            retry_candidates.append(tool)
+                        recent_sigs.append(sig)
+                        if len(recent_sigs) > 20:
+                            recent_sigs.pop(0)
+
+            if step_has_tool:
+                steps += 1
+
+        elif rec_type == "tool.execution_complete":
+            data = record.get("data", {})
+
+            # Error detection from tool failure
+            if not data.get("success", True):
+                error_count += 1
+
+            # Git commit detection from bash tool output
+            call_id = data.get("toolCallId", "")
+            tool_name = call_id_to_name.get(call_id, "")
+            if tool_name == "bash":
+                result = data.get("result", {})
+                content = result.get("content", "") or result.get("detailedContent", "")
+                if isinstance(content, str):
+                    for commit_match in _COMMIT_RE.finditer(content[:500]):
+                        commit_hash = commit_match.group(1)
+                        commit_msg = commit_match.group(2).strip()
+                        git_commits.append(f"{commit_msg} ({commit_hash})")
+
+        elif rec_type == "session.error":
+            error_count += 1
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "session_duration_s": duration_s,
+        "retry_count": len(retry_candidates),
+        "deliverables": deliverables,
+    }
+
+
+def extract_usage_codex(msgs: list[dict]) -> dict:
+    """Extract model and rate-limit info from Codex CLI trajectories.
+
+    Codex only provides rate-limit percentages (not absolute token counts).
+    We extract the model name and last-seen rate limit usage for reference.
+
+    Returns an empty dict if no model/usage data is found.
+    """
+    model: str | None = None
+    rate_limit_primary: float | None = None
+    rate_limit_secondary: float | None = None
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        if rec_type == "turn_context":
+            m = record.get("payload", {}).get("model")
+            if m:
+                model = m
+
+        elif rec_type == "event_msg":
+            payload = record.get("payload", {})
+            if payload.get("type") == "token_count":
+                rl = payload.get("rate_limits", {})
+                primary = rl.get("primary", {})
+                secondary = rl.get("secondary", {})
+                if primary.get("used_percent") is not None:
+                    rate_limit_primary = primary["used_percent"]
+                if secondary.get("used_percent") is not None:
+                    rate_limit_secondary = secondary["used_percent"]
+
+    if model is None:
+        return {}
+    result: dict = {"model": model}
+    if rate_limit_primary is not None:
+        result["rate_limit_primary_pct"] = rate_limit_primary
+    if rate_limit_secondary is not None:
+        result["rate_limit_secondary_pct"] = rate_limit_secondary
+    return result
+
+
 def extract_from_path(jsonl_path: Path) -> dict:
     """Parse trajectory and return signals + grade in one call.
 
-    Auto-detects format: gptme (conversation.jsonl) or Claude Code (.jsonl).
-    For CC format, token usage is also extracted from the trajectory.
+    Auto-detects format: gptme, Claude Code, Codex, or Copilot.
+    Token usage is extracted when available (CC has full counts, Codex has
+    rate-limit percentages only, Copilot has no token data).
     """
     msgs = parse_trajectory(jsonl_path)
     fmt = detect_format(msgs)
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
         usage = extract_usage_cc(msgs)
+    elif fmt == "codex":
+        signals = extract_signals_codex(msgs)
+        usage = extract_usage_codex(msgs)
+    elif fmt == "copilot":
+        signals = extract_signals_copilot(msgs)
+        usage = {}  # Copilot has no token data in events
     else:
         signals = extract_signals(msgs)
         usage = extract_usage_gptme(msgs)

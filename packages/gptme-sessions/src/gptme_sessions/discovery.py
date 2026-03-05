@@ -1,9 +1,9 @@
 """Discover session files across agent harnesses.
 
-Scans known session directories for gptme and Claude Code,
-filtering by date range. This replaces the directory scanning logic
-previously duplicated in gptme-activity-summary's session_data.py
-and cc_session_data.py.
+Scans known session directories for gptme, Claude Code, Codex CLI,
+and Copilot CLI, filtering by date range. This replaces the directory
+scanning logic previously duplicated in gptme-activity-summary's
+session_data.py and cc_session_data.py.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GPTME_LOGS_DIR = Path.home() / ".local" / "share" / "gptme" / "logs"
 DEFAULT_CC_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+DEFAULT_CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+DEFAULT_COPILOT_STATE_DIR = Path.home() / ".copilot" / "session-state"
 
 
 def _get_gptme_logs_dir() -> Path:
@@ -178,4 +180,87 @@ def discover_cc_sessions(
                     sessions.append(jsonl_file)
     except PermissionError:
         logger.debug("Permission denied reading: %s", cc_dir)
+    return sessions
+
+
+def discover_codex_sessions(
+    start: date,
+    end: date,
+    codex_dir: Path | None = None,
+) -> list[Path]:
+    """Find Codex CLI session JSONL files within a date range.
+
+    Scans ``~/.codex/sessions/YYYY/MM/DD/`` for rollout JSONL files.
+    Uses the directory date structure for fast filtering (no file reads needed).
+
+    Returns sorted list of session JSONL file paths.
+    """
+    if codex_dir is None:
+        codex_dir = DEFAULT_CODEX_SESSIONS_DIR
+    if not codex_dir.exists():
+        logger.debug("Codex sessions directory does not exist: %s", codex_dir)
+        return []
+
+    sessions: list[Path] = []
+    try:
+        for year_dir in sorted(codex_dir.iterdir()):
+            if not year_dir.is_dir():
+                continue
+            for month_dir in sorted(year_dir.iterdir()):
+                if not month_dir.is_dir():
+                    continue
+                for day_dir in sorted(month_dir.iterdir()):
+                    if not day_dir.is_dir():
+                        continue
+                    # Parse date from directory path: YYYY/MM/DD
+                    try:
+                        dir_date = date(
+                            int(year_dir.name),
+                            int(month_dir.name),
+                            int(day_dir.name),
+                        )
+                    except (ValueError, TypeError):
+                        continue
+                    if not (start <= dir_date <= end):
+                        continue
+                    for jsonl_file in sorted(day_dir.glob("*.jsonl")):
+                        sessions.append(jsonl_file)
+    except PermissionError:
+        logger.debug("Permission denied reading: %s", codex_dir)
+    return sessions
+
+
+def discover_copilot_sessions(
+    start: date,
+    end: date,
+    copilot_dir: Path | None = None,
+) -> list[Path]:
+    """Find Copilot CLI session event files within a date range.
+
+    Scans ``~/.copilot/session-state/<uuid>/events.jsonl`` for session files.
+    Uses quick first-line timestamp extraction for date filtering.
+
+    Returns sorted list of session JSONL file paths.
+    """
+    if copilot_dir is None:
+        copilot_dir = DEFAULT_COPILOT_STATE_DIR
+    if not copilot_dir.exists():
+        logger.debug("Copilot session-state directory does not exist: %s", copilot_dir)
+        return []
+
+    sessions: list[Path] = []
+    try:
+        for session_dir in sorted(copilot_dir.iterdir()):
+            if not session_dir.is_dir():
+                continue
+            events_file = session_dir / "events.jsonl"
+            if not events_file.exists():
+                continue
+            session_date = _quick_date_from_jsonl(events_file)
+            if session_date is None:
+                continue
+            if start <= session_date <= end:
+                sessions.append(events_file)
+    except PermissionError:
+        logger.debug("Permission denied reading: %s", copilot_dir)
     return sessions
