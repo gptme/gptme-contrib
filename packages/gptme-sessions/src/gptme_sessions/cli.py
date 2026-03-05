@@ -174,6 +174,9 @@ def main() -> int:
     store = SessionStore(sessions_dir=args.sessions_dir)
 
     if args.command == "append":
+        if args.token_count is not None and args.token_count < 0:
+            print("error: --token-count must be non-negative", file=sys.stderr)
+            return 1
         record = SessionRecord(
             harness=args.harness,
             model=args.model,
