@@ -341,7 +341,8 @@ class BanditState:
             # Selection guard: protect arms above threshold from being pruned by count alone
             if arm.total_selections > min_selections:
                 return False
-            return arm.total_selections == 0
+            # Arms at or below min_selections threshold are stale
+            return True
 
         # Prune global arms
         to_prune = [arm_id for arm_id, arm in self.arms.items() if _is_stale(arm)]

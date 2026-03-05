@@ -474,3 +474,20 @@ def test_load_bandit_means_unknown_arm_returns_half(tmp_path: Path):
 
     means_ctx = load_bandit_means(tmp_path, arm_ids=["unseen"], context=("code", "opus"))
     assert means_ctx["unseen"] == pytest.approx(0.5)
+
+
+def test_bandit_state_prune_stale_min_selections_threshold():
+    """prune_stale with min_selections > 0 prunes arms with 1..min_selections selections."""
+    state = BanditState()
+    # Arm with 1 selection — below threshold of 3
+    arm_low = state.get_or_create_arm("low-selections")
+    arm_low.update(1.0)  # 1 selection
+    # Arm with 5 selections — above threshold of 3, should survive
+    arm_high = state.get_or_create_arm("high-selections")
+    for _ in range(5):
+        arm_high.update(0.8)
+
+    pruned = state.prune_stale(min_selections=3)
+    assert pruned == 1, f"Expected 1 pruned, got {pruned}"
+    assert "low-selections" not in state.arms, "Arm with 1 selection should be pruned"
+    assert "high-selections" in state.arms, "Arm with 5 selections should survive"
