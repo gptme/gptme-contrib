@@ -3,6 +3,8 @@
   "threshold": 1,
   "reporters": ["console"],
   "ignore": [
+    "worktree/**",
+    "worktrees/**",
     "**/__pycache__/**",
     "**/node_modules/**",
     "**/.venv/**",
