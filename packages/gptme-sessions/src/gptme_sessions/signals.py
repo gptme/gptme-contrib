@@ -22,7 +22,8 @@ from pathlib import Path
 _COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
 
 # Tools that write files in Claude Code
-_CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "Patch"}
+# Note: gptme has a "patch" tool but Claude Code does not — no "Patch" here
+_CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
@@ -241,7 +242,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     - type='user': message.content is a list; tool results have type='tool_result'
     - type='result': final session result record
 
-    Tool names for file writes: Write, Edit, Patch (input.file_path), NotebookEdit (input.notebook_path).
+    Tool names for file writes: Write, Edit (input.file_path), NotebookEdit (input.notebook_path).
     Errors: tool_result items with is_error=True.
     Git commits: detected from Bash tool output content via regex.
     """

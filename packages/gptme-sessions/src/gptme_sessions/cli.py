@@ -100,7 +100,14 @@ def main() -> int:
             else:
                 print(f"error: {p} not found", file=sys.stderr)
             return 1
-        result = extract_from_path(p)
+        try:
+            result = extract_from_path(p)
+        except PermissionError:
+            print(f"error: cannot read {p}: permission denied", file=sys.stderr)
+            return 1
+        except UnicodeDecodeError:
+            print(f"error: {p} contains non-UTF-8 content", file=sys.stderr)
+            return 1
         if args.grade:
             print(f"{result['grade']:.4f}")
             return 0
