@@ -81,6 +81,15 @@ def decode_cc_project_path(encoded: str) -> str:
     CC encodes workspace paths by replacing ``/`` with ``-``, e.g.::
 
         -home-bob-bob  ->  /home/bob/bob
+
+    .. warning::
+        This decoding is **lossy** for paths whose directory components contain
+        hyphens.  Because CC uses ``-`` for both path separators *and* literal
+        hyphens in directory names, ``-home-bob-my-project`` is ambiguous: it
+        could represent ``/home/bob/my-project`` or ``/home/bob/my/project``
+        (among other combinations).  No information is available at decode time
+        to distinguish the two cases, so the result may be incorrect for such
+        paths.
     """
     if not encoded.startswith("-"):
         return encoded
@@ -165,7 +174,7 @@ def discover_cc_sessions(
         logger.debug("CC projects directory does not exist: %s", cc_dir)
         return []
 
-    sessions: list[Path] = []
+    sessions_with_dates: list[tuple[date, Path]] = []
     try:
         for project_dir in sorted(cc_dir.iterdir()):
             if not project_dir.is_dir():
@@ -175,7 +184,7 @@ def discover_cc_sessions(
                 if session_date is None:
                     continue
                 if start <= session_date <= end:
-                    sessions.append(jsonl_file)
+                    sessions_with_dates.append((session_date, jsonl_file))
     except PermissionError:
         logger.debug("Permission denied reading: %s", cc_dir)
-    return sessions
+    return [path for _, path in sorted(sessions_with_dates)]

@@ -370,33 +370,19 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     }
 
 
-def _first_not_none(*candidates: float | None) -> float:
-    """Return the first non-None value, or 0.0 if all are None.
-
-    Unlike ``or``-chaining, this correctly handles zero values (0, 0.0).
-    """
-    for v in candidates:
-        if v is not None:
-            return v
-    return 0.0
-
-
 def extract_usage_gptme(msgs: list[dict]) -> dict:
     """Extract cumulative token usage from a gptme conversation.jsonl trajectory.
 
-    gptme stores token/cost data in multiple locations per message:
-      - msg.usage (legacy/generic)
-      - msg.metadata (current format, flat keys)
-      - msg.metadata.usage (future/nested format)
-    Also handles OpenAI-style naming (prompt_tokens, completion_tokens).
+    Reads token/cost data from msg.metadata, consistent with how gptme core
+    tracks costs in gptme.util.cost_display.gather_conversation_costs().
 
     Only accumulates tokens from assistant turns (consistent with extract_usage_cc).
     Records the last-seen model (consistent with extract_usage_cc).
 
     Returns an empty dict if no usage data is found.
     """
-    input_tokens = 0.0
-    output_tokens = 0.0
+    input_tokens = 0
+    output_tokens = 0
     cost = 0.0
     model: str | None = None
 
@@ -405,42 +391,27 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
             continue
 
         metadata = msg.get("metadata") or {}
-        usage = msg.get("usage") or {}
-        meta_usage = metadata.get("usage") or {}
+        if not metadata:
+            continue
 
         # Last-seen model wins (consistent with extract_usage_cc)
         m = metadata.get("model") or msg.get("model")
         if m:
             model = m
 
-        # Use _first_not_none to correctly handle zero values (e.g. cost=0.0 for free models)
-        input_tokens += _first_not_none(
-            usage.get("input_tokens"),
-            meta_usage.get("input_tokens"),
-            metadata.get("input_tokens"),
-            usage.get("prompt_tokens"),
-        )
-        output_tokens += _first_not_none(
-            usage.get("output_tokens"),
-            meta_usage.get("output_tokens"),
-            metadata.get("output_tokens"),
-            usage.get("completion_tokens"),
-        )
-        cost += _first_not_none(
-            usage.get("cost"),
-            meta_usage.get("cost"),
-            metadata.get("cost"),
-        )
+        input_tokens += metadata.get("input_tokens", 0)
+        output_tokens += metadata.get("output_tokens", 0)
+        cost += metadata.get("cost", 0.0)
 
     total_tokens = input_tokens + output_tokens
-    if total_tokens == 0 and model is None:
+    if total_tokens == 0 and cost == 0.0:
         return {}
     return {
         "model": model,
-        "input_tokens": int(input_tokens),
-        "output_tokens": int(output_tokens),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "cost": cost,
-        "total_tokens": int(total_tokens),
+        "total_tokens": total_tokens,
     }
 
 
