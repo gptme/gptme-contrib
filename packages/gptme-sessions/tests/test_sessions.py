@@ -1249,3 +1249,125 @@ def test_extract_signals_cc_no_placeholder_inflation():
     ]
     sigs = extract_signals_cc(msgs)
     assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_gptme_steps_basic():
+    """gptme trajectory: each assistant turn with tool calls counts as one step."""
+    msgs = [
+        # Turn 1: one tool call
+        {
+            "role": "assistant",
+            "content": '@shell(c0): {"command": "ls"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {"role": "system", "content": "file.py", "timestamp": "2026-03-01T10:00:01+00:00"},
+        # Turn 2: two tool calls (parallel) — still one step
+        {
+            "role": "assistant",
+            "content": '@shell(c1): {"command": "git status"}\n@save(c2): {"path": "/tmp/out.py"}',
+            "timestamp": "2026-03-01T10:00:02+00:00",
+        },
+        {"role": "system", "content": "ok", "timestamp": "2026-03-01T10:00:03+00:00"},
+        # Turn 3: pure text, no tool calls — NOT a step
+        {
+            "role": "assistant",
+            "content": "Here is my analysis.",
+            "timestamp": "2026-03-01T10:00:04+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["steps"] == 2
+
+
+def test_extract_signals_gptme_steps_parallel_tools():
+    """gptme trajectory: multiple parallel tool calls in one turn = one step."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": ("@shell(c0): {}\n" "@shell(c1): {}\n" "@shell(c2): {}\n"),
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        }
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["steps"] == 1
+    assert sum(sigs["tool_calls"].values()) == 3
+
+
+def test_extract_signals_gptme_steps_zero():
+    """gptme trajectory: no tool calls → steps is 0."""
+    msgs = [
+        {"role": "assistant", "content": "Hello world", "timestamp": "2026-03-01T10:00:00+00:00"},
+        {"role": "user", "content": "Thanks", "timestamp": "2026-03-01T10:00:01+00:00"},
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["steps"] == 0
+
+
+def test_extract_signals_cc_steps_basic():
+    """CC trajectory: each assistant record with tool_use items counts as one step."""
+    msgs = [
+        # Step 1: single Bash tool call
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}
+                ],
+            },
+        },
+        # Step 2: two tool calls in parallel — still one step
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:02.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "pwd"}},
+                    {
+                        "type": "tool_use",
+                        "id": "t3",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/x"},
+                    },
+                ],
+            },
+        },
+        # Pure text turn — NOT a step
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:04.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done."}],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["steps"] == 2
+
+
+def test_extract_signals_cc_steps_parallel_tools():
+    """CC trajectory: multiple parallel tool_use items in one record = one step."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"t{i}",
+                        "name": "Bash",
+                        "input": {"command": f"cmd{i}"},
+                    }
+                    for i in range(4)
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["steps"] == 1
+    assert sigs["tool_calls"]["Bash"] == 4

@@ -94,6 +94,7 @@ def extract_signals(msgs: list[dict]) -> dict:
     file_writes: list[str] = []
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
+    steps = 0  # number of assistant turns that yielded to await tool results
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -112,12 +113,14 @@ def extract_signals(msgs: list[dict]) -> dict:
         if role == "assistant":
             # Find all @tool_name(call_id): JSON_ARGS blocks.
             blocks = re.split(r"(?=\n@\w+\()", "\n" + content)
+            step_has_tool = False
             for block in blocks:
                 m = re.match(r"\n@(\w+)\(([^)]+)\):\s*(.*)", block, re.DOTALL)
                 if not m:
                     continue
                 tool, _call_id, args_str = m.group(1), m.group(2), m.group(3)
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
 
                 if tool in ("save", "write", "patch", "edit"):
                     path = _extract_path_from_args(args_str)
@@ -134,6 +137,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                     # file writes. Placeholder strings like "<save>" would inflate the
                     # unique-write count used in grade_signals and push unproductive
                     # sessions into higher reward tiers.
+            if step_has_tool:
+                steps += 1
 
         elif role == "system" and ts_str:
             content_stripped = content.strip()
@@ -165,6 +170,7 @@ def extract_signals(msgs: list[dict]) -> dict:
 
     return {
         "tool_calls": tool_calls,
+        "steps": steps,
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
@@ -252,6 +258,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     file_writes: list[str] = []
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
+    steps = 0  # number of assistant turns that yielded to await tool results
     recent_sigs: list[str] = []
     # Map tool_use id → tool name for filtering commit detection to Bash only
     tool_id_to_name: dict[str, str] = {}
@@ -268,6 +275,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
             content = record.get("message", {}).get("content", [])
             if not isinstance(content, list):
                 continue
+            step_has_tool = False
             for item in content:
                 if not isinstance(item, dict) or item.get("type") != "tool_use":
                     continue
@@ -275,6 +283,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 if not tool:
                     continue
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
 
                 # Track id → name for commit detection filtering
                 tool_id = item.get("id", "")
@@ -300,6 +309,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                 recent_sigs.pop(0)
                     # No else: tool calls without extractable paths are not counted as
                     # file writes — same rationale as the gptme path above.
+            if step_has_tool:
+                steps += 1
 
         elif rec_type == "user":
             content = record.get("message", {}).get("content", [])
@@ -340,6 +351,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     deliverables = list(dict.fromkeys(git_commits + file_writes))
     return {
         "tool_calls": tool_calls,
+        "steps": steps,
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
