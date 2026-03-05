@@ -390,6 +390,11 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
       - msg.metadata.usage (future/nested format)
     Also handles OpenAI-style naming (prompt_tokens, completion_tokens).
 
+    For Anthropic models, also extracts prompt-cache token fields:
+      - cache_creation_input_tokens: tokens written to the prompt cache
+      - cache_read_input_tokens: context served from the prompt cache
+    These are included in total_tokens for accurate billing representation.
+
     Only accumulates tokens from assistant turns (consistent with extract_usage_cc).
     Records the last-seen model (consistent with extract_usage_cc).
 
@@ -397,6 +402,8 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     """
     input_tokens = 0.0
     output_tokens = 0.0
+    cache_creation_tokens = 0.0
+    cache_read_tokens = 0.0
     cost = 0.0
     model: str | None = None
 
@@ -431,14 +438,27 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
             meta_usage.get("cost"),
             metadata.get("cost"),
         )
+        # Anthropic prompt-cache fields — present when using Claude models via gptme
+        cache_creation_tokens += _first_not_none(
+            usage.get("cache_creation_input_tokens"),
+            meta_usage.get("cache_creation_input_tokens"),
+            metadata.get("cache_creation_input_tokens"),
+        )
+        cache_read_tokens += _first_not_none(
+            usage.get("cache_read_input_tokens"),
+            meta_usage.get("cache_read_input_tokens"),
+            metadata.get("cache_read_input_tokens"),
+        )
 
-    total_tokens = input_tokens + output_tokens
+    total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
     if total_tokens == 0 and model is None:
         return {}
     return {
         "model": model,
         "input_tokens": int(input_tokens),
         "output_tokens": int(output_tokens),
+        "cache_creation_tokens": int(cache_creation_tokens),
+        "cache_read_tokens": int(cache_read_tokens),
         "cost": cost,
         "total_tokens": int(total_tokens),
     }
