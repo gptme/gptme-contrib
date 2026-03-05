@@ -13,6 +13,15 @@ Usage:
 """
 
 from .record import MODEL_ALIASES, SessionRecord, normalize_model
+from .signals import (
+    detect_format,
+    extract_from_path,
+    extract_signals,
+    extract_signals_cc,
+    extract_usage_cc,
+    grade_signals,
+    is_productive,
+)
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 
@@ -25,4 +34,11 @@ __all__ = [
     "BanditArm",
     "BanditState",
     "load_bandit_means",
+    "detect_format",
+    "extract_from_path",
+    "extract_signals",
+    "extract_signals_cc",
+    "extract_usage_cc",
+    "grade_signals",
+    "is_productive",
 ]
