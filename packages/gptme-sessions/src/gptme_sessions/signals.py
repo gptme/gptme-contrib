@@ -41,7 +41,7 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
     return msgs
 
 
-def detect_format(msgs: list[dict]) -> str:
+def _detect_format(msgs: list[dict]) -> str:
     """Detect trajectory format: 'claude_code' or 'gptme'.
 
     Claude Code records have a top-level 'type' field (user/assistant/result).
