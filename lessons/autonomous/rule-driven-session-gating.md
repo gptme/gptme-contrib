@@ -31,6 +31,14 @@ The fix is **not** to use a lighter model — lighter models (e.g., Haiku) are u
 
 This is already how gptme's autonomous and project monitoring runs work: timers, conditions, and rule-based triggers determine when to run.
 
+## Scope: Event-Gating Only
+
+This lesson addresses one question: **when to skip a session entirely** because there's nothing to act on.
+
+It does *not* address what to do with remaining inference budget when the agent has capacity left after covering event-driven work. When an agent has leftover cycles within its budget, it should still do productive autonomous work — exploring new opportunities, self-review, refining systems, running CASCADE sessions. Reducing an agent to a "position monitor" wastes available capacity.
+
+The complementary pattern is **budget-based productive-work scheduling**: use CASCADE + Thompson sampling to pick the highest-value work category when the agent has inference budget and no immediate events to respond to ([tracking issue #349](https://github.com/gptme/gptme-contrib/issues/349)). Session gating and productive-work scheduling are two separate mechanisms that should both be in place.
+
 ## Detection
 Observable signals that session gating would reduce waste:
 - Agent runs many sessions per day with near-identical, low-value outputs
@@ -160,14 +168,6 @@ Following this pattern results in:
 - **Higher reliability**: No small-model tool-use failures on routine tasks
 - **Cleaner signal**: Sessions that *do* run represent real decisions, not noise
 - **Adaptive cadence**: Resource use tracks actual activity, not a fixed schedule
-
-## Scope: Event-Gating Only
-
-This lesson addresses one question: **when to skip a session entirely** because there's nothing to act on.
-
-It does *not* address what to do with remaining inference budget when the agent has capacity left after covering event-driven work. When an agent has leftover cycles within its budget, it should still do productive autonomous work — exploring new opportunities, self-review, refining systems, running CASCADE sessions. Reducing an agent to a "position monitor" wastes available capacity.
-
-The complementary pattern is **budget-based productive-work scheduling**: use CASCADE + Thompson sampling to pick the highest-value work category when the agent has inference budget and no immediate events to respond to. Session gating and productive-work scheduling are two separate mechanisms that should both be in place.
 
 ## Related
 - [Blocked Period Status Check Trap](./blocked-period-status-check-trap.md) - Avoiding no-op commits
