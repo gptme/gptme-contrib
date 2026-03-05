@@ -51,6 +51,9 @@ def main() -> int:
     append_parser.add_argument("--selector-mode", help="Selector mode used")
     append_parser.add_argument("--journal-path", help="Path to journal entry")
     append_parser.add_argument("--deliverables", nargs="*", default=[], help="Commit SHAs, PR URLs")
+    append_parser.add_argument(
+        "--token-count", type=int, default=None, help="Total token count for the session"
+    )
 
     # Stats shortcut
     stats_parser = subparsers.add_parser("stats", help="Show summary statistics")
@@ -181,6 +184,7 @@ def main() -> int:
             selector_mode=args.selector_mode,
             journal_path=args.journal_path,
             deliverables=args.deliverables or [],
+            token_count=args.token_count,
         )
         path = store.append(record)
         print(f"Appended session {record.session_id} to {path}")
