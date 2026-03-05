@@ -495,6 +495,20 @@ class Bandit:
         self.save()
         return count
 
+    def prune(self, min_selections: int = 0, max_age_days: int = 90) -> int:
+        """Remove stale arms and save.
+
+        Args:
+            min_selections: Prune arms with at most this many selections (total_selections <= min_selections).
+            max_age_days: Prune arms not updated in this many days.
+
+        Returns:
+            Number of arms pruned.
+        """
+        count = self.state.prune_stale(min_selections=min_selections, max_age_days=max_age_days)
+        self.save()
+        return count
+
     def status_report(self) -> str:
         """Generate human-readable status report."""
         lines = [
@@ -732,6 +746,21 @@ def main() -> None:
         "--rate", type=float, default=0.99, help="Decay rate gamma (default: 0.99)"
     )
 
+    # prune
+    prune_p = subparsers.add_parser("prune", help="Remove stale arms from the bandit")
+    prune_p.add_argument(
+        "--min-selections",
+        type=int,
+        default=0,
+        help="Prune arms with at most this many selections (default: 0, prunes never-selected arms)",
+    )
+    prune_p.add_argument(
+        "--max-age-days",
+        type=int,
+        default=90,
+        help="Prune arms not updated in this many days (default: 90)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "dashboard":
@@ -793,6 +822,12 @@ def main() -> None:
             sys.exit(1)
         count = bandit.decay(args.rate)
         print(f"Applied decay (gamma={args.rate}) to {count} arms")
+
+    elif args.command == "prune":
+        count = bandit.prune(min_selections=args.min_selections, max_age_days=args.max_age_days)
+        print(
+            f"Pruned {count} stale arms (min_selections={args.min_selections}, max_age_days={args.max_age_days})"
+        )
 
     else:
         parser.print_help()
