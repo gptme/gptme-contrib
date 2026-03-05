@@ -2,7 +2,6 @@
 match:
   keywords:
   - "classify operation before executing"
-  - "GREEN YELLOW RED classification"
   - "safe to execute autonomously"
   - "requires human approval"
   - "operation safety classification"
