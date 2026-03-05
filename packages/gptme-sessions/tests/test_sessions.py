@@ -1286,7 +1286,7 @@ def test_extract_signals_gptme_steps_parallel_tools():
     msgs = [
         {
             "role": "assistant",
-            "content": ("@shell(c0): {}\n" "@shell(c1): {}\n" "@shell(c2): {}\n"),
+            "content": ("@shell(c0): {}\n@shell(c1): {}\n@shell(c2): {}\n"),
             "timestamp": "2026-03-01T10:00:00+00:00",
         }
     ]
