@@ -1690,6 +1690,71 @@ def test_post_session_timeout_is_noop(tmp_path: Path):
     assert result.record.outcome == "noop"
 
 
+def test_post_session_timeout_with_productive_trajectory(tmp_path: Path):
+    """exit_code=124 does NOT override productive trajectory outcome."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    commit_output = "[master abc1234] feat: add feature"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": commit_output}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        exit_code=124,  # timeout
+        trajectory_path=traj,
+    )
+    # Trajectory evidence of productive work takes priority over timeout → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_timeout_with_new_commits(tmp_path: Path):
+    """exit_code=124 does NOT override productive git-comparison outcome."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=124,  # timeout
+        start_commit="aaa",
+        end_commit="bbb",  # different → productive by git
+    )
+    # Git evidence of productive work takes priority over timeout → productive
+    assert result.record.outcome == "productive"
+
+
 def test_post_session_noop_from_commits(tmp_path: Path):
     """Same start/end commit → noop when no trajectory."""
     store = SessionStore(sessions_dir=tmp_path)

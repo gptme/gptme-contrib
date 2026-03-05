@@ -21,6 +21,7 @@ What this function does **not** do (kept in caller scripts):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ from typing import Any
 from .record import SessionRecord
 from .signals import extract_from_path
 from .store import SessionStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -140,9 +143,9 @@ def post_session(
             total = usage.get("total_tokens", 0)
             if total:
                 token_count = int(total)
-        except Exception:
+        except Exception as e:
             # Signal extraction is non-fatal; proceed without signals
-            pass
+            logger.warning("Signal extraction from %s failed: %s", trajectory_path, e)
 
     # --- Resolve deliverables ---
     if deliverables is None:
@@ -153,18 +156,23 @@ def post_session(
             deliverables = []
 
     # --- Determine outcome ---
+    # Priority order (highest → lowest):
+    # 1. Non-zero exit (except 124) → failed
+    # 2. Trajectory productive flag → productive / noop
+    # 3. Git HEAD comparison → productive / noop
+    # 4. Timeout (124) with no other evidence → noop
+    # 5. Default → productive
     if exit_code not in (0, 124):
         outcome = "failed"
     elif traj_productive is not None:
         outcome = "productive" if traj_productive else "noop"
     elif start_commit is not None and end_commit is not None:
         outcome = "productive" if start_commit != end_commit else "noop"
+    elif exit_code == 124:
+        # Timeout with no trajectory or git evidence → noop
+        outcome = "noop"
     else:
         outcome = "productive"
-
-    # Timeout (124) → noop, not failed
-    if exit_code == 124:
-        outcome = "noop"
 
     # --- Build SessionRecord kwargs ---
     record_kwargs: dict[str, Any] = {
