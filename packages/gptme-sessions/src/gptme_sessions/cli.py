@@ -51,7 +51,7 @@ def main() -> int:
     append_parser.add_argument("--journal-path", help="Path to journal entry")
     append_parser.add_argument("--deliverables", nargs="*", default=[], help="Commit SHAs, PR URLs")
     append_parser.add_argument(
-        "--tokens", type=int, default=None, help="Total tokens used in session"
+        "--tokens", type=int, default=None, help="Total input+output token count for the session"
     )
     append_parser.add_argument("--cost-usd", type=float, default=None, help="Total cost in USD")
 
@@ -85,7 +85,7 @@ def main() -> int:
             journal_path=args.journal_path,
             deliverables=args.deliverables or [],
             token_count=args.tokens,
-            cost_usd=getattr(args, "cost_usd", None),
+            cost_usd=args.cost_usd,
         )
         path = store.append(record)
         print(f"Appended session {record.session_id} to {path}")
