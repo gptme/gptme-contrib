@@ -5,13 +5,15 @@ tags:
 - knowledge-management
 - lesson-creation
 - bloat-prevention
+status: active
 match:
   keywords:
-  - lesson
+  - knowledge base bloat
+  - lesson bloat
   - knowledge capture
   - lesson creation
   - lesson quality
-  - lessons
+  - dated lesson variants
 ---
 
 # Lesson Quality Standards
