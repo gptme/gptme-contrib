@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .record import SessionRecord
+from .signals import extract_from_path
 from .store import (
     SessionStore,
     compute_run_analytics,
@@ -66,7 +67,88 @@ def main() -> int:
     runs_parser.add_argument("--since", default="14d", help="Time window (e.g. 7d, 30d)")
     runs_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # Signals — extract productivity signals from a trajectory file
+    signals_parser = subparsers.add_parser(
+        "signals",
+        help="Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)",
+    )
+    signals_parser.add_argument(
+        "path",
+        type=Path,
+        help="Path to conversation.jsonl",
+    )
+    signals_output_group = signals_parser.add_mutually_exclusive_group()
+    signals_output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON (default: human-readable summary)",
+    )
+    signals_output_group.add_argument(
+        "--grade",
+        action="store_true",
+        help="Output grade only (float 0.0-1.0)",
+    )
+
     args = parser.parse_args()
+
+    # Handle signals before constructing SessionStore (no store needed)
+    if args.command == "signals":
+        p = args.path
+        if not p.is_file():
+            if p.is_dir():
+                print(f"error: {p} is a directory, expected a .jsonl file", file=sys.stderr)
+            else:
+                print(f"error: {p} not found", file=sys.stderr)
+            return 1
+        try:
+            result = extract_from_path(p)
+        except PermissionError:
+            print(f"error: cannot read {p}: permission denied", file=sys.stderr)
+            return 1
+        except UnicodeDecodeError:
+            print(f"error: {p} contains non-UTF-8 content", file=sys.stderr)
+            return 1
+        if args.grade:
+            print(f"{result['grade']:.4f}")
+            return 0
+        if args.json:
+            print(json.dumps(result, indent=2))
+            return 0
+        # Human-readable summary
+        tc = result["tool_calls"]
+        print(f"Format: {result.get('format', 'gptme')}")
+        print(
+            f"Tool calls: {sum(tc.values())} "
+            f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
+        )
+        print(f"Git commits: {len(result['git_commits'])}")
+        unique_writes = len(set(result["file_writes"]))
+        total_writes = len(result["file_writes"])
+        write_str = (
+            str(unique_writes)
+            if unique_writes == total_writes
+            else f"{unique_writes} unique ({total_writes} total)"
+        )
+        print(f"File writes: {write_str}")
+        print(f"Errors: {result['error_count']}")
+        print(f"Retries: {result['retry_count']}")
+        print(f"Duration: {result['session_duration_s']}s")
+        print(f"Productive: {result['productive']}")
+        print(f"Grade: {result['grade']:.4f}")
+        if result.get("usage"):
+            u = result["usage"]
+            print(
+                f"Tokens: {u['total_tokens']:,} total "
+                f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
+                f"cache_create={u['cache_creation_tokens']:,} "
+                f"cache_read={u['cache_read_tokens']:,})"
+            )
+        if result["deliverables"]:
+            print("Deliverables:")
+            for d in result["deliverables"][:10]:
+                print(f"  - {d}")
+        return 0
+
     store = SessionStore(sessions_dir=args.sessions_dir)
 
     if args.command == "append":
