@@ -41,7 +41,7 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
     return msgs
 
 
-def _detect_format(msgs: list[dict]) -> str:
+def detect_format(msgs: list[dict]) -> str:
     """Detect trajectory format: 'claude_code' or 'gptme'.
 
     Claude Code records have a top-level 'type' field (user/assistant/result).
@@ -370,6 +370,68 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     }
 
 
+def extract_usage_gptme(msgs: list[dict]) -> dict:
+    """Extract cumulative token usage from a gptme conversation.jsonl trajectory.
+
+    gptme stores token/cost data in multiple locations per message:
+      - msg.usage (legacy/generic)
+      - msg.metadata (current format, flat keys)
+      - msg.metadata.usage (future/nested format)
+    Also handles OpenAI-style naming (prompt_tokens, completion_tokens).
+
+    Returns an empty dict if no usage data is found.
+    """
+    input_tokens = 0
+    output_tokens = 0
+    cost = 0.0
+    model: str | None = None
+
+    for msg in msgs:
+        role = msg.get("role", "")
+        if role == "assistant":
+            metadata = msg.get("metadata") or {}
+            if not model:
+                model = metadata.get("model") or msg.get("model")
+
+        usage = msg.get("usage") or {}
+        metadata = msg.get("metadata") or {}
+        meta_usage = metadata.get("usage") or {}
+
+        input_tok = (
+            usage.get("input_tokens", 0)
+            or meta_usage.get("input_tokens", 0)
+            or metadata.get("input_tokens", 0)
+            or usage.get("prompt_tokens", 0)
+            or 0
+        )
+        output_tok = (
+            usage.get("output_tokens", 0)
+            or meta_usage.get("output_tokens", 0)
+            or metadata.get("output_tokens", 0)
+            or usage.get("completion_tokens", 0)
+            or 0
+        )
+        input_tokens += input_tok
+        output_tokens += output_tok
+        cost += (
+            usage.get("cost", 0.0)
+            or meta_usage.get("cost", 0.0)
+            or metadata.get("cost", 0.0)
+            or 0.0
+        )
+
+    total_tokens = input_tokens + output_tokens
+    if total_tokens == 0 and model is None:
+        return {}
+    return {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost": cost,
+        "total_tokens": total_tokens,
+    }
+
+
 def extract_usage_cc(msgs: list[dict]) -> dict:
     """Extract cumulative token usage from a Claude Code trajectory.
 
@@ -426,13 +488,13 @@ def extract_from_path(jsonl_path: Path) -> dict:
     For CC format, token usage is also extracted from the trajectory.
     """
     msgs = parse_trajectory(jsonl_path)
-    fmt = _detect_format(msgs)
+    fmt = detect_format(msgs)
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
         usage = extract_usage_cc(msgs)
     else:
         signals = extract_signals(msgs)
-        usage = {}
+        usage = extract_usage_gptme(msgs)
     grade = grade_signals(signals)
     result: dict = {
         **signals,

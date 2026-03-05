@@ -10,6 +10,7 @@ from gptme_sessions.signals import (
     extract_signals,
     extract_signals_cc,
     extract_usage_cc,
+    extract_usage_gptme,
     grade_signals,
     is_productive,
 )
@@ -660,18 +661,18 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
 def test_detect_format_gptme():
     """Detects gptme format from role-keyed messages."""
     msgs = _make_gptme_msgs(commits=1)
-    assert _detect_format(msgs) == "gptme"
+    assert detect_format(msgs) == "gptme"
 
 
 def test_detect_format_claude_code():
     """Detects claude_code format from type-keyed records."""
     msgs = _make_cc_msgs(commits=1)
-    assert _detect_format(msgs) == "claude_code"
+    assert detect_format(msgs) == "claude_code"
 
 
 def test_detect_format_empty():
     """Empty messages default to gptme."""
-    assert _detect_format([]) == "gptme"
+    assert detect_format([]) == "gptme"
 
 
 def test_extract_signals_cc_commits():
@@ -979,7 +980,7 @@ def test_detect_format_cc_with_preamble():
         {"type": "system_prompt", "content": "You are an assistant."},
     ] * 8  # 16 records — beyond the old first-15 window
     cc_msgs = _make_cc_msgs(commits=1)
-    assert _detect_format(preamble + cc_msgs) == "claude_code"
+    assert detect_format(preamble + cc_msgs) == "claude_code"
 
 
 def test_extract_signals_cc_journal_no_retry_penalty():
@@ -1471,3 +1472,128 @@ def test_signals_cli_usage_cc_zero(tmp_path):
     )
     assert result.returncode == 0
     assert result.stdout.strip() == ""  # zero total tokens → no output
+
+
+# ---------------------------------------------------------------------------
+# extract_usage_gptme
+# ---------------------------------------------------------------------------
+
+
+def test_extract_usage_gptme_metadata():
+    """Token counts in msg.metadata are extracted correctly."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "hello",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cost": 0.005,
+            },
+        },
+        {
+            "role": "assistant",
+            "content": "world",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 200,
+                "output_tokens": 30,
+                "cost": 0.003,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 80
+    assert usage["total_tokens"] == 380
+    assert abs(usage["cost"] - 0.008) < 1e-9
+    assert usage["model"] == "anthropic/claude-sonnet-4-6"
+
+
+def test_extract_usage_gptme_usage_field():
+    """Token counts in msg.usage (legacy) are extracted correctly."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            "usage": {"input_tokens": 50, "output_tokens": 25, "cost": 0.001},
+            "metadata": {"model": "anthropic/claude-sonnet-4-6"},
+        }
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 50
+    assert usage["output_tokens"] == 25
+
+
+def test_extract_usage_gptme_openai_naming():
+    """OpenAI-style naming (prompt_tokens, completion_tokens) is supported."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+            "metadata": {"model": "openai/gpt-4o"},
+        }
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 40
+    assert usage["model"] == "openai/gpt-4o"
+
+
+def test_extract_usage_gptme_meta_usage():
+    """Token counts in msg.metadata.usage (nested) are extracted correctly."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            "metadata": {
+                "model": "anthropic/claude-opus-4-6",
+                "usage": {"input_tokens": 300, "output_tokens": 100, "cost": 0.01},
+            },
+        }
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 100
+    assert abs(usage["cost"] - 0.01) < 1e-9
+
+
+def test_extract_usage_gptme_empty():
+    """Empty trajectory returns empty dict."""
+    assert extract_usage_gptme([]) == {}
+
+
+def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
+    """extract_from_path includes usage data for gptme format trajectories."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "conversation.jsonl"
+    msgs = [
+        {
+            "role": "user",
+            "content": "write hello",
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@save(c0): {"path": "/tmp/hello.py"}',
+            "timestamp": "2026-03-01T10:01:00+00:00",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 500,
+                "output_tokens": 100,
+            },
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "gptme"
+    assert "usage" in result
+    assert result["usage"]["input_tokens"] == 500
+    assert result["usage"]["output_tokens"] == 100
+    assert result["usage"]["model"] == "anthropic/claude-sonnet-4-6"
