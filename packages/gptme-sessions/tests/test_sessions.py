@@ -590,6 +590,7 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
                     "content": [
                         {
                             "type": "tool_use",
+                            "id": f"edit_{i}",
                             "name": "Edit",
                             "input": {"file_path": f"/home/bob/file{i}.py"},
                         }
@@ -598,15 +599,35 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
             }
         )
     for i in range(commits):
+        # Proper linked Bash tool_use → tool_result pair for commit detection
+        bash_id = f"bash_commit_{i}"
+        msgs.append(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-03-01T10:1{i}:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": bash_id,
+                            "name": "Bash",
+                            "input": {"command": f"git commit -m 'commit message {i}'"},
+                        }
+                    ],
+                },
+            }
+        )
         msgs.append(
             {
                 "type": "user",
-                "timestamp": f"2026-03-01T10:1{i}:00.000Z",
+                "timestamp": f"2026-03-01T10:1{i}:30.000Z",
                 "message": {
                     "role": "user",
                     "content": [
                         {
                             "type": "tool_result",
+                            "tool_use_id": bash_id,
                             "is_error": False,
                             "content": f"[master abc{i:04d}] commit message {i}\n 1 file changed",
                         }
@@ -614,7 +635,7 @@ def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[di
                 },
             }
         )
-    for _ in range(errors):
+    for j in range(errors):
         msgs.append(
             {
                 "type": "user",
@@ -944,3 +965,83 @@ def test_extract_usage_cc_no_usage_field():
     assert usage["input_tokens"] == 5
     assert usage["output_tokens"] == 3
     assert usage["total_tokens"] == 8
+
+
+def test_detect_format_cc_with_preamble():
+    """CC trajectories starting with non-standard record types are still detected correctly.
+
+    If the first 15 records are 'queue-operation', 'system_prompt', etc., the format
+    detection must scan beyond them to find the real CC records.
+    """
+    preamble = [
+        {"type": "queue-operation", "operation": "start"},
+        {"type": "system_prompt", "content": "You are an assistant."},
+    ] * 8  # 16 records — beyond the old first-15 window
+    cc_msgs = _make_cc_msgs(commits=1)
+    assert _detect_format(preamble + cc_msgs) == "claude_code"
+
+
+def test_extract_signals_cc_journal_no_retry_penalty():
+    """Writing to a journal path multiple times does not inflate retry_count.
+
+    Journal paths are excluded from file_writes (not deliverables), and must
+    also be excluded from retry tracking so repeated journal updates don't
+    penalize the session grade.
+    """
+    path = "/home/bob/bob/journal/2026-03-01/session.md"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": f"2026-03-01T10:0{i}:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": path}}],
+            },
+        }
+        for i in range(3)
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["retry_count"] == 0
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_cc_commit_detection_bash_only():
+    """Commit patterns in non-Bash tool results (e.g. Read) are not counted.
+
+    A Read result could contain git log output from a file, which would be a
+    false positive if we applied commit detection to all tool results.
+    """
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "read_1",
+                        "name": "Read",
+                        "input": {"file_path": "/home/bob/CHANGELOG.md"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read_1",
+                        "is_error": False,
+                        "content": "[master abc1234] some historical commit in changelog",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 0  # not from Bash output — must not be counted

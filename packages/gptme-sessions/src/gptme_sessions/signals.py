@@ -45,8 +45,11 @@ def _detect_format(msgs: list[dict]) -> str:
 
     Claude Code records have a top-level 'type' field (user/assistant/result).
     gptme records have a top-level 'role' field (user/assistant/system).
+
+    Scans all records (not just the first few) to handle CC trajectories that
+    begin with non-standard record types like 'queue-operation' or 'system_prompt'.
     """
-    for msg in msgs[:15]:
+    for msg in msgs:
         if "role" in msg:
             return "gptme"
         if msg.get("type") in ("user", "assistant", "result"):
@@ -120,12 +123,12 @@ def extract_signals(msgs: list[dict]) -> dict:
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
-                        sig = f"{tool}:{path}"
-                        if sig in recent_sigs:
-                            retry_candidates.append(tool)
-                        recent_sigs.append(sig)
-                        if len(recent_sigs) > 20:
-                            recent_sigs.pop(0)
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
                     else:
                         file_writes.append(f"<{tool}>")
 
@@ -242,6 +245,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     recent_sigs: list[str] = []
+    # Map tool_use id → tool name for filtering commit detection to Bash only
+    tool_id_to_name: dict[str, str] = {}
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -263,17 +268,22 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     continue
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
 
+                # Track id → name for commit detection filtering
+                tool_id = item.get("id", "")
+                if tool_id:
+                    tool_id_to_name[tool_id] = tool
+
                 if tool in _CC_WRITE_TOOLS:
                     path = item.get("input", {}).get("file_path", "")
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
-                        sig = f"{tool}:{path}"
-                        if sig in recent_sigs:
-                            retry_candidates.append(tool)
-                        recent_sigs.append(sig)
-                        if len(recent_sigs) > 20:
-                            recent_sigs.pop(0)
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
                     else:
                         file_writes.append(f"<{tool}>")
 
@@ -299,12 +309,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 else:
                     result_str = str(result_content)
 
-                # Git commit detection from Bash tool output
-                m = _COMMIT_RE.search(result_str)
-                if m:
-                    commit_hash = m.group(1)
-                    commit_msg = m.group(2).strip()
-                    git_commits.append(f"{commit_msg} ({commit_hash})")
+                # Git commit detection: only from Bash tool output.
+                # Other tools (Read, Glob, Write) can return content containing
+                # commit-like patterns from files, which would be false positives.
+                tool_use_id = item.get("tool_use_id", "")
+                if tool_id_to_name.get(tool_use_id) == "Bash":
+                    m = _COMMIT_RE.search(result_str)
+                    if m:
+                        commit_hash = m.group(1)
+                        commit_msg = m.group(2).strip()
+                        git_commits.append(f"{commit_msg} ({commit_hash})")
 
     duration_s = 0
     if len(timestamps) >= 2:
