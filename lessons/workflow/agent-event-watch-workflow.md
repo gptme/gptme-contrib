@@ -1,4 +1,5 @@
 ---
+status: active
 match:
   keywords: ["event watch", "watch task", "settlement watch", "trigger date", "standup result", "high-stakes event", "analyze results"]
 ---
@@ -40,9 +41,9 @@ Structure the task with:
 
 ```markdown
 ## Action (upon trigger date)
-1. Read results from `gptme-superuser/standups/YYYY-MM-DD/agent.md`
+1. Read results from `{coord-repo}/standups/YYYY-MM-DD/agent.md`
 2. Perform the analysis (win rate, PnL delta, comparison to baseline)
-3. Message Erik with findings + recommendation
+3. Message {stakeholder} with findings + recommendation
 4. Update this task to done
 ```
 
@@ -60,13 +61,13 @@ without needing to re-research.
 
 In Phase 1 of the session, scan for active watch tasks:
 ```bash
-./scripts/tasks.py status --compact | grep "watch"
+gptodo status --compact | grep "watch"
 ```
 
 Then check if the trigger condition is met:
 ```bash
 # Example: check for standup file from trigger date
-ls gptme-superuser/standups/2026-03-06/agent.md 2>/dev/null || echo "Not yet"
+ls {coord-repo}/standups/YYYY-MM-DD/agent.md 2>/dev/null || echo "Not yet"
 ```
 
 ### Step 4: When triggered — act immediately
@@ -115,6 +116,14 @@ not a week later when data has staled and context is lost.
 
 **Don't**: Check for the trigger file in a separate "follow-up" session if it appears mid-week
 **Do**: Build the watch check into Phase 1 of every session during the watch period
+
+## Outcome
+
+Following this pattern results in:
+- **Timely analysis**: Results are processed promptly in the same session the trigger fires, not days later
+- **Full context**: Baseline metrics are pre-captured in the task, so no re-research is needed at trigger time
+- **Clear decisions**: Structured framework maps outcome to action (scale / hold / reduce / revert)
+- **Reliable follow-through**: Watching is built into Phase 1 of every session — triggers aren't missed
 
 ## Related
 
