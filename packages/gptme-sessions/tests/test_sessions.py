@@ -1433,3 +1433,39 @@ def test_signals_cli_tokens_gptme(tmp_path):
     )
     assert result.returncode == 0
     assert result.stdout.strip() == ""  # no usage data in gptme format
+
+
+def test_signals_cli_tokens_cc_zero_usage(tmp_path):
+    """signals --tokens produces no output for CC with model but all-zero usage counters."""
+    import subprocess
+
+    # A CC trajectory where the model field is present but all token counts are zero.
+    # extract_usage_cc returns {model: ..., total_tokens: 0, ...} in this case —
+    # the --tokens flag should still produce no output (consistent with gptme format).
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-4-5",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        }
+    ]
+    p = tmp_path / "session.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--tokens"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""  # zero total tokens → no output

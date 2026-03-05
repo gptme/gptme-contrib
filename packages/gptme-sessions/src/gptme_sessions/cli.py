@@ -118,9 +118,9 @@ def main() -> int:
             return 0
         if args.tokens:
             usage = result.get("usage")
-            if usage:
+            if usage and usage.get("total_tokens", 0) > 0:
                 print(usage["total_tokens"])
-            # else: no output (gptme format or CC with no usage data)
+            # else: no output (gptme format, or CC with no/zero token data)
             return 0
         if args.json:
             print(json.dumps(result, indent=2))
