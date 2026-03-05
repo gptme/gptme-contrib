@@ -1045,3 +1045,32 @@ def test_extract_signals_cc_commit_detection_bash_only():
     ]
     sigs = extract_signals_cc(msgs)
     assert len(sigs["git_commits"]) == 0  # not from Bash output — must not be counted
+
+
+def test_grade_signals_file_writes_deduplication():
+    """Repeated edits to the same file should not inflate grade tier.
+
+    A session editing one file 3 times (3 raw writes, 1 unique) should NOT
+    score higher than a session editing a unique file once (1 raw write, 1 unique).
+    Without deduplication, the repeated-writes session would hit the writes>=3
+    tier (0.55) while the single-write session stays at 0.40.
+    """
+    sigs_repeated = {
+        "git_commits": [],
+        "file_writes": ["foo.py", "foo.py", "foo.py"],  # same file 3x
+        "error_count": 0,
+        "retry_count": 2,
+        "tool_calls": {"Edit": 3},
+    }
+    sigs_unique = {
+        "git_commits": [],
+        "file_writes": ["foo.py"],  # same unique output, one write
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Edit": 1},
+    }
+    grade_repeated = grade_signals(sigs_repeated)
+    grade_unique = grade_signals(sigs_unique)
+    # Both have 1 unique write — repeated session should not outscore unique session
+    # (repeated session gets retry penalty, unique doesn't)
+    assert grade_repeated <= grade_unique

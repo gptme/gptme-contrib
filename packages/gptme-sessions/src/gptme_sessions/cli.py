@@ -77,12 +77,13 @@ def main() -> int:
         type=Path,
         help="Path to conversation.jsonl",
     )
-    signals_parser.add_argument(
+    signals_output_group = signals_parser.add_mutually_exclusive_group()
+    signals_output_group.add_argument(
         "--json",
         action="store_true",
         help="Output as JSON (default: human-readable summary)",
     )
-    signals_parser.add_argument(
+    signals_output_group.add_argument(
         "--grade",
         action="store_true",
         help="Output grade only (float 0.0-1.0)",

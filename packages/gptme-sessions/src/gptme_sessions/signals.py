@@ -180,7 +180,9 @@ def grade_signals(signals: dict) -> float:
     - Retry penalty
     """
     commits = len(signals["git_commits"])
-    writes = len(signals["file_writes"])
+    # Use unique writes for tier placement — repeated edits to the same file
+    # should not inflate the grade tier beyond what the retry penalty recovers.
+    writes = len(set(signals["file_writes"]))
     errors = signals["error_count"]
     retries = signals["retry_count"]
     total_tools = sum(signals["tool_calls"].values())
@@ -358,7 +360,6 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
         usage = msg.get("usage") or {}
         input_tokens += usage.get("input_tokens", 0)
         output_tokens += usage.get("output_tokens", 0)
-        # cache_creation may be nested under usage or a top-level key
         cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
         cache_read_tokens += usage.get("cache_read_input_tokens", 0)
         if msg.get("model"):
