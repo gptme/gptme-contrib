@@ -72,7 +72,8 @@ check_standup_ready() {
     local agent="$1" date="$2"
     [[ -f "gptme-superuser/standups/${date}/${agent}.md" ]] && echo 1 || echo 0
 }
-EVENTS=$(check_standup_ready gordon "$(date +%Y-%m-%d)")
+AGENT_NAME="your-agent"  # Replace with your agent's identifier
+EVENTS=$(check_standup_ready "$AGENT_NAME" "$(date +%Y-%m-%d)")
 ```
 
 **Price proximity check (external API + arithmetic):**
