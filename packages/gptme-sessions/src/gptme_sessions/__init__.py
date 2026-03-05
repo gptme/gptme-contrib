@@ -12,6 +12,12 @@ Usage:
     stats = store.stats()
 """
 
+from .discovery import (
+    decode_cc_project_path,
+    discover_cc_sessions,
+    discover_gptme_sessions,
+    parse_gptme_config,
+)
 from .record import MODEL_ALIASES, SessionRecord, normalize_model
 from .signals import (
     detect_format,
@@ -39,6 +45,10 @@ __all__ = [
     "extract_usage_cc",
     "grade_signals",
     "is_productive",
+    "discover_gptme_sessions",
+    "discover_cc_sessions",
+    "parse_gptme_config",
+    "decode_cc_project_path",
     "Bandit",
     "BanditArm",
     "BanditState",
