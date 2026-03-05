@@ -906,6 +906,7 @@ dependencies = [
     { name = "aw-client" },
     { name = "click" },
     { name = "gptme" },
+    { name = "gptme-sessions" },
 ]
 
 [package.optional-dependencies]
@@ -924,6 +925,7 @@ requires-dist = [
     { name = "aw-client", specifier = ">=0.5.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "gptme-sessions", editable = "packages/gptme-sessions" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
