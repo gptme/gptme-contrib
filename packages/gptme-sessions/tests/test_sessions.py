@@ -927,10 +927,9 @@ def test_extract_usage_cc_basic():
 
 
 def test_extract_usage_cc_empty():
-    """Empty trajectory returns zero counts."""
+    """Empty trajectory (no assistant turns) returns empty dict."""
     usage = extract_usage_cc([])
-    assert usage["total_tokens"] == 0
-    assert usage["model"] is None
+    assert usage == {}
 
 
 def test_extract_usage_cc_ignores_non_assistant():
