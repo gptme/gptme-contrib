@@ -1949,6 +1949,33 @@ def test_post_session_missing_trajectory(tmp_path: Path):
     assert result.record.outcome == "productive"  # falls back to git comparison
 
 
+def test_post_session_partial_commit_pair_no_crash(tmp_path: Path):
+    """Only start_commit provided (no end_commit) must not raise UnboundLocalError.
+
+    Regression test for: elif branch that logs warning but never assigns ``outcome``.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc123",  # end_commit omitted — shell footgun
+    )
+    # No exception; falls through to default → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_partial_commit_pair_timeout_is_noop(tmp_path: Path):
+    """Partial commit pair + timeout exit code → noop (not UnboundLocalError)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=124,
+        end_commit="def456",  # start_commit omitted
+    )
+    assert result.record.outcome == "noop"
+
+
 def test_post_session_explicit_deliverables_override(tmp_path: Path):
     """Explicit deliverables take priority over trajectory deliverables."""
     import json as _json

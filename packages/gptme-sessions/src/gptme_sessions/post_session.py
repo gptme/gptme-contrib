@@ -175,6 +175,8 @@ def post_session(
             "end_commit",
             end_commit,
         )
+        # Apply remaining priority steps: timeout → noop, else → productive
+        outcome = "noop" if exit_code == 124 else "productive"
     elif exit_code == 124:
         # Timeout with no trajectory or git evidence → noop
         outcome = "noop"
