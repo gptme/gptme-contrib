@@ -102,6 +102,7 @@ class SessionRecord:
     outcome: str = "unknown"  # productive, noop, failed
     duration_seconds: int = 0
     token_count: int | None = None
+    cost_usd: float | None = None  # actual API cost in USD
 
     # Artifacts
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
