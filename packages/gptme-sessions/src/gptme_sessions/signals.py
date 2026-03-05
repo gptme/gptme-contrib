@@ -511,12 +511,13 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     timestamps: list[datetime] = []
     steps = 0
     recent_sigs: list[str] = []
-    # Track whether the current turn (bounded by turn_context records) has tool calls.
-    # Increment steps once per turn, not once per function_call record.
-    current_turn_has_tool = False
 
     # Track function_call ids for matching with their outputs
     call_id_to_name: dict[str, str] = {}
+
+    # Steps count turns (bounded by turn_context records), not individual tool calls.
+    # When no turn_context is present, all function_calls fall into one implicit turn.
+    current_turn_has_tool = False
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -526,10 +527,10 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
             timestamps.append(ts)
 
         if rec_type == "turn_context":
-            # New turn boundary: flush the previous turn's step
+            # New turn boundary: finalize the previous turn's step count
             if current_turn_has_tool:
                 steps += 1
-                current_turn_has_tool = False
+            current_turn_has_tool = False
 
         elif rec_type == "response_item":
             payload = record.get("payload", {})
@@ -588,7 +589,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
 
-    # Flush the final turn
+    # Finalize the last turn (not followed by another turn_context)
     if current_turn_has_tool:
         steps += 1
 

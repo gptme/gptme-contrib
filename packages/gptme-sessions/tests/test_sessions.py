@@ -2218,12 +2218,21 @@ def test_detect_format_codex_interactive():
 
 
 def test_extract_signals_codex_basic():
-    """Extract signals from a minimal Codex trajectory."""
+    """Extract signals from a minimal Codex trajectory.
+
+    Uses two turn_context records to model two distinct turns, each with one
+    tool call. Steps should be 2 (one per turn), not 2 (one per function_call).
+    """
     msgs = [
         {
             "timestamp": "2026-03-05T06:56:48Z",
             "type": "session_meta",
             "payload": {"id": "test", "originator": "codex_exec", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:49Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex", "cwd": "/tmp"},
         },
         {
             "timestamp": "2026-03-05T06:56:50Z",
@@ -2243,6 +2252,11 @@ def test_extract_signals_codex_basic():
                 "call_id": "call_1",
                 "output": "Process exited with code 0\nOutput:\n/tmp",
             },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:55Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex", "cwd": "/tmp"},
         },
         {
             "timestamp": "2026-03-05T06:57:00Z",
@@ -2266,9 +2280,7 @@ def test_extract_signals_codex_basic():
     ]
     signals = extract_signals_codex(msgs)
     assert signals["tool_calls"] == {"exec_command": 2}
-    # Both function_calls are in the same implicit turn (no turn_context boundary),
-    # so steps = 1, not 2. One step per turn, consistent with all other extractors.
-    assert signals["steps"] == 1
+    assert signals["steps"] == 2  # one step per turn (bounded by turn_context records)
     assert signals["error_count"] == 0
     assert len(signals["git_commits"]) == 1
     assert "feat: add thing (abc1234)" in signals["git_commits"]
@@ -2337,51 +2349,6 @@ def test_extract_signals_codex_file_writes():
     ]
     signals = extract_signals_codex(msgs)
     assert "/tmp/test.py" in signals["file_writes"]
-
-
-def test_extract_signals_codex_steps_multi_turn():
-    """Codex: each turn_context boundary produces one step per turn with tool calls."""
-    turn_ctx = {
-        "timestamp": "2026-03-05T06:56:48Z",
-        "type": "turn_context",
-        "payload": {"turn_id": "t", "model": "gpt-4o-codex"},
-    }
-    tool_call = {
-        "timestamp": "2026-03-05T06:56:50Z",
-        "type": "response_item",
-        "payload": {
-            "type": "function_call",
-            "name": "exec_command",
-            "call_id": "c1",
-            "arguments": '{"cmd": "echo hi"}',
-        },
-    }
-    tool_out = {
-        "timestamp": "2026-03-05T06:56:51Z",
-        "type": "response_item",
-        "payload": {
-            "type": "function_call_output",
-            "call_id": "c1",
-            "output": "Process exited with code 0\nOutput:\nhi",
-        },
-    }
-    # Two turns each with one tool call → steps = 2
-    msgs = [turn_ctx, tool_call, tool_out, turn_ctx, tool_call, tool_out]
-    signals = extract_signals_codex(msgs)
-    assert signals["steps"] == 2
-
-
-def test_extract_signals_codex_steps_zero():
-    """Codex trajectory: no tool calls → steps is 0."""
-    msgs = [
-        {
-            "timestamp": "2026-03-05T06:56:48Z",
-            "type": "session_meta",
-            "payload": {"originator": "codex_exec"},
-        }
-    ]
-    signals = extract_signals_codex(msgs)
-    assert signals["steps"] == 0
 
 
 def test_extract_usage_codex():

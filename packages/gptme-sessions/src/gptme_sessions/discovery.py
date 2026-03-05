@@ -39,7 +39,7 @@ def _get_cc_projects_dir() -> Path:
 
 
 def _get_codex_sessions_dir() -> Path:
-    """Get Codex sessions directory from env or default."""
+    """Get Codex CLI sessions directory from env or default."""
     env_dir = os.environ.get("CODEX_SESSIONS_DIR")
     if env_dir:
         return Path(env_dir)
@@ -47,7 +47,7 @@ def _get_codex_sessions_dir() -> Path:
 
 
 def _get_copilot_state_dir() -> Path:
-    """Get Copilot session-state directory from env or default."""
+    """Get Copilot CLI session-state directory from env or default."""
     env_dir = os.environ.get("COPILOT_STATE_DIR")
     if env_dir:
         return Path(env_dir)
