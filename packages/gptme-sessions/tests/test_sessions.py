@@ -1074,3 +1074,40 @@ def test_grade_signals_file_writes_deduplication():
     # Both have 1 unique write — repeated session should not outscore unique session
     # (repeated session gets retry penalty, unique doesn't)
     assert grade_repeated <= grade_unique
+
+
+def test_extract_signals_cc_notebook_edit():
+    """NotebookEdit writes are tracked via notebook_path, not file_path."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "nb_1",
+                        "name": "NotebookEdit",
+                        "input": {"notebook_path": "/home/bob/analysis.ipynb", "new_source": "x=1"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["file_writes"] == ["/home/bob/analysis.ipynb"]
+
+
+def test_is_productive_deduplication():
+    """is_productive uses unique file_writes count, consistent with grade_signals."""
+    sigs_two_writes_same_file = {
+        "git_commits": [],
+        "file_writes": ["foo.py", "foo.py"],  # 2 raw writes, 1 unique
+    }
+    sigs_two_unique_writes = {
+        "git_commits": [],
+        "file_writes": ["foo.py", "bar.py"],  # 2 raw writes, 2 unique
+    }
+    assert not is_productive(sigs_two_writes_same_file)
+    assert is_productive(sigs_two_unique_writes)

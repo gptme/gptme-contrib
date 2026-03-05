@@ -143,9 +143,8 @@ def extract_signals(msgs: list[dict]) -> dict:
             ):
                 error_count += 1
 
-            # Git commit detection from shell output
-            commit_match = _COMMIT_RE.search(content)
-            if commit_match:
+            # Git commit detection from shell output (finditer handles multi-commit pushes)
+            for commit_match in _COMMIT_RE.finditer(content):
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
                 git_commits.append(f"{commit_msg} ({commit_hash})")
@@ -225,7 +224,7 @@ def grade_signals(signals: dict) -> float:
 
 def is_productive(signals: dict) -> bool:
     """Quick binary productive/noop classification from trajectory signals."""
-    return bool(signals["git_commits"] or len(signals["file_writes"]) >= 2)
+    return bool(signals["git_commits"] or len(set(signals["file_writes"])) >= 2)
 
 
 def extract_signals_cc(msgs: list[dict]) -> dict:
@@ -236,7 +235,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     - type='user': message.content is a list; tool results have type='tool_result'
     - type='result': final session result record
 
-    Tool names for file writes: Write, Edit, NotebookEdit, Patch (input.file_path).
+    Tool names for file writes: Write, Edit, Patch (input.file_path), NotebookEdit (input.notebook_path).
     Errors: tool_result items with is_error=True.
     Git commits: detected from Bash tool output content via regex.
     """
@@ -276,7 +275,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     tool_id_to_name[tool_id] = tool
 
                 if tool in _CC_WRITE_TOOLS:
-                    path = item.get("input", {}).get("file_path", "")
+                    inp = item.get("input", {})
+                    # NotebookEdit uses 'notebook_path'; all other write tools use 'file_path'
+                    path = (
+                        inp.get("notebook_path", "")
+                        if tool == "NotebookEdit"
+                        else inp.get("file_path", "")
+                    )
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
@@ -316,10 +321,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 # commit-like patterns from files, which would be false positives.
                 tool_use_id = item.get("tool_use_id", "")
                 if tool_id_to_name.get(tool_use_id) == "Bash":
-                    m = _COMMIT_RE.search(result_str)
-                    if m:
-                        commit_hash = m.group(1)
-                        commit_msg = m.group(2).strip()
+                    for commit_match in _COMMIT_RE.finditer(result_str):
+                        commit_hash = commit_match.group(1)
+                        commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
 
     duration_s = 0
