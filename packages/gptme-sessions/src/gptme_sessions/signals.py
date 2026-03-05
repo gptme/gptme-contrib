@@ -557,7 +557,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                             cmd = args.get("cmd", "")
                             # Detect redirects and file-writing commands
                             write_match = re.search(
-                                r"(?:cat\s*>\s*|tee\s+|>\s*)([^\s<>|&;]+)",
+                                r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>\s*)([^\s<>|&;]+)",
                                 cmd,
                             )
                             if write_match:
@@ -663,7 +663,16 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                 # File write detection from edit/write tools
                 if tool in _COPILOT_WRITE_TOOLS:
                     args = req.get("arguments", {})
-                    path = args.get("path", "") or args.get("file_path", "")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
+                    path = (
+                        args.get("path", "") or args.get("file_path", "")
+                        if isinstance(args, dict)
+                        else ""
+                    )
                     if path and "/journal/" not in path:
                         file_writes.append(path)
                         sig = f"{tool}:{path}"
@@ -688,7 +697,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
             tool_name = call_id_to_name.get(call_id, "")
             if tool_name == "bash":
                 result = data.get("result", {})
-                content = result.get("content", "") or result.get("detailedContent", "")
+                content = result.get("detailedContent", "") or result.get("content", "")
                 if isinstance(content, str):
                     for commit_match in _COMMIT_RE.finditer(content[:500]):
                         commit_hash = commit_match.group(1)

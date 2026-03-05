@@ -2351,6 +2351,40 @@ def test_extract_signals_codex_file_writes():
     assert "/tmp/test.py" in signals["file_writes"]
 
 
+def test_extract_signals_codex_tee_flags():
+    """tee with flags (-a) should not capture the flag as a file path."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "echo hello | tee -a /tmp/output.log"}),
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    # Should capture the actual path, not the flag "-a"
+    assert "-a" not in signals["file_writes"]
+    assert "/tmp/output.log" in signals["file_writes"]
+
+
 def test_extract_usage_codex():
     """Extract model and rate-limit info from Codex trajectory."""
     msgs = [
