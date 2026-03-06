@@ -33,6 +33,14 @@ def lesson_page_path(lesson_path: str) -> str:
     return "lessons/" + str(Path(lesson_path).with_suffix(".html"))
 
 
+def skill_page_path(skill_dir: str) -> str:
+    """Convert a skill's directory path to its detail page URL path.
+
+    E.g. 'skills/my-skill' -> 'skills/my-skill/index.html'
+    """
+    return str(Path(skill_dir) / "index.html")
+
+
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
     """Parse YAML frontmatter from a markdown file."""
     text = path.read_text(errors="replace")
@@ -199,11 +207,16 @@ def scan_skills(workspace: Path) -> list[dict]:
         if not description:
             description = extract_title(body, "")
 
+        rel_dir = str(skill_md.parent.relative_to(workspace))
+        page_url = skill_page_path(rel_dir)
+
         skills.append(
             {
                 "name": name,
                 "description": description,
-                "path": str(skill_md.parent.relative_to(workspace)),
+                "body": body,
+                "path": rel_dir,
+                "page_url": page_url,
             }
         )
 
@@ -307,13 +320,29 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(lesson_html)
 
+    # Generate per-skill detail pages
+    skill_template = env.get_template("skill.html")
+    for skill in data["skills"]:
+        # page_url is e.g. "skills/my-skill/index.html" (depth=2), so root_prefix="../../"
+        depth = len(Path(skill["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        skill_html = skill_template.render(
+            workspace_name=data["workspace_name"],
+            skill=skill,
+            body_html=render_markdown_to_html(skill["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / skill["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(skill_html)
+
     stats = data["stats"]
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins, "
         f"{stats['total_packages']} packages, "
-        f"{stats['total_skills']} skills"
+        f"{stats['total_skills']} skills ({stats['total_skills']} detail pages)"
     )
 
 
@@ -332,6 +361,9 @@ def generate_json(workspace: Path, output: Path | None = None) -> str:
         "lessons": [
             {k: v for k, v in lesson.items() if k not in _JSON_EXCLUDE}
             for lesson in data["lessons"]
+        ],
+        "skills": [
+            {k: v for k, v in skill.items() if k not in _JSON_EXCLUDE} for skill in data["skills"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)
