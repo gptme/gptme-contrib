@@ -994,6 +994,7 @@ name = "gptme-contrib-lib"
 version = "0.1.0"
 source = { editable = "packages/gptme-contrib-lib" }
 dependencies = [
+    { name = "click" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
@@ -1012,6 +1013,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -1270,6 +1272,7 @@ version = "0.1.0"
 source = { editable = "packages/gptme-voice" }
 dependencies = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "click" },
     { name = "openai" },
     { name = "starlette" },
     { name = "uvicorn" },
@@ -1287,6 +1290,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2" },
+    { name = "click", specifier = ">=8.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "pyaudio", marker = "extra == 'local'", specifier = ">=0.2.13" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
@@ -1326,6 +1330,9 @@ provides-extras = ["test"]
 name = "gptme-whatsapp"
 version = "0.1.0"
 source = { editable = "packages/gptme-whatsapp" }
+dependencies = [
+    { name = "click" },
+]
 
 [package.optional-dependencies]
 test = [
@@ -1333,7 +1340,10 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" }]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+]
 provides-extras = ["test"]
 
 [[package]]

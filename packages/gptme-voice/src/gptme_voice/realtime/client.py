@@ -24,6 +24,7 @@ except ImportError:
     PYAUDIO_AVAILABLE = False
     print("Warning: pyaudio not available. Install with: pip install pyaudio")
 
+import click
 import websockets  # type: ignore
 
 
@@ -168,30 +169,23 @@ class LocalVoiceTest:
             self.audio.terminate()
 
 
-async def _async_main():
-    """Async entry point."""
-    import argparse
+@click.command()
+@click.option(
+    "--server", default="ws://localhost:8080/local", help="Server WebSocket URL"
+)
+def main(server: str):
+    """Local voice interface test client."""
+    test = LocalVoiceTest(server_url=server)
 
-    parser = argparse.ArgumentParser(description="Local voice interface test")
-    parser.add_argument(
-        "--server", default="ws://localhost:8080/local", help="Server WebSocket URL"
-    )
+    async def _run():
+        try:
+            await test.run()
+        except KeyboardInterrupt:
+            print("\nExiting...")
+        finally:
+            test.cleanup()
 
-    args = parser.parse_args()
-
-    test = LocalVoiceTest(server_url=args.server)
-
-    try:
-        await test.run()
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    finally:
-        test.cleanup()
-
-
-def main():
-    """Synchronous entry point for console_scripts."""
-    asyncio.run(_async_main())
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

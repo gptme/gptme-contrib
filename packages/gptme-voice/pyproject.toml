@@ -5,6 +5,7 @@ description = "Voice interface for gptme with OpenAI Realtime API"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "click>=8.0",
     "openai>=1.0.0",
     "websockets>=12.0",
     "starlette>=0.37.0",

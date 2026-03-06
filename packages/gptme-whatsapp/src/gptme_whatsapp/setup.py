@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import click
+
 NODE_DIR = Path(__file__).parent.parent.parent.parent / "node"
 
 
@@ -88,54 +90,50 @@ WantedBy=default.target
     return service
 
 
+@click.group()
 def main():
-    """CLI entry point for setup."""
-    import argparse
+    """gptme-whatsapp setup."""
 
-    parser = argparse.ArgumentParser(description="gptme-whatsapp setup")
-    subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("install", help="Install npm dependencies")
-
-    service_parser = subparsers.add_parser("service", help="Generate systemd service")
-    service_parser.add_argument("--agent", required=True, help="Agent name (e.g. sven)")
-    service_parser.add_argument(
-        "--workspace", required=True, help="Agent workspace path"
-    )
-    service_parser.add_argument("--contacts", nargs="+", help="Allowed phone numbers")
-    service_parser.add_argument(
-        "--node-path", default="/usr/local/bin", help="Node.js bin path"
-    )
-    service_parser.add_argument(
-        "--backend",
-        default="gptme",
-        choices=["gptme", "claude-code"],
-        help="Agent backend",
-    )
-    service_parser.add_argument(
-        "--claude-path", default="", help="Claude Code bin path"
-    )
-
-    args = parser.parse_args()
-
-    if args.command == "install":
-        if install_npm_deps():
-            print("npm dependencies installed successfully.")
-        else:
-            sys.exit(1)
-    elif args.command == "service":
-        contacts = args.contacts or []
-        service = generate_systemd_service(
-            args.agent,
-            args.workspace,
-            contacts,
-            args.node_path,
-            args.backend,
-            args.claude_path,
-        )
-        print(service)
+@main.command()
+def install():
+    """Install npm dependencies."""
+    if install_npm_deps():
+        print("npm dependencies installed successfully.")
     else:
-        parser.print_help()
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--agent", required=True, help="Agent name (e.g. sven)")
+@click.option("--workspace", required=True, help="Agent workspace path")
+@click.option("--contacts", multiple=True, help="Allowed phone numbers")
+@click.option("--node-path", default="/usr/local/bin", help="Node.js bin path")
+@click.option(
+    "--backend",
+    default="gptme",
+    type=click.Choice(["gptme", "claude-code"]),
+    help="Agent backend",
+)
+@click.option("--claude-path", default="", help="Claude Code bin path")
+def service(
+    agent: str,
+    workspace: str,
+    contacts: tuple,
+    node_path: str,
+    backend: str,
+    claude_path: str,
+):
+    """Generate systemd service."""
+    service_text = generate_systemd_service(
+        agent,
+        workspace,
+        list(contacts),
+        node_path,
+        backend,
+        claude_path,
+    )
+    print(service_text)
 
 
 if __name__ == "__main__":

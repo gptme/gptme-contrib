@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List
 
+import click
+
 from .config import InputSourcesConfig
 from .input_source_impl import (
     EmailInputSource,
@@ -255,50 +257,51 @@ class InputSourceOrchestrator:
         self.running = False
 
 
-async def main():
-    """Main entry point for orchestrator."""
-    import argparse
+@click.command()
+@click.option(
+    "--config",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to configuration file (YAML)",
+)
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Run once and exit instead of continuous polling",
+)
+def main(config: Path | None, once: bool):
+    """Input sources orchestrator."""
 
-    parser = argparse.ArgumentParser(description="Input sources orchestrator")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        help="Path to configuration file (YAML)",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run once and exit instead of continuous polling",
-    )
-    args = parser.parse_args()
-
-    # Load configuration
-    if args.config and args.config.exists():
-        config = InputSourcesConfig.from_yaml(args.config)
-    else:
-        # Use default configuration
-        config = InputSourcesConfig()
-
-    # Create orchestrator
-    orchestrator = InputSourceOrchestrator(config)
-
-    try:
-        if args.once:
-            # Run once and exit
-            results = await orchestrator.run_once()
-            total = sum(results.values())
-            print(f"Created {total} tasks")
-            if total > 0:
-                for source, count in results.items():
-                    if count > 0:
-                        print(f"  {source}: {count}")
+    async def _run():
+        # Load configuration
+        if config and config.exists():
+            cfg = InputSourcesConfig.from_yaml(config)
         else:
-            # Run continuously
-            await orchestrator.run_continuous()
-    except KeyboardInterrupt:
-        orchestrator.stop()
-        print("\nStopped")
+            # Use default configuration
+            cfg = InputSourcesConfig()
+
+        # Create orchestrator
+        orchestrator = InputSourceOrchestrator(cfg)
+
+        try:
+            if once:
+                # Run once and exit
+                results = await orchestrator.run_once()
+                total = sum(results.values())
+                print(f"Created {total} tasks")
+                if total > 0:
+                    for source, count in results.items():
+                        if count > 0:
+                            print(f"  {source}: {count}")
+            else:
+                # Run continuously
+                await orchestrator.run_continuous()
+        except KeyboardInterrupt:
+            orchestrator.stop()
+            print("\nStopped")
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

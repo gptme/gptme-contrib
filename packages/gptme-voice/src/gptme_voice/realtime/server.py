@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 
+import click
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -212,20 +213,15 @@ class VoiceServer:
         uvicorn.run(self.app, host=self.host, port=self.port)
 
 
-def main():
-    """Entry point for running the voice server."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Voice Interface Server for gptme")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
-    parser.add_argument("--workspace", help="Working directory for gptme commands")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-
-    args = parser.parse_args()
-
+@click.command()
+@click.option("--host", default="0.0.0.0", help="Host to bind to")
+@click.option("--port", default=8080, type=int, help="Port to bind to")
+@click.option("--workspace", default=None, help="Working directory for gptme commands")
+@click.option("--debug", is_flag=True, help="Enable debug logging")
+def main(host: str, port: int, workspace: str | None, debug: bool):
+    """Voice Interface Server for gptme."""
     logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=logging.DEBUG if debug else logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -233,13 +229,13 @@ def main():
     logging.getLogger("websockets").setLevel(logging.WARNING)
 
     server = VoiceServer(
-        host=args.host,
-        port=args.port,
-        workspace=args.workspace,
+        host=host,
+        port=port,
+        workspace=workspace,
     )
 
-    logger.info(f"Starting voice server on {args.host}:{args.port}")
-    logger.info(f"Local test endpoint: ws://{args.host}:{args.port}/local")
+    logger.info(f"Starting voice server on {host}:{port}")
+    logger.info(f"Local test endpoint: ws://{host}:{port}/local")
 
     server.run()
 

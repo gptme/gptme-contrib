@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import click
+
 
 def parse_headers(content: str) -> Dict[str, str]:
     """Parse email headers from markdown content."""
@@ -97,27 +99,22 @@ def find_duplicates(sent_dir: Path) -> List[Tuple[Path, Path, str]]:
     return duplicates
 
 
-def main():
-    """Main function to identify and optionally clean up duplicates."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Find and clean up duplicate email files")
-    parser.add_argument("--dry-run", action="store_true", help="Only show duplicates, don't delete")
-    parser.add_argument(
-        "--sent-dir",
-        type=Path,
-        default=Path.home() / "workspace" / "email" / "sent",
-        help="Path to sent email directory",
-    )
-
-    args = parser.parse_args()
-
-    if not args.sent_dir.exists():
-        print(f"Error: Directory not found: {args.sent_dir}", file=sys.stderr)
+@click.command()
+@click.option("--dry-run", is_flag=True, help="Only show duplicates, don't delete")
+@click.option(
+    "--sent-dir",
+    type=click.Path(path_type=Path),
+    default=Path.home() / "workspace" / "email" / "sent",
+    help="Path to sent email directory",
+)
+def main(dry_run: bool, sent_dir: Path):
+    """Find and clean up duplicate email files."""
+    if not sent_dir.exists():
+        print(f"Error: Directory not found: {sent_dir}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Scanning for duplicates in: {args.sent_dir}")
-    duplicates = find_duplicates(args.sent_dir)
+    print(f"Scanning for duplicates in: {sent_dir}")
+    duplicates = find_duplicates(sent_dir)
 
     if not duplicates:
         print("✅ No duplicates found!")
@@ -131,14 +128,14 @@ def main():
         print(f"Reason: {reason}")
         print()
 
-        if not args.dry_run:
+        if not dry_run:
             try:
                 duplicate.unlink()
                 print(f"✅ Deleted: {duplicate.name}\n")
             except Exception as e:
                 print(f"❌ Error deleting {duplicate.name}: {e}\n", file=sys.stderr)
 
-    if args.dry_run:
+    if dry_run:
         print("\n⚠️  DRY RUN: No files were deleted.")
         print("   Run without --dry-run to actually delete duplicates.")
     else:
