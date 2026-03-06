@@ -11,8 +11,10 @@ from gptme_dashboard.generate import (
     extract_title,
     generate,
     generate_json,
+    lesson_page_path,
     parse_frontmatter,
     read_workspace_config,
+    render_markdown_to_html,
     scan_lessons,
     scan_packages,
     scan_plugins,
@@ -293,3 +295,85 @@ def test_generate_empty_workspace(tmp_path: Path):
 
     html = (output / "index.html").read_text()
     assert 'class="number">0<' in html  # Zero counts
+
+
+def test_render_markdown_to_html():
+    """Test basic markdown rendering."""
+    result = render_markdown_to_html("# Hello\n\nWorld")
+    assert "<h1>" in result
+    assert "Hello" in result
+    assert "<p>" in result
+
+
+def test_render_markdown_fenced_code():
+    """Test fenced code block rendering."""
+    result = render_markdown_to_html("```python\nprint('hello')\n```")
+    assert "<code" in result
+    assert "print" in result
+
+
+def test_render_markdown_tables():
+    """Test table rendering."""
+    result = render_markdown_to_html("| A | B |\n|---|---|\n| 1 | 2 |")
+    assert "<table>" in result
+    assert "<td>" in result
+
+
+def test_lesson_page_path():
+    """Test lesson path to URL conversion."""
+    assert lesson_page_path("workflow/test-lesson.md") == "lessons/workflow/test-lesson.html"
+    assert lesson_page_path("standalone.md") == "lessons/standalone.html"
+
+
+def test_scan_lessons_includes_body(workspace: Path):
+    """Test that scanned lessons include body content."""
+    lessons = scan_lessons(workspace)
+    test_lesson = next(x for x in lessons if x["title"] == "Test Lesson")
+    assert "body" in test_lesson
+    assert "Always test your code" in test_lesson["body"]
+    assert "page_url" in test_lesson
+    assert test_lesson["page_url"] == "lessons/workflow/test-lesson.html"
+
+
+def test_scan_lessons_includes_all_keywords(workspace: Path):
+    """Test that all_keywords contains the full keyword list."""
+    lessons = scan_lessons(workspace)
+    shell_lesson = next(x for x in lessons if x["title"] == "Shell Safety")
+    assert "all_keywords" in shell_lesson
+    assert "shell command" in shell_lesson["all_keywords"]
+    assert "bash script" in shell_lesson["all_keywords"]
+
+
+def test_generate_lesson_detail_pages(workspace: Path, tmp_path: Path):
+    """Test that per-lesson detail pages are generated."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # Check that lesson detail pages exist
+    lesson_page = output / "lessons" / "workflow" / "test-lesson.html"
+    assert lesson_page.exists(), f"Expected {lesson_page} to exist"
+
+    html = lesson_page.read_text()
+    assert "Test Lesson" in html
+    assert "Always test your code" in html
+    assert "test keyword" in html
+    assert "workflow" in html
+
+    # Check another lesson page
+    shell_page = output / "lessons" / "tools" / "shell-safety.html"
+    assert shell_page.exists()
+    shell_html = shell_page.read_text()
+    assert "Shell Safety" in shell_html
+    assert "Quote your variables" in shell_html
+
+
+def test_generate_index_links_to_lessons(workspace: Path, tmp_path: Path):
+    """Test that index.html lesson titles are links to detail pages."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    assert 'href="lessons/workflow/test-lesson.html"' in html
+    assert 'href="lessons/tools/shell-safety.html"' in html

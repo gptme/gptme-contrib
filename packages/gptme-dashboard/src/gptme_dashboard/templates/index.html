@@ -253,7 +253,7 @@ footer {
     <tbody>
     {% for lesson in lessons %}
       <tr data-category="{{ lesson.category }}">
-        <td>{{ lesson.title }}</td>
+        <td><a href="{{ lesson.page_url }}">{{ lesson.title }}</a></td>
         <td><span class="tag tag-category">{{ lesson.category }}</span></td>
         <td><span class="tag {% if lesson.status == 'active' %}tag-active{% elif lesson.status == 'deprecated' %}tag-deprecated{% endif %}">{{ lesson.status }}</span></td>
         <td>{% for kw in lesson.keywords %}<span class="tag">{{ kw }}</span>{% endfor %}</td>

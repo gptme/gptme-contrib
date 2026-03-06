@@ -11,9 +11,26 @@ import json
 import re
 from pathlib import Path
 
+import markdown
 import yaml
-
 from jinja2 import Environment, FileSystemLoader
+
+
+def render_markdown_to_html(md_text: str) -> str:
+    """Render markdown text to HTML using the markdown library."""
+    return markdown.markdown(
+        md_text,
+        extensions=["fenced_code", "tables", "codehilite"],
+        extension_configs={"codehilite": {"css_class": "code"}},
+    )
+
+
+def lesson_page_path(lesson_path: str) -> str:
+    """Convert a lesson's relative path to its detail page URL path.
+
+    E.g. 'workflow/test-lesson.md' -> 'lessons/workflow/test-lesson.html'
+    """
+    return "lessons/" + lesson_path.replace(".md", ".html")
 
 
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
@@ -72,13 +89,18 @@ def scan_lessons(workspace: Path) -> list[dict]:
             elif isinstance(kw, str):
                 keywords = [kw]
 
+        page_url = lesson_page_path(str(rel))
+
         lessons.append(
             {
                 "title": title,
                 "category": category,
                 "status": status,
                 "keywords": keywords[:5],  # Limit displayed keywords
+                "all_keywords": keywords,
+                "body": body,
                 "path": str(rel),
+                "page_url": page_url,
             }
         )
 
@@ -259,6 +281,7 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         loader=FileSystemLoader(str(template_dir)),
         autoescape=True,
     )
+    env.filters["render_markdown"] = render_markdown_to_html
 
     data = collect_workspace_data(workspace)
 
@@ -268,6 +291,18 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(html)
 
+    # Generate per-lesson detail pages
+    lesson_template = env.get_template("lesson.html")
+    for lesson in data["lessons"]:
+        lesson_html = lesson_template.render(
+            workspace_name=data["workspace_name"],
+            lesson=lesson,
+            body_html=render_markdown_to_html(lesson["body"]),
+        )
+        page_path = output / lesson["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(lesson_html)
+
     stats = data["stats"]
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
@@ -276,6 +311,7 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         f"{stats['total_packages']} packages, "
         f"{stats['total_skills']} skills"
     )
+    print(f"  {stats['total_lessons']} lesson detail pages generated")
 
 
 def generate_json(workspace: Path, output: Path | None = None) -> str:
