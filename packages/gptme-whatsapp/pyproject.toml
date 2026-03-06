@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "WhatsApp integration for gptme agents via whatsapp-web.js"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "click>=8.0",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
