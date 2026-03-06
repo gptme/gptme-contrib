@@ -554,7 +554,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                             except (json.JSONDecodeError, ValueError):
                                 pass
                         if isinstance(args, dict):
-                            cmd = args.get("cmd", "")
+                            cmd = args.get("cmd") or ""
                             # Detect redirects and file-writing commands
                             write_match = re.search(
                                 r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>\s*)([^\s<>|&;]+)",
@@ -689,7 +689,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
             data = record.get("data", {})
 
             # Error detection from tool failure
-            if not data.get("success", True):
+            if data.get("success") is False:
                 error_count += 1
 
             # Git commit detection from bash tool output

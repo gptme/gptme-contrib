@@ -2715,3 +2715,52 @@ def test_extract_from_path_copilot(tmp_path: Path):
     assert result["tool_calls"]["bash"] == 1
     # Copilot has no token data
     assert "usage" not in result
+
+
+def test_extract_signals_codex_null_cmd():
+    """cmd: null in exec_command arguments must not crash re.search."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                # cmd is explicitly null (interrupted mid-call)
+                "arguments": json.dumps({"cmd": None}),
+            },
+        },
+    ]
+    # Must not raise TypeError
+    signals = extract_signals_codex(msgs)
+    assert signals["file_writes"] == []
+
+
+def test_extract_signals_copilot_null_success_not_counted_as_error():
+    """success: null in tool.execution_complete must not increment error_count."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            # success is explicitly null (truncated/partial record)
+            "data": {"toolCallId": "tc_1", "success": None, "result": None},
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 0
