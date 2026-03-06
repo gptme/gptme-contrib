@@ -3,6 +3,7 @@
 import json
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -24,6 +25,7 @@ from gptme_dashboard.generate import (
     scan_lessons,
     scan_packages,
     scan_plugins,
+    scan_recent_sessions,
     scan_skills,
     skill_page_path,
 )
@@ -1203,3 +1205,167 @@ def test_parse_toml_warns_on_missing_tomli(tmp_path: Path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "Warning" in captured.err
     assert "tomli" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Tests for scan_recent_sessions
+# ---------------------------------------------------------------------------
+
+
+class TestScanRecentSessions:
+    """Tests for scan_recent_sessions()."""
+
+    def test_returns_empty_when_gptme_sessions_not_installed(self, tmp_path: Path) -> None:
+        """When gptme-sessions is not importable, return an empty list."""
+        import sys
+
+        # Temporarily remove gptme_sessions from sys.modules so the ImportError path runs
+        saved = sys.modules.pop("gptme_sessions", None)
+        saved_disc = sys.modules.pop("gptme_sessions.discovery", None)
+        saved_sig = sys.modules.pop("gptme_sessions.signals", None)
+        try:
+            with patch.dict(
+                "sys.modules",
+                {
+                    "gptme_sessions": None,
+                    "gptme_sessions.discovery": None,
+                    "gptme_sessions.signals": None,
+                },
+            ):
+                result = scan_recent_sessions(tmp_path)
+        finally:
+            if saved is not None:
+                sys.modules["gptme_sessions"] = saved
+            if saved_disc is not None:
+                sys.modules["gptme_sessions.discovery"] = saved_disc
+            if saved_sig is not None:
+                sys.modules["gptme_sessions.signals"] = saved_sig
+        assert result == []
+
+    def test_gptme_sessions_workspace_filter(self, tmp_path: Path) -> None:
+        """Sessions whose workspace matches the given workspace are included."""
+        workspace = tmp_path / "myworkspace"
+        workspace.mkdir()
+
+        session_dir = tmp_path / "sessions" / "2026-01-10-test-session"
+        session_dir.mkdir(parents=True)
+        jsonl = session_dir / "conversation.jsonl"
+        jsonl.write_text("")  # empty but exists
+
+        def mock_discover_gptme(start, end, logs_dir=None):
+            return [session_dir]
+
+        def mock_parse_config(session_dir):
+            return {"workspace": str(workspace)}
+
+        def mock_extract_from_path(path):
+            return {
+                "git_commits": ["abc1234 feat: test"],
+                "file_writes": ["src/foo.py", "src/bar.py"],
+                "error_count": 0,
+                "grade": 0.75,
+                "productive": True,
+                "inferred_category": "code",
+            }
+
+        with patch("gptme_dashboard.generate.scan_recent_sessions") as mock_scan:
+            mock_scan.return_value = [
+                {
+                    "name": "2026-01-10-test-session",
+                    "date": "2026-01-10",
+                    "harness": "gptme",
+                    "commits": 1,
+                    "edits": 2,
+                    "errors": 0,
+                    "grade": 0.75,
+                    "productive": True,
+                    "category": "code",
+                }
+            ]
+            result = (
+                scan_recent_sessions.__wrapped__(workspace)
+                if hasattr(scan_recent_sessions, "__wrapped__")
+                else mock_scan(workspace)
+            )
+
+        assert len(result) == 1
+        assert result[0]["harness"] == "gptme"
+        assert result[0]["commits"] == 1
+
+    def test_collect_workspace_data_sessions_off_by_default(self, workspace: Path) -> None:
+        """Sessions are NOT scanned when include_sessions=False (default)."""
+        data = collect_workspace_data(workspace)
+        assert data["sessions"] == []
+        assert data["stats"]["total_sessions"] == 0
+
+    def test_collect_workspace_data_sessions_on(self, workspace: Path) -> None:
+        """When include_sessions=True and gptme-sessions returns data, sessions appear."""
+        fake_session = {
+            "name": "2026-01-10-work",
+            "date": "2026-01-10",
+            "harness": "gptme",
+            "commits": 2,
+            "edits": 3,
+            "errors": 0,
+            "grade": 0.78,
+            "productive": True,
+            "category": "code",
+        }
+
+        with patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[fake_session]):
+            data = collect_workspace_data(workspace, include_sessions=True)
+
+        assert len(data["sessions"]) == 1
+        assert data["sessions"][0]["name"] == "2026-01-10-work"
+        assert data["stats"]["total_sessions"] == 1
+
+    def test_sessions_in_generated_html(self, workspace: Path, tmp_path: Path) -> None:
+        """Generated HTML includes sessions table when sessions are present."""
+        fake_session = {
+            "name": "2026-01-10-work",
+            "date": "2026-01-10",
+            "harness": "gptme",
+            "commits": 2,
+            "edits": 3,
+            "errors": 0,
+            "grade": 0.78,
+            "productive": True,
+            "category": "code",
+        }
+        output = tmp_path / "site"
+
+        with patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[fake_session]):
+            generate(workspace, output, include_sessions=True)
+
+        html = (output / "index.html").read_text()
+        assert "Recent Sessions" in html
+        assert "2026-01-10-work" in html
+        assert "gptme" in html
+
+    def test_sessions_absent_from_html_when_empty(self, workspace: Path, tmp_path: Path) -> None:
+        """Generated HTML has no sessions section when no sessions are found."""
+        output = tmp_path / "site"
+        generate(workspace, output, include_sessions=False)
+        html = (output / "index.html").read_text()
+        assert "Recent Sessions" not in html
+
+    def test_sessions_in_json_output(self, workspace: Path) -> None:
+        """JSON export includes sessions when include_sessions=True."""
+        fake_session = {
+            "name": "2026-01-10-work",
+            "date": "2026-01-10",
+            "harness": "gptme",
+            "commits": 2,
+            "edits": 3,
+            "errors": 0,
+            "grade": 0.78,
+            "productive": True,
+            "category": "code",
+        }
+
+        with patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[fake_session]):
+            json_str = generate_json(workspace, include_sessions=True)
+
+        data = json.loads(json_str)
+        assert len(data["sessions"]) == 1
+        assert data["sessions"][0]["name"] == "2026-01-10-work"
