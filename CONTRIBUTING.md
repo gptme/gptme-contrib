@@ -89,6 +89,12 @@ def main(workspace: Path) -> None:
 
 Add `click>=8.0` to your package's `[project.dependencies]` in `pyproject.toml`.
 
+**Exception — zero-dependency scripts**: Standalone scripts in `scripts/` that have no
+third-party dependencies (pure Python + stdlib only) may use `argparse` instead of Click.
+Adding Click as a dependency solely for argument parsing would be disproportionate for
+simple, self-contained scripts. If a script already depends on Click (or other packages),
+it should use Click for its CLI.
+
 ## Adding Lessons
 
 Lessons are reusable patterns that help agents (and humans) learn from common mistakes and best practices.
