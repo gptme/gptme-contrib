@@ -11,9 +11,26 @@ import json
 import re
 from pathlib import Path
 
+import markdown
 import yaml
-
 from jinja2 import Environment, FileSystemLoader
+
+
+def render_markdown_to_html(md_text: str) -> str:
+    """Render markdown text to HTML using the markdown library."""
+    return markdown.markdown(
+        md_text,
+        extensions=["fenced_code", "tables", "codehilite"],
+        extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
+    )
+
+
+def lesson_page_path(lesson_path: str) -> str:
+    """Convert a lesson's relative path to its detail page URL path.
+
+    E.g. 'workflow/test-lesson.md' -> 'lessons/workflow/test-lesson.html'
+    """
+    return "lessons/" + str(Path(lesson_path).with_suffix(".html"))
 
 
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
@@ -72,13 +89,18 @@ def scan_lessons(workspace: Path) -> list[dict]:
             elif isinstance(kw, str):
                 keywords = [kw]
 
+        page_url = lesson_page_path(str(rel))
+
         lessons.append(
             {
                 "title": title,
                 "category": category,
                 "status": status,
                 "keywords": keywords[:5],  # Limit displayed keywords
+                "all_keywords": keywords,
+                "body": body,
                 "path": str(rel),
+                "page_url": page_url,
             }
         )
 
@@ -268,10 +290,27 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(html)
 
+    # Generate per-lesson detail pages
+    lesson_template = env.get_template("lesson.html")
+    for lesson in data["lessons"]:
+        # Compute how many levels up from the lesson page to the site root.
+        # page_url is e.g. "lessons/workflow/test.html" (depth=2), so root_prefix="../../"
+        depth = len(Path(lesson["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        lesson_html = lesson_template.render(
+            workspace_name=data["workspace_name"],
+            lesson=lesson,
+            body_html=render_markdown_to_html(lesson["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / lesson["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(lesson_html)
+
     stats = data["stats"]
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
-        f"  {stats['total_lessons']} lessons, "
+        f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins, "
         f"{stats['total_packages']} packages, "
         f"{stats['total_skills']} skills"
@@ -285,7 +324,17 @@ def generate_json(workspace: Path, output: Path | None = None) -> str:
     Returns the JSON string in all cases.
     """
     data = collect_workspace_data(workspace)
-    json_str = json.dumps(data, indent=2)
+    # Exclude large fields (body, all_keywords) from JSON export — they are only
+    # needed for HTML page generation and would bloat data.json unnecessarily.
+    _JSON_EXCLUDE = {"body", "all_keywords"}
+    export_data = {
+        **data,
+        "lessons": [
+            {k: v for k, v in lesson.items() if k not in _JSON_EXCLUDE}
+            for lesson in data["lessons"]
+        ],
+    }
+    json_str = json.dumps(export_data, indent=2)
 
     if output is not None:
         output.mkdir(parents=True, exist_ok=True)
