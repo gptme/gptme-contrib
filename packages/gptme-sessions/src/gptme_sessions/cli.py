@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from .post_session import post_session
 from .record import SessionRecord
 from .signals import extract_from_path
 from .store import (
@@ -94,6 +95,51 @@ def main() -> int:
         help="Output token usage breakdown: input, output, cache_read, cache_create (CC trajectories only)",
     )
 
+    # Post-session — record a session and extract signals in one call
+    ps_parser = subparsers.add_parser(
+        "post-session",
+        help=(
+            "Record a completed session: extract signals from trajectory, "
+            "determine outcome, append session record."
+        ),
+    )
+    ps_parser.add_argument("--harness", required=True, help="Harness name (claude-code, gptme)")
+    ps_parser.add_argument("--model", default="unknown", help="Model name")
+    ps_parser.add_argument("--run-type", default="unknown", help="Run type (autonomous, etc.)")
+    ps_parser.add_argument(
+        "--trigger",
+        help="Session trigger: timer, dispatch, manual, spawn",
+    )
+    ps_parser.add_argument("--category", help="Work category (code, triage, …)")
+    ps_parser.add_argument(
+        "--exit-code",
+        type=int,
+        default=0,
+        help="Exit code from the agent process (non-zero = failed, 124 = timeout/noop)",
+    )
+    ps_parser.add_argument("--duration", type=int, default=0, help="Duration in seconds")
+    ps_parser.add_argument(
+        "--trajectory",
+        type=Path,
+        help="Path to trajectory .jsonl for signal extraction",
+    )
+    ps_parser.add_argument("--start-commit", help="Git HEAD SHA before session (for NOOP detect)")
+    ps_parser.add_argument("--end-commit", help="Git HEAD SHA after session (for NOOP detect)")
+    ps_parser.add_argument(
+        "--deliverables",
+        nargs="*",
+        default=None,
+        help=(
+            "Explicit deliverables (commit SHAs, PR URLs). "
+            "Omit this flag to extract deliverables from the trajectory. "
+            "Passing the flag with no values (--deliverables) is treated the same as omitting it "
+            "(trajectory extraction still runs); provide at least one value to set explicit deliverables."
+        ),
+    )
+    ps_parser.add_argument("--journal-path", help="Path to journal entry for this session")
+    ps_parser.add_argument("--session-id", help="Override auto-generated session ID")
+    ps_parser.add_argument("--json", action="store_true", help="Output result as JSON")
+
     args = parser.parse_args()
 
     # Handle signals before constructing SessionStore (no store needed)
@@ -169,6 +215,43 @@ def main() -> int:
         return 0
 
     store = SessionStore(sessions_dir=args.sessions_dir)
+
+    if args.command == "post-session":
+        ps = post_session(
+            store=store,
+            harness=args.harness,
+            model=args.model,
+            run_type=args.run_type,
+            trigger=args.trigger,
+            category=args.category,
+            exit_code=args.exit_code,
+            duration_seconds=args.duration,
+            trajectory_path=args.trajectory,
+            start_commit=args.start_commit,
+            end_commit=args.end_commit,
+            deliverables=args.deliverables or None,
+            journal_path=args.journal_path,
+            session_id=args.session_id,
+        )
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "session_id": ps.record.session_id,
+                        "outcome": ps.record.outcome,
+                        "grade": ps.grade,
+                        "token_count": ps.token_count,
+                    }
+                )
+            )
+        else:
+            grade_str = f"{ps.grade:.4f}" if ps.grade is not None else "n/a"
+            tok_str = f"{ps.token_count:,}" if ps.token_count is not None else "n/a"
+            print(
+                f"Recorded session {ps.record.session_id}: "
+                f"outcome={ps.record.outcome} grade={grade_str} tokens={tok_str}"
+            )
+        return 0
 
     if args.command == "append":
         record = SessionRecord(

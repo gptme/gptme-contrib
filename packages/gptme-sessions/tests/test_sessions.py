@@ -1286,7 +1286,7 @@ def test_extract_signals_gptme_steps_parallel_tools():
     msgs = [
         {
             "role": "assistant",
-            "content": ("@shell(c0): {}\n" "@shell(c1): {}\n" "@shell(c2): {}\n"),
+            "content": ("@shell(c0): {}\n@shell(c1): {}\n@shell(c2): {}\n"),
             "timestamp": "2026-03-01T10:00:00+00:00",
         }
     ]
@@ -1646,3 +1646,534 @@ def test_extract_usage_gptme_cache_tokens():
     # total_tokens includes cache tokens (consistent with extract_usage_cc)
     assert usage["total_tokens"] == 1150  # 100 + 50 + 800 + 200
     assert abs(usage["cost"] - 0.01) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# post_session() tests
+# ---------------------------------------------------------------------------
+
+
+from gptme_sessions import PostSessionResult, post_session  # noqa: E402
+
+
+def test_post_session_basic(tmp_path: Path):
+    """post_session records a session with minimal args."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        run_type="autonomous",
+    )
+    assert isinstance(result, PostSessionResult)
+    assert result.record.harness == "claude-code"
+    assert result.record.model == "opus"
+    assert result.record.outcome == "productive"
+    assert result.grade is None
+    assert result.signals is None
+    assert result.token_count is None
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].session_id == result.record.session_id
+
+
+def test_post_session_outcome_from_exit_code(tmp_path: Path):
+    """Non-zero exit code marks session as failed."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(store=store, harness="gptme", exit_code=1)
+    assert result.record.outcome == "failed"
+
+
+def test_post_session_timeout_is_noop(tmp_path: Path):
+    """Exit code 124 (timeout) marks session as noop, not failed."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(store=store, harness="gptme", exit_code=124)
+    assert result.record.outcome == "noop"
+
+
+def test_post_session_timeout_with_productive_trajectory(tmp_path: Path):
+    """exit_code=124 does NOT override productive trajectory outcome."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    commit_output = "[master abc1234] feat: add feature"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": commit_output}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        exit_code=124,  # timeout
+        trajectory_path=traj,
+    )
+    # Trajectory evidence of productive work takes priority over timeout → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_timeout_with_new_commits(tmp_path: Path):
+    """exit_code=124 does NOT override productive git-comparison outcome."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=124,  # timeout
+        start_commit="aaa",
+        end_commit="bbb",  # different → productive by git
+    )
+    # Git evidence of productive work takes priority over timeout → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_noop_from_commits(tmp_path: Path):
+    """Same start/end commit → noop when no trajectory."""
+    store = SessionStore(sessions_dir=tmp_path)
+    sha = "abc1234"
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit=sha,
+        end_commit=sha,
+    )
+    assert result.record.outcome == "noop"
+
+
+def test_post_session_productive_from_commits(tmp_path: Path):
+    """Different start/end commits → productive when no trajectory."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc1234",
+        end_commit="def5678",
+    )
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_exit_code_overrides_commits(tmp_path: Path):
+    """Failed exit code takes priority over git comparison."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=2,
+        start_commit="aaa",
+        end_commit="bbb",  # would be productive by git
+    )
+    assert result.record.outcome == "failed"
+
+
+def test_post_session_with_trajectory_productive(tmp_path: Path):
+    """Trajectory with commits → productive outcome, grade extracted."""
+    # Write a minimal CC trajectory with a git commit in Bash output
+    traj = tmp_path / "session.jsonl"
+    import json as _json
+
+    commit_output = "[master abc1234] feat: add feature"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": commit_output}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        trajectory_path=traj,
+        start_commit="abc",
+        end_commit="abc",  # same → would be noop by git, but trajectory overrides
+    )
+    assert result.record.outcome == "productive"
+    assert result.grade is not None
+    assert result.grade > 0
+    assert result.signals is not None
+    assert len(result.signals["git_commits"]) == 1
+
+
+def test_post_session_with_trajectory_noop(tmp_path: Path):
+    """Trajectory with no commits/writes → noop outcome."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "echo hello"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:00:30Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hello"}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert result.record.outcome == "noop"
+    assert result.grade is not None
+    assert result.grade < 0.5
+
+
+def test_post_session_token_count_from_trajectory(tmp_path: Path):
+    """Token count extracted from CC trajectory usage data."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cache_read_input_tokens": 200,
+                    "cache_creation_input_tokens": 100,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert result.token_count == 1800  # 1000+500+200+100
+    assert result.record.token_count == 1800
+
+
+def test_post_session_missing_trajectory(tmp_path: Path):
+    """Missing trajectory path is handled gracefully (non-fatal)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        trajectory_path=Path("/nonexistent/session.jsonl"),
+        start_commit="aaa",
+        end_commit="bbb",
+    )
+    assert result.signals is None
+    assert result.grade is None
+    assert result.record.outcome == "productive"  # falls back to git comparison
+
+
+def test_post_session_partial_commit_pair_no_crash(tmp_path: Path):
+    """Only start_commit provided (no end_commit) must not raise UnboundLocalError.
+
+    Regression test for: elif branch that logs warning but never assigns ``outcome``.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc123",  # end_commit omitted — shell footgun
+    )
+    # No exception; falls through to default → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_partial_commit_pair_timeout_is_noop(tmp_path: Path):
+    """Partial commit pair + timeout exit code → noop (not UnboundLocalError)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=124,
+        end_commit="def456",  # start_commit omitted
+    )
+    assert result.record.outcome == "noop"
+
+
+def test_post_session_explicit_deliverables_override(tmp_path: Path):
+    """Explicit deliverables take priority over trajectory deliverables."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Write",
+                        "input": {"file_path": "/tmp/foo.py", "content": "x"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    explicit = ["abc123def456"]
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        deliverables=explicit,
+    )
+    assert result.record.deliverables == explicit
+
+
+def test_post_session_deliverables_from_trajectory(tmp_path: Path):
+    """When no explicit deliverables, trajectory file writes are used."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Write",
+                        "input": {"file_path": "/tmp/foo.py", "content": "x"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "t2",
+                        "name": "Edit",
+                        "input": {"file_path": "/tmp/bar.py", "old_string": "a", "new_string": "b"},
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert "/tmp/foo.py" in result.record.deliverables
+    assert "/tmp/bar.py" in result.record.deliverables
+
+
+def test_post_session_metadata_fields(tmp_path: Path):
+    """Category, journal_path, session_id and duration are stored correctly."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        category="infrastructure",
+        duration_seconds=2700,
+        journal_path="/home/bob/bob/journal/2026-01-01/session.md",
+        session_id="test1234",
+    )
+    r = result.record
+    assert r.category == "infrastructure"
+    assert r.duration_seconds == 2700
+    assert r.journal_path == "/home/bob/bob/journal/2026-01-01/session.md"
+    assert r.session_id == "test1234"
+
+
+def test_post_session_cli_basic(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session command records a session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "claude-code",
+            "--model",
+            "opus",
+            "--run-type",
+            "autonomous",
+            "--exit-code",
+            "0",
+            "--duration",
+            "3000",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "outcome=productive" in captured.out
+
+    # Verify record was written
+    store = SessionStore(sessions_dir=tmp_path)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "productive"
+
+
+def test_post_session_cli_noop_exit_code(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session: exit code 124 → noop."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "gptme",
+            "--exit-code",
+            "124",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "outcome=noop" in captured.out
+
+
+def test_post_session_cli_json_output(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session --json outputs valid JSON with expected keys."""
+    import json as _json
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "gptme",
+            "--json",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    out = _json.loads(captured.out)
+    assert "session_id" in out
+    assert "outcome" in out
+    assert "grade" in out
+    assert "token_count" in out
