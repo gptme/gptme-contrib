@@ -2558,6 +2558,38 @@ def test_extract_signals_copilot_file_writes():
     assert signals["tool_calls"]["edit"] == 1
 
 
+def test_extract_signals_copilot_null_result():
+    """extract_signals_copilot doesn't crash when tool result is JSON null."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc_bash", "name": "bash", "arguments": {}},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_bash",
+                "success": False,
+                "result": None,  # explicit JSON null — must not crash
+            },
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 1
+    assert signals["git_commits"] == []
+
+
 def test_extract_signals_copilot_commit_only_from_bash():
     """Git commits only extracted from bash tool output, not other tools."""
     msgs = [

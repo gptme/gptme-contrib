@@ -274,7 +274,7 @@ def discover_copilot_sessions(
 
     sessions_with_dates: list[tuple[date, Path]] = []
     try:
-        for session_dir in sorted(copilot_dir.iterdir()):
+        for session_dir in copilot_dir.iterdir():
             if not session_dir.is_dir():
                 continue
             events_file = session_dir / "events.jsonl"

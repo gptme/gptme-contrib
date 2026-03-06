@@ -696,7 +696,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
             call_id = data.get("toolCallId", "")
             tool_name = call_id_to_name.get(call_id, "")
             if tool_name == "bash":
-                result = data.get("result", {})
+                result = data.get("result") or {}
                 content = result.get("detailedContent", "") or result.get("content", "")
                 if isinstance(content, str):
                     for commit_match in _COMMIT_RE.finditer(content[:500]):

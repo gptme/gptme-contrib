@@ -304,3 +304,16 @@ def test_discover_copilot_sessions_env_var(tmp_path: Path, monkeypatch: pytest.M
     result = discover_copilot_sessions(date(2026, 3, 5), date(2026, 3, 5))
     assert len(result) == 1
     assert result[0].parent.name == "env-uuid"
+
+
+def test_discover_copilot_sessions_sorted_by_date(tmp_path: Path) -> None:
+    """Results are sorted by session date, not by UUID directory name."""
+    # UUID "zzz" has an earlier date than "aaa" — alphabetical sort would give wrong order
+    _make_copilot_session(tmp_path, "zzz-early", "2026-03-04T08:00:00Z")
+    _make_copilot_session(tmp_path, "aaa-late", "2026-03-05T20:00:00Z")
+
+    result = discover_copilot_sessions(date(2026, 3, 4), date(2026, 3, 5), copilot_dir=tmp_path)
+    assert len(result) == 2
+    # Should be sorted by date: early session first, late session second
+    assert result[0].parent.name == "zzz-early"
+    assert result[1].parent.name == "aaa-late"
