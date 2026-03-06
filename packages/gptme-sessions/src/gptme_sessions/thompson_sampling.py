@@ -710,7 +710,7 @@ def status(ctx: click.Context) -> None:
     print(bandit.status_report())
 
 
-@bandit_cli.command()
+@bandit_cli.command(name="dashboard")
 @click.option("--base-dirs", multiple=True, help="Base directories to scan")
 def dashboard_cmd(base_dirs: tuple[str, ...]) -> None:
     """Unified dashboard across state files."""
@@ -846,6 +846,10 @@ def main() -> int:
         return 0
     except click.ClickException as e:
         e.show()
+        return 1
+    except click.exceptions.Exit as e:
+        return e.exit_code
+    except click.exceptions.Abort:
         return 1
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 0
