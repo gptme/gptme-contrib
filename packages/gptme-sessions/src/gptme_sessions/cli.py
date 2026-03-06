@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+
+import click
 
 from .discovery import (
     discover_cc_sessions,
@@ -24,467 +25,516 @@ from .store import (
     format_stats,
 )
 
+HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Session tracking and analytics for gptme agents",
-    )
-    parser.add_argument(
-        "--sessions-dir",
-        type=Path,
-        default=None,
-        help="Path to sessions directory (default: ./state/sessions)",
-    )
-    subparsers = parser.add_subparsers(dest="command", help="Command")
 
-    # Query (default)
-    query_parser = subparsers.add_parser("query", help="Query session records")
-    query_parser.add_argument("--model", help="Filter by model (e.g. opus, sonnet)")
-    query_parser.add_argument("--run-type", help="Filter by run type")
-    query_parser.add_argument("--category", help="Filter by category")
-    query_parser.add_argument("--harness", help="Filter by harness")
-    query_parser.add_argument("--outcome", help="Filter by outcome")
-    query_parser.add_argument("--since", help="Filter by recency (e.g. 7d, 30d)")
-    query_parser.add_argument("--json", action="store_true", help="Output as JSON")
-    query_parser.add_argument("--stats", action="store_true", help="Show summary statistics")
+def _parse_since(since: str | None) -> int | None:
+    """Parse a --since value like '7d' or '30' into days."""
+    if not since:
+        return None
+    try:
+        if since.endswith("d"):
+            return int(since[:-1])
+        return int(since)
+    except ValueError:
+        raise click.BadParameter(
+            f"invalid value {since!r} (expected e.g. 7d, 30d)",
+            param_hint="'--since'",
+        )
 
-    # Append
-    append_parser = subparsers.add_parser("append", help="Append a session record")
-    append_parser.add_argument("--harness", default="claude-code", help="Harness name")
-    append_parser.add_argument("--model", default="unknown", help="Model name")
-    append_parser.add_argument("--run-type", default="autonomous", help="Run type")
-    append_parser.add_argument(
-        "--category", help="Work category inferred or actual (e.g. code, infrastructure)"
-    )
-    append_parser.add_argument(
-        "--recommended-category", help="Category recommended by selector (e.g. Thompson sampling)"
-    )
-    append_parser.add_argument("--outcome", default="unknown", help="Session outcome")
-    append_parser.add_argument("--duration", type=int, default=0, help="Duration in seconds")
-    append_parser.add_argument("--selector-mode", help="Selector mode used")
-    append_parser.add_argument("--journal-path", help="Path to journal entry")
-    append_parser.add_argument("--deliverables", nargs="*", default=[], help="Commit SHAs, PR URLs")
 
-    # Stats shortcut
-    stats_parser = subparsers.add_parser("stats", help="Show summary statistics")
-    stats_parser.add_argument("--model", help="Filter by model")
-    stats_parser.add_argument("--run-type", help="Filter by run type")
-    stats_parser.add_argument("--category", help="Filter by category")
-    stats_parser.add_argument("--harness", help="Filter by harness")
-    stats_parser.add_argument("--outcome", help="Filter by outcome")
-    stats_parser.add_argument("--since", help="Filter by recency (e.g. 7d, 30d)")
-    stats_parser.add_argument("--json", action="store_true", help="Output as JSON")
+@click.group(invoke_without_command=True)
+@click.option(
+    "--sessions-dir",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=None,
+    help="Path to sessions directory (default: ./state/sessions)",
+)
+@click.pass_context
+def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
+    """Session tracking and analytics for gptme agents."""
+    ctx.ensure_object(dict)
+    ctx.obj["sessions_dir"] = sessions_dir
+    if ctx.invoked_subcommand is None:
+        store = SessionStore(sessions_dir=sessions_dir)
+        s = store.stats()
+        format_stats(s)
 
-    # Runs analytics
-    runs_parser = subparsers.add_parser("runs", help="Run analytics (duration, NOOP rate, trends)")
-    runs_parser.add_argument("--since", default="14d", help="Time window (e.g. 7d, 30d)")
-    runs_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
-    # Discover — find trajectory files from all harnesses
-    discover_parser = subparsers.add_parser(
-        "discover",
-        help="Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses",
-    )
-    discover_parser.add_argument(
-        "--harness",
-        choices=["gptme", "claude-code", "codex", "copilot"],
-        help="Limit to a specific harness (default: all)",
-    )
-    discover_parser.add_argument(
-        "--since",
-        default="7d",
-        help="How far back to scan (e.g. 7d, 30d). Default: 7d",
-    )
-    discover_parser.add_argument(
-        "--signals",
-        action="store_true",
-        help="Extract and display productivity signals for each session",
-    )
-    discover_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output as JSON",
-    )
+# -- Shared filter options for query/stats -----------------------------------
 
-    # Signals — extract productivity signals from a trajectory file
-    signals_parser = subparsers.add_parser(
-        "signals",
-        help="Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)",
-    )
-    signals_parser.add_argument(
-        "path",
-        type=Path,
-        help="Path to conversation.jsonl",
-    )
-    signals_output_group = signals_parser.add_mutually_exclusive_group()
-    signals_output_group.add_argument(
-        "--json",
-        action="store_true",
-        help="Output as JSON (default: human-readable summary)",
-    )
-    signals_output_group.add_argument(
-        "--grade",
-        action="store_true",
-        help="Output grade only (float 0.0-1.0)",
-    )
-    signals_output_group.add_argument(
-        "--usage",
-        action="store_true",
-        help="Output token usage breakdown: input, output, cache_read, cache_create (CC trajectories only)",
-    )
 
-    # Post-session — record a session and extract signals in one call
-    ps_parser = subparsers.add_parser(
-        "post-session",
-        help=(
-            "Record a completed session: extract signals from trajectory, "
-            "determine outcome, append session record."
-        ),
-    )
-    ps_parser.add_argument("--harness", required=True, help="Harness name (claude-code, gptme)")
-    ps_parser.add_argument("--model", default="unknown", help="Model name")
-    ps_parser.add_argument("--run-type", default="unknown", help="Run type (autonomous, etc.)")
-    ps_parser.add_argument(
-        "--trigger",
-        help="Session trigger: timer, dispatch, manual, spawn",
-    )
-    ps_parser.add_argument(
-        "--category",
-        help="Work category (e.g. code, infrastructure). Overrides inference from trajectory.",
-    )
-    ps_parser.add_argument(
-        "--recommended-category",
-        help="Category recommended by selector (e.g. Thompson sampling), before the session ran.",
-    )
-    ps_parser.add_argument(
-        "--exit-code",
-        type=int,
-        default=0,
-        help="Exit code from the agent process (non-zero = failed, 124 = timeout/noop)",
-    )
-    ps_parser.add_argument("--duration", type=int, default=0, help="Duration in seconds")
-    ps_parser.add_argument(
-        "--trajectory",
-        type=Path,
-        help="Path to trajectory .jsonl for signal extraction",
-    )
-    ps_parser.add_argument("--start-commit", help="Git HEAD SHA before session (for NOOP detect)")
-    ps_parser.add_argument("--end-commit", help="Git HEAD SHA after session (for NOOP detect)")
-    ps_parser.add_argument(
-        "--deliverables",
-        nargs="*",
-        default=None,
-        help=(
-            "Explicit deliverables (commit SHAs, PR URLs). "
-            "Omit this flag to extract deliverables from the trajectory. "
-            "Passing the flag with no values (--deliverables) is treated the same as omitting it "
-            "(trajectory extraction still runs); provide at least one value to set explicit deliverables."
-        ),
-    )
-    ps_parser.add_argument("--journal-path", help="Path to journal entry for this session")
-    ps_parser.add_argument("--session-id", help="Override auto-generated session ID")
-    ps_parser.add_argument("--json", action="store_true", help="Output result as JSON")
+def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
+    """Decorator adding common filter options to a command."""
+    for option in reversed(
+        [
+            click.option("--model", default=None, help="Filter by model (e.g. opus, sonnet)"),
+            click.option("--run-type", default=None, help="Filter by run type"),
+            click.option("--category", default=None, help="Filter by category"),
+            click.option("--harness", default=None, help="Filter by harness"),
+            click.option("--outcome", default=None, help="Filter by outcome"),
+            click.option("--since", default=None, help="Filter by recency (e.g. 7d, 30d)"),
+            click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
+        ]
+    ):
+        func = option(func)
+    return func
 
-    args = parser.parse_args()
 
-    # Handle signals before constructing SessionStore (no store needed)
-    if args.command == "signals":
-        p = args.path
-        if not p.is_file():
-            if p.is_dir():
-                print(f"error: {p} is a directory, expected a .jsonl file", file=sys.stderr)
+# -- query -------------------------------------------------------------------
+
+
+@cli.command()
+@_filter_options
+@click.option("--stats", "show_stats", is_flag=True, help="Show summary statistics")
+@click.pass_context
+def query(
+    ctx: click.Context,
+    model: str | None,
+    run_type: str | None,
+    category: str | None,
+    harness: str | None,
+    outcome: str | None,
+    since: str | None,
+    as_json: bool,
+    show_stats: bool,
+) -> None:
+    """Query session records."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since)
+
+    if show_stats:
+        records = store.query(
+            model=model,
+            run_type=run_type,
+            category=category,
+            harness=harness,
+            outcome=outcome,
+            since_days=since_days,
+        )
+        s = store.stats(records)
+        if as_json:
+            click.echo(json.dumps(s, indent=2))
+        else:
+            format_stats(s)
+        return
+
+    records = store.query(
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+        since_days=since_days,
+    )
+    if as_json:
+        click.echo(json.dumps([r.to_dict() for r in records], indent=2))
+    else:
+        for r in records:
+            status = "+" if r.outcome == "productive" else "-"
+            cat = r.category or "?"
+            dur = f"{r.duration_seconds // 60:3d}m" if r.duration_seconds > 0 else "   ?"
+            click.echo(
+                f"[{status}] {r.timestamp[:16]}  {(r.model_normalized or 'unknown'):8s}  "
+                f"{(r.run_type or 'unknown'):12s}  {cat:14s}  {dur}  {r.outcome}"
+            )
+        click.echo(f"\n{len(records)} records")
+
+
+# -- stats -------------------------------------------------------------------
+
+
+@cli.command()
+@_filter_options
+@click.pass_context
+def stats(
+    ctx: click.Context,
+    model: str | None,
+    run_type: str | None,
+    category: str | None,
+    harness: str | None,
+    outcome: str | None,
+    since: str | None,
+    as_json: bool,
+) -> None:
+    """Show summary statistics."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since)
+    records = store.query(
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+        since_days=since_days,
+    )
+    s = store.stats(records)
+    if as_json:
+        click.echo(json.dumps(s, indent=2))
+    else:
+        format_stats(s)
+
+
+# -- runs --------------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--since", default="14d", help="Time window (e.g. 7d, 30d)")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def runs(ctx: click.Context, since: str, as_json: bool) -> None:
+    """Run analytics (duration, NOOP rate, trends)."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since)
+    records = store.query(since_days=since_days)
+    analytics = compute_run_analytics(records)
+    if as_json:
+        click.echo(json.dumps(analytics, indent=2))
+    else:
+        format_run_analytics(analytics)
+
+
+# -- append ------------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--harness", default="unknown", help="Harness name")
+@click.option("--model", default="unknown", help="Model name")
+@click.option("--run-type", default="autonomous", help="Run type")
+@click.option("--category", default=None, help="Category (e.g. code, content)")
+@click.option("--outcome", default="unknown", help="Session outcome")
+@click.option("--duration", type=int, default=0, help="Duration in seconds")
+@click.option("--selector-mode", default=None, help="Selector mode used")
+@click.option("--journal-path", default=None, help="Path to journal entry")
+@click.option("--deliverables", multiple=True, help="Commit SHAs, PR URLs")
+@click.pass_context
+def append(
+    ctx: click.Context,
+    harness: str,
+    model: str,
+    run_type: str,
+    category: str | None,
+    outcome: str,
+    duration: int,
+    selector_mode: str | None,
+    journal_path: str | None,
+    deliverables: tuple[str, ...],
+) -> None:
+    """Append a session record."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    record = SessionRecord(
+        harness=harness,
+        model=model,
+        run_type=run_type,
+        category=category,
+        outcome=outcome,
+        duration_seconds=duration,
+        selector_mode=selector_mode,
+        journal_path=journal_path,
+        deliverables=list(deliverables),
+    )
+    path = store.append(record)
+    click.echo(f"Appended session {record.session_id} to {path}")
+
+
+# -- discover ----------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--harness",
+    type=click.Choice(HARNESS_CHOICES),
+    default=None,
+    help="Limit to a specific harness (default: all)",
+)
+@click.option("--since", default="7d", help="How far back to scan (e.g. 7d, 30d). Default: 7d")
+@click.option(
+    "--signals", is_flag=True, help="Extract and display productivity signals for each session"
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def discover(
+    harness: str | None,
+    since: str,
+    signals: bool,
+    as_json: bool,
+) -> None:
+    """Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses."""
+    since_days = _parse_since(since) or 7
+    today = date.today()
+    start = today - timedelta(days=since_days)
+
+    discovered: list[dict] = []
+
+    if harness in (None, "gptme"):
+        for p in discover_gptme_sessions(start, today):
+            jsonl = p / "conversation.jsonl"
+            resolved = jsonl if jsonl.exists() else p
+            discovered.append({"harness": "gptme", "path": str(resolved)})
+
+    if harness in (None, "claude-code"):
+        for p in discover_cc_sessions(start, today):
+            discovered.append({"harness": "claude-code", "path": str(p)})
+
+    if harness in (None, "codex"):
+        for p in discover_codex_sessions(start, today):
+            discovered.append({"harness": "codex", "path": str(p)})
+
+    if harness in (None, "copilot"):
+        for p in discover_copilot_sessions(start, today):
+            discovered.append({"harness": "copilot", "path": str(p)})
+
+    # Optionally enrich with signals
+    if signals:
+        for entry in discovered:
+            try:
+                result = extract_from_path(Path(entry["path"]))
+                entry["grade"] = result["grade"]
+                entry["productive"] = result["productive"]
+                entry["tool_calls"] = sum(result["tool_calls"].values())
+                entry["git_commits"] = len(result["git_commits"])
+                entry["error_count"] = result["error_count"]
+            except Exception as exc:  # noqa: BLE001
+                entry["signals_error"] = str(exc)
+
+    if as_json:
+        click.echo(json.dumps(discovered, indent=2))
+    else:
+        if not discovered:
+            click.echo(f"No sessions found in the last {since_days} day(s).")
+            return
+        harness_width = max(len(e["harness"]) for e in discovered)
+        for entry in discovered:
+            path_str = entry["path"]
+            harness_str = entry["harness"].ljust(harness_width)
+            if signals and "grade" in entry:
+                grade = entry["grade"]
+                prod = "+" if entry["productive"] else "-"
+                tools = entry["tool_calls"]
+                commits = entry["git_commits"]
+                errors = entry["error_count"]
+                click.echo(
+                    f"[{prod}] {harness_str}  grade={grade:.2f}"
+                    f"  tools={tools} commits={commits} errors={errors}"
+                    f"  {path_str}"
+                )
+            elif "signals_error" in entry:
+                click.echo(
+                    f"[?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
+                )
             else:
-                print(f"error: {p} not found", file=sys.stderr)
-            return 1
-        try:
-            result = extract_from_path(p)
-        except PermissionError:
-            print(f"error: cannot read {p}: permission denied", file=sys.stderr)
-            return 1
-        except UnicodeDecodeError:
-            print(f"error: {p} contains non-UTF-8 content", file=sys.stderr)
-            return 1
-        if args.grade:
-            print(f"{result['grade']:.4f}")
-            return 0
-        if args.json:
-            print(json.dumps(result, indent=2))
-            return 0
-        if args.usage:
-            usage = result.get("usage")
-            if usage:
-                if usage.get("total_tokens", 0) > 0:
-                    print(
-                        f"input={usage['input_tokens']} "
-                        f"output={usage['output_tokens']} "
-                        f"cache_read={usage['cache_read_tokens']} "
-                        f"cache_create={usage['cache_creation_tokens']} "
-                        f"total={usage['total_tokens']}"
-                    )
-                elif usage.get("rate_limit_primary_pct") is not None:
-                    primary = usage["rate_limit_primary_pct"]
-                    secondary = usage.get("rate_limit_secondary_pct")
-                    sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
-                    print(f"primary={primary:.1f}%{sec_str} (rate limits only; no token counts)")
-            return 0
-        # Human-readable summary
-        tc = result["tool_calls"]
-        total_tools = sum(tc.values())
-        steps = result.get("steps", 0)
-        print(f"Format: {result.get('format', 'gptme')}")
-        tools_per_step = f" ({total_tools / steps:.1f} tools/step)" if steps else ""
-        print(
-            f"Tool calls: {total_tools} in {steps} step(s){tools_per_step} "
-            f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
-        )
-        print(f"Git commits: {len(result['git_commits'])}")
-        unique_writes = len(set(result["file_writes"]))
-        total_writes = len(result["file_writes"])
-        write_str = (
-            str(unique_writes)
-            if unique_writes == total_writes
-            else f"{unique_writes} unique ({total_writes} total)"
-        )
-        print(f"File writes: {write_str}")
-        print(f"Errors: {result['error_count']}")
-        print(f"Retries: {result['retry_count']}")
-        print(f"Duration: {result['session_duration_s']}s")
-        print(f"Productive: {result['productive']}")
-        print(f"Grade: {result['grade']:.4f}")
-        inferred = result.get("inferred_category")
-        if inferred:
-            print(f"Inferred category: {inferred}")
-        if result.get("usage"):
-            u = result["usage"]
-            if "total_tokens" in u:
-                print(
-                    f"Tokens: {u['total_tokens']:,} total "
-                    f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
-                    f"cache_create={u['cache_creation_tokens']:,} "
-                    f"cache_read={u['cache_read_tokens']:,})"
+                click.echo(f"    {harness_str}  {path_str}")
+        click.echo(f"\n{len(discovered)} session(s) found ({start} to {today})")
+
+
+# -- signals -----------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("path", type=click.Path(path_type=Path))  # type: ignore[type-var]
+@click.option(
+    "--json", "as_json", is_flag=True, help="Output as JSON (default: human-readable summary)"
+)
+@click.option("--grade", is_flag=True, help="Output grade only (float 0.0-1.0)")
+@click.option("--usage", is_flag=True, help="Output token usage breakdown")
+def signals(path: Path, as_json: bool, grade: bool, usage: bool) -> None:
+    """Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)."""
+    # Validate mutual exclusivity
+    flags = sum([as_json, grade, usage])
+    if flags > 1:
+        raise click.UsageError("--json, --grade, and --usage are mutually exclusive")
+
+    if not path.is_file():
+        if path.is_dir():
+            raise click.BadParameter(
+                f"{path} is a directory, expected a .jsonl file", param_hint="'PATH'"
+            )
+        else:
+            raise click.BadParameter(f"{path} not found", param_hint="'PATH'")
+    try:
+        result = extract_from_path(path)
+    except PermissionError:
+        raise click.ClickException(f"cannot read {path}: permission denied")
+    except UnicodeDecodeError:
+        raise click.ClickException(f"{path} contains non-UTF-8 content")
+
+    if grade:
+        click.echo(f"{result['grade']:.4f}")
+        return
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if usage:
+        u = result.get("usage")
+        if u:
+            if u.get("total_tokens", 0) > 0:
+                click.echo(
+                    f"input={u['input_tokens']} "
+                    f"output={u['output_tokens']} "
+                    f"cache_read={u['cache_read_tokens']} "
+                    f"cache_create={u['cache_creation_tokens']} "
+                    f"total={u['total_tokens']}"
                 )
             elif u.get("rate_limit_primary_pct") is not None:
                 primary = u["rate_limit_primary_pct"]
                 secondary = u.get("rate_limit_secondary_pct")
                 sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
-                print(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
-        if result["deliverables"]:
-            print("Deliverables:")
-            for d in result["deliverables"][:10]:
-                print(f"  - {d}")
-        return 0
+                click.echo(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
+        return
 
-    if args.command == "discover":
-        # Parse --since into a date range ending today
-        since_val = getattr(args, "since", "7d")
-        since_days: int | None
-        try:
-            if since_val.endswith("d"):
-                since_days = int(since_val[:-1])
-            else:
-                since_days = int(since_val)
-        except ValueError:
-            print(
-                f"error: invalid --since value {since_val!r} (expected e.g. 7d, 30d)",
-                file=sys.stderr,
+    # Human-readable summary
+    tc = result["tool_calls"]
+    total_tools = sum(tc.values())
+    steps = result.get("steps", 0)
+    click.echo(f"Format: {result.get('format', 'gptme')}")
+    tools_per_step = f" ({total_tools / steps:.1f} tools/step)" if steps else ""
+    click.echo(
+        f"Tool calls: {total_tools} in {steps} step(s){tools_per_step} "
+        f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
+    )
+    click.echo(f"Git commits: {len(result['git_commits'])}")
+    unique_writes = len(set(result["file_writes"]))
+    total_writes = len(result["file_writes"])
+    write_str = (
+        str(unique_writes)
+        if unique_writes == total_writes
+        else f"{unique_writes} unique ({total_writes} total)"
+    )
+    click.echo(f"File writes: {write_str}")
+    click.echo(f"Errors: {result['error_count']}")
+    click.echo(f"Retries: {result['retry_count']}")
+    click.echo(f"Duration: {result['session_duration_s']}s")
+    click.echo(f"Productive: {result['productive']}")
+    click.echo(f"Grade: {result['grade']:.4f}")
+    if result.get("usage"):
+        u = result["usage"]
+        if "total_tokens" in u:
+            click.echo(
+                f"Tokens: {u['total_tokens']:,} total "
+                f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
+                f"cache_create={u['cache_creation_tokens']:,} "
+                f"cache_read={u['cache_read_tokens']:,})"
             )
-            return 1
-        today = date.today()
-        start = today - timedelta(days=since_days)
+        elif u.get("rate_limit_primary_pct") is not None:
+            primary = u["rate_limit_primary_pct"]
+            secondary = u.get("rate_limit_secondary_pct")
+            sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
+            click.echo(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
+    if result["deliverables"]:
+        click.echo("Deliverables:")
+        for d in result["deliverables"][:10]:
+            click.echo(f"  - {d}")
 
-        # Collect sessions per harness
-        harness_filter = getattr(args, "harness", None)
-        discovered: list[dict] = []
 
-        if harness_filter in (None, "gptme"):
-            for p in discover_gptme_sessions(start, today):
-                # discover_gptme_sessions returns session directories; resolve to the
-                # actual conversation file so extract_from_path can open it.
-                jsonl = p / "conversation.jsonl"
-                resolved = jsonl if jsonl.exists() else p
-                discovered.append({"harness": "gptme", "path": str(resolved)})
+# -- post-session ------------------------------------------------------------
 
-        if harness_filter in (None, "claude-code"):
-            for p in discover_cc_sessions(start, today):
-                discovered.append({"harness": "claude-code", "path": str(p)})
 
-        if harness_filter in (None, "codex"):
-            for p in discover_codex_sessions(start, today):
-                discovered.append({"harness": "codex", "path": str(p)})
-
-        if harness_filter in (None, "copilot"):
-            for p in discover_copilot_sessions(start, today):
-                discovered.append({"harness": "copilot", "path": str(p)})
-
-        # Optionally enrich with signals
-        if getattr(args, "signals", False):
-            for entry in discovered:
-                try:
-                    result = extract_from_path(Path(entry["path"]))
-                    entry["grade"] = result["grade"]
-                    entry["productive"] = result["productive"]
-                    entry["tool_calls"] = sum(result["tool_calls"].values())
-                    entry["git_commits"] = len(result["git_commits"])
-                    entry["error_count"] = result["error_count"]
-                except Exception as exc:  # noqa: BLE001
-                    entry["signals_error"] = str(exc)
-
-        if getattr(args, "json", False):
-            print(json.dumps(discovered, indent=2))
-        else:
-            if not discovered:
-                print(f"No sessions found in the last {since_days} day(s).")
-                return 0
-            # Human-readable table
-            harness_width = max(len(e["harness"]) for e in discovered)
-            for entry in discovered:
-                path_str = entry["path"]
-                harness_str = entry["harness"].ljust(harness_width)
-                if getattr(args, "signals", False) and "grade" in entry:
-                    grade = entry["grade"]
-                    prod = "+" if entry["productive"] else "-"
-                    tools = entry["tool_calls"]
-                    commits = entry["git_commits"]
-                    errors = entry["error_count"]
-                    print(
-                        f"[{prod}] {harness_str}  grade={grade:.2f}"
-                        f"  tools={tools} commits={commits} errors={errors}"
-                        f"  {path_str}"
-                    )
-                elif "signals_error" in entry:
-                    print(
-                        f"[?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
-                    )
-                else:
-                    print(f"    {harness_str}  {path_str}")
-            print(f"\n{len(discovered)} session(s) found ({start} to {today})")
-        return 0
-
-    store = SessionStore(sessions_dir=args.sessions_dir)
-
-    if args.command == "post-session":
-        ps = post_session(
-            store=store,
-            harness=args.harness,
-            model=args.model,
-            run_type=args.run_type,
-            trigger=args.trigger,
-            category=args.category,
-            recommended_category=getattr(args, "recommended_category", None),
-            exit_code=args.exit_code,
-            duration_seconds=args.duration,
-            trajectory_path=args.trajectory,
-            start_commit=args.start_commit,
-            end_commit=args.end_commit,
-            deliverables=args.deliverables or None,
-            journal_path=args.journal_path,
-            session_id=args.session_id,
-        )
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "session_id": ps.record.session_id,
-                        "outcome": ps.record.outcome,
-                        "grade": ps.grade,
-                        "token_count": ps.token_count,
-                    }
-                )
+@cli.command("post-session")
+@click.option(
+    "--harness",
+    required=True,
+    type=click.Choice(HARNESS_CHOICES),
+    help="Harness name (claude-code, gptme, codex, copilot)",
+)
+@click.option("--model", default="unknown", help="Model name")
+@click.option("--run-type", default="unknown", help="Run type (autonomous, etc.)")
+@click.option("--trigger", default=None, help="Session trigger: timer, dispatch, manual, spawn")
+@click.option("--category", default=None, help="Work category (code, triage, ...)")
+@click.option(
+    "--exit-code",
+    type=int,
+    default=0,
+    help="Exit code from the agent process (non-zero = failed, 124 = timeout/noop)",
+)
+@click.option("--duration", type=int, default=0, help="Duration in seconds")
+@click.option(
+    "--trajectory",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=None,
+    help="Path to trajectory .jsonl for signal extraction",
+)
+@click.option("--start-commit", default=None, help="Git HEAD SHA before session (for NOOP detect)")
+@click.option("--end-commit", default=None, help="Git HEAD SHA after session (for NOOP detect)")
+@click.option(
+    "--deliverables",
+    "deliverables_raw",
+    multiple=True,
+    help="Explicit deliverables (commit SHAs, PR URLs). Omit to extract from trajectory.",
+)
+@click.option("--journal-path", default=None, help="Path to journal entry for this session")
+@click.option("--session-id", default=None, help="Override auto-generated session ID")
+@click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
+@click.pass_context
+def post_session_cmd(
+    ctx: click.Context,
+    harness: str,
+    model: str,
+    run_type: str,
+    trigger: str | None,
+    category: str | None,
+    exit_code: int,
+    duration: int,
+    trajectory: Path | None,
+    start_commit: str | None,
+    end_commit: str | None,
+    deliverables_raw: tuple[str, ...],
+    journal_path: str | None,
+    session_id: str | None,
+    as_json: bool,
+) -> None:
+    """Record a completed session: extract signals, determine outcome, append record."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    deliverables = list(deliverables_raw) if deliverables_raw else None
+    ps = post_session(
+        store=store,
+        harness=harness,
+        model=model,
+        run_type=run_type,
+        trigger=trigger,
+        category=category,
+        exit_code=exit_code,
+        duration_seconds=duration,
+        trajectory_path=trajectory,
+        start_commit=start_commit,
+        end_commit=end_commit,
+        deliverables=deliverables,
+        journal_path=journal_path,
+        session_id=session_id,
+    )
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "session_id": ps.record.session_id,
+                    "outcome": ps.record.outcome,
+                    "grade": ps.grade,
+                    "token_count": ps.token_count,
+                }
             )
-        else:
-            grade_str = f"{ps.grade:.4f}" if ps.grade is not None else "n/a"
-            tok_str = f"{ps.token_count:,}" if ps.token_count is not None else "n/a"
-            print(
-                f"Recorded session {ps.record.session_id}: "
-                f"outcome={ps.record.outcome} grade={grade_str} tokens={tok_str}"
-            )
-        return 0
-
-    if args.command == "append":
-        recommended = getattr(args, "recommended_category", None)
-        record = SessionRecord(
-            harness=args.harness,
-            model=args.model,
-            run_type=args.run_type,
-            category=args.category,
-            recommended_category=recommended,
-            outcome=args.outcome,
-            duration_seconds=args.duration,
-            selector_mode=args.selector_mode,
-            journal_path=args.journal_path,
-            deliverables=args.deliverables or [],
         )
-        path = store.append(record)
-        print(f"Appended session {record.session_id} to {path}")
-        return 0
-
-    # Parse --since into days
-    since_days = None
-    since_val = getattr(args, "since", None)
-    if since_val:
-        try:
-            if since_val.endswith("d"):
-                since_days = int(since_val[:-1])
-            else:
-                since_days = int(since_val)
-        except ValueError:
-            print(
-                f"error: invalid --since value {since_val!r} (expected e.g. 7d, 30d)",
-                file=sys.stderr,
-            )
-            return 1
-
-    if args.command == "stats" or (args.command == "query" and getattr(args, "stats", False)):
-        records = store.query(
-            model=getattr(args, "model", None),
-            run_type=getattr(args, "run_type", None),
-            category=getattr(args, "category", None),
-            harness=getattr(args, "harness", None),
-            outcome=getattr(args, "outcome", None),
-            since_days=since_days,
+    else:
+        grade_str = f"{ps.grade:.4f}" if ps.grade is not None else "n/a"
+        tok_str = f"{ps.token_count:,}" if ps.token_count is not None else "n/a"
+        click.echo(
+            f"Recorded session {ps.record.session_id}: "
+            f"outcome={ps.record.outcome} grade={grade_str} tokens={tok_str}"
         )
-        s = store.stats(records)
-        if getattr(args, "json", False):
-            print(json.dumps(s, indent=2))
-        else:
-            format_stats(s)
-        return 0
 
-    if args.command == "query":
-        records = store.query(
-            model=args.model,
-            run_type=args.run_type,
-            category=args.category,
-            harness=args.harness,
-            outcome=args.outcome,
-            since_days=since_days,
-        )
-        if args.json:
-            print(json.dumps([r.to_dict() for r in records], indent=2))
-        else:
-            for r in records:
-                status = "+" if r.outcome == "productive" else "-"
-                cat = r.category or "?"
-                dur = f"{r.duration_seconds // 60:3d}m" if r.duration_seconds > 0 else "   ?"
-                print(
-                    f"[{status}] {r.timestamp[:16]}  {(r.model_normalized or 'unknown'):8s}  "
-                    f"{(r.run_type or 'unknown'):12s}  {cat:14s}  {dur}  {r.outcome}"
-                )
-            print(f"\n{len(records)} records")
-        return 0
 
-    if args.command == "runs":
-        records = store.query(since_days=since_days)
-        analytics = compute_run_analytics(records)
-        if args.json:
-            print(json.dumps(analytics, indent=2))
-        else:
-            format_run_analytics(analytics)
-        return 0
+def main() -> int:
+    """Entry point for console_scripts (backward-compatible wrapper).
 
-    # No command — show stats by default
-    s = store.stats()
-    format_stats(s)
+    Uses standalone_mode=False so Click returns instead of calling sys.exit(),
+    preserving the return-code contract expected by callers and tests.
+    """
+    try:
+        result = cli(standalone_mode=False)
+        if isinstance(result, int):
+            return result
+    except SystemExit as e:
+        return int(e.code) if e.code else 0
+    except click.exceptions.ClickException as e:
+        e.show()
+        return e.exit_code
     return 0
 
 
