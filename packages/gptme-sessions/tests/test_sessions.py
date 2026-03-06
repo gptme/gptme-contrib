@@ -3179,7 +3179,7 @@ def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
             {"git_commits": ["ci(ci): update workflow (abc1234)", "ci(ci): fix runner (def5678)"]},
             "infrastructure",
         ),
-        # Scope with ×2 weight: lessons scope → knowledge overrides single feat
+        # Scope with ×2 weight: lessons scope → knowledge overrides docs→content prefix
         (
             {
                 "git_commits": [

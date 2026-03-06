@@ -888,7 +888,8 @@ def infer_category(signals: dict) -> str | None:
         if m:
             prefix_counts[m.group(1)] = prefix_counts.get(m.group(1), 0) + 1
 
-    # Count scope signals from commits
+    # Count scope signals from commits (suppressed scopes are implicitly excluded
+    # because they have no entry in scope_to_category, not by explicit loop filtering)
     scope_counts: dict[str, int] = {}
     for commit in commits:
         m = re.match(r"\w+\(([^)]+)\)", commit)
