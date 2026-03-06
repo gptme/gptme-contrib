@@ -1620,3 +1620,29 @@ def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
     assert result["usage"]["input_tokens"] == 500
     assert result["usage"]["output_tokens"] == 100
     assert result["usage"]["model"] == "anthropic/claude-sonnet-4-6"
+
+
+def test_extract_usage_gptme_cache_tokens():
+    """Cache tokens from msg.metadata are extracted and included in total."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "response",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_tokens": 800,
+                "cache_creation_tokens": 200,
+                "cost": 0.01,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+    assert usage["cache_read_tokens"] == 800
+    assert usage["cache_creation_tokens"] == 200
+    # total_tokens includes cache tokens (consistent with extract_usage_cc)
+    assert usage["total_tokens"] == 1150  # 100 + 50 + 800 + 200
+    assert abs(usage["cost"] - 0.01) < 1e-9

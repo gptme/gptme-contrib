@@ -383,6 +383,8 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     """
     input_tokens = 0
     output_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
     cost = 0.0
     model: str | None = None
 
@@ -401,15 +403,19 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
 
         input_tokens += metadata.get("input_tokens", 0)
         output_tokens += metadata.get("output_tokens", 0)
+        cache_read_tokens += metadata.get("cache_read_tokens", 0)
+        cache_creation_tokens += metadata.get("cache_creation_tokens", 0)
         cost += metadata.get("cost", 0.0)
 
-    total_tokens = input_tokens + output_tokens
+    total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
     if total_tokens == 0 and cost == 0.0:
         return {}
     return {
         "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
         "cost": cost,
         "total_tokens": total_tokens,
     }
