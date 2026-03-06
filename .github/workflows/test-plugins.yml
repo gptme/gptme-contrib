@@ -12,20 +12,54 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       plugins: ${{ steps.discover.outputs.plugins }}
+      has_changes: ${{ steps.discover.outputs.has_changes }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for git diff with base branch on PRs
 
       - name: Discover plugins with tests
         id: discover
         run: |
-          # Use Makefile for plugin discovery (single source of truth)
-          plugins=$(make ci-list-plugins-json)
+          # Get all plugins from Makefile (single source of truth)
+          make ci-list-plugins-json > /tmp/all_plugins.json
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Get files changed in this PR
+            changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+            # If shared config changed, run all plugins
+            if echo "$changed" | grep -qE '^(\.github/workflows/test-plugins\.yml|Makefile)'; then
+              echo "Shared config changed, running all plugins"
+              plugins=$(cat /tmp/all_plugins.json)
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            else
+              # Extract affected plugin names from changed paths
+              affected=$(echo "$changed" | sed -n 's|^plugins/\([^/]*\)/.*|\1|p' | sort -u)
+
+              if [ -z "$affected" ]; then
+                echo "No plugin files changed, skipping tests"
+                plugins="[]"
+                echo "has_changes=false" >> $GITHUB_OUTPUT
+              else
+                # Filter all plugins to only affected ones
+                plugins=$(echo "$affected" | python3 -c "import json,sys; all_plugins=json.load(open('/tmp/all_plugins.json')); affected=set(sys.stdin.read().strip().split('\n')); print(json.dumps([p for p in all_plugins if p in affected]))")
+                echo "has_changes=true" >> $GITHUB_OUTPUT
+              fi
+            fi
+          else
+            # On push to master, run all plugins
+            plugins=$(cat /tmp/all_plugins.json)
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
           echo "plugins=$plugins" >> $GITHUB_OUTPUT
           echo "Discovered plugins: $plugins"
 
   # Test each plugin in parallel
   test:
     needs: discover
+    if: needs.discover.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -90,6 +124,7 @@ jobs:
   # Coverage report (combined for all plugins)
   coverage:
     needs: discover
+    if: needs.discover.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
