@@ -30,7 +30,7 @@ def lesson_page_path(lesson_path: str) -> str:
 
     E.g. 'workflow/test-lesson.md' -> 'lessons/workflow/test-lesson.html'
     """
-    return "lessons/" + str(Path(lesson_path).with_suffix(".html"))
+    return "lessons/" + Path(lesson_path).with_suffix(".html").as_posix()
 
 
 def skill_page_path(skill_dir: str) -> str:
@@ -38,7 +38,7 @@ def skill_page_path(skill_dir: str) -> str:
 
     E.g. 'skills/my-skill' -> 'skills/my-skill/index.html'
     """
-    return str(Path(skill_dir) / "index.html")
+    return (Path(skill_dir) / "index.html").as_posix()
 
 
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
