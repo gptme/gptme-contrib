@@ -436,6 +436,9 @@ def test_generate_json_excludes_large_fields(workspace: Path):
         assert "all_keywords" not in lesson, "all_keywords should not appear in JSON export"
     for skill in data["skills"]:
         assert "body" not in skill, "skill body should not appear in JSON export"
+    for item in data["guidance"]:
+        assert "body" not in item, "guidance body should not appear in JSON export"
+        assert "all_keywords" not in item, "guidance all_keywords should not appear in JSON export"
 
 
 def test_generate_json_to_file(workspace: Path, tmp_path: Path):
