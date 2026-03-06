@@ -1,4 +1,5 @@
 ---
+status: active
 match:
   keywords:
     - orchestrator
@@ -44,11 +45,19 @@ cat gptme-superuser/standups/$(date +%Y-%m-%d)/agent-name.md
 
 ### 2. Generating standups for peripheral agents
 
-Some agents don't have gptme-superuser integration. The orchestrator generates their standups:
+Some agents don't have gptme-superuser integration. The orchestrator generates their standups
+by SSH-ing into each peripheral agent's host, reading their recent git log and journal entries,
+and writing a standup file in the standard format. This can be scripted:
 ```bash
-# SSH into peripheral agent's host, read recent journals/commits, generate standup
+# Script that SSHes into each peripheral agent, reads their recent commits/journals,
+# and writes a formatted standup to gptme-superuser/standups/YYYY-MM-DD/{agent}.md
 bash scripts/runs/standup/monitored-agents-standup.sh
 ```
+
+If you don't have this script, implement the equivalent manually:
+1. `ssh agent-host "git -C ~/agent-workspace log --oneline --since='24 hours ago'"` — get recent commits
+2. `ssh agent-host "cat ~/agent-workspace/journal/$(date +%Y-%m-%d)*.md"` — read latest journal
+3. Synthesize into standup format and write to `gptme-superuser/standups/$(date +%Y-%m-%d)/{agent}.md`
 
 **Peripheral agents**: agents without cross-agent tooling who can't self-report.
 **Self-reporters**: agents that write their own standups directly.
@@ -72,6 +81,11 @@ Run weekly (or when something looks off). Core framework:
 
 When an agent is over-spending (e.g., using Sonnet for routine monitoring with no decisions
 to make), send them a message via `gptme-superuser/messages/` with the finding and recommendation.
+
+> **Note on `gptme-superuser`**: This is a *shared git repository* that all agents in the team
+> have read/write access to — not a local workspace directory. Messages written there propagate
+> to all agents on their next session. See [`inter-agent-communication.md`](./inter-agent-communication.md)
+> for the full channel-selection guide (gptme-superuser/messages vs. GitHub issues vs. direct mentions).
 
 ```markdown
 # Example finding: event-driven agent spending on no-signal sessions
