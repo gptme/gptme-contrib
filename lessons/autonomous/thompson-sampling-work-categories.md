@@ -60,7 +60,7 @@ from gptme_sessions import load_bandit_means
 means = load_bandit_means("state/category-bandit", arm_ids=CATEGORIES)
 
 def apply_ts_boost(base_score: float, category: str, weight: float = 1.5) -> float:
-    """Additive boost: +weight at mean=1.0, 0 at mean=0.5, -weight at mean=0.0."""
+    """Additive boost: +weight/2 at mean=1.0, 0 at mean=0.5, -weight/2 at mean=0.0."""
     return base_score + weight * (means.get(category, 0.5) - 0.5)
 
 # Example: score options with Thompson posterior boost
