@@ -378,7 +378,12 @@ async function loadSessionStats() {
     if (!resp.ok) return;
     const stats = await resp.json();
     const grid = document.getElementById('session-stats-grid');
-    if (!grid || stats.total === 0) return;
+    if (!grid) return;
+    if (stats.total === 0) {
+      const section = document.getElementById('session-stats');
+      if (section) section.style.display = 'none';
+      return;
+    }
 
     const rate = stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : 'N/A';
     const dur = stats.duration && stats.duration.total_hours
