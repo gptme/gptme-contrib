@@ -14,6 +14,7 @@ Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 import configparser
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import markdown
@@ -369,6 +370,51 @@ def read_workspace_config(workspace: Path) -> dict:
     return config
 
 
+def detect_github_url(workspace: Path) -> str:
+    """Detect GitHub repository URL from git remote.
+
+    Tries ``git remote get-url origin`` and converts SSH/HTTPS URLs to
+    a browsable ``https://github.com/owner/repo`` URL.  Returns empty
+    string if detection fails.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return ""
+        url = result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+    # SSH: git@github.com:owner/repo.git
+    m = re.match(r"git@github\.com:(.+?)(?:\.git)?$", url)
+    if m:
+        return f"https://github.com/{m.group(1)}"
+
+    # HTTPS: https://github.com/owner/repo.git
+    m = re.match(r"https://github\.com/(.+?)(?:\.git)?$", url)
+    if m:
+        return f"https://github.com/{m.group(1)}"
+
+    return ""
+
+
+def github_blob_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
+    """Build a GitHub blob URL for a file path.
+
+    ``prefix`` is prepended to the path (e.g. for submodule-relative paths).
+    """
+    if not gh_repo_url:
+        return ""
+    full_path = f"{prefix}/{path}" if prefix else path
+    return f"{gh_repo_url}/blob/master/{full_path}"
+
+
 def collect_workspace_data(workspace: Path) -> dict:
     """Collect all workspace data into a dict suitable for JSON export or rendering.
 
@@ -400,6 +446,20 @@ def collect_workspace_data(workspace: Path) -> dict:
             packages.extend(scan_packages(sub_path, source=sub_name))
         if sub["has_plugins"]:
             plugins.extend(scan_plugins(sub_path, source=sub_name))
+
+    # Detect GitHub repo URL for source links
+    gh_repo_url = detect_github_url(workspace)
+
+    # Add GitHub source links to all items
+    if gh_repo_url:
+        for lesson in lessons:
+            lesson["gh_url"] = github_blob_url(gh_repo_url, lesson["path"], prefix="lessons")
+        for plugin in plugins:
+            plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"])
+        for pkg in packages:
+            pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"])
+        for skill in skills:
+            skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"])
 
     # Build unified guidance list (lessons + skills together)
     guidance: list[dict] = []
@@ -442,6 +502,7 @@ def collect_workspace_data(workspace: Path) -> dict:
 
     return {
         "workspace_name": workspace_name,
+        "gh_repo_url": gh_repo_url,
         "lessons": lessons,
         "plugins": plugins,
         "packages": packages,

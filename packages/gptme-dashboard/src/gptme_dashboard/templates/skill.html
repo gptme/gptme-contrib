@@ -103,6 +103,7 @@ header h1 {
     <span style="color: var(--text-dim); font-size: 0.9rem;">{{ skill.description }}</span>
     {% endif %}
     <span style="color: var(--text-dim); font-size: 0.85rem;">{{ skill.path }}</span>
+    {% if skill.gh_url %}<a href="{{ skill.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
 </header>
 

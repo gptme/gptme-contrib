@@ -116,6 +116,7 @@ header h1 {
     <span class="tag tag-category">{{ lesson.category }}</span>
     <span class="tag {% if lesson.status == 'active' %}tag-active{% elif lesson.status == 'deprecated' %}tag-deprecated{% endif %}">{{ lesson.status }}</span>
     <span style="color: var(--text-dim); font-size: 0.85rem;">{{ lesson.path }}</span>
+    {% if lesson.gh_url %}<a href="{{ lesson.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
 </header>
 
