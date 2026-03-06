@@ -167,14 +167,20 @@ def main() -> int:
             return 0
         if args.usage:
             usage = result.get("usage")
-            if usage and usage.get("total_tokens", 0) > 0:
-                print(
-                    f"input={usage['input_tokens']} "
-                    f"output={usage['output_tokens']} "
-                    f"cache_read={usage['cache_read_tokens']} "
-                    f"cache_create={usage['cache_creation_tokens']} "
-                    f"total={usage['total_tokens']}"
-                )
+            if usage:
+                if usage.get("total_tokens", 0) > 0:
+                    print(
+                        f"input={usage['input_tokens']} "
+                        f"output={usage['output_tokens']} "
+                        f"cache_read={usage['cache_read_tokens']} "
+                        f"cache_create={usage['cache_creation_tokens']} "
+                        f"total={usage['total_tokens']}"
+                    )
+                elif usage.get("rate_limit_primary_pct") is not None:
+                    primary = usage["rate_limit_primary_pct"]
+                    secondary = usage.get("rate_limit_secondary_pct")
+                    sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
+                    print(f"primary={primary:.1f}%{sec_str} (rate limits only; no token counts)")
             return 0
         # Human-readable summary
         tc = result["tool_calls"]
@@ -202,12 +208,18 @@ def main() -> int:
         print(f"Grade: {result['grade']:.4f}")
         if result.get("usage"):
             u = result["usage"]
-            print(
-                f"Tokens: {u['total_tokens']:,} total "
-                f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
-                f"cache_create={u['cache_creation_tokens']:,} "
-                f"cache_read={u['cache_read_tokens']:,})"
-            )
+            if "total_tokens" in u:
+                print(
+                    f"Tokens: {u['total_tokens']:,} total "
+                    f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
+                    f"cache_create={u['cache_creation_tokens']:,} "
+                    f"cache_read={u['cache_read_tokens']:,})"
+                )
+            elif u.get("rate_limit_primary_pct") is not None:
+                primary = u["rate_limit_primary_pct"]
+                secondary = u.get("rate_limit_secondary_pct")
+                sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
+                print(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
         if result["deliverables"]:
             print("Deliverables:")
             for d in result["deliverables"][:10]:

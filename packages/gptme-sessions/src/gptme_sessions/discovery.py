@@ -1,9 +1,9 @@
 """Discover session files across agent harnesses.
 
-Scans known session directories for gptme and Claude Code,
-filtering by date range. This replaces the directory scanning logic
-previously duplicated in gptme-activity-summary's session_data.py
-and cc_session_data.py.
+Scans known session directories for gptme, Claude Code, Codex CLI,
+and Copilot CLI, filtering by date range. This replaces the directory
+scanning logic previously duplicated in gptme-activity-summary's
+session_data.py and cc_session_data.py.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GPTME_LOGS_DIR = Path.home() / ".local" / "share" / "gptme" / "logs"
 DEFAULT_CC_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+DEFAULT_CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+DEFAULT_COPILOT_STATE_DIR = Path.home() / ".copilot" / "session-state"
 
 
 def _get_gptme_logs_dir() -> Path:
@@ -34,6 +36,22 @@ def _get_cc_projects_dir() -> Path:
     if env_dir:
         return Path(env_dir) / "projects"
     return DEFAULT_CC_PROJECTS_DIR
+
+
+def _get_codex_sessions_dir() -> Path:
+    """Get Codex CLI sessions directory from env or default."""
+    env_dir = os.environ.get("CODEX_SESSIONS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return DEFAULT_CODEX_SESSIONS_DIR
+
+
+def _get_copilot_state_dir() -> Path:
+    """Get Copilot CLI session-state directory from env or default."""
+    env_dir = os.environ.get("COPILOT_STATE_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return DEFAULT_COPILOT_STATE_DIR
 
 
 def _session_in_range(session_name: str, start: date, end: date) -> bool:
@@ -187,4 +205,86 @@ def discover_cc_sessions(
                     sessions_with_dates.append((session_date, jsonl_file))
     except PermissionError:
         logger.debug("Permission denied reading: %s", cc_dir)
+    return [path for _, path in sorted(sessions_with_dates)]
+
+
+def discover_codex_sessions(
+    start: date,
+    end: date,
+    codex_dir: Path | None = None,
+) -> list[Path]:
+    """Find Codex CLI session JSONL files within a date range.
+
+    Scans ``~/.codex/sessions/YYYY/MM/DD/`` for rollout JSONL files.
+    Uses the directory date structure for fast filtering (no file reads needed).
+
+    Returns sorted list of session JSONL file paths.
+    """
+    if codex_dir is None:
+        codex_dir = _get_codex_sessions_dir()
+    if not codex_dir.exists():
+        logger.debug("Codex sessions directory does not exist: %s", codex_dir)
+        return []
+
+    dated_sessions: list[tuple[date, Path]] = []
+    try:
+        for year_dir in sorted(codex_dir.iterdir()):
+            if not year_dir.is_dir():
+                continue
+            for month_dir in sorted(year_dir.iterdir()):
+                if not month_dir.is_dir():
+                    continue
+                for day_dir in sorted(month_dir.iterdir()):
+                    if not day_dir.is_dir():
+                        continue
+                    try:
+                        dir_date = date(
+                            int(year_dir.name),
+                            int(month_dir.name),
+                            int(day_dir.name),
+                        )
+                    except (ValueError, TypeError):
+                        continue
+                    if not (start <= dir_date <= end):
+                        continue
+                    for jsonl_file in sorted(day_dir.glob("*.jsonl")):
+                        dated_sessions.append((dir_date, jsonl_file))
+    except PermissionError:
+        logger.debug("Permission denied reading: %s", codex_dir)
+    return [path for _, path in sorted(dated_sessions)]
+
+
+def discover_copilot_sessions(
+    start: date,
+    end: date,
+    copilot_dir: Path | None = None,
+) -> list[Path]:
+    """Find Copilot CLI session event files within a date range.
+
+    Scans ``~/.copilot/session-state/<uuid>/events.jsonl`` for session files.
+    Uses quick first-line timestamp extraction for date filtering.
+
+    Returns sorted list of session JSONL file paths.
+    """
+    if copilot_dir is None:
+        copilot_dir = _get_copilot_state_dir()
+    if not copilot_dir.exists():
+        logger.debug("Copilot session-state directory does not exist: %s", copilot_dir)
+        return []
+
+    sessions_with_dates: list[tuple[date, Path]] = []
+    try:
+        for session_dir in copilot_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            events_file = session_dir / "events.jsonl"
+            if not events_file.exists():
+                continue
+            session_date = _quick_date_from_jsonl(events_file)
+            if session_date is None:
+                continue
+            if start <= session_date <= end:
+                sessions_with_dates.append((session_date, events_file))
+    except PermissionError:
+        logger.debug("Permission denied reading: %s", copilot_dir)
     return [path for _, path in sorted(sessions_with_dates)]

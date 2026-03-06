@@ -13,6 +13,8 @@ from gptme_sessions.discovery import (
     _session_in_range,
     decode_cc_project_path,
     discover_cc_sessions,
+    discover_codex_sessions,
+    discover_copilot_sessions,
     discover_gptme_sessions,
     parse_gptme_config,
 )
@@ -201,3 +203,117 @@ def test_discover_cc_sessions_nonexistent(tmp_path: Path) -> None:
         date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path / "nonexistent"
     )
     assert result == []
+
+
+# --- discover_codex_sessions ---
+
+
+def _make_codex_session(day_dir: Path, name: str) -> Path:
+    """Helper to create a minimal Codex session JSONL file."""
+    jsonl = day_dir / f"{name}.jsonl"
+    jsonl.write_text(
+        json.dumps({"type": "session_meta", "payload": {"originator": "codex_exec"}}) + "\n"
+    )
+    return jsonl
+
+
+def test_discover_codex_sessions(tmp_path: Path) -> None:
+    """Test scanning Codex sessions by YYYY/MM/DD directory structure."""
+    day_in = tmp_path / "2026" / "03" / "05"
+    day_in.mkdir(parents=True)
+    day_out = tmp_path / "2026" / "03" / "04"
+    day_out.mkdir(parents=True)
+
+    s1 = _make_codex_session(day_in, "session1")
+    s2 = _make_codex_session(day_in, "session2")
+    _make_codex_session(day_out, "old-session")
+
+    result = discover_codex_sessions(date(2026, 3, 5), date(2026, 3, 5), codex_dir=tmp_path)
+    assert len(result) == 2
+    assert s1 in result
+    assert s2 in result
+
+
+def test_discover_codex_sessions_nonexistent(tmp_path: Path) -> None:
+    result = discover_codex_sessions(
+        date(2026, 3, 5), date(2026, 3, 5), codex_dir=tmp_path / "nonexistent"
+    )
+    assert result == []
+
+
+def test_discover_codex_sessions_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CODEX_SESSIONS_DIR env var overrides the default path."""
+    day = tmp_path / "2026" / "03" / "05"
+    day.mkdir(parents=True)
+    _make_codex_session(day, "env-session")
+
+    monkeypatch.setenv("CODEX_SESSIONS_DIR", str(tmp_path))
+    # No explicit codex_dir — should pick up env var
+    result = discover_codex_sessions(date(2026, 3, 5), date(2026, 3, 5))
+    assert len(result) == 1
+    assert result[0].name == "env-session.jsonl"
+
+
+# --- discover_copilot_sessions ---
+
+
+def _make_copilot_session(state_dir: Path, uuid: str, ts: str) -> Path:
+    """Helper to create a minimal Copilot session events.jsonl file."""
+    session_dir = state_dir / uuid
+    session_dir.mkdir(parents=True)
+    events_file = session_dir / "events.jsonl"
+    events_file.write_text(
+        json.dumps(
+            {
+                "type": "session.start",
+                "timestamp": ts,
+                "data": {"producer": "copilot-agent"},
+            }
+        )
+        + "\n"
+    )
+    return events_file
+
+
+def test_discover_copilot_sessions(tmp_path: Path) -> None:
+    """Test scanning Copilot sessions by timestamp in events.jsonl."""
+    _make_copilot_session(tmp_path, "uuid-1", "2026-03-05T10:00:00Z")
+    _make_copilot_session(tmp_path, "uuid-2", "2026-03-05T14:00:00Z")
+    _make_copilot_session(tmp_path, "uuid-3", "2026-03-04T10:00:00Z")  # out of range
+
+    result = discover_copilot_sessions(date(2026, 3, 5), date(2026, 3, 5), copilot_dir=tmp_path)
+    assert len(result) == 2
+    uuids = {p.parent.name for p in result}
+    assert "uuid-1" in uuids
+    assert "uuid-2" in uuids
+
+
+def test_discover_copilot_sessions_nonexistent(tmp_path: Path) -> None:
+    result = discover_copilot_sessions(
+        date(2026, 3, 5), date(2026, 3, 5), copilot_dir=tmp_path / "nonexistent"
+    )
+    assert result == []
+
+
+def test_discover_copilot_sessions_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """COPILOT_STATE_DIR env var overrides the default path."""
+    _make_copilot_session(tmp_path, "env-uuid", "2026-03-05T09:00:00Z")
+
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    # No explicit copilot_dir — should pick up env var
+    result = discover_copilot_sessions(date(2026, 3, 5), date(2026, 3, 5))
+    assert len(result) == 1
+    assert result[0].parent.name == "env-uuid"
+
+
+def test_discover_copilot_sessions_sorted_by_date(tmp_path: Path) -> None:
+    """Results are sorted by session date, not by UUID directory name."""
+    # UUID "zzz" has an earlier date than "aaa" — alphabetical sort would give wrong order
+    _make_copilot_session(tmp_path, "zzz-early", "2026-03-04T08:00:00Z")
+    _make_copilot_session(tmp_path, "aaa-late", "2026-03-05T20:00:00Z")
+
+    result = discover_copilot_sessions(date(2026, 3, 4), date(2026, 3, 5), copilot_dir=tmp_path)
+    assert len(result) == 2
+    # Should be sorted by date: early session first, late session second
+    assert result[0].parent.name == "zzz-early"
+    assert result[1].parent.name == "aaa-late"

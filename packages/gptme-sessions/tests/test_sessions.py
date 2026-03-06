@@ -9,7 +9,10 @@ from gptme_sessions.signals import (
     detect_format,
     extract_signals,
     extract_signals_cc,
+    extract_signals_codex,
+    extract_signals_copilot,
     extract_usage_cc,
+    extract_usage_codex,
     extract_usage_gptme,
     grade_signals,
     is_productive,
@@ -2177,3 +2180,743 @@ def test_post_session_cli_json_output(tmp_path: Path, capsys, monkeypatch):
     assert "outcome" in out
     assert "grade" in out
     assert "token_count" in out
+
+
+# ============================================================
+# Codex CLI format tests
+# ============================================================
+
+
+def test_detect_format_codex():
+    """Detect Codex CLI trajectory format from session_meta entry."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48.495Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "test-session",
+                "originator": "codex_exec",
+                "cwd": "/home/bob/bob",
+            },
+        }
+    ]
+    assert detect_format(msgs) == "codex"
+    assert _detect_format(msgs) == "codex"
+
+
+def test_detect_format_codex_interactive():
+    """Detect Codex interactive sessions too."""
+    msgs = [
+        {
+            "type": "session_meta",
+            "payload": {"originator": "codex_interactive"},
+        }
+    ]
+    assert detect_format(msgs) == "codex"
+
+
+def test_extract_signals_codex_basic():
+    """Extract signals from a minimal Codex trajectory.
+
+    Uses two turn_context records to model two distinct turns, each with one
+    tool call. Steps should be 2 (one per turn), not 2 (one per function_call).
+    """
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"id": "test", "originator": "codex_exec", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:49Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": '{"cmd": "pwd", "workdir": "/tmp"}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0\nOutput:\n/tmp",
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:55Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:57:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_2",
+                "arguments": '{"cmd": "git commit -m \\"feat: add thing\\""}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:57:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": "Process exited with code 0\n[master abc1234] feat: add thing\n 1 file changed",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["tool_calls"] == {"exec_command": 2}
+    assert signals["steps"] == 2  # one step per turn (bounded by turn_context records)
+    assert signals["error_count"] == 0
+    assert len(signals["git_commits"]) == 1
+    assert "feat: add thing (abc1234)" in signals["git_commits"]
+    assert signals["session_duration_s"] == 14  # 06:56:48 to 06:57:02
+
+
+def test_extract_signals_codex_error_detection():
+    """Detect errors from non-zero exit codes in Codex."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": '{"cmd": "false"}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 1\nOutput:\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["error_count"] == 1
+
+
+def test_extract_signals_codex_file_writes():
+    """Detect file writes from exec_command redirect patterns."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "cat > /tmp/test.py <<'EOF'\nprint('hi')\nEOF"}),
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/tmp/test.py" in signals["file_writes"]
+
+
+def test_extract_signals_codex_tee_flags():
+    """tee with flags (-a) should not capture the flag as a file path."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "echo hello | tee -a /tmp/output.log"}),
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    # Should capture the actual path, not the flag "-a"
+    assert "-a" not in signals["file_writes"]
+    assert "/tmp/output.log" in signals["file_writes"]
+
+
+def test_extract_usage_codex():
+    """Extract model and rate-limit info from Codex trajectory."""
+    msgs = [
+        {
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex"},
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "primary": {"used_percent": 8.0, "window_minutes": 300},
+                    "secondary": {"used_percent": 2.0, "window_minutes": 10080},
+                },
+            },
+        },
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage["model"] == "gpt-5.3-codex"
+    assert usage["rate_limit_primary_pct"] == 8.0
+    assert usage["rate_limit_secondary_pct"] == 2.0
+
+
+def test_extract_usage_codex_empty():
+    """Empty dict when no model/usage data."""
+    assert extract_usage_codex([]) == {}
+    assert extract_usage_codex([{"type": "session_meta", "payload": {}}]) == {}
+
+
+# ============================================================
+# Copilot CLI format tests
+# ============================================================
+
+
+def test_detect_format_copilot():
+    """Detect Copilot CLI trajectory format from session.start entry."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test-session",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+                "context": {"cwd": "/home/bob/bob"},
+            },
+            "timestamp": "2026-03-03T12:32:04.861Z",
+        }
+    ]
+    assert detect_format(msgs) == "copilot"
+
+
+def test_extract_signals_copilot_basic():
+    """Extract signals from a minimal Copilot trajectory."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+            },
+            "timestamp": "2026-03-03T12:32:04Z",
+        },
+        {
+            "type": "assistant.turn_start",
+            "timestamp": "2026-03-03T12:32:05Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {
+                        "toolCallId": "tc_1",
+                        "name": "bash",
+                        "arguments": {"command": "git status"},
+                        "type": "function",
+                    }
+                ]
+            },
+            "timestamp": "2026-03-03T12:32:06Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_1",
+                "success": True,
+                "result": {"content": "[master def5678] docs: update README\n 1 file changed"},
+            },
+            "timestamp": "2026-03-03T12:32:10Z",
+        },
+        {
+            "type": "assistant.turn_end",
+            "timestamp": "2026-03-03T12:32:11Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["tool_calls"] == {"bash": 1}
+    assert signals["steps"] == 1
+    assert signals["error_count"] == 0
+    assert len(signals["git_commits"]) == 1
+    assert "docs: update README (def5678)" in signals["git_commits"]
+    assert signals["session_duration_s"] == 7
+
+
+def test_extract_signals_copilot_error_detection():
+    """Detect errors from failed tools and session.error events."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "session.error",
+            "data": {
+                "errorType": "authentication",
+                "message": "Not authorized",
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_1",
+                "success": False,
+                "result": {"content": "command not found"},
+            },
+            "timestamp": "2026-03-03T12:00:03Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 2  # session.error + failed tool
+
+
+def test_extract_signals_copilot_file_writes():
+    """Detect file writes from Copilot edit tool."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {
+                        "toolCallId": "tc_1",
+                        "name": "edit",
+                        "arguments": {
+                            "path": "/home/bob/bob/README.md",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                        "type": "function",
+                    }
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert "/home/bob/bob/README.md" in signals["file_writes"]
+    assert signals["tool_calls"]["edit"] == 1
+
+
+def test_extract_signals_copilot_null_result():
+    """extract_signals_copilot doesn't crash when tool result is JSON null."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc_bash", "name": "bash", "arguments": {}},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_bash",
+                "success": False,
+                "result": None,  # explicit JSON null — must not crash
+            },
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 1
+    assert signals["git_commits"] == []
+
+
+def test_extract_signals_copilot_commit_only_from_bash():
+    """Git commits only extracted from bash tool output, not other tools."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc_view", "name": "view", "arguments": {}},
+                    {"toolCallId": "tc_bash", "name": "bash", "arguments": {}},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_view",
+                "success": True,
+                "result": {"content": "[master aaa1111] fake commit from file content"},
+            },
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_bash",
+                "success": True,
+                "result": {"content": "[master bbb2222] real commit from bash"},
+            },
+            "timestamp": "2026-03-03T12:00:03Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    # Only the bash commit should be extracted
+    assert len(signals["git_commits"]) == 1
+    assert "real commit from bash (bbb2222)" in signals["git_commits"]
+
+
+def test_extract_from_path_codex(tmp_path: Path):
+    """extract_from_path correctly identifies and extracts Codex format."""
+    trajectory_file = tmp_path / "rollout.jsonl"
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"id": "test", "originator": "codex_exec", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex"},
+        },
+        {
+            "timestamp": "2026-03-05T06:57:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": '{"cmd": "echo hi"}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:57:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "Process exited with code 0\nOutput:\nhi",
+            },
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    from gptme_sessions.signals import extract_from_path
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "codex"
+    assert result["tool_calls"]["exec_command"] == 1
+    assert "usage" in result
+    assert result["usage"]["model"] == "gpt-5.3-codex"
+
+
+def test_extract_from_path_copilot(tmp_path: Path):
+    """extract_from_path correctly identifies and extracts Copilot format."""
+    trajectory_file = tmp_path / "events.jsonl"
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+            },
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:05Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {"toolCallId": "tc_1", "success": True, "result": {"content": "ok"}},
+            "timestamp": "2026-03-03T12:00:10Z",
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    from gptme_sessions.signals import extract_from_path
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "copilot"
+    assert result["tool_calls"]["bash"] == 1
+    # Copilot has no token data
+    assert "usage" not in result
+
+
+# --- Null-guard regression tests ---
+
+
+def test_detect_format_codex_null_payload():
+    """_detect_format doesn't crash when Codex session_meta has payload=null."""
+    msgs = [{"type": "session_meta", "payload": None}]
+    # Should not raise; falls through to default format
+    fmt = _detect_format(msgs)
+    assert fmt in ("gptme", "claude_code", "codex", "copilot")
+
+
+def test_detect_format_copilot_null_data():
+    """_detect_format doesn't crash when Copilot session.start has data=null."""
+    msgs = [{"type": "session.start", "data": None}]
+    fmt = _detect_format(msgs)
+    assert fmt in ("gptme", "claude_code", "codex", "copilot")
+
+
+def test_extract_signals_codex_null_payload():
+    """extract_signals_codex doesn't crash when response_item has payload=null."""
+    msgs: list[dict] = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {"type": "response_item", "payload": None},  # explicit null
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_codex_null_cmd():
+    """cmd: null in exec_command arguments must not crash re.search."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                # cmd is explicitly null (interrupted mid-call)
+                "arguments": json.dumps({"cmd": None}),
+            },
+        },
+    ]
+    # Must not raise TypeError
+    signals = extract_signals_codex(msgs)
+    assert signals["file_writes"] == []
+
+
+def test_extract_signals_codex_multi_file_writes():
+    """re.finditer captures all write targets in a multi-output command."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "command | tee /tmp/debug.log > /tmp/output.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/tmp/debug.log" in signals["file_writes"]
+    assert "/tmp/output.txt" in signals["file_writes"]
+
+
+def test_extract_signals_codex_dev_null_excluded():
+    """/dev/null and /dev/stderr are not counted as file writes."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "cmd 2>/dev/null > /tmp/out.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/dev/null" not in signals["file_writes"]
+    assert "/tmp/out.txt" in signals["file_writes"]
+
+
+def test_extract_signals_copilot_null_data_assistant():
+    """extract_signals_copilot doesn't crash when assistant.message has data=null."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {"type": "assistant.message", "data": None, "timestamp": "2026-03-03T12:00:01Z"},
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_copilot_null_tool_requests():
+    """extract_signals_copilot doesn't crash when toolRequests=null."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": None},
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_copilot_null_arguments():
+    """Copilot write tool with arguments=null doesn't crash."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc1", "name": "write", "arguments": None},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["file_writes"] == []
+
+
+def test_extract_signals_copilot_null_data_tool_complete():
+    """extract_signals_copilot doesn't crash when tool.execution_complete has data=null."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {"type": "tool.execution_complete", "data": None, "timestamp": "2026-03-03T12:00:01Z"},
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 0
+
+
+def test_extract_signals_copilot_null_success_not_counted_as_error():
+    """success: null in tool.execution_complete must not increment error_count."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            # success is explicitly null (truncated/partial record)
+            "data": {"toolCallId": "tc_1", "success": None, "result": None},
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 0
+
+
+def test_extract_usage_codex_null_payload():
+    """extract_usage_codex doesn't crash when turn_context/event_msg has payload=null."""
+    msgs = [
+        {"type": "turn_context", "payload": None},
+        {"type": "event_msg", "payload": None},
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage == {}
+
+
+def test_extract_usage_codex_null_rate_limits():
+    """extract_usage_codex doesn't crash when rate_limits=null."""
+    msgs = [
+        {"type": "turn_context", "payload": {"model": "gpt-5.3-codex"}},
+        {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": None},
+        },
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage["model"] == "gpt-5.3-codex"
+    assert "rate_limit_primary_pct" not in usage
