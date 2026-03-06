@@ -308,17 +308,27 @@ def detect_default_branch(workspace: Path) -> str:
     return "master"
 
 
-def github_blob_url(gh_repo_url: str, path: str, prefix: str = "", branch: str = "master") -> str:
-    """Build a GitHub blob URL for a file path.
+def github_blob_url(
+    gh_repo_url: str,
+    path: str,
+    prefix: str = "",
+    branch: str = "master",
+    is_dir: bool = False,
+) -> str:
+    """Build a GitHub URL for a file or directory path.
 
+    Uses ``/blob/`` for files and ``/tree/`` for directories.
     ``prefix`` is prepended to the path (e.g. for submodule-relative paths).
     ``branch`` defaults to ``"master"``; pass the detected default branch from
     :func:`detect_default_branch` for accurate links.
+    ``is_dir`` should be ``True`` for directory-backed items (plugins, packages,
+    skills) to produce a ``/tree/`` URL instead of the file-only ``/blob/``.
     """
     if not gh_repo_url:
         return ""
     full_path = f"{prefix}/{path}" if prefix else path
-    return f"{gh_repo_url}/blob/{branch}/{full_path}"
+    segment = "tree" if is_dir else "blob"
+    return f"{gh_repo_url}/{segment}/{branch}/{full_path}"
 
 
 def collect_workspace_data(workspace: Path) -> dict:
@@ -340,11 +350,17 @@ def collect_workspace_data(workspace: Path) -> dict:
             gh_repo_url, lesson["path"], prefix="lessons", branch=default_branch
         )
     for plugin in plugins:
-        plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"], branch=default_branch)
+        plugin["gh_url"] = github_blob_url(
+            gh_repo_url, plugin["path"], branch=default_branch, is_dir=True
+        )
     for pkg in packages:
-        pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"], branch=default_branch)
+        pkg["gh_url"] = github_blob_url(
+            gh_repo_url, pkg["path"], branch=default_branch, is_dir=True
+        )
     for skill in skills:
-        skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"], branch=default_branch)
+        skill["gh_url"] = github_blob_url(
+            gh_repo_url, skill["path"], branch=default_branch, is_dir=True
+        )
 
     lesson_categories: dict[str, int] = {}
     for lesson in lessons:

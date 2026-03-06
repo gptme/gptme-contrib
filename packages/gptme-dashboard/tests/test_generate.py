@@ -507,10 +507,16 @@ def test_skill_detail_breadcrumb(workspace: Path, tmp_path: Path):
 # --- GitHub URL detection and linking tests ---
 
 
-def test_github_blob_url():
-    """Test GitHub blob URL construction."""
-    url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo")
-    assert url == "https://github.com/gptme/gptme-contrib/blob/master/plugins/foo"
+def test_github_blob_url_file():
+    """Test GitHub blob URL construction for files."""
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "lessons/workflow/foo.md")
+    assert url == "https://github.com/gptme/gptme-contrib/blob/master/lessons/workflow/foo.md"
+
+
+def test_github_blob_url_dir():
+    """Test GitHub tree URL construction for directories."""
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo", is_dir=True)
+    assert url == "https://github.com/gptme/gptme-contrib/tree/master/plugins/foo"
 
 
 def test_github_blob_url_with_prefix():
@@ -587,7 +593,7 @@ def test_collect_workspace_data_includes_gh_urls(tmp_path: Path):
         "https://github.com/test/repo/blob/master/lessons/"
     )
     assert (
-        data["packages"][0]["gh_url"] == "https://github.com/test/repo/blob/master/packages/mypkg"
+        data["packages"][0]["gh_url"] == "https://github.com/test/repo/tree/master/packages/mypkg"
     )
 
 
@@ -625,13 +631,19 @@ def test_generate_html_includes_github_links(tmp_path: Path):
 
 
 def test_github_blob_url_with_branch():
-    """Test GitHub blob URL respects explicit branch parameter."""
-    url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo", branch="main")
-    assert url == "https://github.com/gptme/gptme-contrib/blob/main/plugins/foo"
-    # Default branch is "master"
-    assert github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo").endswith(
-        "/blob/master/plugins/foo"
+    """Test GitHub URL respects explicit branch parameter."""
+    # File URL uses /blob/
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "lessons/foo.md", branch="main")
+    assert url == "https://github.com/gptme/gptme-contrib/blob/main/lessons/foo.md"
+    # Directory URL uses /tree/
+    url = github_blob_url(
+        "https://github.com/gptme/gptme-contrib", "plugins/foo", branch="main", is_dir=True
     )
+    assert url == "https://github.com/gptme/gptme-contrib/tree/main/plugins/foo"
+    # Default branch is "master"
+    assert github_blob_url(
+        "https://github.com/gptme/gptme-contrib", "plugins/foo", is_dir=True
+    ).endswith("/tree/master/plugins/foo")
 
 
 def test_detect_default_branch_fallback(tmp_path: Path):
