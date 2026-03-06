@@ -1245,6 +1245,7 @@ name = "gptme-sessions"
 version = "0.1.0"
 source = { editable = "packages/gptme-sessions" }
 dependencies = [
+    { name = "click" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
@@ -1259,6 +1260,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },

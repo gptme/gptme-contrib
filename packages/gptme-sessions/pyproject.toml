@@ -21,6 +21,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
+    "click>=8.0",
     "tomli>=1.0; python_version < '3.11'",
 ]
 
