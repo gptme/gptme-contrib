@@ -393,6 +393,18 @@ def github_blob_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
     return f"{gh_repo_url}/blob/HEAD/{full_path}"
 
 
+def github_tree_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
+    """Build a GitHub tree URL for a directory path.
+
+    Use this for directories (plugins, packages, skills).
+    ``prefix`` is prepended to the path.
+    """
+    if not gh_repo_url:
+        return ""
+    full_path = f"{prefix}/{path}" if prefix else path
+    return f"{gh_repo_url}/tree/HEAD/{full_path}"
+
+
 def collect_workspace_data(workspace: Path) -> dict:
     """Collect all workspace data into a dict suitable for JSON export or rendering.
 
@@ -437,13 +449,13 @@ def collect_workspace_data(workspace: Path) -> dict:
                 lesson["gh_url"] = github_blob_url(gh_repo_url, lesson["path"], prefix="lessons")
         for plugin in plugins:
             if not plugin.get("source"):
-                plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"])
+                plugin["gh_url"] = github_tree_url(gh_repo_url, plugin["path"])
         for pkg in packages:
             if not pkg.get("source"):
-                pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"])
+                pkg["gh_url"] = github_tree_url(gh_repo_url, pkg["path"])
         for skill in skills:
             if not skill.get("source"):
-                skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"])
+                skill["gh_url"] = github_tree_url(gh_repo_url, skill["path"])
 
     # Build unified guidance list (lessons + skills together)
     guidance: list[dict] = []

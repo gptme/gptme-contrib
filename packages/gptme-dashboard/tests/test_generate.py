@@ -14,6 +14,7 @@ from gptme_dashboard.generate import (
     generate,
     generate_json,
     github_blob_url,
+    github_tree_url,
     lesson_page_path,
     parse_frontmatter,
     read_workspace_config,
@@ -903,9 +904,9 @@ def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
 
 
 def test_github_blob_url():
-    """Test GitHub blob URL construction."""
-    url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo")
-    assert url == "https://github.com/gptme/gptme-contrib/blob/HEAD/plugins/foo"
+    """Test GitHub blob URL construction for a file path."""
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "lessons/workflow/test.md")
+    assert url == "https://github.com/gptme/gptme-contrib/blob/HEAD/lessons/workflow/test.md"
 
 
 def test_github_blob_url_with_prefix():
@@ -921,6 +922,17 @@ def test_github_blob_url_with_prefix():
 def test_github_blob_url_empty():
     """Test blob URL returns empty when no repo URL."""
     assert github_blob_url("", "some/path") == ""
+
+
+def test_github_tree_url():
+    """Test GitHub tree URL construction for directory paths (plugins, packages, skills)."""
+    url = github_tree_url("https://github.com/gptme/gptme-contrib", "plugins/foo")
+    assert url == "https://github.com/gptme/gptme-contrib/tree/HEAD/plugins/foo"
+
+
+def test_github_tree_url_empty():
+    """Test tree URL returns empty when no repo URL."""
+    assert github_tree_url("", "some/dir") == ""
 
 
 def test_detect_github_url_ssh(tmp_path: Path):
@@ -981,7 +993,7 @@ def test_collect_workspace_data_includes_gh_urls(tmp_path: Path):
     assert data["lessons"][0]["gh_url"].startswith(
         "https://github.com/test/repo/blob/HEAD/lessons/"
     )
-    assert data["packages"][0]["gh_url"] == "https://github.com/test/repo/blob/HEAD/packages/mypkg"
+    assert data["packages"][0]["gh_url"] == "https://github.com/test/repo/tree/HEAD/packages/mypkg"
 
 
 def test_generate_html_includes_github_links(tmp_path: Path):
