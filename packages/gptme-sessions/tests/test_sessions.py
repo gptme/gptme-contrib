@@ -2185,8 +2185,6 @@ def test_post_session_cli_json_output(tmp_path: Path, capsys, monkeypatch):
 # ============================================================
 # Codex CLI format tests
 # ============================================================
-# Codex CLI format tests
-# ============================================================
 
 
 def test_detect_format_codex():

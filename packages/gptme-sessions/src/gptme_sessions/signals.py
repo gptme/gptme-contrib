@@ -500,8 +500,8 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     - event_msg: events (token_count, task lifecycle)
 
     Codex uses exec_command for all tool calls (shell-based). File writes are
-    detected from git commits rather than individual tool names since all
-    operations go through the shell.
+    detected from shell redirect patterns rather than individual tool names
+    since all operations go through the shell.
     """
     tool_calls: dict[str, int] = {}
     error_count = 0
