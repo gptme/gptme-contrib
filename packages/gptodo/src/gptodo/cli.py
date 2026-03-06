@@ -802,7 +802,7 @@ def _show_github_issues(
         github_repo = _detect_github_repo()
         if not github_repo:
             console.print(
-                "[yellow]Could not detect GitHub repo. " "Use --repo owner/name to specify.[/]"
+                "[yellow]Could not detect GitHub repo. Use --repo owner/name to specify.[/]"
             )
             return
 
@@ -840,7 +840,7 @@ def _show_github_issues(
 
         if not compact:
             console.print(
-                f"\n  [dim]Import with: gptodo import --source github " f"--repo {github_repo}[/]"
+                f"\n  [dim]Import with: gptodo import --source github --repo {github_repo}[/]"
             )
     else:
         console.print(
@@ -1300,8 +1300,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
                 console.print(f"  [green]✓ {task_id}[/] - {', '.join(task_changes)}")
         elif verbose:
             console.print(
-                f"[dim][{timestamp}] Check #{iteration}: "
-                f"{resolved} resolved, {pending} pending[/]"
+                f"[dim][{timestamp}] Check #{iteration}: {resolved} resolved, {pending} pending[/]"
             )
 
         if once:
@@ -3621,8 +3620,7 @@ def _execute_task_agent(
             for s in actually_running:
                 console.print(f"  • {s.session_id[:8]} — {s.task_id}")
             console.print(
-                "\nWait for agents to finish, or kill one with: "
-                "[cyan]gptodo kill <session-id>[/]"
+                "\nWait for agents to finish, or kill one with: [cyan]gptodo kill <session-id>[/]"
             )
             return
 

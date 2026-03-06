@@ -127,8 +127,7 @@ class TeamRun(BaseRunLoop):
     def execute(self, prompt: str) -> ExecutionResult:
         """Execute backend with restricted tools for coordinator mode."""
         self.logger.info(
-            f"Starting team coordinator (timeout: {self.timeout}s, "
-            f"tools: {self.tools})"
+            f"Starting team coordinator (timeout: {self.timeout}s, tools: {self.tools})"
         )
 
         result = self.executor.execute(

@@ -445,9 +445,9 @@ def metrics_quality(ctx: click.Context, days: int, json_output: bool) -> None:
     click.echo(f"Total Insights: {len(insights)}")
     click.echo(f"Average Quality: {avg_quality:.2f}")
     click.echo(
-        f"Actionable: {actionable_count} ({actionable_count/len(insights)*100:.1f}%)"
+        f"Actionable: {actionable_count} ({actionable_count / len(insights) * 100:.1f}%)"
     )
-    click.echo(f"Novel: {novel_count} ({novel_count/len(insights)*100:.1f}%)")
+    click.echo(f"Novel: {novel_count} ({novel_count / len(insights) * 100:.1f}%)")
 
     # By category
     by_category: dict[str, list[InsightQuality]] = {}
@@ -732,7 +732,7 @@ def dashboard(ctx: click.Context, json_output: bool) -> None:
         click.echo(f"   Count: {len(insights_7d)}")
         click.echo(f"   Avg Quality: {avg_quality:.2f}")
         click.echo(
-            f"   Actionable: {actionable} ({actionable/len(insights_7d)*100:.0f}%)"
+            f"   Actionable: {actionable} ({actionable / len(insights_7d) * 100:.0f}%)"
         )
     else:
         click.echo("   No insights in last 7 days")

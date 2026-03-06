@@ -529,9 +529,7 @@ class QueueGenerator:
 
         all_tasks = file_tasks + github_issues
 
-        print(
-            f"Found {len(file_tasks)} tasks from files, " f"{len(github_issues)} from GitHub issues"
-        )
+        print(f"Found {len(file_tasks)} tasks from files, {len(github_issues)} from GitHub issues")
 
         # Filter out blocked tasks (unmet dependencies)
         all_tasks = self.filter_blocked_tasks(all_tasks)
