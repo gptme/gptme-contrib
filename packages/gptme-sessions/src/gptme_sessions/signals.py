@@ -764,40 +764,72 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
     return result
 
 
-def infer_category(signals: dict) -> str | None:
-    """Infer work category from commit messages and file writes.
+def _extract_committed_files(git_commits: list[str]) -> list[str]:
+    """Extract file paths changed in commits by running git diff-tree.
 
-    Analyzes conventional commit prefixes (feat, fix, docs, ci, etc.),
-    commit scopes, and file paths to classify what kind of work a session did.
+    Parses commit SHAs from the git_commits list (format: "message (sha)")
+    and returns all unique file paths changed across those commits.
+    Returns empty list if git is unavailable or SHAs can't be resolved.
+    """
+    import subprocess
+
+    shas = []
+    for entry in git_commits:
+        # Extract SHA from "commit message (abc1234)" format
+        m = re.search(r"\(([0-9a-f]{7,40})\)\s*$", entry)
+        if m:
+            shas.append(m.group(1))
+
+    files: list[str] = []
+    for sha in shas:
+        try:
+            result = subprocess.run(
+                ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().splitlines():
+                    if line:
+                        files.append(line)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            break  # git not available or too slow
+    return files
+
+
+def infer_category(signals: dict) -> str | None:
+    """Infer work category from commit messages, committed files, and file writes.
+
+    Uses three signal sources:
+    - Conventional commit prefixes and scopes from commit messages
+    - File paths changed in commits (via git diff-tree)
+    - File paths written by tools during the session
 
     Returns a category string or None if insufficient signal (< 2 votes).
     """
     commits = signals.get("git_commits", [])
     file_writes = signals.get("file_writes", [])
 
-    # Filter out bookkeeping commits — operational overhead, not the actual work.
-    # Only specific (prefix, scope) pairs are noise; the scope alone isn't.
-    # e.g. "chore(sessions): record session" is noise, but
-    #      "feat(sessions): add post-session hook" is real work.
-    _NOISE_PAIRS = {
+    # Get actual files changed in commits
+    committed_files = _extract_committed_files(commits)
+
+    # (prefix, scope) pairs where the prefix vote is suppressed — the prefix
+    # is misleading for these. e.g. "docs(journal)" isn't content work,
+    # "chore(submodule)" isn't meaningful. But "feat(sessions)" IS real work.
+    _SUPPRESS_PREFIX_PAIRS = {
         ("chore", "sessions"),
         ("chore", "submodule"),
         ("chore", "submodules"),
         ("docs", "journal"),
     }
 
-    def _is_noise(commit_msg: str) -> bool:
-        scope_m = re.match(r"(\w+)\(([^)]+)\)", commit_msg)
-        if not scope_m:
-            return False
-        prefix, scope = scope_m.group(1).lower(), scope_m.group(2).lower()
-        return (prefix, scope) in _NOISE_PAIRS
-
-    commits = [c for c in commits if not _is_noise(c)]
-
-    # Count commit prefix signals
+    # Count commit prefix signals (skip when prefix+scope pair is suppressed)
     prefix_counts: dict[str, int] = {}
     for commit in commits:
+        m = re.match(r"(\w+)\(([^)]+)\)", commit)
+        if m and (m.group(1).lower(), m.group(2).lower()) in _SUPPRESS_PREFIX_PAIRS:
+            continue
         # Extract conventional commit prefix: "type(scope): msg (sha)"
         m = re.match(r"(feat|fix|refactor|perf|test|ci|build|docs|style)\b", commit)
         if m:
@@ -817,22 +849,29 @@ def infer_category(signals: dict) -> str | None:
 
         return bool(_re.search(r"(^|/)" + _re.escape(segment) + r"(/|$)", p))
 
-    # Path-based signals
+    # Path-based signals from tool writes + committed files
+    # Committed files are ground truth — weight them higher than tool writes
+    all_paths: list[tuple[str, int]] = []
+    for p in file_writes:
+        all_paths.append((p, 1))
+    for p in committed_files:
+        all_paths.append((p, 2))  # committed files are stronger signal
+
     path_signals: dict[str, int] = {}
-    for path in file_writes:
+    for path, weight in all_paths:
         p = path.lower()
         if _dir_in_path("lesson", p) or _dir_in_path("lessons", p) or _dir_in_path("patterns", p):
-            path_signals["knowledge"] = path_signals.get("knowledge", 0) + 1
+            path_signals["knowledge"] = path_signals.get("knowledge", 0) + weight
         elif _dir_in_path("test", p) or _dir_in_path("tests", p) or "_test." in p or "test_" in p:
-            path_signals["code"] = path_signals.get("code", 0) + 1
-        elif _dir_in_path("scripts", p) or _dir_in_path("hooks", p) or "ci" in p.split("/"):
-            path_signals["infrastructure"] = path_signals.get("infrastructure", 0) + 1
-        elif (
-            _dir_in_path("journal", p) or _dir_in_path("standup", p) or _dir_in_path("standups", p)
-        ):
-            path_signals["coordination"] = path_signals.get("coordination", 0) + 1
+            path_signals["code"] = path_signals.get("code", 0) + weight
+        elif _dir_in_path("scripts", p) or _dir_in_path("hooks", p) or _dir_in_path("ci", p):
+            path_signals["infrastructure"] = path_signals.get("infrastructure", 0) + weight
+        elif _dir_in_path("standup", p) or _dir_in_path("standups", p):
+            path_signals["coordination"] = path_signals.get("coordination", 0) + weight
         elif _dir_in_path("tasks", p):
-            path_signals["triage"] = path_signals.get("triage", 0) + 1
+            path_signals["triage"] = path_signals.get("triage", 0) + weight
+        elif p.endswith((".py", ".sh", ".ts", ".js", ".rs", ".go")):
+            path_signals["code"] = path_signals.get("code", 0) + weight
 
     # Map commit prefixes → categories
     prefix_to_category = {
@@ -854,7 +893,6 @@ def infer_category(signals: dict) -> str | None:
         "tasks": "triage",
         "standup": "coordination",
         "orchestration": "coordination",
-        "sessions": "coordination",
         "scripts": "infrastructure",
         "hooks": "infrastructure",
         "ci": "infrastructure",

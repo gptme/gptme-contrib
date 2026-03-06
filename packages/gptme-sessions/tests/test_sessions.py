@@ -3207,13 +3207,13 @@ def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
             },
             "knowledge",
         ),
-        # Relative path for journal → coordination
+        # Journal-only writes — not classifiable (operational chore, not a work category)
         (
             {
                 "git_commits": [],
                 "file_writes": ["journal/2026-03-06/session.md", "journal/2026-03-06/work.md"],
             },
-            "coordination",
+            None,
         ),
     ],
 )
