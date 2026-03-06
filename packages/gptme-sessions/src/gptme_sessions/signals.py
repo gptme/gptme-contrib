@@ -784,7 +784,6 @@ def infer_category(signals: dict) -> str | None:
         ("chore", "submodule"),
         ("chore", "submodules"),
         ("docs", "journal"),
-        ("docs", "settlement"),
     }
 
     def _is_noise(commit_msg: str) -> bool:
