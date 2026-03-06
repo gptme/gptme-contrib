@@ -41,6 +41,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, List
 
+import click
+
 
 @dataclass
 class InsightMetadata:
@@ -432,63 +434,75 @@ class InsightStorage:
         }
 
 
+@click.group()
 def main():
-    """CLI interface for insight storage."""
-    import argparse
+    """ACE Insight Storage System."""
 
-    parser = argparse.ArgumentParser(description="ACE Insight Storage System")
-    parser.add_argument("command", choices=["list", "show", "stats", "update-status"])
-    parser.add_argument("--agent", choices=["raw", "refined"], default="raw")
-    parser.add_argument("--id", help="Insight ID")
-    parser.add_argument("--status", help="Filter by status")
-    parser.add_argument("--category", help="Filter by category")
-    parser.add_argument("--new-status", help="New status for update")
-    parser.add_argument("--reviewer", help="Reviewer name")
 
-    args = parser.parse_args()
-
+@main.command("list")
+@click.option(
+    "--agent", type=click.Choice(["raw", "refined"]), default="raw", help="Source agent"
+)
+@click.option("--status", default=None, help="Filter by status")
+@click.option("--category", default=None, help="Filter by category")
+def list_cmd(agent: str, status: str | None, category: str | None) -> None:
+    """List stored insights."""
     storage = InsightStorage()
+    insights = storage.list_insights(
+        source_agent=agent, status=status, category=category
+    )
+    print(f"Found {len(insights)} insights:")
+    for insight in insights:
+        print(f"  {insight['insight_id']}: {insight['title']}")
+        print(f"    Category: {insight['category']}, Status: {insight['status']}")
+        print(f"    Created: {insight['created_at']}")
+        print()
 
-    if args.command == "list":
-        insights = storage.list_insights(
-            source_agent=args.agent, status=args.status, category=args.category
-        )
-        print(f"Found {len(insights)} insights:")
-        for insight in insights:
-            print(f"  {insight['insight_id']}: {insight['title']}")
-            print(f"    Category: {insight['category']}, Status: {insight['status']}")
-            print(f"    Created: {insight['created_at']}")
-            print()
 
-    elif args.command == "show":
-        if not args.id:
-            print("Error: --id required for show command")
-            return
-        maybe_insight = storage.get_insight(args.id, args.agent)
-        if maybe_insight is not None:
-            print(json.dumps(asdict(maybe_insight), indent=2))
-        else:
-            print(f"Insight {args.id} not found")
+@main.command()
+@click.option("--id", "insight_id", required=True, help="Insight ID")
+@click.option(
+    "--agent", type=click.Choice(["raw", "refined"]), default="raw", help="Source agent"
+)
+def show(insight_id: str, agent: str) -> None:
+    """Show a specific insight."""
+    storage = InsightStorage()
+    maybe_insight = storage.get_insight(insight_id, agent)
+    if maybe_insight is not None:
+        print(json.dumps(asdict(maybe_insight), indent=2))
+    else:
+        print(f"Insight {insight_id} not found")
 
-    elif args.command == "stats":
-        stats = storage.get_statistics()
-        print("Storage Statistics:")
-        print(f"  Total insights: {stats['total_insights']}")
-        print("  By agent:")
-        for agent, count in stats["by_agent"].items():
-            print(f"    {agent}: {count}")
-        print("  By status:")
-        for status, count in stats["by_status"].items():
-            print(f"    {status}: {count}")
 
-    elif args.command == "update-status":
-        if not args.id or not args.new_status:
-            print("Error: --id and --new-status required")
-            return
-        storage.update_status(
-            args.id, args.agent, args.new_status, reviewer=args.reviewer
-        )
-        print(f"Updated {args.id} to status: {args.new_status}")
+@main.command()
+def stats() -> None:
+    """Show storage statistics."""
+    storage = InsightStorage()
+    st = storage.get_statistics()
+    print("Storage Statistics:")
+    print(f"  Total insights: {st['total_insights']}")
+    print("  By agent:")
+    for agent, count in st["by_agent"].items():
+        print(f"    {agent}: {count}")
+    print("  By status:")
+    for status_name, count in st["by_status"].items():
+        print(f"    {status_name}: {count}")
+
+
+@main.command("update-status")
+@click.option("--id", "insight_id", required=True, help="Insight ID")
+@click.option(
+    "--agent", type=click.Choice(["raw", "refined"]), default="raw", help="Source agent"
+)
+@click.option("--new-status", required=True, help="New status")
+@click.option("--reviewer", default=None, help="Reviewer name")
+def update_status_cmd(
+    insight_id: str, agent: str, new_status: str, reviewer: str | None
+) -> None:
+    """Update insight status."""
+    storage = InsightStorage()
+    storage.update_status(insight_id, agent, new_status, reviewer=reviewer)
+    print(f"Updated {insight_id} to status: {new_status}")
 
 
 if __name__ == "__main__":

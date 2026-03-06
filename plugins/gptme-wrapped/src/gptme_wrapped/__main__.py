@@ -12,59 +12,62 @@ Commands:
     export      Export to file (json/csv/html)
 """
 
-import argparse
 import json
 
+import click
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="gptme Wrapped - Year-end analytics for your gptme usage",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    python -m gptme_wrapped                    # Show 2025 report
-    python -m gptme_wrapped report 2024        # Show 2024 report
-    python -m gptme_wrapped heatmap            # Show activity heatmap
-    python -m gptme_wrapped stats              # Raw stats as JSON
-    python -m gptme_wrapped export --format html > wrapped.html
-        """,
-    )
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default="report",
-        choices=["report", "stats", "heatmap", "export"],
-        help="Command to run (default: report)",
-    )
-    parser.add_argument(
-        "year",
-        nargs="?",
-        type=int,
-        default=None,
-        help="Year to analyze (default: current year)",
-    )
-    parser.add_argument(
-        "--format",
-        "-f",
-        choices=["json", "csv", "html"],
-        default="json",
-        help="Export format (for export command)",
-    )
 
-    args = parser.parse_args()
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx: click.Context) -> None:
+    """gptme Wrapped - Year-end analytics for your gptme usage."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(report)
 
-    # Import here to avoid slow startup for --help
-    from .tools import wrapped_export, wrapped_heatmap, wrapped_report, wrapped_stats
 
-    if args.command == "report":
-        print(wrapped_report(args.year))
-    elif args.command == "heatmap":
-        print(wrapped_heatmap(args.year))
-    elif args.command == "stats":
-        stats = wrapped_stats(args.year)
-        print(json.dumps(stats, indent=2, default=str))
-    elif args.command == "export":
-        print(wrapped_export(args.year, format=args.format))
+@main.command()
+@click.argument("year", type=int, required=False, default=None)
+def report(year: int | None) -> None:
+    """Show the wrapped report."""
+    from .tools import wrapped_report
+
+    print(wrapped_report(year))
+
+
+@main.command()
+@click.argument("year", type=int, required=False, default=None)
+def stats(year: int | None) -> None:
+    """Show raw statistics as JSON."""
+    from .tools import wrapped_stats
+
+    result = wrapped_stats(year)
+    print(json.dumps(result, indent=2, default=str))
+
+
+@main.command()
+@click.argument("year", type=int, required=False, default=None)
+def heatmap(year: int | None) -> None:
+    """Show activity heatmap."""
+    from .tools import wrapped_heatmap
+
+    print(wrapped_heatmap(year))
+
+
+@main.command()
+@click.argument("year", type=int, required=False, default=None)
+@click.option(
+    "--format",
+    "-f",
+    "fmt",
+    type=click.Choice(["json", "csv", "html"]),
+    default="json",
+    help="Export format",
+)
+def export(year: int | None, fmt: str) -> None:
+    """Export to file (json/csv/html)."""
+    from .tools import wrapped_export
+
+    print(wrapped_export(year, format=fmt))
 
 
 if __name__ == "__main__":

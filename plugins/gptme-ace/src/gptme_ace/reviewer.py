@@ -18,11 +18,12 @@ Usage:
 
 import json
 import logging
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+
+import click
 
 logger = logging.getLogger(__name__)
 
@@ -564,99 +565,78 @@ class DeltaReviewer:
         }
 
 
+@click.group()
 def main():
-    """CLI entry point"""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="ACE Reviewer - Review and evaluate pending deltas"
-    )
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
-
-    # Review command
-    review_parser = subparsers.add_parser("review", help="Review a single delta")
-    review_parser.add_argument("--delta-id", required=True, help="Delta ID to review")
-    review_parser.add_argument(
-        "--reviewer", default="ace_reviewer", help="Reviewer name"
-    )
-    review_parser.add_argument(
-        "--auto-approve",
-        action="store_true",
-        help="Automatically approve/reject based on score",
-    )
-
-    # Batch command
-    batch_parser = subparsers.add_parser("batch", help="Review all pending deltas")
-    batch_parser.add_argument("--all", action="store_true", help="Review all pending")
-    batch_parser.add_argument(
-        "--auto-approve",
-        action="store_true",
-        help="Automatically approve/reject based on score",
-    )
-    batch_parser.add_argument(
-        "--reviewer", default="ace_reviewer", help="Reviewer name"
-    )
-
-    # Status command
-    subparsers.add_parser("status", help="Show delta status summary")
-
-    # Approve command
-    approve_parser = subparsers.add_parser("approve", help="Manually approve a delta")
-    approve_parser.add_argument("--delta-id", required=True, help="Delta ID to approve")
-
-    # Reject command
-    reject_parser = subparsers.add_parser("reject", help="Manually reject a delta")
-    reject_parser.add_argument("--delta-id", required=True, help="Delta ID to reject")
-    reject_parser.add_argument("--reason", default="", help="Rejection reason")
-
-    args = parser.parse_args()
-
+    """ACE Reviewer - Review and evaluate pending deltas."""
     logging.basicConfig(level=logging.INFO)
 
-    reviewer = DeltaReviewer(auto_approve=getattr(args, "auto_approve", False))
 
-    if args.command == "review":
-        result = reviewer.review_and_process(args.delta_id, reviewer_name=args.reviewer)
-        print(f"\n{result.summary}")
-        print(f"Decision: {result.decision.value.upper()}")
-        print(f"Score: {result.overall_score:.1%}")
-        if result.suggestions:
-            print("\nSuggestions:")
-            for s in result.suggestions:
-                print(f"  - {s}")
+@main.command()
+@click.option("--delta-id", required=True, help="Delta ID to review")
+@click.option("--reviewer", default="ace_reviewer", help="Reviewer name")
+@click.option(
+    "--auto-approve", is_flag=True, help="Automatically approve/reject based on score"
+)
+def review(delta_id: str, reviewer: str, auto_approve: bool) -> None:
+    """Review a single delta."""
+    rev = DeltaReviewer(auto_approve=auto_approve)
+    result = rev.review_and_process(delta_id, reviewer_name=reviewer)
+    print(f"\n{result.summary}")
+    print(f"Decision: {result.decision.value.upper()}")
+    print(f"Score: {result.overall_score:.1%}")
+    if result.suggestions:
+        print("\nSuggestions:")
+        for s in result.suggestions:
+            print(f"  - {s}")
 
-    elif args.command == "batch":
-        if not args.all:
-            print(
-                "Error: batch command requires --all flag to review all pending deltas"
-            )
-            print("This prevents accidental batch operations.")
-            print("Use: python -m gptme_ace.reviewer batch --all")
-            sys.exit(1)
-        results = reviewer.batch_review(reviewer_name=args.reviewer)
-        print(f"\nReviewed {len(results)} deltas:")
-        for r in results:
-            print(f"  {r.delta_id}: {r.decision.value} ({r.overall_score:.1%})")
 
-    elif args.command == "status":
-        status = reviewer.get_status()
-        print("\nDelta Status:")
-        print(f"  Pending:  {status['pending']}")
-        print(f"  Approved: {status['approved']}")
-        print(f"  Rejected: {status['rejected']}")
-        print(f"  Applied:  {status['applied']}")
-        print(f"  Reviews:  {status['total_reviews']}")
+@main.command()
+@click.option(
+    "--all", "review_all", is_flag=True, required=True, help="Review all pending"
+)
+@click.option(
+    "--auto-approve", is_flag=True, help="Automatically approve/reject based on score"
+)
+@click.option("--reviewer", default="ace_reviewer", help="Reviewer name")
+def batch(review_all: bool, auto_approve: bool, reviewer: str) -> None:
+    """Review all pending deltas."""
+    rev = DeltaReviewer(auto_approve=auto_approve)
+    results = rev.batch_review(reviewer_name=reviewer)
+    print(f"\nReviewed {len(results)} deltas:")
+    for r in results:
+        print(f"  {r.delta_id}: {r.decision.value} ({r.overall_score:.1%})")
 
-    elif args.command == "approve":
-        reviewer.move_to_approved(args.delta_id)
-        print(f"Approved delta {args.delta_id}")
 
-    elif args.command == "reject":
-        reviewer.move_to_rejected(args.delta_id, args.reason)
-        print(f"Rejected delta {args.delta_id}")
+@main.command()
+def status() -> None:
+    """Show delta status summary."""
+    rev = DeltaReviewer()
+    st = rev.get_status()
+    print("\nDelta Status:")
+    print(f"  Pending:  {st['pending']}")
+    print(f"  Approved: {st['approved']}")
+    print(f"  Rejected: {st['rejected']}")
+    print(f"  Applied:  {st['applied']}")
+    print(f"  Reviews:  {st['total_reviews']}")
 
-    else:
-        parser.print_help()
+
+@main.command()
+@click.option("--delta-id", required=True, help="Delta ID to approve")
+def approve(delta_id: str) -> None:
+    """Manually approve a delta."""
+    rev = DeltaReviewer()
+    rev.move_to_approved(delta_id)
+    print(f"Approved delta {delta_id}")
+
+
+@main.command()
+@click.option("--delta-id", required=True, help="Delta ID to reject")
+@click.option("--reason", default="", help="Rejection reason")
+def reject(delta_id: str, reason: str) -> None:
+    """Manually reject a delta."""
+    rev = DeltaReviewer()
+    rev.move_to_rejected(delta_id, reason)
+    print(f"Rejected delta {delta_id}")
 
 
 if __name__ == "__main__":
