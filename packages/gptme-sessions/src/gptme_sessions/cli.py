@@ -150,7 +150,11 @@ def main() -> int:
     )
     ps_parser.add_argument(
         "--category",
-        help="Recommended work category from selector (e.g. Thompson sampling). Actual category is inferred from trajectory.",
+        help="Work category (e.g. code, infrastructure). Overrides inference from trajectory.",
+    )
+    ps_parser.add_argument(
+        "--recommended-category",
+        help="Category recommended by selector (e.g. Thompson sampling), before the session ran.",
     )
     ps_parser.add_argument(
         "--exit-code",
@@ -365,7 +369,8 @@ def main() -> int:
             model=args.model,
             run_type=args.run_type,
             trigger=args.trigger,
-            recommended_category=args.category,
+            category=args.category,
+            recommended_category=getattr(args, "recommended_category", None),
             exit_code=args.exit_code,
             duration_seconds=args.duration,
             trajectory_path=args.trajectory,
