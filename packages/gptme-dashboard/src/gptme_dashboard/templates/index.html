@@ -86,6 +86,7 @@ tr:hover { background: var(--accent-dim); }
 }
 .tag-active { border-color: var(--green); color: var(--green); }
 .tag-deprecated { border-color: var(--orange); color: var(--orange); }
+.tag-medium { border-color: var(--orange); color: var(--orange); }
 .tag-category { border-color: var(--purple); color: var(--purple); }
 .tag-kind-lesson { border-color: var(--accent); color: var(--accent); }
 .tag-kind-skill { border-color: var(--cyan); color: var(--cyan); }
@@ -316,7 +317,7 @@ tr:hover { background: var(--accent-dim); }
         <td>{{ s.edits }}</td>
         <td>{{ s.errors }}</td>
         <td>
-          <span class="tag {% if s.grade >= 0.7 %}tag-active{% elif s.grade >= 0.4 %}tag-deprecated{% endif %}">
+          <span class="tag {% if s.grade >= 0.7 %}tag-active{% elif s.grade >= 0.4 %}tag-medium{% endif %}">
             {{ "%.2f"|format(s.grade) }}
           </span>
         </td>

@@ -169,6 +169,11 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
         )
         from gptme_sessions.signals import extract_from_path
     except ImportError:
+        print(
+            "warning: --sessions requested but gptme-sessions is not installed; "
+            "install it with: pip install gptme-dashboard[sessions]",
+            file=sys.stderr,
+        )
         return []
 
     end = date.today()
@@ -200,10 +205,16 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
         except Exception:
             signals = {}
 
+        date_str = session_dir.name[:10]
+        try:
+            date.fromisoformat(date_str)
+        except ValueError:
+            continue  # Directory name doesn't start with a valid ISO date — skip
+
         sessions.append(
             {
                 "name": session_dir.name,
-                "date": session_dir.name[:10],
+                "date": date_str,
                 "harness": "gptme",
                 "commits": len(signals.get("git_commits", [])),
                 "edits": len(set(signals.get("file_writes", []))),

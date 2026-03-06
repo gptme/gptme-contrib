@@ -25,6 +25,9 @@ Repository = "https://github.com/gptme/gptme-contrib"
 Issues = "https://github.com/gptme/gptme-contrib/issues"
 
 [project.optional-dependencies]
+sessions = [
+    "gptme-sessions",
+]
 dev = [
     "mypy>=1.0.0",
     "pytest>=7.0",

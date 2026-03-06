@@ -1065,6 +1065,9 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
 ]
+sessions = [
+    { name = "gptme-sessions" },
+]
 test = [
     { name = "gptme-sessions" },
     { name = "pytest" },
@@ -1074,6 +1077,7 @@ test = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "gptme-sessions", marker = "extra == 'sessions'", editable = "packages/gptme-sessions" },
     { name = "gptme-sessions", marker = "extra == 'test'", editable = "packages/gptme-sessions" },
     { name = "jinja2", specifier = ">=3.0" },
     { name = "markdown", specifier = ">=3.4" },
@@ -1083,7 +1087,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
-provides-extras = ["dev", "test"]
+provides-extras = ["sessions", "dev", "test"]
 
 [[package]]
 name = "gptme-gptodo"
