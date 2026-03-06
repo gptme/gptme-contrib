@@ -79,7 +79,7 @@ jobs:
   # Test each package in parallel
   test:
     needs: discover
-    if: needs.discover.outputs.packages != '[]'
+    if: needs.discover.result == 'success' && needs.discover.outputs.packages != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

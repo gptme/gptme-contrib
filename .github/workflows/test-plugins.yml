@@ -76,7 +76,7 @@ jobs:
   # Test each plugin in parallel
   test:
     needs: discover
-    if: needs.discover.outputs.plugins != '[]'
+    if: needs.discover.result == 'success' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
