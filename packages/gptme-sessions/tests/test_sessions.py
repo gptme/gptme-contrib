@@ -2828,11 +2828,20 @@ def test_extract_signals_codex_comparison_operators_excluded():
                 "arguments": {"cmd": "echo 'usage >=60%' | tee /tmp/report.txt"},
             },
         },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c3",
+                "arguments": {"cmd": "python3 -c 'if x >= threshold: pass'"},
+            },
+        },
     ]
     signals = extract_signals_codex(msgs)
-    # >=2 and >= should NOT be treated as file redirects
+    # >=2, >= threshold, and >=60% should NOT be treated as file redirects
     assert "=2" not in signals["file_writes"]
-    assert "=" not in signals["file_writes"]
+    assert "=" not in signals["file_writes"]  # standalone >= e.g. `if x >= threshold`
     assert "=60%" not in signals["file_writes"]
     # But real file writes should still work
     assert "/tmp/report.txt" in signals["file_writes"]
