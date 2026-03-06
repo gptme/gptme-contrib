@@ -253,7 +253,7 @@ def main() -> int:
         print(f"Grade: {result['grade']:.4f}")
         inferred = result.get("inferred_category")
         if inferred:
-            print(f"Category: {inferred}")
+            print(f"Inferred category: {inferred}")
         if result.get("usage"):
             u = result["usage"]
             if "total_tokens" in u:

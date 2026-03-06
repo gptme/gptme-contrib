@@ -811,19 +811,27 @@ def infer_category(signals: dict) -> str | None:
             scope = m.group(1).lower()
             scope_counts[scope] = scope_counts.get(scope, 0) + 1
 
+    def _dir_in_path(segment: str, p: str) -> bool:
+        """True if `segment` appears as a directory component in path `p`."""
+        import re as _re
+
+        return bool(_re.search(r"(^|/)" + _re.escape(segment) + r"(/|$)", p))
+
     # Path-based signals
     path_signals: dict[str, int] = {}
     for path in file_writes:
         p = path.lower()
-        if "/lesson" in p or "/patterns/" in p:
+        if _dir_in_path("lesson", p) or _dir_in_path("lessons", p) or _dir_in_path("patterns", p):
             path_signals["knowledge"] = path_signals.get("knowledge", 0) + 1
-        elif "/test" in p or "_test." in p or "test_" in p:
+        elif _dir_in_path("test", p) or _dir_in_path("tests", p) or "_test." in p or "test_" in p:
             path_signals["code"] = path_signals.get("code", 0) + 1
-        elif "/scripts/" in p or "/hooks/" in p or "ci" in p.split("/"):
+        elif _dir_in_path("scripts", p) or _dir_in_path("hooks", p) or "ci" in p.split("/"):
             path_signals["infrastructure"] = path_signals.get("infrastructure", 0) + 1
-        elif "/journal/" in p or "/standup" in p:
+        elif (
+            _dir_in_path("journal", p) or _dir_in_path("standup", p) or _dir_in_path("standups", p)
+        ):
             path_signals["coordination"] = path_signals.get("coordination", 0) + 1
-        elif "/tasks/" in p:
+        elif _dir_in_path("tasks", p):
             path_signals["triage"] = path_signals.get("triage", 0) + 1
 
     # Map commit prefixes → categories
