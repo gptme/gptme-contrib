@@ -24,6 +24,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import click
+
 from .curator import Delta, DeltaOperation
 
 logger = logging.getLogger(__name__)
@@ -423,63 +425,52 @@ class DeltaApplier:
         return results
 
 
+@click.group()
 def main():
-    """CLI entry point for the Applier"""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="ACE Delta Applier")
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
-
-    # Apply single delta
-    apply_parser = subparsers.add_parser("apply", help="Apply a single delta")
-    apply_parser.add_argument("--delta-id", required=True, help="Delta ID to apply")
-    apply_parser.add_argument("--lessons-dir", type=Path, help="Lessons directory")
-    apply_parser.add_argument(
-        "--dry-run", action="store_true", help="Show what would happen"
-    )
-
-    # Batch apply all approved
-    batch_parser = subparsers.add_parser("batch", help="Apply all approved deltas")
-    batch_parser.add_argument("--lessons-dir", type=Path, help="Lessons directory")
-    batch_parser.add_argument(
-        "--dry-run", action="store_true", help="Show what would happen"
-    )
-
-    # List status
-    _ = subparsers.add_parser("status", help="Show delta status")
-
-    args = parser.parse_args()
-
+    """ACE Delta Applier."""
     logging.basicConfig(level=logging.INFO)
 
-    if args.command == "apply":
-        applier = DeltaApplier(
-            lessons_dir=args.lessons_dir,
-            dry_run=args.dry_run,
-        )
-        delta = applier.load_delta(args.delta_id)
-        result = applier.apply_delta(delta)
-        print(json.dumps(result, indent=2))
 
-    elif args.command == "batch":
-        applier = DeltaApplier(
-            lessons_dir=args.lessons_dir,
-            dry_run=args.dry_run,
-        )
-        results = applier.apply_all_approved()
-        print(json.dumps(results, indent=2))
+@main.command()
+@click.option("--delta-id", required=True, help="Delta ID to apply")
+@click.option(
+    "--lessons-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Lessons directory",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would happen")
+def apply(delta_id: str, lessons_dir: Path | None, dry_run: bool) -> None:
+    """Apply a single delta."""
+    applier = DeltaApplier(lessons_dir=lessons_dir, dry_run=dry_run)
+    delta = applier.load_delta(delta_id)
+    result = applier.apply_delta(delta)
+    print(json.dumps(result, indent=2))
 
-    elif args.command == "status":
-        applier = DeltaApplier()
-        deltas = applier.list_approved_deltas()
-        print(f"Approved deltas ready to apply: {len(deltas)}")
-        for delta in deltas:
-            print(
-                f"  - {delta.delta_id}: {delta.lesson_id} ({len(delta.operations)} ops)"
-            )
 
-    else:
-        parser.print_help()
+@main.command()
+@click.option(
+    "--lessons-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Lessons directory",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would happen")
+def batch(lessons_dir: Path | None, dry_run: bool) -> None:
+    """Apply all approved deltas."""
+    applier = DeltaApplier(lessons_dir=lessons_dir, dry_run=dry_run)
+    results = applier.apply_all_approved()
+    print(json.dumps(results, indent=2))
+
+
+@main.command()
+def status() -> None:
+    """Show delta status."""
+    applier = DeltaApplier()
+    deltas = applier.list_approved_deltas()
+    print(f"Approved deltas ready to apply: {len(deltas)}")
+    for delta in deltas:
+        print(f"  - {delta.delta_id}: {delta.lesson_id} ({len(delta.operations)} ops)")
 
 
 if __name__ == "__main__":

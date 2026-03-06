@@ -1384,6 +1384,7 @@ name = "gptme-wrapped"
 version = "0.1.0"
 source = { editable = "plugins/gptme-wrapped" }
 dependencies = [
+    { name = "click" },
     { name = "gptme" },
 ]
 
@@ -1394,6 +1395,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
 ]

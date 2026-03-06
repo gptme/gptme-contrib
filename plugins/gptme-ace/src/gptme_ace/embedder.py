@@ -11,14 +11,15 @@ Uses Sentence-BERT for local, free, fast embeddings.
 FAISS for efficient vector search (with numpy fallback).
 """
 
-import argparse
 import hashlib
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import click
 import numpy as np
 
 try:
@@ -1164,246 +1165,196 @@ class LessonEmbedder:
         print()
 
 
+@click.group()
 def main():
-    parser = argparse.ArgumentParser(description="ACE Lesson Embedding System")
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    """ACE Lesson Embedding System."""
 
-    # Generate command
-    gen_parser = subparsers.add_parser(
-        "generate", help="Generate embeddings for all lessons"
-    )
-    gen_parser.add_argument(
-        "--force", action="store_true", help="Regenerate even if unchanged"
-    )
 
-    # Update command
-    subparsers.add_parser("update", help="Update embeddings for changed lessons")
+@main.command()
+@click.option("--force", is_flag=True, help="Regenerate even if unchanged")
+def generate(force: bool) -> None:
+    """Generate embeddings for all lessons."""
+    embedder = LessonEmbedder()
+    embedder.generate_all(force=force)
 
-    # Rebuild command
-    subparsers.add_parser("rebuild", help="Rebuild index from scratch")
 
-    # Similar command
-    sim_parser = subparsers.add_parser("similar", help="Find similar lessons")
-    sim_parser.add_argument(
-        "--lesson-id", required=True, help="Lesson ID to find similar to"
-    )
-    sim_parser.add_argument("--top-k", type=int, default=5, help="Number of results")
+@main.command()
+def update() -> None:
+    """Update embeddings for changed lessons."""
+    embedder = LessonEmbedder()
+    embedder.update_changed()
 
-    # Search command
-    search_parser = subparsers.add_parser("search", help="Semantic search")
-    search_parser.add_argument("query", help="Search query")
-    search_parser.add_argument("--top-k", type=int, default=5, help="Number of results")
 
-    # List command
-    subparsers.add_parser("list", help="List all embedded lessons")
+@main.command()
+def rebuild() -> None:
+    """Rebuild index from scratch."""
+    embedder = LessonEmbedder()
+    embedder.rebuild_index()
 
-    # Duplicates command
-    dup_parser = subparsers.add_parser(
-        "duplicates", help="Find potential duplicate lessons"
-    )
-    dup_parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.70,
-        help="Similarity threshold for duplicates (default: 0.70)",
-    )
-    dup_parser.add_argument(
-        "--min-similarity",
-        type=float,
-        default=0.7,
-        help="Minimum similarity to report (default: 0.7)",
-    )
 
-    # Cluster command
-    cluster_parser = subparsers.add_parser(
-        "cluster", help="Cluster lessons by similarity"
-    )
-    cluster_parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.7,
-        help="Similarity threshold for clustering (default: 0.7)",
-    )
+@main.command()
+@click.option("--lesson-id", required=True, help="Lesson ID to find similar to")
+@click.option("--top-k", type=int, default=5, help="Number of results")
+def similar(lesson_id: str, top_k: int) -> None:
+    """Find similar lessons."""
+    embedder = LessonEmbedder()
+    results = embedder.find_similar(lesson_id, top_k)
+    if results:
+        print(f"\nTop {len(results)} similar lessons to '{lesson_id}':\n")
+        for lid, similarity in results:
+            meta = embedder.metadata[lid]
+            print(f"  {lid}")
+            print(f"    Similarity: {similarity:.3f}")
+            print(f"    Path: {meta['path']}\n")
 
-    # Phase 4.3: Deduplication workflow commands
-    # Check-new command
-    check_parser = subparsers.add_parser(
-        "check-new", help="Check if new lesson text is too similar to existing lessons"
-    )
-    check_parser.add_argument("file", help="Path to new lesson file or '-' for stdin")
-    check_parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.55,
-        help="Similarity threshold (default: 0.55)",
-    )
 
-    # Suggest-merges command
-    merge_parser = subparsers.add_parser(
-        "suggest-merges", help="Suggest merging duplicate lessons"
-    )
-    merge_parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.55,
-        help="Similarity threshold for merge suggestions (default: 0.55)",
-    )
+@main.command()
+@click.argument("query")
+@click.option("--top-k", type=int, default=5, help="Number of results")
+def search(query: str, top_k: int) -> None:
+    """Semantic search across lessons."""
+    embedder = LessonEmbedder()
+    results = embedder.search(query, top_k)
+    if results:
+        print(f"\nTop {len(results)} results for '{query}':\n")
+        for lesson_id, similarity in results:
+            meta = embedder.metadata[lesson_id]
+            print(f"  {lesson_id}")
+            print(f"    Similarity: {similarity:.3f}")
+            print(f"    Path: {meta['path']}\n")
 
-    # Preview command
-    preview_parser = subparsers.add_parser(
-        "preview-merge", help="Preview what merging two lessons would look like"
-    )
-    preview_parser.add_argument("lesson1", help="First lesson ID")
-    preview_parser.add_argument("lesson2", help="Second lesson ID")
 
-    # Dashboard command
-    dashboard_parser = subparsers.add_parser(
-        "dashboard", help="Show comprehensive deduplication dashboard"
-    )
-    dashboard_parser.add_argument(
-        "--cluster-threshold",
-        type=float,
-        default=0.7,
-        help="Threshold for clustering (default: 0.7)",
-    )
-    dashboard_parser.add_argument(
-        "--duplicate-threshold",
-        type=float,
-        default=0.85,
-        help="Threshold for duplicates (default: 0.85)",
-    )
-    dashboard_parser.add_argument(
-        "--show-top",
-        type=int,
-        default=5,
-        help="Number of top merge candidates to show (default: 5)",
-    )
+@main.command("list")
+def list_cmd() -> None:
+    """List all embedded lessons."""
+    embedder = LessonEmbedder()
+    if not embedder.metadata:
+        print("No embeddings found. Run 'generate' first.")
+    else:
+        print(f"Total lessons: {len(embedder.metadata)}\n")
+        for lesson_id, meta in sorted(embedder.metadata.items()):
+            print(f"  {lesson_id}")
+            print(f"    Path: {meta['path']}")
+            print(f"    Embedded: {meta['embedded_at']}\n")
 
-    args = parser.parse_args()
 
-    if args.command is None:
-        parser.print_help()
-        return
+@main.command()
+@click.option("--threshold", type=float, default=0.70, help="Similarity threshold")
+@click.option(
+    "--min-similarity", type=float, default=0.7, help="Minimum similarity to report"
+)
+def duplicates(threshold: float, min_similarity: float) -> None:
+    """Find potential duplicate lessons."""
+    embedder = LessonEmbedder()
+    embedder.print_duplicate_report(threshold, min_similarity)
 
+
+@main.command()
+@click.option("--threshold", type=float, default=0.7, help="Similarity threshold")
+def cluster(threshold: float) -> None:
+    """Cluster lessons by similarity."""
+    embedder = LessonEmbedder()
+    embedder.print_cluster_report(threshold)
+
+
+@main.command("check-new")
+@click.argument("file")
+@click.option("--threshold", type=float, default=0.55, help="Similarity threshold")
+def check_new(file: str, threshold: float) -> None:
+    """Check if new lesson text is too similar to existing lessons."""
     embedder = LessonEmbedder()
 
-    if args.command == "generate":
-        embedder.generate_all(force=args.force)
+    if file == "-":
+        text = sys.stdin.read()
+    else:
+        text = Path(file).read_text()
 
-    elif args.command == "update":
-        embedder.update_changed()
+    results = embedder.check_new_lesson(text, threshold)
 
-    elif args.command == "rebuild":
-        embedder.rebuild_index()
-
-    elif args.command == "similar":
-        results = embedder.find_similar(args.lesson_id, args.top_k)
-        if results:
-            print(f"\nTop {len(results)} similar lessons to '{args.lesson_id}':\n")
-            for lesson_id, similarity in results:
-                meta = embedder.metadata[lesson_id]
-                print(f"  {lesson_id}")
-                print(f"    Similarity: {similarity:.3f}")
-                print(f"    Path: {meta['path']}\n")
-
-    elif args.command == "search":
-        results = embedder.search(args.query, args.top_k)
-        if results:
-            print(f"\nTop {len(results)} results for '{args.query}':\n")
-            for lesson_id, similarity in results:
-                meta = embedder.metadata[lesson_id]
-                print(f"  {lesson_id}")
-                print(f"    Similarity: {similarity:.3f}")
-                print(f"    Path: {meta['path']}\n")
-
-    elif args.command == "list":
-        if not embedder.metadata:
-            print("No embeddings found. Run 'generate' first.")
-        else:
-            print(f"Total lessons: {len(embedder.metadata)}\n")
-            for lesson_id, meta in sorted(embedder.metadata.items()):
-                print(f"  {lesson_id}")
-                print(f"    Path: {meta['path']}")
-                print(f"    Embedded: {meta['embedded_at']}\n")
-
-    elif args.command == "duplicates":
-        embedder.print_duplicate_report(args.threshold, args.min_similarity)
-
-    elif args.command == "cluster":
-        embedder.print_cluster_report(args.threshold)
-
-    elif args.command == "check-new":
-        # Read new lesson text
-        if args.file == "-":
-            import sys
-
-            text = sys.stdin.read()
-        else:
-            text = Path(args.file).read_text()
-
-        # Check for similar lessons
-        results = embedder.check_new_lesson(text, args.threshold)
-
-        if not results:
-            print(f"\n✅ No similar lessons found above threshold {args.threshold}")
-            print("Safe to create new lesson.")
-        else:
-            print(
-                f"\n⚠️ Found {len(results)} similar lesson(s) above threshold {args.threshold}:\n"
-            )
-            for lesson_id, similarity in results[:5]:  # Show top 5
-                meta = embedder.metadata[lesson_id]
-                print(f"  {lesson_id}")
-                print(f"    Similarity: {similarity:.3f}")
-                print(f"    Path: {meta['path']}")
-                print()
-            print("Consider reviewing these lessons before creating a new one.")
-
-    elif args.command == "suggest-merges":
-        suggestions = embedder.suggest_merges(args.threshold)
-
-        if not suggestions:
-            print(f"\n✅ No merge suggestions at threshold {args.threshold}")
-        else:
-            print(f"\n📋 Merge Suggestions (threshold={args.threshold}):\n")
-            for i, suggestion in enumerate(suggestions, 1):
-                print(
-                    f"{i}. {suggestion['lesson1']['name']} ↔ {suggestion['lesson2']['name']}"
-                )
-                print(f"   Similarity: {suggestion['similarity']:.3f}")
-                print(f"   {suggestion['recommendation']}")
-                print("   Paths:")
-                print(f"     - {suggestion['lesson1']['path']}")
-                print(f"     - {suggestion['lesson2']['path']}")
-                print()
-
-    elif args.command == "preview-merge":
-        preview = embedder.get_merge_preview(args.lesson1, args.lesson2)
-
-        if "error" in preview:
-            print(f"\n❌ Error: {preview['error']}")
-        else:
-            print("\n=== Merge Preview ===")
-            print(f"Similarity: {preview['similarity']:.3f}\n")
-
-            print("Lesson 1:")
-            print(f"  ID: {preview['lesson1']['id']}")
-            print(f"  Path: {preview['lesson1']['path']}")
-            print(f"  Rule: {preview['lesson1']['rule'][:100]}...")
-            print(f"  Context: {preview['lesson1']['context'][:100]}...\n")
-
-            print("Lesson 2:")
-            print(f"  ID: {preview['lesson2']['id']}")
-            print(f"  Path: {preview['lesson2']['path']}")
-            print(f"  Rule: {preview['lesson2']['rule'][:100]}...")
-            print(f"  Context: {preview['lesson2']['context'][:100]}...")
-
-    elif args.command == "dashboard":
-        embedder.dashboard(
-            cluster_threshold=args.cluster_threshold,
-            duplicate_threshold=args.duplicate_threshold,
-            show_top_merges=args.show_top,
+    if not results:
+        print(f"\n✅ No similar lessons found above threshold {threshold}")
+        print("Safe to create new lesson.")
+    else:
+        print(
+            f"\n⚠️ Found {len(results)} similar lesson(s) above threshold {threshold}:\n"
         )
+        for lesson_id, similarity in results[:5]:
+            meta = embedder.metadata[lesson_id]
+            print(f"  {lesson_id}")
+            print(f"    Similarity: {similarity:.3f}")
+            print(f"    Path: {meta['path']}")
+            print()
+        print("Consider reviewing these lessons before creating a new one.")
+
+
+@main.command("suggest-merges")
+@click.option("--threshold", type=float, default=0.55, help="Similarity threshold")
+def suggest_merges_cmd(threshold: float) -> None:
+    """Suggest merging duplicate lessons."""
+    embedder = LessonEmbedder()
+    suggestions = embedder.suggest_merges(threshold)
+
+    if not suggestions:
+        print(f"\n✅ No merge suggestions at threshold {threshold}")
+    else:
+        print(f"\n📋 Merge Suggestions (threshold={threshold}):\n")
+        for i, suggestion in enumerate(suggestions, 1):
+            print(
+                f"{i}. {suggestion['lesson1']['name']} <-> {suggestion['lesson2']['name']}"
+            )
+            print(f"   Similarity: {suggestion['similarity']:.3f}")
+            print(f"   {suggestion['recommendation']}")
+            print("   Paths:")
+            print(f"     - {suggestion['lesson1']['path']}")
+            print(f"     - {suggestion['lesson2']['path']}")
+            print()
+
+
+@main.command("preview-merge")
+@click.argument("lesson1")
+@click.argument("lesson2")
+def preview_merge(lesson1: str, lesson2: str) -> None:
+    """Preview what merging two lessons would look like."""
+    embedder = LessonEmbedder()
+    preview = embedder.get_merge_preview(lesson1, lesson2)
+
+    if "error" in preview:
+        print(f"\n❌ Error: {preview['error']}")
+    else:
+        print("\n=== Merge Preview ===")
+        print(f"Similarity: {preview['similarity']:.3f}\n")
+
+        print("Lesson 1:")
+        print(f"  ID: {preview['lesson1']['id']}")
+        print(f"  Path: {preview['lesson1']['path']}")
+        print(f"  Rule: {preview['lesson1']['rule'][:100]}...")
+        print(f"  Context: {preview['lesson1']['context'][:100]}...\n")
+
+        print("Lesson 2:")
+        print(f"  ID: {preview['lesson2']['id']}")
+        print(f"  Path: {preview['lesson2']['path']}")
+        print(f"  Rule: {preview['lesson2']['rule'][:100]}...")
+        print(f"  Context: {preview['lesson2']['context'][:100]}...")
+
+
+@main.command()
+@click.option(
+    "--cluster-threshold", type=float, default=0.7, help="Clustering threshold"
+)
+@click.option(
+    "--duplicate-threshold", type=float, default=0.85, help="Duplicate threshold"
+)
+@click.option("--show-top", type=int, default=5, help="Number of top merge candidates")
+def dashboard(
+    cluster_threshold: float, duplicate_threshold: float, show_top: int
+) -> None:
+    """Show comprehensive deduplication dashboard."""
+    embedder = LessonEmbedder()
+    embedder.dashboard(
+        cluster_threshold=cluster_threshold,
+        duplicate_threshold=duplicate_threshold,
+        show_top_merges=show_top,
+    )
 
 
 if __name__ == "__main__":
