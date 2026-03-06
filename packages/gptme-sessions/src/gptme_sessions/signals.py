@@ -61,12 +61,12 @@ def _detect_format(msgs: list[dict]) -> str:
         first = msgs[0]
         # Codex: first line is always session_meta
         if first.get("type") == "session_meta":
-            payload = first.get("payload", {})
+            payload = first.get("payload") or {}
             if payload.get("originator") in ("codex_exec", "codex_interactive"):
                 return "codex"
         # Copilot: first line is always session.start
         if first.get("type") == "session.start":
-            data = first.get("data", {})
+            data = first.get("data") or {}
             if data.get("producer") == "copilot-agent":
                 return "copilot"
 
@@ -533,7 +533,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
             current_turn_has_tool = False
 
         elif rec_type == "response_item":
-            payload = record.get("payload", {})
+            payload = record.get("payload") or {}
             payload_type = payload.get("type", "")
 
             if payload_type == "function_call":
@@ -556,13 +556,12 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         if isinstance(args, dict):
                             cmd = args.get("cmd") or ""
                             # Detect redirects and file-writing commands
-                            write_match = re.search(
+                            for write_match in re.finditer(
                                 r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>\s*)([^\s<>|&;]+)",
                                 cmd,
-                            )
-                            if write_match:
+                            ):
                                 path = write_match.group(1).strip("'\"")
-                                if "/journal/" not in path:
+                                if "/journal/" not in path and not path.startswith("/dev/"):
                                     file_writes.append(path)
                                     sig = f"exec_command:{path}"
                                     if sig in recent_sigs:
@@ -645,8 +644,8 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
             timestamps.append(ts)
 
         if rec_type == "assistant.message":
-            data = record.get("data", {})
-            tool_requests = data.get("toolRequests", [])
+            data = record.get("data") or {}
+            tool_requests = data.get("toolRequests") or []
             step_has_tool = False
 
             for req in tool_requests:
@@ -662,17 +661,16 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
 
                 # File write detection from edit/write tools
                 if tool in _COPILOT_WRITE_TOOLS:
-                    args = req.get("arguments", {})
+                    args = req.get("arguments") or {}
                     if isinstance(args, str):
                         try:
                             args = json.loads(args)
                         except (json.JSONDecodeError, ValueError):
                             args = {}
-                    path = (
-                        args.get("path", "") or args.get("file_path", "")
-                        if isinstance(args, dict)
-                        else ""
-                    )
+                    if isinstance(args, dict):
+                        path = args.get("path", "") or args.get("file_path", "")
+                    else:
+                        path = ""
                     if path and "/journal/" not in path:
                         file_writes.append(path)
                         sig = f"{tool}:{path}"
@@ -686,7 +684,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                 steps += 1
 
         elif rec_type == "tool.execution_complete":
-            data = record.get("data", {})
+            data = record.get("data") or {}
 
             # Error detection from tool failure
             if data.get("success") is False:
@@ -740,16 +738,16 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         rec_type = record.get("type", "")
 
         if rec_type == "turn_context":
-            m = record.get("payload", {}).get("model")
+            m = (record.get("payload") or {}).get("model")
             if m:
                 model = m
 
         elif rec_type == "event_msg":
-            payload = record.get("payload", {})
+            payload = record.get("payload") or {}
             if payload.get("type") == "token_count":
-                rl = payload.get("rate_limits", {})
-                primary = rl.get("primary", {})
-                secondary = rl.get("secondary", {})
+                rl = payload.get("rate_limits") or {}
+                primary = rl.get("primary") or {}
+                secondary = rl.get("secondary") or {}
                 if primary.get("used_percent") is not None:
                     rate_limit_primary = primary["used_percent"]
                 if secondary.get("used_percent") is not None:

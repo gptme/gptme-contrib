@@ -2717,6 +2717,34 @@ def test_extract_from_path_copilot(tmp_path: Path):
     assert "usage" not in result
 
 
+# --- Null-guard regression tests ---
+
+
+def test_detect_format_codex_null_payload():
+    """_detect_format doesn't crash when Codex session_meta has payload=null."""
+    msgs = [{"type": "session_meta", "payload": None}]
+    # Should not raise; falls through to default format
+    fmt = _detect_format(msgs)
+    assert fmt in ("gptme", "claude_code", "codex", "copilot")
+
+
+def test_detect_format_copilot_null_data():
+    """_detect_format doesn't crash when Copilot session.start has data=null."""
+    msgs = [{"type": "session.start", "data": None}]
+    fmt = _detect_format(msgs)
+    assert fmt in ("gptme", "claude_code", "codex", "copilot")
+
+
+def test_extract_signals_codex_null_payload():
+    """extract_signals_codex doesn't crash when response_item has payload=null."""
+    msgs: list[dict] = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {"type": "response_item", "payload": None},  # explicit null
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["steps"] == 0
+
+
 def test_extract_signals_codex_null_cmd():
     """cmd: null in exec_command arguments must not crash re.search."""
     msgs = [
@@ -2742,6 +2770,112 @@ def test_extract_signals_codex_null_cmd():
     assert signals["file_writes"] == []
 
 
+def test_extract_signals_codex_multi_file_writes():
+    """re.finditer captures all write targets in a multi-output command."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "command | tee /tmp/debug.log > /tmp/output.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/tmp/debug.log" in signals["file_writes"]
+    assert "/tmp/output.txt" in signals["file_writes"]
+
+
+def test_extract_signals_codex_dev_null_excluded():
+    """/dev/null and /dev/stderr are not counted as file writes."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "cmd 2>/dev/null > /tmp/out.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/dev/null" not in signals["file_writes"]
+    assert "/tmp/out.txt" in signals["file_writes"]
+
+
+def test_extract_signals_copilot_null_data_assistant():
+    """extract_signals_copilot doesn't crash when assistant.message has data=null."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {"type": "assistant.message", "data": None, "timestamp": "2026-03-03T12:00:01Z"},
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_copilot_null_tool_requests():
+    """extract_signals_copilot doesn't crash when toolRequests=null."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": None},
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_copilot_null_arguments():
+    """Copilot write tool with arguments=null doesn't crash."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc1", "name": "write", "arguments": None},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["file_writes"] == []
+
+
+def test_extract_signals_copilot_null_data_tool_complete():
+    """extract_signals_copilot doesn't crash when tool.execution_complete has data=null."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {"type": "tool.execution_complete", "data": None, "timestamp": "2026-03-03T12:00:01Z"},
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 0
+
+
 def test_extract_signals_copilot_null_success_not_counted_as_error():
     """success: null in tool.execution_complete must not increment error_count."""
     msgs = [
@@ -2764,3 +2898,27 @@ def test_extract_signals_copilot_null_success_not_counted_as_error():
     ]
     signals = extract_signals_copilot(msgs)
     assert signals["error_count"] == 0
+
+
+def test_extract_usage_codex_null_payload():
+    """extract_usage_codex doesn't crash when turn_context/event_msg has payload=null."""
+    msgs = [
+        {"type": "turn_context", "payload": None},
+        {"type": "event_msg", "payload": None},
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage == {}
+
+
+def test_extract_usage_codex_null_rate_limits():
+    """extract_usage_codex doesn't crash when rate_limits=null."""
+    msgs = [
+        {"type": "turn_context", "payload": {"model": "gpt-5.3-codex"}},
+        {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": None},
+        },
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage["model"] == "gpt-5.3-codex"
+    assert "rate_limit_primary_pct" not in usage
