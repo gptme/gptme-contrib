@@ -1385,6 +1385,33 @@ class TestScanRecentSessions:
         assert len(result) == 1
         assert result[0]["grade"] == 0.0  # fell back to default
 
+    def test_error_count_none_does_not_render_as_string(self, tmp_path: Path) -> None:
+        """error_count=None from signals is safe-cast to 0, not rendered as 'None'."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        session_dir = tmp_path / "sessions" / "2026-01-10-test"
+        session_dir.mkdir(parents=True)
+        (session_dir / "conversation.jsonl").write_text("")
+
+        def mock_discover_gptme(start, end, logs_dir=None):
+            return [session_dir]
+
+        def mock_extract_none_error_count(path):
+            return {"grade": 0.5, "git_commits": [], "file_writes": [], "error_count": None}
+
+        with (
+            patch("gptme_sessions.discovery.discover_gptme_sessions", mock_discover_gptme),
+            patch("gptme_sessions.discovery.parse_gptme_config", lambda d: {}),
+            patch("gptme_sessions.signals.extract_from_path", mock_extract_none_error_count),
+            patch("gptme_sessions.discovery.discover_cc_sessions", lambda s, e: []),
+            patch("gptme_sessions.discovery.decode_cc_project_path", lambda x: x),
+        ):
+            result = scan_recent_sessions(workspace)
+
+        assert len(result) == 1
+        assert result[0]["errors"] == 0  # None safe-cast to 0, not string "None"
+
     def test_collect_workspace_data_sessions_off_by_default(self, workspace: Path) -> None:
         """Sessions are NOT scanned when include_sessions=False (default)."""
         data = collect_workspace_data(workspace)

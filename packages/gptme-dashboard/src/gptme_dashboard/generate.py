@@ -141,6 +141,14 @@ def _safe_grade(val: object, default: float = 0.0) -> float:
         return default
 
 
+def _safe_int(val: object, default: int = 0) -> int:
+    """Convert *val* to int, returning *default* on failure (e.g. None or non-numeric)."""
+    try:
+        return int(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
     """Scan recent agent sessions using gptme-sessions discovery.
 
@@ -218,7 +226,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "harness": "gptme",
                 "commits": len(signals.get("git_commits", [])),
                 "edits": len(set(signals.get("file_writes", []))),
-                "errors": int(signals.get("error_count") or 0),
+                "errors": _safe_int(signals.get("error_count", 0)),
                 "grade": _safe_grade(signals.get("grade", 0.0)),
                 "productive": bool(signals.get("productive", False)),
                 "category": signals.get("inferred_category", ""),
@@ -255,7 +263,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "harness": "claude-code",
                 "commits": len(signals.get("git_commits", [])),
                 "edits": len(set(signals.get("file_writes", []))),
-                "errors": int(signals.get("error_count") or 0),
+                "errors": _safe_int(signals.get("error_count", 0)),
                 "grade": _safe_grade(signals.get("grade", 0.0)),
                 "productive": bool(signals.get("productive", False)),
                 "category": signals.get("inferred_category", ""),
