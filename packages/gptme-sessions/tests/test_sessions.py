@@ -2806,6 +2806,39 @@ def test_extract_signals_codex_dev_null_excluded():
     assert "/tmp/out.txt" in signals["file_writes"]
 
 
+def test_extract_signals_codex_comparison_operators_excluded():
+    """Comparison operators (>=, <=) in heredoc content are not file writes."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "python3 - <<'PY'\nif x >=2:\n    print('ok')\nPY"},
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c2",
+                "arguments": {"cmd": "echo 'usage >=60%' | tee /tmp/report.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    # >=2 and >= should NOT be treated as file redirects
+    assert "=2" not in signals["file_writes"]
+    assert "=" not in signals["file_writes"]
+    assert "=60%`," not in signals["file_writes"]
+    # But real file writes should still work
+    assert "/tmp/report.txt" in signals["file_writes"]
+    assert len(signals["deliverables"]) == 1
+
+
 def test_extract_signals_copilot_null_data_assistant():
     """extract_signals_copilot doesn't crash when assistant.message has data=null."""
     msgs: list[dict] = [

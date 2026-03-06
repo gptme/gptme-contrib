@@ -555,9 +555,10 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                                 pass
                         if isinstance(args, dict):
                             cmd = args.get("cmd") or ""
-                            # Detect redirects and file-writing commands
+                            # Detect redirects and file-writing commands.
+                            # >(?!=) excludes >= comparison operators in heredoc content.
                             for write_match in re.finditer(
-                                r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>\s*)([^\s<>|&;]+)",
+                                r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>(?!=)\s*)([^\s<>|&;]+)",
                                 cmd,
                             ):
                                 path = write_match.group(1).strip("'\"")
