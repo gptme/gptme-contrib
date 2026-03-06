@@ -764,6 +764,216 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
     return result
 
 
+def _extract_committed_files(git_commits: list[str]) -> list[str]:
+    """Extract file paths changed in commits by running git diff-tree.
+
+    Parses commit SHAs from the git_commits list (format: "message (sha)")
+    and returns all unique file paths changed across those commits.
+
+    For SHAs that don't resolve in the current repo, tries common submodule
+    directories as fallback (cross-repo commits from submodules).
+
+    Returns empty list if git is unavailable or SHAs can't be resolved.
+    """
+    import subprocess
+
+    shas = []
+    for entry in git_commits:
+        # Extract SHA from "commit message (abc1234)" format
+        m = re.search(r"\(([0-9a-f]{7,40})\)\s*$", entry)
+        if m:
+            shas.append(m.group(1))
+
+    if not shas:
+        return []
+
+    # Discover candidate repos: submodules + sibling git repos in ../
+    candidate_repos: list[str] = []
+
+    # Submodules
+    try:
+        result = subprocess.run(
+            ["git", "submodule", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.strip().lstrip("+-U").split()
+                if len(parts) >= 2:
+                    candidate_repos.append(parts[1])
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Sibling directories that are git repos (../*)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            from pathlib import Path
+
+            workspace_root = Path(result.stdout.strip())
+            parent = workspace_root.parent
+            for sibling in parent.iterdir():
+                if sibling == workspace_root or not sibling.is_dir():
+                    continue
+                if (sibling / ".git").exists():
+                    candidate_repos.append(str(sibling))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    def _diff_tree(sha: str, cwd: str | None = None) -> list[str]:
+        try:
+            cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=cwd)
+            if result.returncode == 0:
+                return [line for line in result.stdout.strip().splitlines() if line]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return []
+
+    files: list[str] = []
+    for sha in shas:
+        found = _diff_tree(sha)
+        if not found:
+            for repo_path in candidate_repos:
+                found = _diff_tree(sha, cwd=repo_path)
+                if found:
+                    # Prefix with repo name for context
+                    from pathlib import Path as _Path
+
+                    repo_name = _Path(repo_path).name
+                    found = [f"{repo_name}/{f}" for f in found]
+                    break
+        files.extend(found)
+    return files
+
+
+def infer_category(signals: dict) -> str | None:
+    """Infer work category from commit messages, committed files, and file writes.
+
+    Uses three signal sources:
+    - Conventional commit prefixes and scopes from commit messages
+    - File paths changed in commits (via git diff-tree)
+    - File paths written by tools during the session
+
+    Returns a category string or None if insufficient signal (< 2 votes).
+    """
+    commits = signals.get("git_commits", [])
+    file_writes = signals.get("file_writes", [])
+
+    # Get actual files changed in commits
+    committed_files = _extract_committed_files(commits)
+
+    # (prefix, scope) pairs where the prefix vote is suppressed — the prefix
+    # is misleading for these. e.g. "docs(journal)" isn't content work,
+    # "chore(submodule)" isn't meaningful. But "feat(sessions)" IS real work.
+    _SUPPRESS_PREFIX_PAIRS = {
+        ("docs", "journal"),
+    }
+
+    # Count commit prefix signals (skip when prefix+scope pair is suppressed)
+    prefix_counts: dict[str, int] = {}
+    for commit in commits:
+        m = re.match(r"(\w+)\(([^)]+)\)", commit)
+        if m and (m.group(1).lower(), m.group(2).lower()) in _SUPPRESS_PREFIX_PAIRS:
+            continue
+        # Extract conventional commit prefix: "type(scope): msg (sha)"
+        m = re.match(r"(feat|fix|refactor|perf|test|ci|build|docs|style)\b", commit)
+        if m:
+            prefix_counts[m.group(1)] = prefix_counts.get(m.group(1), 0) + 1
+
+    # Count scope signals from commits (suppressed scopes are implicitly excluded
+    # because they have no entry in scope_to_category, not by explicit loop filtering)
+    scope_counts: dict[str, int] = {}
+    for commit in commits:
+        m = re.match(r"\w+\(([^)]+)\)", commit)
+        if m:
+            scope = m.group(1).lower()
+            scope_counts[scope] = scope_counts.get(scope, 0) + 1
+
+    def _dir_in_path(segment: str, p: str) -> bool:
+        """True if `segment` appears as a directory component in path `p`."""
+        return bool(re.search(r"(^|/)" + re.escape(segment) + r"(/|$)", p))
+
+    # Path-based signals from tool writes + committed files
+    # Committed files are ground truth — weight them higher than tool writes
+    all_paths: list[tuple[str, int]] = []
+    for p in file_writes:
+        all_paths.append((p, 1))
+    for p in committed_files:
+        all_paths.append((p, 2))  # committed files are stronger signal
+
+    path_signals: dict[str, int] = {}
+    for path, weight in all_paths:
+        p = path.lower()
+        if _dir_in_path("lesson", p) or _dir_in_path("lessons", p) or _dir_in_path("patterns", p):
+            path_signals["knowledge"] = path_signals.get("knowledge", 0) + weight
+        elif _dir_in_path("test", p) or _dir_in_path("tests", p) or "_test." in p or "test_" in p:
+            path_signals["code"] = path_signals.get("code", 0) + weight
+        elif _dir_in_path("scripts", p) or _dir_in_path("hooks", p) or _dir_in_path("ci", p):
+            path_signals["infrastructure"] = path_signals.get("infrastructure", 0) + weight
+        elif _dir_in_path("standup", p) or _dir_in_path("standups", p):
+            path_signals["coordination"] = path_signals.get("coordination", 0) + weight
+        elif _dir_in_path("tasks", p):
+            path_signals["triage"] = path_signals.get("triage", 0) + weight
+        elif p.endswith((".py", ".sh", ".ts", ".js", ".rs", ".go")):
+            path_signals["code"] = path_signals.get("code", 0) + weight
+
+    # Map commit prefixes → categories
+    prefix_to_category = {
+        "feat": "code",
+        "fix": "code",
+        "refactor": "code",
+        "perf": "code",
+        "test": "code",
+        "ci": "infrastructure",
+        "build": "infrastructure",
+        "docs": "content",
+        "style": "code",
+    }
+
+    # Scope overrides: certain scopes imply category regardless of prefix
+    scope_to_category = {
+        "lessons": "knowledge",
+        "lesson": "knowledge",
+        "tasks": "triage",
+        "standup": "coordination",
+        "orchestration": "coordination",
+        "scripts": "infrastructure",
+        "hooks": "infrastructure",
+        "ci": "infrastructure",
+    }
+
+    # Tally votes
+    votes: dict[str, int] = {}
+    for prefix, count in prefix_counts.items():
+        cat = prefix_to_category.get(prefix)
+        if cat:
+            votes[cat] = votes.get(cat, 0) + count
+    for scope, count in scope_counts.items():
+        cat = scope_to_category.get(scope)
+        if cat:
+            # Scope signals are stronger than prefix alone
+            votes[cat] = votes.get(cat, 0) + count * 2
+    for cat, count in path_signals.items():
+        votes[cat] = votes.get(cat, 0) + count
+
+    if not votes:
+        return None
+
+    best = max(votes, key=lambda k: votes[k])
+    # Require at least 2 votes for confident classification
+    if votes[best] < 2:
+        return None
+    return best
+
+
 def extract_from_path(jsonl_path: Path) -> dict:
     """Parse trajectory and return signals + grade in one call.
 
@@ -791,6 +1001,7 @@ def extract_from_path(jsonl_path: Path) -> dict:
         "format": fmt,
         "productive": is_productive(signals),
         "grade": round(grade, 4),
+        "inferred_category": infer_category(signals),
     }
     if usage:
         result["usage"] = usage

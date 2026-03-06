@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from gptme_sessions import SessionRecord, SessionStore
+import pytest
+
 from gptme_sessions.signals import (
     _detect_format,
     detect_format,
@@ -15,6 +17,7 @@ from gptme_sessions.signals import (
     extract_usage_codex,
     extract_usage_gptme,
     grade_signals,
+    infer_category,
     is_productive,
 )
 from gptme_sessions.store import (
@@ -3157,3 +3160,62 @@ def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "notadate"])
     rc = main()
     assert rc != 0
+
+
+@pytest.mark.parametrize(
+    "signals,expected",
+    [
+        # Empty signals → None
+        ({}, None),
+        # Single vote (below threshold) → None
+        ({"git_commits": ["feat: add feature (abc1234)"]}, None),
+        # Two feat: commits → code
+        (
+            {"git_commits": ["feat: add feature (abc1234)", "feat: more (def5678)"]},
+            "code",
+        ),
+        # ci(ci): commits → infrastructure
+        (
+            {"git_commits": ["ci(ci): update workflow (abc1234)", "ci(ci): fix runner (def5678)"]},
+            "infrastructure",
+        ),
+        # Scope with ×2 weight: lessons scope → knowledge overrides docs→content prefix
+        (
+            {
+                "git_commits": [
+                    "docs(lessons): add lesson (abc1234)",
+                    "docs(lessons): add more (def5678)",
+                ]
+            },
+            "knowledge",
+        ),
+        # Tie-break: equal votes, category with highest score wins (no crash)
+        (
+            {
+                "git_commits": [
+                    "feat: code work (abc1234)",
+                    "docs: content work (def5678)",
+                ]
+            },
+            None,  # each gets 1 vote, both below threshold
+        ),
+        # Relative path for lessons → knowledge (not missed by leading-slash check)
+        (
+            {
+                "git_commits": [],
+                "file_writes": ["lessons/workflow/my-lesson.md", "lessons/workflow/other.md"],
+            },
+            "knowledge",
+        ),
+        # Journal-only writes — not classifiable (operational chore, not a work category)
+        (
+            {
+                "git_commits": [],
+                "file_writes": ["journal/2026-03-06/session.md", "journal/2026-03-06/work.md"],
+            },
+            None,
+        ),
+    ],
+)
+def test_infer_category(signals, expected):
+    assert infer_category(signals) == expected

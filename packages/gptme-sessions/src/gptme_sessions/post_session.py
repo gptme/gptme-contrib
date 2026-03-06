@@ -61,6 +61,7 @@ def post_session(
     run_type: str | None = None,
     trigger: str | None = None,
     category: str | None = None,
+    recommended_category: str | None = None,
     exit_code: int = 0,
     duration_seconds: int = 0,
     trajectory_path: Path | None = None,
@@ -88,7 +89,14 @@ def post_session(
         ``"spawn"``.  Records trigger mechanism as metadata without implying
         bandit treatment.  Added in PR #351.
     category:
-        Work category for the session (e.g. ``"code"``, ``"triage"``).
+        Work category for the session (e.g. ``"code"``, ``"infrastructure"``).
+        When provided, used as-is (e.g. from a post-hoc classifier).
+        When ``None`` and a trajectory is available, inferred from commit
+        messages and file paths.
+    recommended_category:
+        Category recommended by the selector before the session ran
+        (e.g. Thompson sampling, CASCADE). Stored alongside the actual
+        category so drift between recommendation and reality is trackable.
     exit_code:
         Exit code from the agent process.  Non-zero (except 124 = timeout)
         marks the session as ``"failed"``.
@@ -182,6 +190,11 @@ def post_session(
     else:
         outcome = "productive"
 
+    # --- Category: inferred (actual) vs recommended (intended) ---
+    inferred_category = signals.get("inferred_category") if signals else None
+    # Actual category: explicit override > inferred from signals
+    actual_category = category or inferred_category
+
     # --- Build SessionRecord kwargs ---
     record_kwargs: dict[str, Any] = {
         "harness": harness,
@@ -193,8 +206,10 @@ def post_session(
     }
     if trigger is not None:
         record_kwargs["trigger"] = trigger
-    if category is not None:
-        record_kwargs["category"] = category
+    if actual_category is not None:
+        record_kwargs["category"] = actual_category
+    if recommended_category is not None:
+        record_kwargs["recommended_category"] = recommended_category
     if journal_path is not None:
         record_kwargs["journal_path"] = journal_path
     if session_id is not None:
