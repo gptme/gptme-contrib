@@ -6,7 +6,6 @@ Analyzes lesson effectiveness across the agent network using evolution tracking 
 Generates network-wide insights about lesson success rates, adoption patterns, and best practices.
 """
 
-import argparse
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -301,50 +300,44 @@ class MetricsAggregator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Lesson Aggregated Metrics System")
+    import click
 
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    @click.group()
+    def cli():
+        """Lesson Aggregated Metrics System."""
+        pass
 
-    # Lesson metrics command
-    lesson_parser = subparsers.add_parser(
-        "lesson", help="Get metrics for specific lesson"
-    )
-    lesson_parser.add_argument("lesson_id", help="Lesson identifier")
+    @cli.command()
+    @click.argument("lesson_id")
+    def lesson(lesson_id):
+        """Get metrics for specific lesson."""
+        aggregator = MetricsAggregator()
+        lesson_metrics = aggregator.aggregate_lesson_metrics(lesson_id)
+        if lesson_metrics:
+            print(json.dumps(lesson_metrics.to_dict(), indent=2))
+        else:
+            print(f"No metrics found for lesson: {lesson_id}")
+            raise SystemExit(1)
 
-    # Network metrics command
-    subparsers.add_parser("network", help="Aggregate network-wide metrics")
+    @cli.command()
+    def network():
+        """Aggregate network-wide metrics."""
+        aggregator = MetricsAggregator()
+        network_metrics = aggregator.aggregate_network_metrics()
+        print(f"Aggregated metrics for {len(network_metrics)} lessons")
+        print(f"Cached to: {aggregator.metrics_dir / 'network_metrics.json'}")
 
-    # Best practices command
-    bp_parser = subparsers.add_parser("best-practices", help="Identify best practices")
-    bp_parser.add_argument(
+    @cli.command("best-practices")
+    @click.option(
         "--min-adoption",
         type=int,
         default=2,
         help="Minimum adoption count (default: 2)",
     )
-
-    # Report command
-    subparsers.add_parser("report", help="Generate comprehensive metrics report")
-
-    args = parser.parse_args()
-
-    aggregator = MetricsAggregator()
-
-    if args.command == "lesson":
-        lesson_metrics = aggregator.aggregate_lesson_metrics(args.lesson_id)
-        if lesson_metrics:
-            print(json.dumps(lesson_metrics.to_dict(), indent=2))
-        else:
-            print(f"No metrics found for lesson: {args.lesson_id}")
-            return 1
-
-    elif args.command == "network":
-        network_metrics = aggregator.aggregate_network_metrics()
-        print(f"Aggregated metrics for {len(network_metrics)} lessons")
-        print(f"Cached to: {aggregator.metrics_dir / 'network_metrics.json'}")
-
-    elif args.command == "best-practices":
-        practices = aggregator.identify_best_practices(args.min_adoption)
+    def best_practices(min_adoption):
+        """Identify best practices."""
+        aggregator = MetricsAggregator()
+        practices = aggregator.identify_best_practices(min_adoption)
         print(f"\nBest Practices ({len(practices)} found):\n")
         for i, (lesson_id, metrics) in enumerate(practices, 1):
             print(f"{i}. {lesson_id}")
@@ -352,16 +345,15 @@ def main():
                 f"   Success: {metrics.success_rate:.1%}, Adoption: {metrics.adoption_count} agents"
             )
 
-    elif args.command == "report":
-        report = aggregator.generate_report()
-        print(report)
+    @cli.command()
+    def report():
+        """Generate comprehensive metrics report."""
+        aggregator = MetricsAggregator()
+        report_text = aggregator.generate_report()
+        print(report_text)
 
-    else:
-        parser.print_help()
-        return 1
-
-    return 0
+    cli()
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()

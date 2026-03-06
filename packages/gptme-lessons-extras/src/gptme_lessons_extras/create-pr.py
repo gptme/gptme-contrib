@@ -6,13 +6,13 @@ Usage:
     ./create-pr.py <lesson-file> [--scores <scores-file>] [--conversation <link>] [--dry-run]
 """
 
-import argparse
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+import click
 import yaml
 
 
@@ -286,57 +286,51 @@ def create_lesson_pr(
         return False
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Create a pull request for a lesson file",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "lesson_file",
-        type=Path,
-        help="Path to lesson file",
-    )
-    parser.add_argument(
-        "--scores",
-        type=Path,
-        help="Path to judge scores JSON file",
-    )
-    parser.add_argument(
-        "--conversation",
-        type=str,
-        help="Link to conversation that generated the lesson",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate and show what would be done, but don't create PR",
-    )
-
-    args = parser.parse_args()
-
+@click.command()
+@click.argument(
+    "lesson_file", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option(
+    "--scores",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to judge scores JSON file",
+)
+@click.option(
+    "--conversation",
+    type=str,
+    default=None,
+    help="Link to conversation that generated the lesson",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Validate and show what would be done, but don't create PR",
+)
+def main(
+    lesson_file: Path, scores: Path | None, conversation: str | None, dry_run: bool
+):
+    """Create a pull request for a lesson file."""
     # Load judge scores if provided
     judge_scores = None
-    if args.scores:
-        if not args.scores.exists():
-            print(f"❌ Scores file not found: {args.scores}")
-            return 1
+    if scores:
         try:
-            with open(args.scores) as f:
+            with open(scores) as f:
                 judge_scores = json.load(f)
         except json.JSONDecodeError as e:
             print(f"❌ Error parsing scores file: {e}")
-            return 1
+            sys.exit(1)
 
     # Create PR
     success = create_lesson_pr(
-        args.lesson_file,
+        lesson_file,
         judge_scores=judge_scores,
-        conversation_link=args.conversation,
-        dry_run=args.dry_run,
+        conversation_link=conversation,
+        dry_run=dry_run,
     )
 
-    return 0 if success else 1
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

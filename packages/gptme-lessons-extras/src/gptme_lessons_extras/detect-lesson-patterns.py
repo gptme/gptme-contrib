@@ -12,7 +12,6 @@ Usage:
     ./scripts/detect-lesson-patterns.py [--days N] [--min-occurrences N] [--output FILE]
 """
 
-import argparse
 import json
 import re
 from collections import defaultdict
@@ -20,6 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+import click
 
 # Common error patterns to detect
 ERROR_PATTERNS = {
@@ -284,50 +285,47 @@ def format_lesson_candidate(candidate: LessonCandidate) -> str:
     return "\n".join(output)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Detect potential lesson patterns from conversation logs"
-    )
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=7,
-        help="Analyze conversations from last N days (default: 7)",
-    )
-    parser.add_argument(
-        "--min-occurrences",
-        type=int,
-        default=2,
-        help="Minimum occurrences to suggest a lesson (default: 2)",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        help="Output file for lesson candidates (default: stdout)",
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Show detailed progress",
-    )
-
-    args = parser.parse_args()
-
+@click.command()
+@click.option(
+    "--days",
+    type=int,
+    default=7,
+    help="Analyze conversations from last N days (default: 7)",
+)
+@click.option(
+    "--min-occurrences",
+    type=int,
+    default=2,
+    help="Minimum occurrences to suggest a lesson (default: 2)",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Output file for lesson candidates (default: stdout)",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Show detailed progress",
+)
+def main(days: int, min_occurrences: int, output: Path | None, verbose: bool):
+    """Detect potential lesson patterns from conversation logs."""
     # Find conversation logs
     logs_dir = Path.home() / ".local/share/gptme/logs"
     if not logs_dir.exists():
         print(f"Error: Logs directory not found: {logs_dir}")
-        return 1
+        raise SystemExit(1)
 
-    print(f"🔍 Analyzing conversations from last {args.days} days...")
-    conversations = get_recent_conversations(logs_dir, days=args.days)
+    print(f"🔍 Analyzing conversations from last {days} days...")
+    conversations = get_recent_conversations(logs_dir, days=days)
     print(f"Found {len(conversations)} conversations to analyze")
 
     # Analyze all conversations
     all_occurrences = []
     for conv_id, log_path in conversations:
-        if args.verbose:
+        if verbose:
             print(f"  Analyzing: {conv_id}")
         occurrences = analyze_conversation(log_path, conv_id)
         all_occurrences.extend(occurrences)
@@ -336,9 +334,7 @@ def main():
 
     # Group and create candidates
     by_pattern = group_by_pattern(all_occurrences)
-    candidates = create_lesson_candidates(
-        by_pattern, min_occurrences=args.min_occurrences
-    )
+    candidates = create_lesson_candidates(by_pattern, min_occurrences=min_occurrences)
 
     print(f"Identified {len(candidates)} potential lesson candidates")
     print("")
@@ -349,7 +345,7 @@ def main():
     output_lines.append("")
     output_lines.append(f"Generated: {datetime.now().isoformat()}")
     output_lines.append(
-        f"Analyzed: {len(conversations)} conversations from last {args.days} days"
+        f"Analyzed: {len(conversations)} conversations from last {days} days"
     )
     output_lines.append(f"Found: {len(all_occurrences)} error occurrences")
     output_lines.append(f"Candidates: {len(candidates)} potential lessons")
@@ -363,14 +359,12 @@ def main():
     output_text = "\n".join(output_lines)
 
     # Write output
-    if args.output:
-        args.output.write_text(output_text)
-        print(f"✅ Results written to: {args.output}")
+    if output:
+        output.write_text(output_text)
+        print(f"✅ Results written to: {output}")
     else:
         print(output_text)
 
-    return 0
-
 
 if __name__ == "__main__":
-    exit(main())
+    main()

@@ -6,13 +6,14 @@ Tracks which lessons are included over time and generates reports
 showing inclusion frequency, patterns, and potential over-inclusion issues.
 """
 
-import argparse
 import json
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+import click
 
 # Default agent names to match in log files
 DEFAULT_AGENT_NAMES = ["Assistant", "Bob", "Alice", "Agent"]
@@ -215,40 +216,40 @@ def save_json_report(results: Dict, output_path: Path):
     print(f"\n💾 Detailed results saved to: {output_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze lesson usage from autonomous run logs"
-    )
-    parser.add_argument(
-        "--logs-dir",
-        type=Path,
-        default=Path("logs"),
-        help="Path to logs directory (default: logs/)",
-    )
-    parser.add_argument("--days", type=int, help="Limit analysis to last N days")
-    parser.add_argument("--json", type=Path, help="Save detailed results to JSON file")
-    parser.add_argument(
-        "--verbose", action="store_true", help="Show detailed lesson inclusion patterns"
-    )
-
-    args = parser.parse_args()
-
+@click.command()
+@click.option(
+    "--logs-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default="logs",
+    help="Path to logs directory (default: logs/)",
+)
+@click.option("--days", type=int, default=None, help="Limit analysis to last N days")
+@click.option(
+    "--json-file",
+    "json_file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Save detailed results to JSON file",
+)
+@click.option("--verbose", is_flag=True, help="Show detailed lesson inclusion patterns")
+def main(logs_dir: Path, days: int | None, json_file: Path | None, verbose: bool):
+    """Analyze lesson usage from autonomous run logs."""
     # Analyze logs
-    results = analyze_logs(args.logs_dir, args.days)
+    results = analyze_logs(logs_dir, days)
 
     if "error" in results:
         print(f"Error: {results['error']}")
-        return 1
+        raise SystemExit(1)
 
     # Print report
     print_report(results)
 
     # Save JSON if requested
-    if args.json:
-        save_json_report(results, args.json)
+    if json_file:
+        save_json_report(results, json_file)
 
     # Verbose mode: show inclusion rate distribution
-    if args.verbose:
+    if verbose:
         print("\n📊 Inclusion Rate Distribution")
         print(f"{'Rate Range':<15} {'Count':<8} {'Lessons'}")
         print("-" * 80)
@@ -273,8 +274,6 @@ def main():
                 if len(lessons_in_range) > 3:
                     print(f"{'':15} {'':8} ... and {len(lessons_in_range) - 3} more")
 
-    return 0
-
 
 if __name__ == "__main__":
-    exit(main())
+    main()

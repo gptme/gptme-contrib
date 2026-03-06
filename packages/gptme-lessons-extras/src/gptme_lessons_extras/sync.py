@@ -11,7 +11,6 @@ Enables agents to share lessons via GitHub repository:
 Part of Phase 4.3 Phase 2: Agent Network Protocol implementation.
 """
 
-import argparse
 import importlib
 import subprocess
 import sys
@@ -287,114 +286,119 @@ def sync(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Git-based lesson synchronization for agent network",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    import click
+
+    @click.command(
         epilog="""
 Examples:
+
   # Full sync (pull, export, push)
-  %(prog)s --agent <agent> --lessons lessons/
+
+  sync --agent <agent> --lessons lessons/
 
   # Only push local changes
-  %(prog)s --agent <agent> --lessons lessons/ --push-only
+
+  sync --agent <agent> --lessons lessons/ --push-only
 
   # Only pull network updates
-  %(prog)s --agent <agent> --pull-only
+
+  sync --agent <agent> --pull-only
 
   # List available lessons from network
-  %(prog)s --agent <agent> --list
+
+  sync --agent <agent> --list
 
   # Initialize/reset network repo
-  %(prog)s --init
+
+  sync --init
         """,
     )
-
-    parser.add_argument(
+    @click.option(
         "--agent",
         default="agent",
         help="Agent name for directory structure (default: agent)",
     )
-    parser.add_argument(
+    @click.option(
         "--lessons",
-        type=Path,
-        default=Path("lessons"),
+        type=click.Path(),
+        default="lessons",
         help="Local lessons directory (default: lessons/)",
     )
-    parser.add_argument(
+    @click.option(
         "--network-dir",
-        type=Path,
-        default=DEFAULT_NETWORK_DIR,
+        type=click.Path(),
+        default=str(DEFAULT_NETWORK_DIR),
         help=f"Network repository directory (default: {DEFAULT_NETWORK_DIR})",
     )
-
-    # Actions
-    parser.add_argument(
+    @click.option(
         "--init",
-        action="store_true",
+        "do_init",
+        is_flag=True,
         help="Initialize network repository (clone if needed)",
     )
-    parser.add_argument(
-        "--list", action="store_true", help="List available lessons from other agents"
+    @click.option(
+        "--list",
+        "do_list",
+        is_flag=True,
+        help="List available lessons from other agents",
     )
-    parser.add_argument(
-        "--push-only", action="store_true", help="Only push changes (no pull)"
+    @click.option("--push-only", is_flag=True, help="Only push changes (no pull)")
+    @click.option(
+        "--pull-only", is_flag=True, help="Only pull changes (no export/push)"
     )
-    parser.add_argument(
-        "--pull-only", action="store_true", help="Only pull changes (no export/push)"
-    )
-    parser.add_argument(
-        "--force", action="store_true", help="Force re-clone network repo"
-    )
+    @click.option("--force", is_flag=True, help="Force re-clone network repo")
+    def cli(agent, lessons, network_dir, do_init, do_list, push_only, pull_only, force):
+        """Git-based lesson synchronization for agent network."""
+        lessons_path = Path(lessons)
+        network_path = Path(network_dir)
 
-    args = parser.parse_args()
+        try:
+            # Init action
+            if do_init:
+                init_repo(network_path, force=force)
+                return
 
-    try:
-        # Init action
-        if args.init:
-            init_repo(args.network_dir, force=args.force)
-            return 0
+            # List action
+            if do_list:
+                init_repo(network_path)
+                found_lessons = list_network_lessons(network_path, exclude_agent=agent)
 
-        # List action
-        if args.list:
-            init_repo(args.network_dir)
-            lessons = list_network_lessons(args.network_dir, exclude_agent=args.agent)
+                if not found_lessons:
+                    print("ℹ No lessons available from other agents")
+                    return
 
-            if not lessons:
-                print("ℹ No lessons available from other agents")
-                return 0
+                print("\n📚 Available lessons from network:\n")
+                for agent_name, lesson_list in sorted(found_lessons.items()):
+                    print(f"  {agent_name}/ ({len(lesson_list)} lessons)")
+                    for lesson in sorted(lesson_list)[:5]:  # Show first 5
+                        rel_path = lesson.relative_to(network_path / agent_name)
+                        print(f"    - {rel_path}")
+                    if len(lesson_list) > 5:
+                        print(f"    ... and {len(lesson_list) - 5} more")
+                return
 
-            print("\n📚 Available lessons from network:\n")
-            for agent, lesson_list in sorted(lessons.items()):
-                print(f"  {agent}/ ({len(lesson_list)} lessons)")
-                for lesson in sorted(lesson_list)[:5]:  # Show first 5
-                    rel_path = lesson.relative_to(args.network_dir / agent)
-                    print(f"    - {rel_path}")
-                if len(lesson_list) > 5:
-                    print(f"    ... and {len(lesson_list) - 5} more")
-            return 0
+            # Sync action (default)
+            exported, pulled = sync(
+                agent=agent,
+                lessons_dir=lessons_path,
+                network_dir=network_path,
+                push_only=push_only,
+                pull_only=pull_only,
+            )
 
-        # Sync action (default)
-        exported, pulled = sync(
-            agent=args.agent,
-            lessons_dir=args.lessons,
-            network_dir=args.network_dir,
-            push_only=args.push_only,
-            pull_only=args.pull_only,
-        )
+            print("\n✓ Sync complete")
+            print(f"  Exported: {exported} lessons")
+            print(f"  Network updates: {'Yes' if pulled else 'No'}")
 
-        print("\n✓ Sync complete")
-        print(f"  Exported: {exported} lessons")
-        print(f"  Network updates: {'Yes' if pulled else 'No'}")
+        except SyncError as e:
+            print(f"❌ Sync failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("\n⚠ Interrupted by user", file=sys.stderr)
+            sys.exit(130)
 
-        return 0
-
-    except SyncError as e:
-        print(f"❌ Sync failed: {e}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        print("\n⚠ Interrupted by user", file=sys.stderr)
-        return 130
+    cli()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
