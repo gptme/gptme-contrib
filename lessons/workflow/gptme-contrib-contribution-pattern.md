@@ -29,8 +29,8 @@ Observable signals that you need this workflow:
 ls gptme-contrib/lessons/<category>/
 head -15 gptme-contrib/lessons/<category>/existing-lesson.md
 
-# Workflow files use: match.keywords (array) + status
-# Pattern files use: match.keywords (block) + status
+# All lesson files use: match.keywords + status
+# Keywords can be inline-array ["a","b"] or block-sequence style — both are valid
 # Do NOT add category/tags fields unless they appear in peer files
 ```
 
@@ -63,7 +63,7 @@ pre-commit run --all-files
 git checkout -b feat/descriptive-branch-name origin/master
 
 # Add and commit
-git add lessons/category/lesson-name.md
+git add lessons/<category>/<lesson-name>.md
 git commit -m "docs(lessons): add <topic> lesson"
 
 # Push and open PR
@@ -125,7 +125,7 @@ raise ValueError(f"Expected one of {VALID_UNITS}")  # output varies run to run
 
 **❌ Creating branch from local instead of origin/master:**
 Contaminating the PR with unrelated commits from other local work.
-See also: `clean-pr-creation.md`
+See also: `branch-from-master.md`, `clean-pr-creation.md`
 
 **❌ Slow review response:**
 Greptile leaves feedback. Leaving it unaddressed for days signals low engagement and
@@ -142,6 +142,7 @@ Following this workflow results in:
 ## Related
 
 - [Lesson Quality Standards](../autonomous/lesson-quality-standards.md) — Required lesson structure
+- [Branch From Master](./branch-from-master.md) — Always branch from origin/master
 - [Clean PR Creation](./clean-pr-creation.md) — Keeping PRs free of unrelated commits
 - [Pre-Landing Self-Review](./pre-landing-self-review.md) — Final review before submitting
 
