@@ -247,12 +247,32 @@ def read_workspace_config(workspace: Path) -> dict:
     config: dict = {}
 
     current_section = ""
+    in_enabled_list = False
+    enabled_items: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        if stripped.startswith("["):
+        if stripped.startswith("[") and not in_enabled_list:
             current_section = stripped
+            continue
+
+        if in_enabled_list:
+            # End of list (line is "]" or ends with "]")
+            if stripped.rstrip(",") == "]" or stripped == "]":
+                config["plugins_enabled"] = enabled_items
+                in_enabled_list = False
+            elif "]" in stripped:
+                # Item on same line as closing bracket: "  \"foo\","  or just "]"
+                item = stripped.split("]")[0].rstrip(",").strip().strip('"').strip("'")
+                if item:
+                    enabled_items.append(item)
+                config["plugins_enabled"] = enabled_items
+                in_enabled_list = False
+            else:
+                item = stripped.rstrip(",").strip().strip('"').strip("'")
+                if item:
+                    enabled_items.append(item)
             continue
 
         if current_section == "[agent]":
@@ -261,21 +281,16 @@ def read_workspace_config(workspace: Path) -> dict:
                 config["agent_name"] = m.group(1)
 
         elif current_section == "[plugins]":
+            # Single-line: enabled = ["a", "b"]
             m = re.match(r"enabled\s*=\s*\[(.+)\]", stripped)
             if m:
                 config["plugins_enabled"] = [
                     s.strip().strip('"').strip("'") for s in m.group(1).split(",") if s.strip()
                 ]
-            # Multi-line paths array
-            m = re.match(r"paths\s*=\s*\[", stripped)
-            if m and "]" in stripped:
-                # Single-line paths = ["a", "b"]
-                inner = stripped[stripped.index("[") + 1 : stripped.rindex("]")]
-                config["plugins_paths"] = [
-                    s.strip().strip('"').strip("'")
-                    for s in inner.split(",")
-                    if s.strip() and not s.strip().startswith("#")
-                ]
+            # Multi-line: enabled = [
+            elif re.match(r"enabled\s*=\s*\[\s*$", stripped):
+                in_enabled_list = True
+                enabled_items = []
 
     return config
 

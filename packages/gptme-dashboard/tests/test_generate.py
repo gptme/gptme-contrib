@@ -602,3 +602,36 @@ def test_generate_shows_plugin_status(tmp_path: Path):
     assert "tag-active" in html  # enabled plugin
     assert "enabled" in html.lower()
     assert "available" in html.lower()
+
+
+def test_read_workspace_config_multiline_enabled(tmp_path: Path):
+    """Test that multi-line enabled = [...] arrays are parsed correctly."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "MultilineAgent"
+
+        [plugins]
+        enabled = [
+            "user_memories",
+            "gptme_consortium",
+        ]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert config["agent_name"] == "MultilineAgent"
+    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+
+
+def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
+    """Test that plugins_paths is not included in config (it was dead code, removed)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [plugins]
+        paths = ["plugins", "gptme-contrib/plugins"]
+        enabled = ["user_memories"]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert "plugins_paths" not in config
+    assert config["plugins_enabled"] == ["user_memories"]
