@@ -1,11 +1,5 @@
 ---
-category: workflow
 status: active
-tags:
-- accountability
-- follow-through
-- communication
-- traceability
 match:
   keywords:
   - i'll do
