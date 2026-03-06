@@ -108,7 +108,7 @@ jobs:
   # Integration tests (only on master push, with API keys)
   integration-tests:
     needs: discover
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.discover.result == 'success' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
