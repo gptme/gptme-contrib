@@ -814,8 +814,12 @@ def generate_json(
 
     If *_data* is provided, reuse it instead of rescanning the workspace.
     """
-    data = _data or collect_workspace_data(
-        workspace, include_sessions=include_sessions, sessions_days=sessions_days
+    data = (
+        _data
+        if _data is not None
+        else collect_workspace_data(
+            workspace, include_sessions=include_sessions, sessions_days=sessions_days
+        )
     )
     # Exclude large fields (body, all_keywords) from JSON export — they are only
     # needed for HTML page generation and would bloat data.json unnecessarily.
