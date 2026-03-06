@@ -775,6 +775,27 @@ def infer_category(signals: dict) -> str | None:
     commits = signals.get("git_commits", [])
     file_writes = signals.get("file_writes", [])
 
+    # Filter out bookkeeping commits — operational overhead, not the actual work.
+    # Only specific (prefix, scope) pairs are noise; the scope alone isn't.
+    # e.g. "chore(sessions): record session" is noise, but
+    #      "feat(sessions): add post-session hook" is real work.
+    _NOISE_PAIRS = {
+        ("chore", "sessions"),
+        ("chore", "submodule"),
+        ("chore", "submodules"),
+        ("docs", "journal"),
+        ("docs", "settlement"),
+    }
+
+    def _is_noise(commit_msg: str) -> bool:
+        scope_m = re.match(r"(\w+)\(([^)]+)\)", commit_msg)
+        if not scope_m:
+            return False
+        prefix, scope = scope_m.group(1).lower(), scope_m.group(2).lower()
+        return (prefix, scope) in _NOISE_PAIRS
+
+    commits = [c for c in commits if not _is_noise(c)]
+
     # Count commit prefix signals
     prefix_counts: dict[str, int] = {}
     for commit in commits:
