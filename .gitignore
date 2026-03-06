@@ -21,3 +21,6 @@ state/sessions/
 
 # Stale directory from tasks->gptodo rename (PR #171)
 packages/tasks/
+
+# Dashboard build output
+_site/
