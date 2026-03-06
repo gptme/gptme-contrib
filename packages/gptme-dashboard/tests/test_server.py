@@ -157,6 +157,15 @@ def test_api_sessions_limit_capped(client):
     assert isinstance(data, list)
 
 
+def test_api_sessions_limit_negative(client):
+    """Test /api/sessions clamps negative limit to 1 (returns 1 record)."""
+    resp = client.get("/api/sessions?limit=-1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert len(data) == 1  # clamped to 1, not all-but-last
+
+
 def test_workspace_no_sessions(tmp_path: Path):
     """Test API gracefully handles missing session data."""
     (tmp_path / "gptme.toml").write_text('[agent]\nname = "Empty"\n')

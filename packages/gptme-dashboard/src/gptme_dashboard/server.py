@@ -99,7 +99,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
 
             limit = request.args.get("limit", 50, type=int)
-            limit = min(limit, 200)  # Cap at 200
+            limit = max(1, min(limit, 200))  # Clamp to [1, 200]
 
             records = store.load_all()
             # Most recent first
