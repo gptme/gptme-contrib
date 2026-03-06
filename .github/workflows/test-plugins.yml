@@ -23,6 +23,9 @@ jobs:
         filters: |
           plugins:
             - 'plugins/**'
+            - 'pyproject.toml'
+            - 'uv.lock'
+            - 'Makefile'
             - '.github/workflows/test-plugins.yml'
 
   # Discovery job - outputs plugin matrix dynamically using Makefile (single source of truth)
@@ -50,7 +53,7 @@ jobs:
             changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
 
             # If shared config changed, run all plugins (can't tell which are affected)
-            if echo "$changed" | grep -qE '^(\.github/workflows/test-plugins\.yml)'; then
+            if echo "$changed" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-plugins\.yml)'; then
               echo "Shared config changed, running all plugins"
               plugins=$(cat /tmp/all_plugins.json)
             else
