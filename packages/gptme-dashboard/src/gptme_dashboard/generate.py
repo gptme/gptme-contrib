@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import markdown
 import yaml
@@ -109,7 +110,15 @@ def read_agent_links(workspace: Path) -> dict[str, str]:
     data = _parse_toml(gptme_toml)
     links = data.get("agent", {}).get("links", {})
     if isinstance(links, dict):
-        return {str(k): str(v) for k, v in links.items()}
+        safe_links: dict[str, str] = {}
+        for key, value in links.items():
+            if not isinstance(value, str):
+                continue
+            url = value.strip()
+            parsed = urlparse(url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                safe_links[str(key)] = url
+        return safe_links
     return {}
 
 
@@ -356,14 +365,18 @@ def read_workspace_config(workspace: Path) -> dict:
 
     try:
         project_config = get_project_config(workspace, quiet=True)
-        if project_config is not None:
-            if project_config.agent and project_config.agent.name:
-                config["agent_name"] = project_config.agent.name
-            if project_config.plugins.enabled:
-                config["plugins_enabled"] = list(project_config.plugins.enabled)
-            return config
-    except Exception:
-        pass
+    except TypeError:
+        # gptme currently raises TypeError when AgentConfig sees unsupported keys
+        # like [agent.links]. Fall back to raw TOML parsing in that case.
+        project_config = None
+    else:
+        if project_config is None:
+            return config  # No gptme.toml present; raw-TOML fallback would also find nothing
+        if project_config.agent and project_config.agent.name:
+            config["agent_name"] = project_config.agent.name
+        if project_config.plugins.enabled:
+            config["plugins_enabled"] = list(project_config.plugins.enabled)
+        return config
 
     # Fallback: parse gptme.toml directly when gptme's schema rejects the file
     # (e.g. future keys like [agent.links] not yet in AgentConfig).

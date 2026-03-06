@@ -1104,6 +1104,22 @@ def test_read_agent_links_no_toml(tmp_path: Path):
     assert links == {}
 
 
+def test_read_agent_links_strips_non_http_schemes(tmp_path: Path):
+    """read_agent_links filters out non-http/https URLs (e.g. javascript:)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent.links]
+        safe = "https://example.com"
+        unsafe = "javascript:alert(1)"
+        also_unsafe = "data:text/html,<h1>x</h1>"
+        """)
+    )
+    links = read_agent_links(tmp_path)
+    assert links == {"safe": "https://example.com"}
+    assert "unsafe" not in links
+    assert "also_unsafe" not in links
+
+
 def test_collect_workspace_data_includes_agent_links(workspace: Path):
     """collect_workspace_data exposes agent_links from [agent.links]."""
     # Overwrite the workspace gptme.toml to add [agent.links]
@@ -1147,6 +1163,9 @@ def test_generate_no_agent_links_no_extra_midpoints(workspace: Path, tmp_path: P
     output = tmp_path / "_site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
-    # There should be no agent-links anchors beyond the GitHub link
-    # (workspace fixture has no [agent.links])
-    assert "dashboard" not in html or "lessons" in html  # sanity: page rendered OK
+    # Sanity: page rendered OK
+    assert "lessons" in html
+    # No agent-link middot separators — workspace fixture has no [agent.links] and no
+    # git remote, so gh_repo_url is also absent.  Any &middot; in the output would
+    # indicate a spurious agent link was rendered.
+    assert "&middot;" not in html
