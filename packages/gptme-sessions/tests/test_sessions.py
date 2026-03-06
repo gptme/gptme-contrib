@@ -2833,7 +2833,7 @@ def test_extract_signals_codex_comparison_operators_excluded():
     # >=2 and >= should NOT be treated as file redirects
     assert "=2" not in signals["file_writes"]
     assert "=" not in signals["file_writes"]
-    assert "=60%`," not in signals["file_writes"]
+    assert "=60%" not in signals["file_writes"]
     # But real file writes should still work
     assert "/tmp/report.txt" in signals["file_writes"]
     assert len(signals["deliverables"]) == 1
