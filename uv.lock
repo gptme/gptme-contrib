@@ -19,6 +19,7 @@ members = [
     "gptme-consortium",
     "gptme-contrib-lib",
     "gptme-contrib-workspace",
+    "gptme-dashboard",
     "gptme-gptodo",
     "gptme-gupp",
     "gptme-hooks-examples",
@@ -1045,6 +1046,34 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.1.0" },
     { name = "pytest-mock", specifier = ">=3.12.0" },
 ]
+
+[[package]]
+name = "gptme-dashboard"
+version = "0.1.0"
+source = { editable = "packages/gptme-dashboard" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jinja2", specifier = ">=3.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
+provides-extras = ["dev", "test"]
 
 [[package]]
 name = "gptme-gptodo"

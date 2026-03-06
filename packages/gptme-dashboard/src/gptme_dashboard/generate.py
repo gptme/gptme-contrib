@@ -9,7 +9,6 @@ Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 
 import json
 import re
-import warnings
 from pathlib import Path
 
 import yaml
@@ -134,12 +133,22 @@ def scan_packages(workspace: Path) -> list[dict]:
         version = ""
         if pyproject.exists():
             text = pyproject.read_text()
-            m = re.search(r'description\s*=\s*"([^"]*)"', text)
-            if m:
-                description = m.group(1)
-            m = re.search(r'version\s*=\s*"([^"]*)"', text)
-            if m:
-                version = m.group(1)
+            in_project_section = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("["):
+                    in_project_section = stripped == "[project]"
+                elif in_project_section:
+                    if not description:
+                        m = re.match(r'description\s*=\s*"([^"]*)"', stripped)
+                        if m:
+                            description = m.group(1)
+                    if not version:
+                        m = re.match(r'version\s*=\s*"([^"]*)"', stripped)
+                        if m:
+                            version = m.group(1)
+                    if description and version:
+                        break
 
         packages.append(
             {
@@ -237,6 +246,7 @@ def collect_workspace_data(workspace: Path) -> dict:
         "packages": packages,
         "skills": skills,
         "stats": stats,
+        "lesson_categories": lesson_categories,
     }
 
 
@@ -283,7 +293,3 @@ def generate_json(workspace: Path, output: Path | None = None) -> str:
         print(f"Generated data dump at {output / 'data.json'}")
 
     return json_str
-
-
-# Suppress unused import warning — yaml is always available (required dependency)
-warnings.filterwarnings("ignore", category=UserWarning, module="gptme_dashboard")

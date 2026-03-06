@@ -82,8 +82,9 @@ The template receives these variables:
 | `plugins` | `list[dict]` | `name`, `description`, `path` |
 | `packages` | `list[dict]` | `name`, `version`, `description`, `path` |
 | `skills` | `list[dict]` | `name`, `description`, `path` |
+| `lesson_categories` | `dict[str, int]` | Category name to lesson count (also in `stats`) |
 
-`stats.lesson_categories` is a `dict[str, int]` mapping category name to lesson count.
+`stats.lesson_categories` is the same value, accessible via either path.
 
 ## Deployment (GitHub Pages)
 
