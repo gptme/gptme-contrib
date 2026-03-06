@@ -133,6 +133,14 @@ def read_agent_urls(workspace: Path) -> dict[str, str]:
     return {}
 
 
+def _safe_grade(val: object, default: float = 0.0) -> float:
+    """Convert *val* to a rounded float grade, returning *default* on failure."""
+    try:
+        return round(float(val), 2)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
     """Scan recent agent sessions using gptme-sessions discovery.
 
@@ -200,7 +208,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "commits": len(signals.get("git_commits", [])),
                 "edits": len(set(signals.get("file_writes", []))),
                 "errors": signals.get("error_count", 0),
-                "grade": round(float(signals.get("grade", 0.0)), 2),
+                "grade": _safe_grade(signals.get("grade", 0.0)),
                 "productive": bool(signals.get("productive", False)),
                 "category": signals.get("inferred_category", ""),
             }
@@ -220,10 +228,14 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             continue
 
         try:
-            signals = extract_from_path(jsonl)
             session_date = str(date.fromtimestamp(os.path.getmtime(jsonl)))
+        except OSError:
+            continue  # No usable date — skip this session
+
+        try:
+            signals = extract_from_path(jsonl)
         except Exception:
-            continue
+            signals = {}
 
         sessions.append(
             {
@@ -233,7 +245,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "commits": len(signals.get("git_commits", [])),
                 "edits": len(set(signals.get("file_writes", []))),
                 "errors": signals.get("error_count", 0),
-                "grade": round(float(signals.get("grade", 0.0)), 2),
+                "grade": _safe_grade(signals.get("grade", 0.0)),
                 "productive": bool(signals.get("productive", False)),
                 "category": signals.get("inferred_category", ""),
             }

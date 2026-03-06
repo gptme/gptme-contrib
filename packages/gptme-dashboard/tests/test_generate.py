@@ -1298,6 +1298,93 @@ class TestScanRecentSessions:
         assert result[0]["harness"] == "gptme"
         assert result[0]["commits"] == 1
 
+    def test_cc_sessions_workspace_filter(self, tmp_path: Path) -> None:
+        """CC sessions are included when their decoded project path matches the workspace;
+        sessions for other workspaces are excluded."""
+        workspace = tmp_path / "myworkspace"
+        workspace.mkdir()
+
+        other_workspace = tmp_path / "other-agent"
+        other_workspace.mkdir()
+
+        # Two CC session JSONL files in different project dirs
+        matching_dir = tmp_path / "proj-matching"
+        matching_dir.mkdir()
+        matching_jsonl = matching_dir / "session1.jsonl"
+        matching_jsonl.write_text("")
+
+        other_dir = tmp_path / "proj-other"
+        other_dir.mkdir()
+        other_jsonl = other_dir / "session2.jsonl"
+        other_jsonl.write_text("")
+
+        # Map dir names to workspace paths (avoids encoding/decoding complexity)
+        cc_dir_map = {
+            "proj-matching": str(workspace),
+            "proj-other": str(other_workspace),
+        }
+
+        def mock_discover_gptme(start, end, logs_dir=None):
+            return []  # no gptme sessions in this test
+
+        def mock_discover_cc(start, end):
+            return [matching_jsonl, other_jsonl]
+
+        def mock_decode_cc_project_path(dir_name: str) -> str:
+            return cc_dir_map.get(dir_name, "/unknown")
+
+        def mock_extract_from_path(path):
+            return {
+                "git_commits": ["abc1234 feat: cc test"],
+                "file_writes": ["src/main.py"],
+                "error_count": 1,
+                "grade": 0.5,
+                "productive": False,
+                "inferred_category": "test",
+            }
+
+        with (
+            patch("gptme_sessions.discovery.discover_gptme_sessions", mock_discover_gptme),
+            patch("gptme_sessions.discovery.parse_gptme_config", lambda d: {}),
+            patch("gptme_sessions.signals.extract_from_path", mock_extract_from_path),
+            patch("gptme_sessions.discovery.discover_cc_sessions", mock_discover_cc),
+            patch("gptme_sessions.discovery.decode_cc_project_path", mock_decode_cc_project_path),
+            patch("os.path.getmtime", return_value=1704844800.0),  # 2024-01-10
+        ):
+            result = scan_recent_sessions(workspace)
+
+        # Only the matching CC session should be included
+        assert len(result) == 1
+        assert result[0]["harness"] == "claude-code"
+        assert result[0]["commits"] == 1
+
+    def test_grade_non_numeric_does_not_crash(self, tmp_path: Path) -> None:
+        """Non-numeric grade values (None, 'n/a') are handled gracefully."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        session_dir = tmp_path / "sessions" / "2026-01-10-test"
+        session_dir.mkdir(parents=True)
+        (session_dir / "conversation.jsonl").write_text("")
+
+        def mock_discover_gptme(start, end, logs_dir=None):
+            return [session_dir]
+
+        def mock_extract_bad_grade(path):
+            return {"grade": "n/a", "git_commits": [], "file_writes": [], "error_count": 0}
+
+        with (
+            patch("gptme_sessions.discovery.discover_gptme_sessions", mock_discover_gptme),
+            patch("gptme_sessions.discovery.parse_gptme_config", lambda d: {}),
+            patch("gptme_sessions.signals.extract_from_path", mock_extract_bad_grade),
+            patch("gptme_sessions.discovery.discover_cc_sessions", lambda s, e: []),
+            patch("gptme_sessions.discovery.decode_cc_project_path", lambda x: x),
+        ):
+            result = scan_recent_sessions(workspace)
+
+        assert len(result) == 1
+        assert result[0]["grade"] == 0.0  # fell back to default
+
     def test_collect_workspace_data_sessions_off_by_default(self, workspace: Path) -> None:
         """Sessions are NOT scanned when include_sessions=False (default)."""
         data = collect_workspace_data(workspace)
