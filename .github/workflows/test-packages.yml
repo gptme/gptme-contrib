@@ -29,6 +29,7 @@ jobs:
             - '.github/workflows/test-packages.yml'
 
   # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
+  # On PRs, filters the matrix to only packages with actual file changes
   discover:
     needs: changes
     # Always run on push to master; on PRs, only when package code changed
@@ -38,18 +39,47 @@ jobs:
       packages: ${{ steps.discover.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for git diff against base branch on PRs
 
       - name: Discover packages
         id: discover
         run: |
-          # Use Makefile for package discovery (single source of truth)
-          packages=$(make ci-list-packages-json)
+          # Get all packages from Makefile (single source of truth)
+          make ci-list-packages-json > /tmp/all_packages.json
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Get files changed in this PR
+            changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+            # If shared config changed, run all packages (can't tell which are affected)
+            if echo "$changed" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then
+              echo "Shared config changed, running all packages"
+              packages=$(cat /tmp/all_packages.json)
+            else
+              # Extract affected package names from changed paths (packages/<name>/...)
+              affected=$(echo "$changed" | sed -n 's|^packages/\([^/]*\)/.*|\1|p' | sort -u)
+
+              if [ -z "$affected" ]; then
+                echo "No package files changed, skipping tests"
+                packages="[]"
+              else
+                # Filter all packages to only affected ones
+                packages=$(echo "$affected" | python3 -c "import json,sys; all_pkgs=json.load(open('/tmp/all_packages.json')); affected=set(sys.stdin.read().strip().split('\n')); print(json.dumps([p for p in all_pkgs if p in affected]))")
+              fi
+            fi
+          else
+            # On push to master, run all packages
+            packages=$(cat /tmp/all_packages.json)
+          fi
+
           echo "packages=$packages" >> $GITHUB_OUTPUT
           echo "Discovered packages: $packages"
 
   # Test each package in parallel
   test:
     needs: discover
+    if: needs.discover.outputs.packages != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
