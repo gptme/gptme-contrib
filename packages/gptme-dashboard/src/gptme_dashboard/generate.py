@@ -234,63 +234,20 @@ def scan_skills(workspace: Path) -> list[dict]:
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata.
+    """Read gptme.toml for workspace metadata using gptme's config module."""
+    from gptme.config import get_project_config
 
-    Parses [agent] and [plugins] sections. Agent name is read from [agent]
-    specifically to avoid matching name fields from other sections like [project].
-    """
-    config_path = workspace / "gptme.toml"
-    if not config_path.exists():
+    project_config = get_project_config(workspace, quiet=True)
+    if project_config is None:
         return {}
 
-    text = config_path.read_text()
     config: dict = {}
 
-    current_section = ""
-    in_enabled_list = False
-    enabled_items: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        if stripped.startswith("[") and not in_enabled_list:
-            current_section = stripped
-            continue
+    if project_config.agent and project_config.agent.name:
+        config["agent_name"] = project_config.agent.name
 
-        if in_enabled_list:
-            # End of list (line is "]" or ends with "]")
-            if stripped.rstrip(",") == "]" or stripped == "]":
-                config["plugins_enabled"] = enabled_items
-                in_enabled_list = False
-            elif "]" in stripped:
-                # Item on same line as closing bracket: "  \"foo\","  or just "]"
-                item = stripped.split("]")[0].rstrip(",").strip().strip('"').strip("'")
-                if item:
-                    enabled_items.append(item)
-                config["plugins_enabled"] = enabled_items
-                in_enabled_list = False
-            else:
-                item = stripped.rstrip(",").strip().strip('"').strip("'")
-                if item:
-                    enabled_items.append(item)
-            continue
-
-        if current_section == "[agent]":
-            m = re.match(r'name\s*=\s*"([^"]*)"', stripped)
-            if m:
-                config["agent_name"] = m.group(1)
-
-        elif current_section == "[plugins]":
-            # Single-line: enabled = ["a", "b"]
-            m = re.match(r"enabled\s*=\s*\[(.+)\]", stripped)
-            if m:
-                config["plugins_enabled"] = [
-                    s.strip().strip('"').strip("'") for s in m.group(1).split(",") if s.strip()
-                ]
-            # Multi-line: enabled = [
-            elif re.match(r"enabled\s*=\s*\[\s*$", stripped):
-                in_enabled_list = True
-                enabled_items = []
+    if project_config.plugins.enabled:
+        config["plugins_enabled"] = list(project_config.plugins.enabled)
 
     return config
 
