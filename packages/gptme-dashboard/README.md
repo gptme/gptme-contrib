@@ -1,19 +1,59 @@
-# gptme workspace dashboard
+# gptme-dashboard
 
-Static site generator that scans a gptme workspace and produces an HTML dashboard.
+Static site generator and JSON exporter for gptme agent workspaces. Produces an HTML dashboard
+suitable for GitHub Pages deployment, and a structured JSON data dump for building custom frontends.
+
+## Purpose
+
+Every gptme agent (Bob, Alice, etc.) and shared workspace (gptme-contrib, gptme-agent-template)
+can use this tool to publish a browsable dashboard of their workspace contents — lessons, plugins,
+packages, and skills — as a static site on GitHub Pages.
+
+The key design principle: **each agent owns their dashboard**. The tool generates a self-contained
+static site that can be hosted anywhere. When gptme-webui gains embedding support, it will load
+the agent's dashboard from a configured URL — the webui provides chrome, the agent provides content.
+
+See [gptme-contrib#382](https://github.com/gptme/gptme-contrib/issues/382) for the full design
+discussion and requirements.
+
+## Installation
+
+```bash
+pip install gptme-dashboard
+# or, from source:
+uv pip install -e packages/gptme-dashboard
+```
 
 ## Usage
 
+### HTML dashboard
+
 ```bash
 # Generate dashboard for current workspace
-python dashboard/generate.py
+gptme-dashboard --workspace .
 
-# Custom workspace and output
-python dashboard/generate.py --workspace /path/to/workspace --output _site
+# Custom workspace and output directory
+gptme-dashboard --workspace /path/to/workspace --output _site
 
-# Custom templates
-python dashboard/generate.py --templates /path/to/templates
+# Custom Jinja2 templates (complete frontend customization)
+gptme-dashboard --workspace . --templates /path/to/templates
 ```
+
+Output: `_site/index.html` — a single-file, zero-dependency HTML dashboard.
+
+### JSON data dump
+
+```bash
+# Print JSON to stdout (pipe to jq, store in CI artifacts, etc.)
+gptme-dashboard --workspace . --json
+
+# Write data.json alongside HTML in the output directory
+gptme-dashboard --workspace . --output _site --json
+```
+
+The JSON output contains the same data as the HTML template context, making it a
+**frontend-independent data source**. Any custom frontend — React, Vue, plain JS — can
+consume `data.json` directly without running the Python generator.
 
 ## What it shows
 
@@ -26,30 +66,41 @@ python dashboard/generate.py --templates /path/to/templates
 ## Requirements
 
 - Python 3.10+
-- `jinja2` (for HTML templating)
-- `pyyaml` (optional, for robust frontmatter parsing; falls back to basic parser)
+- `jinja2` (templating)
+- `pyyaml` (frontmatter parsing)
 
 ## Customization
 
-Override templates by passing `--templates` pointing to your own directory.
+Pass `--templates` pointing to a directory with your own `index.html` (Jinja2).
 The template receives these variables:
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `workspace_name` | str | From gptme.toml agent name or directory name |
-| `stats` | dict | Counts: total_lessons, total_plugins, etc. |
-| `lessons` | list[dict] | title, category, status, keywords, path |
-| `plugins` | list[dict] | name, description, path |
-| `packages` | list[dict] | name, version, description, path |
-| `skills` | list[dict] | name, description, path |
-| `lesson_categories` | dict[str, int] | Category name to count |
+| `workspace_name` | `str` | From `gptme.toml` `[agent]` name or directory name |
+| `stats` | `dict` | Counts and `lesson_categories` breakdown |
+| `lessons` | `list[dict]` | `title`, `category`, `status`, `keywords`, `path` |
+| `plugins` | `list[dict]` | `name`, `description`, `path` |
+| `packages` | `list[dict]` | `name`, `version`, `description`, `path` |
+| `skills` | `list[dict]` | `name`, `description`, `path` |
 
-## Deployment
+`stats.lesson_categories` is a `dict[str, int]` mapping category name to lesson count.
 
-The generated `_site/` directory is ready for GitHub Pages or any static host.
+## Deployment (GitHub Pages)
+
+The generated `_site/` directory is ready for GitHub Pages or any static host. A typical
+GitHub Actions workflow:
+
+```yaml
+- name: Build dashboard
+  run: gptme-dashboard --workspace . --output _site --json
+- name: Deploy to Pages
+  uses: actions/upload-pages-artifact@v3
+  with:
+    path: _site
+```
 
 ## Tests
 
 ```bash
-pytest dashboard/tests/ -v
+pytest packages/gptme-dashboard/tests/ -v
 ```
