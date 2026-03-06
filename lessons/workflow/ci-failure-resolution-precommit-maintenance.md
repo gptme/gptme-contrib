@@ -1,4 +1,5 @@
 ---
+status: active
 match:
   keywords:
     - ci failure
@@ -57,7 +58,7 @@ echo "3. Infrastructure (missing scripts, configuration)"
 **Content Issues** (markdown, links):
 ```bash
 # Find partial markdown files (empty headers)
-grep -r "^#\+ $"
+grep -rE "^#+ $"
 
 # Fix by removing empty trailing headers
 # Or completing incomplete sections
@@ -86,8 +87,19 @@ git log --oneline -- scripts/precommit/
 git show <last-good-commit>:scripts/precommit/<script>.py > scripts/precommit/<script>.py
 
 # Or update pyproject.toml exclusions if needed
-echo '[tool.mypy]' >> pyproject.toml
-echo 'exclude = ["scripts/precommit"]' >> pyproject.toml
+# Use a proper editor or sed — do NOT append with echo, as it will
+# create a duplicate [tool.mypy] section header if one already exists
+# (invalid TOML that breaks all tooling reading pyproject.toml)
+# Example (only if [tool.mypy] section doesn't already exist):
+python -c "
+import sys, re
+content = open('pyproject.toml').read()
+if '[tool.mypy]' not in content:
+    open('pyproject.toml', 'a').write('\n[tool.mypy]\nexclude = [\"scripts/precommit\"]\n')
+else:
+    print('ERROR: [tool.mypy] section already exists — edit it manually', file=sys.stderr)
+    sys.exit(1)
+"
 ```
 
 ### Phase 3: Metadata Standardization
@@ -146,7 +158,7 @@ git commit --no-verify  # Bypasses quality checks
 **Wrong: Broad fixes**
 ```bash
 # Don't run broad formatting without review
-ruff format --unsafe-fixes  # Can introduce issues
+ruff check --unsafe-fixes  # Can introduce issues (note: --unsafe-fixes is a ruff check flag, not ruff format)
 
 # Don't auto-fix without understanding
 pre-commit run --all-files --show-diff-on-failure
@@ -211,6 +223,10 @@ Following this pattern results in:
 - Resolution: 10-15 minutes (depending on complexity)
 - Verification: 2-3 minutes
 - Total: 15-20 minutes to restore clean status
+
+## Tools
+
+**pre-commit** is the standard hook runner used in most gptme-agent workspaces. However, **`prek`** is a superior Rust-based alternative that Bob uses — it supports nested configs, parallelism, and is significantly faster. If your workspace supports it, prefer `prek run --all-files` over `pre-commit run --all-files`.
 
 ## Related
 - [Git Workflow](./git-workflow.md) - Proper commit practices
