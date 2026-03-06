@@ -3067,6 +3067,45 @@ def test_cli_discover_with_signals(tmp_path: Path, capsys, monkeypatch):
     assert "grade=" in captured.out
 
 
+def test_cli_discover_gptme_sessions_with_signals(tmp_path: Path, capsys, monkeypatch):
+    """discover --signals resolves gptme session directories to conversation.jsonl.
+
+    discover_gptme_sessions returns *directory* paths, not .jsonl files.
+    The discover handler must resolve them before calling extract_from_path,
+    otherwise --signals fails with IsADirectoryError.
+    """
+    import sys
+
+    from gptme_sessions.cli import main
+
+    # Create a gptme-style session directory with conversation.jsonl inside
+    session_dir = tmp_path / "2026-03-06-test-session"
+    session_dir.mkdir()
+    conversation_file = session_dir / "conversation.jsonl"
+    msgs = _make_gptme_msgs(commits=1)
+    with open(conversation_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    # discover_gptme_sessions returns the directory, not the file
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [session_dir]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "discover", "--harness", "gptme", "--signals"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    # --signals must produce grade output, not "signals error: Is a directory"
+    assert "grade=" in captured.out
+    assert "Is a directory" not in captured.out
+
+
 def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
     """discover returns non-zero on invalid --since value."""
     import sys

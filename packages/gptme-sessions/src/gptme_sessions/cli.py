@@ -283,7 +283,11 @@ def main() -> int:
 
         if harness_filter in (None, "gptme"):
             for p in discover_gptme_sessions(start, today):
-                discovered.append({"harness": "gptme", "path": str(p)})
+                # discover_gptme_sessions returns session directories; resolve to the
+                # actual conversation file so extract_from_path can open it.
+                jsonl = p / "conversation.jsonl"
+                resolved = jsonl if jsonl.exists() else p
+                discovered.append({"harness": "gptme", "path": str(resolved)})
 
         if harness_filter in (None, "claude-code"):
             for p in discover_cc_sessions(start, today):
