@@ -44,28 +44,36 @@ jobs:
 
       - name: Discover plugins with tests
         id: discover
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           # Get all plugins from Makefile (single source of truth)
           make ci-list-plugins-json > /tmp/all_plugins.json
 
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # Get files changed in this PR
-            changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+            # Get files changed in this PR (use env var to avoid shell injection)
+            changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
 
             # If shared config changed, run all plugins (can't tell which are affected)
             if echo "$changed" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-plugins\.yml)'; then
               echo "Shared config changed, running all plugins"
               plugins=$(cat /tmp/all_plugins.json)
             else
-              # Extract affected plugin names from changed paths (plugins/<name>/...)
-              affected=$(echo "$changed" | sed -n 's|^plugins/\([^/]*\)/.*|\1|p' | sort -u)
-
-              if [ -z "$affected" ]; then
-                echo "No plugin files changed, skipping tests"
-                plugins="[]"
+              # Files directly under plugins/ (not in a subdirectory) also trigger full run
+              if echo "$changed" | grep -qE '^plugins/[^/]+$'; then
+                echo "Root-level plugins/ file changed, running all plugins"
+                plugins=$(cat /tmp/all_plugins.json)
               else
-                # Filter all plugins to only affected ones
-                plugins=$(echo "$affected" | python3 -c "import json,sys; all_plugins=json.load(open('/tmp/all_plugins.json')); affected=set(sys.stdin.read().strip().split('\n')); print(json.dumps([p for p in all_plugins if p in affected]))")
+                # Extract affected plugin names from changed paths (plugins/<name>/...)
+                affected=$(echo "$changed" | sed -n 's|^plugins/\([^/]*\)/.*|\1|p' | sort -u)
+
+                if [ -z "$affected" ]; then
+                  echo "No plugin files changed, skipping tests"
+                  plugins="[]"
+                else
+                  # Filter all plugins to only affected ones
+                  plugins=$(echo "$affected" | python3 -c "import json,sys; all_plugins=json.load(open('/tmp/all_plugins.json')); affected=set(sys.stdin.read().strip().split('\n')); print(json.dumps([p for p in all_plugins if p in affected]))")
+                fi
               fi
             fi
           else
