@@ -69,8 +69,8 @@ def main(
         return
 
     out = Path(output) if output is not None else Path("_site")
-    generate(ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days)
-    json_str = generate_json(ws, out, include_sessions=sessions, sessions_days=sessions_days)
+    data = generate(ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days)
+    json_str = generate_json(ws, out, _data=data)
 
     if print_json:
         sys.stdout.write(json_str + "\n")

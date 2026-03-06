@@ -165,7 +165,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
     end = date.today()
     start = end - timedelta(days=days)
-    workspace_abs = str(workspace.resolve())
+    workspace_resolved = workspace.resolve()
 
     sessions: list[dict] = []
 
@@ -174,8 +174,14 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
         config = parse_gptme_config(session_dir)
         session_ws = config.get("workspace", "")
         # Include when workspace matches or when no workspace metadata is available.
-        if session_ws and workspace_abs not in session_ws and session_ws not in workspace_abs:
-            continue
+        if session_ws:
+            session_ws_path = Path(session_ws).resolve()
+            if not (
+                session_ws_path == workspace_resolved
+                or session_ws_path.is_relative_to(workspace_resolved)
+                or workspace_resolved.is_relative_to(session_ws_path)
+            ):
+                continue
 
         jsonl = session_dir / "conversation.jsonl"
         if not jsonl.exists():
@@ -205,7 +211,12 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
         # The CC project directory name is the workspace path with '/' → '-'.
         project_dir_name = jsonl.parent.name
         decoded = decode_cc_project_path(project_dir_name)
-        if workspace_abs not in decoded and decoded not in workspace_abs:
+        decoded_path = Path(decoded).resolve()
+        if not (
+            decoded_path == workspace_resolved
+            or decoded_path.is_relative_to(workspace_resolved)
+            or workspace_resolved.is_relative_to(decoded_path)
+        ):
             continue
 
         try:
@@ -695,8 +706,12 @@ def generate(
     template_dir: Path | None = None,
     include_sessions: bool = False,
     sessions_days: int = 30,
-) -> None:
-    """Generate static HTML dashboard from workspace."""
+) -> dict:
+    """Generate static HTML dashboard from workspace.
+
+    Returns the collected workspace data dict so callers can reuse it
+    (e.g. for JSON export) without rescanning.
+    """
     if template_dir is None:
         template_dir = Path(__file__).parent / "templates"
 
@@ -759,19 +774,24 @@ def generate(
         f"{session_msg}"
     )
 
+    return data
+
 
 def generate_json(
     workspace: Path,
     output: Path | None = None,
     include_sessions: bool = False,
     sessions_days: int = 30,
+    _data: dict | None = None,
 ) -> str:
     """Generate JSON data dump from workspace.
 
     If output is provided, writes data.json to that directory.
     Returns the JSON string in all cases.
+
+    If *_data* is provided, reuse it instead of rescanning the workspace.
     """
-    data = collect_workspace_data(
+    data = _data or collect_workspace_data(
         workspace, include_sessions=include_sessions, sessions_days=sessions_days
     )
     # Exclude large fields (body, all_keywords) from JSON export — they are only

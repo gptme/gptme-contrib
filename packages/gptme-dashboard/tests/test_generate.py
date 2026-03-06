@@ -1243,20 +1243,29 @@ class TestScanRecentSessions:
         assert result == []
 
     def test_gptme_sessions_workspace_filter(self, tmp_path: Path) -> None:
-        """Sessions whose workspace matches the given workspace are included."""
+        """Sessions whose workspace matches the given workspace are included;
+        sessions from other workspaces are excluded."""
         workspace = tmp_path / "myworkspace"
         workspace.mkdir()
 
-        session_dir = tmp_path / "sessions" / "2026-01-10-test-session"
-        session_dir.mkdir(parents=True)
-        jsonl = session_dir / "conversation.jsonl"
-        jsonl.write_text("")  # empty but exists
+        other_workspace = tmp_path / "other-agent"
+        other_workspace.mkdir()
+
+        matching_dir = tmp_path / "sessions" / "2026-01-10-matching"
+        matching_dir.mkdir(parents=True)
+        (matching_dir / "conversation.jsonl").write_text("")
+
+        non_matching_dir = tmp_path / "sessions" / "2026-01-10-other"
+        non_matching_dir.mkdir(parents=True)
+        (non_matching_dir / "conversation.jsonl").write_text("")
 
         def mock_discover_gptme(start, end, logs_dir=None):
-            return [session_dir]
+            return [matching_dir, non_matching_dir]
 
         def mock_parse_config(session_dir):
-            return {"workspace": str(workspace)}
+            if session_dir == matching_dir:
+                return {"workspace": str(workspace)}
+            return {"workspace": str(other_workspace)}
 
         def mock_extract_from_path(path):
             return {
@@ -1268,27 +1277,24 @@ class TestScanRecentSessions:
                 "inferred_category": "code",
             }
 
-        with patch("gptme_dashboard.generate.scan_recent_sessions") as mock_scan:
-            mock_scan.return_value = [
-                {
-                    "name": "2026-01-10-test-session",
-                    "date": "2026-01-10",
-                    "harness": "gptme",
-                    "commits": 1,
-                    "edits": 2,
-                    "errors": 0,
-                    "grade": 0.75,
-                    "productive": True,
-                    "category": "code",
-                }
-            ]
-            result = (
-                scan_recent_sessions.__wrapped__(workspace)
-                if hasattr(scan_recent_sessions, "__wrapped__")
-                else mock_scan(workspace)
-            )
+        def mock_discover_cc(start, end):
+            return []  # no CC sessions in this test
 
+        with (
+            patch(
+                "gptme_sessions.discovery.discover_gptme_sessions",
+                mock_discover_gptme,
+            ),
+            patch("gptme_sessions.discovery.parse_gptme_config", mock_parse_config),
+            patch("gptme_sessions.signals.extract_from_path", mock_extract_from_path),
+            patch("gptme_sessions.discovery.discover_cc_sessions", mock_discover_cc),
+            patch("gptme_sessions.discovery.decode_cc_project_path", lambda x: x),
+        ):
+            result = scan_recent_sessions(workspace)
+
+        # Only the matching session should be included
         assert len(result) == 1
+        assert result[0]["name"] == "2026-01-10-matching"
         assert result[0]["harness"] == "gptme"
         assert result[0]["commits"] == 1
 
