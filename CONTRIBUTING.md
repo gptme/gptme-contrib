@@ -69,6 +69,7 @@ We aim to review PRs within a few days.
 - Keep it simple
 - Handle errors gracefully
 - Document assumptions
+- **CLI framework**: Use [Click](https://click.palletsprojects.com/) for all new CLI tools. Existing argparse CLIs should be migrated to Click when modified (see [#385](https://github.com/gptme/gptme-contrib/issues/385))
 
 ## Adding Lessons
 
