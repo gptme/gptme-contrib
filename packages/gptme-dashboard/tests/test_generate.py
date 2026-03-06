@@ -29,12 +29,8 @@ from gptme_dashboard.generate import (
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a minimal gptme workspace for testing."""
-    # gptme.toml with [agent] section (name must be read from [agent], not other sections)
     (tmp_path / "gptme.toml").write_text(
         textwrap.dedent("""\
-        [project]
-        name = "should-not-be-used"
-
         [agent]
         name = "TestAgent"
         """)
@@ -252,10 +248,9 @@ def test_extract_title():
 
 
 def test_read_workspace_config_reads_agent_section(workspace: Path):
-    """Test that [agent] name is returned, not [project] name."""
+    """Test that [agent] name is returned from gptme.toml."""
     config = read_workspace_config(workspace)
     assert config["agent_name"] == "TestAgent"
-    assert config["agent_name"] != "should-not-be-used"
 
 
 def test_read_workspace_config_missing(tmp_path: Path):

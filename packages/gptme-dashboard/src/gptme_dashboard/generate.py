@@ -15,16 +15,7 @@ import configparser
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomli as tomllib  # type: ignore[no-redef]
-    except ImportError:
-        tomllib = None  # type: ignore[assignment]
 
 import markdown
 import yaml
@@ -318,34 +309,22 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata.
+    """Read gptme.toml for workspace metadata using gptme's config module."""
+    from gptme.config import get_project_config
 
-    Parses [agent] and [plugins] sections using tomllib for correct TOML handling.
-    Returns a flat dict with keys: agent_name, plugins_enabled.
-    """
-    config_path = workspace / "gptme.toml"
-    if not config_path.exists():
+    project_config = get_project_config(workspace, quiet=True)
+    if project_config is None:
         return {}
 
-    if tomllib is None:
-        return {}
+    config: dict = {}
 
-    try:
-        with open(config_path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        return {}
+    if project_config.agent and project_config.agent.name:
+        config["agent_name"] = project_config.agent.name
 
-    result: dict = {}
-    agent = data.get("agent", {})
-    if "name" in agent:
-        result["agent_name"] = agent["name"]
+    if project_config.plugins.enabled:
+        config["plugins_enabled"] = list(project_config.plugins.enabled)
 
-    plugins = data.get("plugins", {})
-    if "enabled" in plugins:
-        result["plugins_enabled"] = plugins["enabled"]
-
-    return result
+    return config
 
 
 def detect_github_url(workspace: Path) -> str:
