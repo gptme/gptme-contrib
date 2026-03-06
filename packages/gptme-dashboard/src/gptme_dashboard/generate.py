@@ -109,7 +109,7 @@ def detect_submodules(workspace: Path) -> list[dict]:
         has_plugins = (submodule_dir / "plugins").is_dir()
 
         if has_lessons or has_skills or has_packages or has_plugins:
-            name = path.split("/")[-1]  # Use last path component as name
+            name = path.replace("/", "-")  # Use full path (dashes) to ensure uniqueness
             submodules.append(
                 {
                     "name": name,
@@ -368,8 +368,9 @@ def collect_workspace_data(workspace: Path) -> dict:
         lesson_categories[cat] = lesson_categories.get(cat, 0) + 1
     lesson_categories = dict(sorted(lesson_categories.items()))
 
-    # Collect unique sources for UI filtering
-    sources: list[str] = sorted({item.get("source", "") for item in guidance} - {""})
+    # Collect unique sources for UI filtering (from all content types, not just guidance)
+    all_items = guidance + packages + plugins
+    sources: list[str] = sorted({item.get("source", "") for item in all_items} - {""})
 
     stats = {
         "total_lessons": len(lessons),

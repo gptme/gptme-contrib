@@ -312,7 +312,7 @@ filterBtns.forEach(btn => {
   });
 });
 
-if (sourceBtns) {
+if (sourceBtns.length > 0) {
   sourceBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       sourceBtns.forEach(b => b.classList.remove('active'));
