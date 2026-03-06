@@ -80,7 +80,11 @@ def extract_title(body: str, fallback: str) -> str:
 
 
 def _parse_toml(path: Path) -> dict:
-    """Parse a TOML file, returning an empty dict on failure."""
+    """Parse a TOML file, returning an empty dict on failure.
+
+    Returns an empty dict silently when the file does not exist.
+    Logs a warning to stderr when the file exists but contains a syntax error.
+    """
     if sys.version_info >= (3, 11):
         import tomllib
     else:
@@ -91,7 +95,10 @@ def _parse_toml(path: Path) -> dict:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as exc:
+        print(f"Warning: {path}: TOML parse error — {exc}", file=sys.stderr)
         return {}
 
 
