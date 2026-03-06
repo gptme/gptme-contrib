@@ -480,9 +480,8 @@ def validate_directory(
 @click.command()
 @click.argument("paths", nargs=-1, required=True, type=click.Path(path_type=Path))
 @click.option(
-    "--recursive",
+    "--recursive/--no-recursive",
     "-r",
-    is_flag=True,
     default=True,
     help="Recursively validate directories (default: True)",
 )
