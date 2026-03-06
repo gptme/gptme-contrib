@@ -8,9 +8,11 @@ import pytest
 
 from gptme_dashboard.generate import (
     collect_workspace_data,
+    detect_github_url,
     extract_title,
     generate,
     generate_json,
+    github_blob_url,
     lesson_page_path,
     parse_frontmatter,
     read_workspace_config,
@@ -499,3 +501,123 @@ def test_skill_detail_breadcrumb(workspace: Path, tmp_path: Path):
     # skills/test-skill/index.html is two levels deep → needs ../../
     html = (output / "skills" / "test-skill" / "index.html").read_text()
     assert 'href="../../index.html"' in html
+
+
+# --- GitHub URL detection and linking tests ---
+
+
+def test_github_blob_url():
+    """Test GitHub blob URL construction."""
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo")
+    assert url == "https://github.com/gptme/gptme-contrib/blob/master/plugins/foo"
+
+
+def test_github_blob_url_with_prefix():
+    """Test blob URL with prefix for lessons (lessons/workflow/x.md)."""
+    url = github_blob_url(
+        "https://github.com/gptme/gptme-contrib",
+        "workflow/test.md",
+        prefix="lessons",
+    )
+    assert url == "https://github.com/gptme/gptme-contrib/blob/master/lessons/workflow/test.md"
+
+
+def test_github_blob_url_empty():
+    """Test blob URL returns empty when no repo URL."""
+    assert github_blob_url("", "some/path") == ""
+
+
+def test_detect_github_url_ssh(tmp_path: Path):
+    """Test detection from SSH remote URL."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:gptme/gptme-contrib.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    assert detect_github_url(tmp_path) == "https://github.com/gptme/gptme-contrib"
+
+
+def test_detect_github_url_https(tmp_path: Path):
+    """Test detection from HTTPS remote URL."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/ErikBjare/bob.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    assert detect_github_url(tmp_path) == "https://github.com/ErikBjare/bob"
+
+
+def test_detect_github_url_no_git(tmp_path: Path):
+    """Test detection returns empty for non-git directory."""
+    assert detect_github_url(tmp_path) == ""
+
+
+def test_collect_workspace_data_includes_gh_urls(tmp_path: Path):
+    """Test that gh_url is added to items when GitHub remote is detected."""
+    import subprocess
+
+    # Set up git repo with GitHub remote
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/repo.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+
+    # Create minimal workspace content
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "test.md").write_text("---\nstatus: active\n---\n# Test\n\nBody.")
+
+    pkg_dir = tmp_path / "packages" / "mypkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text('[project]\nname = "mypkg"\nversion = "1.0"')
+
+    data = collect_workspace_data(tmp_path)
+
+    assert data["gh_repo_url"] == "https://github.com/test/repo"
+    assert data["lessons"][0]["gh_url"].startswith(
+        "https://github.com/test/repo/blob/master/lessons/"
+    )
+    assert (
+        data["packages"][0]["gh_url"] == "https://github.com/test/repo/blob/master/packages/mypkg"
+    )
+
+
+def test_generate_html_includes_github_links(tmp_path: Path):
+    """Test that generated HTML includes GitHub source links when remote exists."""
+    import subprocess
+
+    # Set up git repo with GitHub remote
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/repo.git"],
+        cwd=workspace,
+        capture_output=True,
+    )
+
+    lessons_dir = workspace / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "test.md").write_text("---\nstatus: active\n---\n# Test Lesson\n\nBody content.")
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # Index should have GitHub link in header and src links in table
+    index_html = (output / "index.html").read_text()
+    assert "https://github.com/test/repo" in index_html
+    assert "gh-link" in index_html
+
+    # Lesson detail page should have "View on GitHub" link
+    lesson_html = (output / "lessons" / "workflow" / "test.html").read_text()
+    assert "View on GitHub" in lesson_html
+    assert "https://github.com/test/repo/blob/master/lessons/workflow/test.md" in lesson_html

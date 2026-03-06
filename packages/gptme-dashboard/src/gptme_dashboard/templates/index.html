@@ -137,6 +137,15 @@ tr:hover { background: var(--accent-dim); }
 .search-box::placeholder { color: var(--text-dim); }
 .search-box:focus { outline: none; border-color: var(--accent); }
 
+/* GitHub source link */
+.gh-link {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-decoration: none;
+  opacity: 0.6;
+}
+.gh-link:hover { opacity: 1; color: var(--accent); }
+
 @media (max-width: 600px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
   .cat-bar .cat-name { width: 80px; font-size: 0.75rem; }
@@ -148,7 +157,7 @@ tr:hover { background: var(--accent-dim); }
 {% block content %}
 <header>
   <h1>{{ workspace_name }} <span>workspace</span></h1>
-  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, plugins, packages, and skills</p>
+  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, plugins, packages, and skills{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}</p>
 </header>
 
 <!-- Stats -->
@@ -195,7 +204,7 @@ tr:hover { background: var(--accent-dim); }
   </div>
   <table id="lesson-table">
     <thead>
-      <tr><th>Title</th><th>Category</th><th>Status</th><th>Keywords</th></tr>
+      <tr><th>Title</th><th>Category</th><th>Status</th><th>Keywords</th>{% if gh_repo_url %}<th></th>{% endif %}</tr>
     </thead>
     <tbody>
     {% for lesson in lessons %}
@@ -204,6 +213,7 @@ tr:hover { background: var(--accent-dim); }
         <td><span class="tag tag-category">{{ lesson.category }}</span></td>
         <td><span class="tag {% if lesson.status == 'active' %}tag-active{% elif lesson.status == 'deprecated' %}tag-deprecated{% endif %}">{{ lesson.status }}</span></td>
         <td>{% for kw in lesson.keywords %}<span class="tag">{{ kw }}</span>{% endfor %}</td>
+        {% if gh_repo_url %}<td><a href="{{ lesson.gh_url }}" title="View on GitHub" class="gh-link">src</a></td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -214,12 +224,13 @@ tr:hover { background: var(--accent-dim); }
 <section id="plugins">
   <h2>Plugins ({{ stats.total_plugins }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Description</th></tr></thead>
+    <thead><tr><th>Name</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for plugin in plugins %}
       <tr>
         <td><strong>{{ plugin.name }}</strong></td>
         <td>{{ plugin.description }}</td>
+        {% if gh_repo_url %}<td><a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a></td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -230,13 +241,14 @@ tr:hover { background: var(--accent-dim); }
 <section id="packages">
   <h2>Packages ({{ stats.total_packages }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Version</th><th>Description</th></tr></thead>
+    <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for pkg in packages %}
       <tr>
         <td><strong>{{ pkg.name }}</strong></td>
         <td>{{ pkg.version }}</td>
         <td>{{ pkg.description }}</td>
+        {% if gh_repo_url %}<td><a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a></td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -247,12 +259,13 @@ tr:hover { background: var(--accent-dim); }
 <section id="skills">
   <h2>Skills ({{ stats.total_skills }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Description</th></tr></thead>
+    <thead><tr><th>Name</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for skill in skills %}
       <tr>
         <td><strong><a href="{{ skill.page_url }}">{{ skill.name }}</a></strong></td>
         <td>{{ skill.description }}</td>
+        {% if gh_repo_url %}<td><a href="{{ skill.gh_url }}" title="View on GitHub" class="gh-link">src</a></td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
