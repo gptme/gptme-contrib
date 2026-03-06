@@ -26,10 +26,10 @@ uv pip install -e packages/gptme-dashboard
 
 ## Usage
 
-### HTML dashboard
+### Generate dashboard (HTML + JSON)
 
 ```bash
-# Generate dashboard for current workspace
+# Generate dashboard for current workspace (outputs to _site/)
 gptme-dashboard --workspace .
 
 # Custom workspace and output directory
@@ -39,21 +39,18 @@ gptme-dashboard --workspace /path/to/workspace --output _site
 gptme-dashboard --workspace . --templates /path/to/templates
 ```
 
-Output: `_site/index.html` — a single-file, zero-dependency HTML dashboard.
+By default, both `_site/index.html` (HTML dashboard) and `_site/data.json` (structured data) are
+generated together. The JSON file is a frontend-independent data source for custom dashboards.
 
-### JSON data dump
+### JSON data dump to stdout
 
 ```bash
 # Print JSON to stdout (pipe to jq, store in CI artifacts, etc.)
 gptme-dashboard --workspace . --json
-
-# Write data.json alongside HTML in the output directory
-gptme-dashboard --workspace . --output _site --json
 ```
 
-The JSON output contains the same data as the HTML template context, making it a
-**frontend-independent data source**. Any custom frontend — React, Vue, plain JS — can
-consume `data.json` directly without running the Python generator.
+The `--json` flag without `--output` prints JSON to stdout and skips HTML generation. Any custom
+frontend — React, Vue, plain JS — can consume `data.json` directly without re-running the generator.
 
 ## What it shows
 
@@ -66,6 +63,7 @@ consume `data.json` directly without running the Python generator.
 ## Requirements
 
 - Python 3.10+
+- `click` (CLI)
 - `jinja2` (templating)
 - `pyyaml` (frontmatter parsing)
 
@@ -93,12 +91,15 @@ GitHub Actions workflow:
 
 ```yaml
 - name: Build dashboard
-  run: gptme-dashboard --workspace . --output _site --json
+  run: gptme-dashboard --workspace . --output _site
 - name: Deploy to Pages
   uses: actions/upload-pages-artifact@v3
   with:
     path: _site
 ```
+
+This generates both `_site/index.html` and `_site/data.json`, giving Pages visitors a browsable
+dashboard and future frontends a machine-readable data source.
 
 ## Tests
 

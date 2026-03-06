@@ -1052,6 +1052,7 @@ name = "gptme-dashboard"
 version = "0.1.0"
 source = { editable = "packages/gptme-dashboard" }
 dependencies = [
+    { name = "click" },
     { name = "jinja2" },
     { name = "pyyaml" },
 ]
@@ -1067,6 +1068,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0" },
     { name = "jinja2", specifier = ">=3.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },

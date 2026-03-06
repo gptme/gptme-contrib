@@ -70,6 +70,24 @@ We aim to review PRs within a few days.
 - Handle errors gracefully
 - Document assumptions
 
+## CLI Packages
+
+When adding a Python package that exposes a CLI, use **[Click](https://click.palletsprojects.com/)**
+as the CLI framework (not argparse). Click provides a cleaner API, better help formatting, and
+easier testability.
+
+```python
+import click
+
+@click.command()
+@click.option("--workspace", type=click.Path(path_type=Path), default=".", show_default=True)
+def main(workspace: Path) -> None:
+    """Short description shown in --help."""
+    ...
+```
+
+Add `click>=8.0` to your package's `[project.dependencies]` in `pyproject.toml`.
+
 ## Adding Lessons
 
 Lessons are reusable patterns that help agents (and humans) learn from common mistakes and best practices.
