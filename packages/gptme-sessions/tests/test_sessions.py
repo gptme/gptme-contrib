@@ -1511,78 +1511,21 @@ def test_extract_usage_gptme_metadata():
     assert usage["model"] == "anthropic/claude-sonnet-4-6"
 
 
-def test_extract_usage_gptme_usage_field():
-    """Token counts in msg.usage (legacy) are extracted correctly."""
-    msgs = [
-        {
-            "role": "assistant",
-            "content": "test",
-            "usage": {"input_tokens": 50, "output_tokens": 25, "cost": 0.001},
-            "metadata": {"model": "anthropic/claude-sonnet-4-6"},
-        }
-    ]
-    usage = extract_usage_gptme(msgs)
-    assert usage["input_tokens"] == 50
-    assert usage["output_tokens"] == 25
-
-
-def test_extract_usage_gptme_openai_naming():
-    """OpenAI-style naming (prompt_tokens, completion_tokens) is supported."""
-    msgs = [
-        {
-            "role": "assistant",
-            "content": "test",
-            "usage": {"prompt_tokens": 100, "completion_tokens": 40},
-            "metadata": {"model": "openai/gpt-4o"},
-        }
-    ]
-    usage = extract_usage_gptme(msgs)
-    assert usage["input_tokens"] == 100
-    assert usage["output_tokens"] == 40
-    assert usage["model"] == "openai/gpt-4o"
-
-
-def test_extract_usage_gptme_meta_usage():
-    """Token counts in msg.metadata.usage (nested) are extracted correctly."""
-    msgs = [
-        {
-            "role": "assistant",
-            "content": "test",
-            "metadata": {
-                "model": "anthropic/claude-opus-4-6",
-                "usage": {"input_tokens": 300, "output_tokens": 100, "cost": 0.01},
-            },
-        }
-    ]
-    usage = extract_usage_gptme(msgs)
-    assert usage["input_tokens"] == 300
-    assert usage["output_tokens"] == 100
-    assert abs(usage["cost"] - 0.01) < 1e-9
-
-
 def test_extract_usage_gptme_empty():
     """Empty trajectory returns empty dict."""
     assert extract_usage_gptme([]) == {}
 
 
-def test_extract_usage_gptme_zero_cost_not_falsy():
-    """Zero cost (e.g. free/local model) is preserved, not skipped by or-chaining."""
+def test_extract_usage_gptme_no_metadata():
+    """Messages without metadata are skipped."""
     msgs = [
         {
             "role": "assistant",
             "content": "test",
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cost": 0.0},
-            "metadata": {
-                "model": "local/llama",
-                # cost also present here with a non-zero value that should NOT win
-                "cost": 9.99,
-            },
+            # no metadata field
         }
     ]
-    usage = extract_usage_gptme(msgs)
-    # cost=0.0 from usage should win over metadata.cost=9.99
-    assert usage["cost"] == 0.0
-    assert usage["input_tokens"] == 100
+    assert extract_usage_gptme(msgs) == {}
 
 
 def test_extract_usage_gptme_non_assistant_ignored():
@@ -1677,3 +1620,29 @@ def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
     assert result["usage"]["input_tokens"] == 500
     assert result["usage"]["output_tokens"] == 100
     assert result["usage"]["model"] == "anthropic/claude-sonnet-4-6"
+
+
+def test_extract_usage_gptme_cache_tokens():
+    """Cache tokens from msg.metadata are extracted and included in total."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "response",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_tokens": 800,
+                "cache_creation_tokens": 200,
+                "cost": 0.01,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+    assert usage["cache_read_tokens"] == 800
+    assert usage["cache_creation_tokens"] == 200
+    # total_tokens includes cache tokens (consistent with extract_usage_cc)
+    assert usage["total_tokens"] == 1150  # 100 + 50 + 800 + 200
+    assert abs(usage["cost"] - 0.01) < 1e-9

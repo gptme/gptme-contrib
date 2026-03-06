@@ -87,7 +87,7 @@ def test_fetch_session_stats_with_logs(tmp_path):
             "role": "assistant",
             "content": "Hi there",
             "timestamp": "2025-01-15T10:05:00",
-            "usage": {"input_tokens": 200, "output_tokens": 100, "cost": 0.02},
+            "metadata": {"input_tokens": 200, "output_tokens": 100, "cost": 0.02},
         },
     ]
     conv_lines = [json.dumps(m) for m in messages]

@@ -20,7 +20,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = [
+    "tomli>=1.0; python_version < '3.11'",
+]
 
 [project.urls]
 Homepage = "https://github.com/gptme/gptme-contrib"
