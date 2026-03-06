@@ -74,6 +74,24 @@ th {
 }
 tr:hover { background: var(--accent-dim); }
 
+/* Tags */
+.tag {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0.15em 0.5em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  margin: 0.1em;
+}
+.tag-active { border-color: var(--green); color: var(--green); }
+.tag-deprecated { border-color: var(--orange); color: var(--orange); }
+.tag-category { border-color: var(--purple); color: var(--purple); }
+.tag-kind-lesson { border-color: var(--accent); color: var(--accent); }
+.tag-kind-skill { border-color: var(--cyan); color: var(--cyan); }
+.tag-source { border-color: var(--orange); color: var(--orange); font-style: italic; }
+
+
 /* Category bar chart */
 .cat-bar {
   display: flex;
@@ -137,6 +155,15 @@ tr:hover { background: var(--accent-dim); }
 .search-box::placeholder { color: var(--text-dim); }
 .search-box:focus { outline: none; border-color: var(--accent); }
 
+/* GitHub source link */
+.gh-link {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-decoration: none;
+  opacity: 0.6;
+}
+.gh-link:hover { opacity: 1; color: var(--accent); }
+
 @media (max-width: 600px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
   .cat-bar .cat-name { width: 80px; font-size: 0.75rem; }
@@ -148,14 +175,14 @@ tr:hover { background: var(--accent-dim); }
 {% block content %}
 <header>
   <h1>{{ workspace_name }} <span>workspace</span></h1>
-  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, plugins, packages, and skills</p>
+  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, skills, plugins, and packages{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}</p>
 </header>
 
 <!-- Stats -->
 <div class="stats">
   <div class="stat-card">
-    <div class="number">{{ stats.total_lessons }}</div>
-    <div class="label">Lessons</div>
+    <div class="number">{{ stats.total_guidance }}</div>
+    <div class="label">Lessons &amp; Skills</div>
   </div>
   <div class="stat-card">
     <div class="number">{{ stats.total_plugins }}</div>
@@ -165,45 +192,59 @@ tr:hover { background: var(--accent-dim); }
     <div class="number">{{ stats.total_packages }}</div>
     <div class="label">Packages</div>
   </div>
+  {% if submodules %}
   <div class="stat-card">
-    <div class="number">{{ stats.total_skills }}</div>
-    <div class="label">Skills</div>
+    <div class="number">{{ submodules | length }}</div>
+    <div class="label">Submodules</div>
   </div>
+  {% endif %}
 </div>
 
-<!-- Lesson Categories -->
+<!-- Categories -->
 <section>
-  <h2>Lesson Categories</h2>
+  <h2>Categories</h2>
   {% for cat, count in stats.lesson_categories.items() %}
   <div class="cat-bar">
     <span class="cat-name">{{ cat }}</span>
-    <div class="bar" style="width: {{ (count / stats.total_lessons * 100) | round(1) }}%"></div>
+    <div class="bar" style="width: {{ (count / stats.total_guidance * 100) | round(1) }}%"></div>
     <span class="count">{{ count }}</span>
   </div>
   {% endfor %}
 </section>
 
-<!-- Lessons -->
-<section id="lessons">
-  <h2>Lessons ({{ stats.total_lessons }})</h2>
-  <input type="text" class="search-box" id="lesson-search" placeholder="Filter lessons...">
-  <div class="filter-row" id="lesson-filters">
+<!-- Lessons & Skills (unified) -->
+<section id="guidance">
+  <h2>Lessons &amp; Skills ({{ stats.total_guidance }})</h2>
+  <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
+  <div class="filter-row" id="guidance-filters">
     <button class="filter-btn active" data-cat="all">All</button>
     {% for cat in stats.lesson_categories %}
     <button class="filter-btn" data-cat="{{ cat }}">{{ cat }}</button>
     {% endfor %}
   </div>
-  <table id="lesson-table">
+  {% if sources %}
+  <div class="filter-row" id="source-filters">
+    <button class="filter-btn active" data-source="all">All sources</button>
+    <button class="filter-btn" data-source="_local">Local</button>
+    {% for src in sources %}
+    <button class="filter-btn" data-source="{{ src }}">{{ src }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <table id="guidance-table">
     <thead>
-      <tr><th>Title</th><th>Category</th><th>Status</th><th>Keywords</th></tr>
+      <tr><th>Title</th><th>Kind</th><th>Category</th><th>Status</th><th>Keywords</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr>
     </thead>
     <tbody>
-    {% for lesson in lessons %}
-      <tr data-category="{{ lesson.category }}">
-        <td><a href="{{ lesson.page_url }}">{{ lesson.title }}</a></td>
-        <td><span class="tag tag-category">{{ lesson.category }}</span></td>
-        <td><span class="tag {% if lesson.status == 'active' %}tag-active{% elif lesson.status == 'deprecated' %}tag-deprecated{% endif %}">{{ lesson.status }}</span></td>
-        <td>{% for kw in lesson.keywords %}<span class="tag">{{ kw }}</span>{% endfor %}</td>
+    {% for item in guidance %}
+      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}">
+        <td>{% if item.page_url %}<a href="{{ item.page_url }}">{{ item.title | default(item.name, true) }}</a>{% else %}{{ item.title | default(item.name, true) }}{% endif %}</td>
+        <td><span class="tag tag-kind-{{ item.kind }}">{{ item.kind }}</span></td>
+        <td><span class="tag tag-category">{{ item.category }}</span></td>
+        <td><span class="tag {% if item.status == 'active' %}tag-active{% elif item.status == 'deprecated' %}tag-deprecated{% endif %}">{{ item.status }}</span></td>
+        <td>{% for kw in item.keywords %}<span class="tag">{{ kw }}</span>{% endfor %}</td>
+        {% if sources %}<td>{% if item.source %}<span class="tag tag-source">{{ item.source }}</span>{% endif %}</td>{% endif %}
+        {% if gh_repo_url %}<td>{% if item.gh_url %}<a href="{{ item.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -214,12 +255,15 @@ tr:hover { background: var(--accent-dim); }
 <section id="plugins">
   <h2>Plugins ({{ stats.total_plugins }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Description</th></tr></thead>
+    <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for plugin in plugins %}
       <tr>
         <td><strong>{{ plugin.name }}</strong></td>
         <td>{{ plugin.description }}</td>
+        <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
+        {% if sources %}<td>{% if plugin.source %}<span class="tag tag-source">{{ plugin.source }}</span>{% endif %}</td>{% endif %}
+        {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -230,29 +274,15 @@ tr:hover { background: var(--accent-dim); }
 <section id="packages">
   <h2>Packages ({{ stats.total_packages }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Version</th><th>Description</th></tr></thead>
+    <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for pkg in packages %}
       <tr>
         <td><strong>{{ pkg.name }}</strong></td>
         <td>{{ pkg.version }}</td>
         <td>{{ pkg.description }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</section>
-
-<!-- Skills -->
-<section id="skills">
-  <h2>Skills ({{ stats.total_skills }})</h2>
-  <table>
-    <thead><tr><th>Name</th><th>Description</th></tr></thead>
-    <tbody>
-    {% for skill in skills %}
-      <tr>
-        <td><strong><a href="{{ skill.page_url }}">{{ skill.name }}</a></strong></td>
-        <td>{{ skill.description }}</td>
+        {% if sources %}<td>{% if pkg.source %}<span class="tag tag-source">{{ pkg.source }}</span>{% endif %}</td>{% endif %}
+        {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -262,21 +292,27 @@ tr:hover { background: var(--accent-dim); }
 
 {% block scripts %}
 <script>
-// Lesson filtering
-const filterBtns = document.querySelectorAll('#lesson-filters .filter-btn');
-const lessonRows = document.querySelectorAll('#lesson-table tbody tr');
-const searchBox = document.getElementById('lesson-search');
+// Guidance (lessons + skills) filtering
+const filterBtns = document.querySelectorAll('#guidance-filters .filter-btn');
+const sourceBtns = document.querySelectorAll('#source-filters .filter-btn');
+const guidanceRows = document.querySelectorAll('#guidance-table tbody tr');
+const searchBox = document.getElementById('guidance-search');
 
 let activeCategory = 'all';
+let activeSource = 'all';
 
 function applyFilters() {
   const query = (searchBox.value || '').toLowerCase();
-  lessonRows.forEach(row => {
+  guidanceRows.forEach(row => {
     const cat = row.dataset.category;
+    const source = row.dataset.source;
     const text = row.textContent.toLowerCase();
     const catMatch = activeCategory === 'all' || cat === activeCategory;
+    const sourceMatch = activeSource === 'all' ||
+      (activeSource === '_local' && !source) ||
+      source === activeSource;
     const searchMatch = !query || text.includes(query);
-    row.style.display = catMatch && searchMatch ? '' : 'none';
+    row.style.display = catMatch && sourceMatch && searchMatch ? '' : 'none';
   });
 }
 
@@ -288,6 +324,17 @@ filterBtns.forEach(btn => {
     applyFilters();
   });
 });
+
+if (sourceBtns.length > 0) {
+  sourceBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      sourceBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeSource = btn.dataset.source;
+      applyFilters();
+    });
+  });
+}
 
 if (searchBox) {
   searchBox.addEventListener('input', applyFilters);

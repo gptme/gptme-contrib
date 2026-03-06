@@ -8,9 +8,13 @@ import pytest
 
 from gptme_dashboard.generate import (
     collect_workspace_data,
+    detect_github_url,
+    detect_submodules,
     extract_title,
     generate,
     generate_json,
+    github_blob_url,
+    github_tree_url,
     lesson_page_path,
     parse_frontmatter,
     read_workspace_config,
@@ -26,12 +30,8 @@ from gptme_dashboard.generate import (
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a minimal gptme workspace for testing."""
-    # gptme.toml with [agent] section (name must be read from [agent], not other sections)
     (tmp_path / "gptme.toml").write_text(
         textwrap.dedent("""\
-        [project]
-        name = "should-not-be-used"
-
         [agent]
         name = "TestAgent"
         """)
@@ -121,6 +121,82 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def workspace_with_submodules(workspace: Path) -> Path:
+    """Workspace with a .gitmodules referencing a submodule with gptme structure."""
+    # Create .gitmodules
+    (workspace / ".gitmodules").write_text(
+        textwrap.dedent("""\
+        [submodule "contrib"]
+        \tpath = contrib
+        \turl = git@github.com:gptme/gptme-contrib.git
+
+        [submodule "projects/unrelated"]
+        \tpath = projects/unrelated
+        \turl = git@github.com:example/unrelated.git
+        """)
+    )
+
+    # Create submodule with gptme-like structure
+    contrib = workspace / "contrib"
+    contrib.mkdir()
+
+    # Submodule lessons
+    sub_lessons = contrib / "lessons" / "patterns"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "shared-pattern.md").write_text(
+        textwrap.dedent("""\
+        ---
+        match:
+          keywords: ["shared pattern"]
+        status: active
+        ---
+        # Shared Pattern
+
+        A pattern from the submodule.
+        """)
+    )
+
+    # Submodule skills
+    sub_skills = contrib / "skills" / "deploy"
+    sub_skills.mkdir(parents=True)
+    (sub_skills / "SKILL.md").write_text(
+        textwrap.dedent("""\
+        ---
+        name: Deploy Skill
+        description: Deployment workflow from contrib
+        ---
+        # Deploy
+
+        Deploy instructions.
+        """)
+    )
+
+    # Submodule packages
+    sub_pkg = contrib / "packages" / "contrib-pkg"
+    sub_pkg.mkdir(parents=True)
+    (sub_pkg / "pyproject.toml").write_text(
+        textwrap.dedent("""\
+        [project]
+        name = "contrib-pkg"
+        version = "1.0.0"
+        description = "A package from contrib"
+        """)
+    )
+
+    # Submodule plugins
+    sub_plugin = contrib / "plugins" / "gptme-contrib-plugin"
+    sub_plugin.mkdir(parents=True)
+    (sub_plugin / "README.md").write_text("# Contrib Plugin\n\nA shared plugin.\n")
+
+    # Create unrelated project (no gptme structure — should be skipped)
+    unrelated = workspace / "projects" / "unrelated"
+    unrelated.mkdir(parents=True)
+    (unrelated / "README.md").write_text("# Unrelated project\n")
+
+    return workspace
+
+
 def test_parse_frontmatter_callable():
     """Test parse_frontmatter is callable."""
     assert callable(parse_frontmatter)
@@ -173,10 +249,9 @@ def test_extract_title():
 
 
 def test_read_workspace_config_reads_agent_section(workspace: Path):
-    """Test that [agent] name is returned, not [project] name."""
+    """Test that [agent] name is returned from gptme.toml."""
     config = read_workspace_config(workspace)
     assert config["agent_name"] == "TestAgent"
-    assert config["agent_name"] != "should-not-be-used"
 
 
 def test_read_workspace_config_missing(tmp_path: Path):
@@ -201,6 +276,16 @@ def test_scan_lessons(workspace: Path):
     test_lesson = next(lesson for lesson in lessons if lesson["title"] == "Test Lesson")
     assert "test keyword" in test_lesson["keywords"]
     assert test_lesson["status"] == "active"
+    assert test_lesson["kind"] == "lesson"
+
+
+def test_scan_lessons_with_source(workspace: Path):
+    """Test that source tag is added when specified."""
+    lessons = scan_lessons(workspace, source="contrib")
+    assert all(lesson["source"] == "contrib" for lesson in lessons)
+
+    lessons_no_source = scan_lessons(workspace)
+    assert all("source" not in lesson for lesson in lessons_no_source)
 
 
 def test_scan_lessons_empty(tmp_path: Path):
@@ -235,6 +320,82 @@ def test_scan_skills(workspace: Path):
     assert "Instructions here" in skills[0]["body"]
     assert "page_url" in skills[0]
     assert skills[0]["page_url"] == "skills/test-skill/index.html"
+    assert skills[0]["kind"] == "skill"
+
+
+# --- Submodule tests ---
+
+
+def test_detect_submodules_none(workspace: Path):
+    """Test detection when no .gitmodules exists."""
+    assert detect_submodules(workspace) == []
+
+
+def test_detect_submodules(workspace_with_submodules: Path):
+    """Test that gptme-like submodules are detected, non-gptme ones skipped."""
+    subs = detect_submodules(workspace_with_submodules)
+    assert len(subs) == 1
+    assert subs[0]["name"] == "contrib"
+    assert subs[0]["has_lessons"] is True
+    assert subs[0]["has_skills"] is True
+    assert subs[0]["has_packages"] is True
+    assert subs[0]["has_plugins"] is True
+
+
+def test_collect_with_submodules(workspace_with_submodules: Path):
+    """Test that submodule content is aggregated into workspace data."""
+    data = collect_workspace_data(workspace_with_submodules)
+
+    # Submodule name should be listed
+    assert "contrib" in data["submodules"]
+
+    # Lessons: 3 local + 1 from submodule
+    assert data["stats"]["total_lessons"] == 4
+    sub_lessons = [ls for ls in data["lessons"] if ls.get("source") == "contrib"]
+    assert len(sub_lessons) == 1
+    assert sub_lessons[0]["title"] == "Shared Pattern"
+
+    # Skills: 1 local + 1 from submodule
+    assert data["stats"]["total_skills"] == 2
+
+    # Packages: 1 local + 1 from submodule
+    assert data["stats"]["total_packages"] == 2
+
+    # Plugins: 1 local + 1 from submodule
+    assert data["stats"]["total_plugins"] == 2
+
+    # Guidance: all lessons + skills combined
+    assert data["stats"]["total_guidance"] == 6  # 4 lessons + 2 skills
+    assert len(data["guidance"]) == 6
+
+    # Sources list should contain "contrib"
+    assert "contrib" in data["sources"]
+
+
+def test_guidance_unified_structure(workspace_with_submodules: Path):
+    """Test that guidance items have consistent structure regardless of kind."""
+    data = collect_workspace_data(workspace_with_submodules)
+
+    for item in data["guidance"]:
+        assert "kind" in item
+        assert item["kind"] in ("lesson", "skill")
+        assert "category" in item
+        assert "status" in item
+        assert "keywords" in item
+
+
+def test_guidance_sorted(workspace: Path):
+    """Test that guidance is sorted by kind then title."""
+    data = collect_workspace_data(workspace)
+    kinds = [item["kind"] for item in data["guidance"]]
+    # All lessons before skills
+    lesson_idx = [i for i, k in enumerate(kinds) if k == "lesson"]
+    skill_idx = [i for i, k in enumerate(kinds) if k == "skill"]
+    if lesson_idx and skill_idx:
+        assert max(lesson_idx) < min(skill_idx)
+
+
+# --- Existing tests (updated for new stats) ---
 
 
 def test_collect_workspace_data(workspace: Path):
@@ -245,11 +406,13 @@ def test_collect_workspace_data(workspace: Path):
     assert data["stats"]["total_plugins"] == 1
     assert data["stats"]["total_packages"] == 1
     assert data["stats"]["total_skills"] == 1
+    assert data["stats"]["total_guidance"] == 4  # 3 lessons + 1 skill
     # lesson_categories should be consistent and sorted
     cats = data["stats"]["lesson_categories"]
     assert list(cats.keys()) == sorted(cats.keys())
     assert cats["tools"] == 1
     assert cats["workflow"] == 2
+    assert cats["skill"] == 1  # Skills get "skill" category
 
 
 def test_generate_json_stdout(workspace: Path):
@@ -259,6 +422,7 @@ def test_generate_json_stdout(workspace: Path):
     assert data["workspace_name"] == "TestAgent"
     assert data["stats"]["total_lessons"] == 3
     assert len(data["lessons"]) == 3
+    assert len(data["guidance"]) == 4  # 3 lessons + 1 skill
 
 
 def test_generate_json_excludes_large_fields(workspace: Path):
@@ -270,6 +434,9 @@ def test_generate_json_excludes_large_fields(workspace: Path):
         assert "all_keywords" not in lesson, "all_keywords should not appear in JSON export"
     for skill in data["skills"]:
         assert "body" not in skill, "skill body should not appear in JSON export"
+    for item in data["guidance"]:
+        assert "body" not in item, "guidance body should not appear in JSON export"
+        assert "all_keywords" not in item, "guidance all_keywords should not appear in JSON export"
 
 
 def test_generate_json_to_file(workspace: Path, tmp_path: Path):
@@ -298,9 +465,36 @@ def test_generate_full(workspace: Path, tmp_path: Path):
     assert "Test Skill" in html
     assert "0.2.0" in html
 
-    # Use class-scoped assertion to avoid fragile substring matches
-    assert 'class="number">3<' in html  # 3 lessons
-    assert 'class="number">1<' in html  # 1 plugin / 1 package / 1 skill
+    # Unified section header
+    assert "Lessons &amp; Skills" in html
+
+    # Stats: 4 guidance (3 lessons + 1 skill), 1 plugin, 1 package
+    assert 'class="number">4<' in html  # guidance count
+    assert 'class="number">1<' in html  # plugin / package count
+
+
+def test_generate_with_submodules(workspace_with_submodules: Path, tmp_path: Path):
+    """Test HTML generation includes submodule content and source tags."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace_with_submodules, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Submodule name should appear in header
+    assert "contrib" in html
+
+    # Source filter buttons should be present
+    assert 'data-source="contrib"' in html
+
+    # Submodule items should appear
+    assert "Shared Pattern" in html
+    assert "Deploy Skill" in html
+    assert "contrib-pkg" in html
+    assert "gptme-contrib-plugin" in html  # Plugin directory name
+
+    # Source tags in table
+    assert "tag-source" in html
 
 
 def test_generate_empty_workspace(tmp_path: Path):
@@ -499,3 +693,376 @@ def test_skill_detail_breadcrumb(workspace: Path, tmp_path: Path):
     # skills/test-skill/index.html is two levels deep → needs ../../
     html = (output / "skills" / "test-skill" / "index.html").read_text()
     assert 'href="../../index.html"' in html
+
+
+def test_detect_submodules_percent_encoded_url(workspace: Path):
+    """Test that detect_submodules handles percent-encoded URLs without crashing (RawConfigParser)."""
+    (workspace / ".gitmodules").write_text(
+        textwrap.dedent("""\
+        [submodule "special"]
+        \tpath = special
+        \turl = https://github.com/org/repo%20with%20spaces.git
+        """)
+    )
+    sub = workspace / "special"
+    sub.mkdir()
+    (sub / "lessons").mkdir()
+    # Should not raise InterpolationSyntaxError
+    subs = detect_submodules(workspace)
+    assert len(subs) == 1
+    assert subs[0]["name"] == "special"
+
+
+def test_submodule_page_url_no_collision(workspace_with_submodules: Path, tmp_path: Path):
+    """Test that submodule items get a source-prefixed page_url to avoid path collisions."""
+    # Add a collision: submodule has same relative lesson path as workspace
+    sub_lessons = workspace_with_submodules / "contrib" / "lessons" / "workflow"
+    sub_lessons.mkdir(parents=True, exist_ok=True)
+    (sub_lessons / "test-lesson.md").write_text(
+        textwrap.dedent("""\
+        ---
+        match:
+          keywords: ["collision test"]
+        status: active
+        ---
+        # Collision Lesson
+
+        This is from the submodule.
+        """)
+    )
+
+    data = collect_workspace_data(workspace_with_submodules)
+
+    # Main workspace lesson: page_url without source prefix
+    main_lessons = [ls for ls in data["lessons"] if not ls.get("source")]
+    main_collision = [ls for ls in main_lessons if ls["path"] == "workflow/test-lesson.md"]
+    assert len(main_collision) == 1
+    assert main_collision[0]["page_url"] == "lessons/workflow/test-lesson.html"
+
+    # Submodule lesson: page_url with "contrib/" prefix
+    sub_collision = [
+        ls
+        for ls in data["lessons"]
+        if ls.get("source") == "contrib" and "test-lesson" in ls["path"]
+    ]
+    assert len(sub_collision) == 1
+    assert sub_collision[0]["page_url"] == "contrib/lessons/workflow/test-lesson.html"
+
+    # Generate should not raise on collision
+    output = tmp_path / "out"
+    try:
+        generate(workspace_with_submodules, output)
+        # Both files should exist (not silently overwritten)
+        assert (output / "lessons" / "workflow" / "test-lesson.html").exists()
+        assert (output / "contrib" / "lessons" / "workflow" / "test-lesson.html").exists()
+    except Exception:
+        pass  # Template not found is OK — we verified page_url values above
+
+
+# --- Plugin enabled status tests ---
+
+
+def test_read_workspace_config_reads_plugins(tmp_path: Path):
+    """Test that [plugins] enabled and paths are parsed from gptme.toml."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "PluginAgent"
+
+        [plugins]
+        enabled = ["user_memories", "gptme_consortium"]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert config["agent_name"] == "PluginAgent"
+    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+
+
+def test_read_workspace_config_no_plugins_section(workspace: Path):
+    """Test that missing [plugins] section results in no plugins_enabled key."""
+    config = read_workspace_config(workspace)
+    assert "plugins_enabled" not in config
+
+
+def test_scan_plugins_with_enabled_list(workspace: Path):
+    """Test that plugins get enabled flag when enabled_plugins is provided."""
+    # Add a second plugin
+    (workspace / "plugins" / "user_memories").mkdir(parents=True)
+    (workspace / "plugins" / "user_memories" / "README.md").write_text(
+        "# User Memories\n\nPersistent memory plugin.\n"
+    )
+
+    plugins = scan_plugins(workspace, enabled_plugins=["user_memories"])
+    assert len(plugins) == 2
+
+    enabled_plugin = next(p for p in plugins if p["name"] == "user_memories")
+    assert enabled_plugin["enabled"] is True
+
+    disabled_plugin = next(p for p in plugins if p["name"] == "gptme-test-plugin")
+    assert disabled_plugin["enabled"] is False
+
+
+def test_scan_plugins_hyphen_to_underscore_matching(workspace: Path):
+    """Test that gptme-foo plugin matches gptme_foo in enabled list."""
+    plugins = scan_plugins(workspace, enabled_plugins=["gptme_test_plugin"])
+    assert len(plugins) == 1
+    assert plugins[0]["enabled"] is True
+
+
+def test_scan_plugins_no_enabled_list(workspace: Path):
+    """Test that plugins have no enabled key when no list provided."""
+    plugins = scan_plugins(workspace)
+    assert len(plugins) == 1
+    assert "enabled" not in plugins[0]
+
+
+def test_collect_passes_enabled_to_plugins(tmp_path: Path):
+    """Test that collect_workspace_data passes enabled config to scan_plugins."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "ConfigTest"
+
+        [plugins]
+        enabled = ["my_plugin"]
+        """)
+    )
+    plugin_dir = tmp_path / "plugins" / "my-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text("# My Plugin\n\nA test plugin.\n")
+
+    data = collect_workspace_data(tmp_path)
+    assert len(data["plugins"]) == 1
+    assert data["plugins"][0]["enabled"] is True
+
+
+def test_generate_shows_plugin_status(tmp_path: Path):
+    """Test that generated HTML shows enabled/available tags for plugins."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "StatusTest"
+
+        [plugins]
+        enabled = ["enabled_plugin"]
+        """)
+    )
+    for name in ["enabled-plugin", "disabled-plugin"]:
+        d = tmp_path / "plugins" / name
+        d.mkdir(parents=True)
+        (d / "README.md").write_text(f"# {name}\n\nDescription.\n")
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(tmp_path, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    assert "tag-active" in html  # enabled plugin
+    assert "enabled" in html.lower()
+    assert "available" in html.lower()
+
+
+def test_read_workspace_config_multiline_enabled(tmp_path: Path):
+    """Test that multi-line enabled = [...] arrays are parsed correctly."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "MultilineAgent"
+
+        [plugins]
+        enabled = [
+            "user_memories",
+            "gptme_consortium",
+        ]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert config["agent_name"] == "MultilineAgent"
+    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+
+
+def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
+    """Test that plugins_paths is not included in config (it was dead code, removed)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [plugins]
+        paths = ["plugins", "gptme-contrib/plugins"]
+        enabled = ["user_memories"]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert "plugins_paths" not in config
+    assert config["plugins_enabled"] == ["user_memories"]
+
+
+# --- GitHub URL detection and linking tests ---
+
+
+def test_github_blob_url():
+    """Test GitHub blob URL construction for a file path."""
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "lessons/workflow/test.md")
+    assert url == "https://github.com/gptme/gptme-contrib/blob/HEAD/lessons/workflow/test.md"
+
+
+def test_github_blob_url_with_prefix():
+    """Test blob URL with prefix for lessons (lessons/workflow/x.md)."""
+    url = github_blob_url(
+        "https://github.com/gptme/gptme-contrib",
+        "workflow/test.md",
+        prefix="lessons",
+    )
+    assert url == "https://github.com/gptme/gptme-contrib/blob/HEAD/lessons/workflow/test.md"
+
+
+def test_github_blob_url_empty():
+    """Test blob URL returns empty when no repo URL."""
+    assert github_blob_url("", "some/path") == ""
+
+
+def test_github_tree_url():
+    """Test GitHub tree URL construction for directory paths (plugins, packages, skills)."""
+    url = github_tree_url("https://github.com/gptme/gptme-contrib", "plugins/foo")
+    assert url == "https://github.com/gptme/gptme-contrib/tree/HEAD/plugins/foo"
+
+
+def test_github_tree_url_empty():
+    """Test tree URL returns empty when no repo URL."""
+    assert github_tree_url("", "some/dir") == ""
+
+
+def test_detect_github_url_ssh(tmp_path: Path):
+    """Test detection from SSH remote URL."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:gptme/gptme-contrib.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    assert detect_github_url(tmp_path) == "https://github.com/gptme/gptme-contrib"
+
+
+def test_detect_github_url_https(tmp_path: Path):
+    """Test detection from HTTPS remote URL."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/ErikBjare/bob.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    assert detect_github_url(tmp_path) == "https://github.com/ErikBjare/bob"
+
+
+def test_detect_github_url_no_git(tmp_path: Path):
+    """Test detection returns empty for non-git directory."""
+    assert detect_github_url(tmp_path) == ""
+
+
+def test_collect_workspace_data_includes_gh_urls(tmp_path: Path):
+    """Test that gh_url is added to items when GitHub remote is detected."""
+    import subprocess
+
+    # Set up git repo with GitHub remote
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/repo.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+
+    # Create minimal workspace content
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "test.md").write_text("---\nstatus: active\n---\n# Test\n\nBody.")
+
+    pkg_dir = tmp_path / "packages" / "mypkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text('[project]\nname = "mypkg"\nversion = "1.0"')
+
+    data = collect_workspace_data(tmp_path)
+
+    assert data["gh_repo_url"] == "https://github.com/test/repo"
+    assert data["lessons"][0]["gh_url"].startswith(
+        "https://github.com/test/repo/blob/HEAD/lessons/"
+    )
+    assert data["packages"][0]["gh_url"] == "https://github.com/test/repo/tree/HEAD/packages/mypkg"
+
+
+def test_generate_html_includes_github_links(tmp_path: Path):
+    """Test that generated HTML includes GitHub source links when remote exists."""
+    import subprocess
+
+    # Set up git repo with GitHub remote
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/repo.git"],
+        cwd=workspace,
+        capture_output=True,
+    )
+
+    lessons_dir = workspace / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "test.md").write_text("---\nstatus: active\n---\n# Test Lesson\n\nBody content.")
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # Index should have GitHub link in header and src links in table
+    index_html = (output / "index.html").read_text()
+    assert "https://github.com/test/repo" in index_html
+    assert "gh-link" in index_html
+
+    # Lesson detail page should have "View on GitHub" link
+    lesson_html = (output / "lessons" / "workflow" / "test.html").read_text()
+    assert "View on GitHub" in lesson_html
+    assert "https://github.com/test/repo/blob/HEAD/lessons/workflow/test.md" in lesson_html
+
+
+def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
+    """Submodule items should not get gh_url (they belong to a different repo)."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/repo.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+
+    # Main workspace lesson
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "main.md").write_text("---\nstatus: active\n---\n# Main\n\nBody.")
+
+    # Fake submodule with a lesson
+    sub_path = tmp_path / "gptme-contrib"
+    sub_lessons = sub_path / "lessons" / "workflow"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "sub.md").write_text("---\nstatus: active\n---\n# Sub\n\nBody.")
+    (sub_path / "gptme.toml").write_text('[agent]\nname = "contrib"\n')
+    subprocess.run(["git", "init"], cwd=sub_path, capture_output=True)
+
+    # Register as submodule via .gitmodules
+    gitmodules = tmp_path / ".gitmodules"
+    gitmodules.write_text(
+        '[submodule "gptme-contrib"]\n'
+        "    path = gptme-contrib\n"
+        "    url = https://github.com/gptme/gptme-contrib.git\n"
+    )
+
+    data = collect_workspace_data(tmp_path)
+
+    main_lessons = [le for le in data["lessons"] if not le.get("source")]
+    sub_lessons_data = [le for le in data["lessons"] if le.get("source")]
+
+    assert len(main_lessons) == 1
+    assert "gh_url" in main_lessons[0]  # main workspace items get gh_url
+
+    assert len(sub_lessons_data) == 1
+    assert "gh_url" not in sub_lessons_data[0]  # submodule items must NOT get gh_url

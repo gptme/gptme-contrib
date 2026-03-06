@@ -4,11 +4,17 @@ Scans a gptme workspace (lessons, plugins, packages, skills) and generates
 a static HTML site suitable for gh-pages deployment, or a JSON data dump
 for custom frontends.
 
+Supports nested submodules: when a workspace contains git submodules with
+gptme-like structure (lessons/, skills/, packages/, plugins/), their content
+is automatically included with source attribution.
+
 Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 """
 
+import configparser
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import markdown
@@ -71,7 +77,56 @@ def extract_title(body: str, fallback: str) -> str:
     return fallback
 
 
-def scan_lessons(workspace: Path) -> list[dict]:
+def detect_submodules(workspace: Path) -> list[dict]:
+    """Detect git submodules with gptme-like structure.
+
+    Reads .gitmodules to find submodules, then checks each for
+    gptme-relevant directories (lessons/, skills/, packages/, plugins/).
+    """
+    gitmodules = workspace / ".gitmodules"
+    if not gitmodules.exists():
+        return []
+
+    config = configparser.RawConfigParser()
+    config.read(str(gitmodules))
+
+    submodules = []
+    for section in config.sections():
+        if not section.startswith("submodule "):
+            continue
+
+        path = config.get(section, "path", fallback=None)
+        if not path:
+            continue
+
+        submodule_dir = workspace / path
+        if not submodule_dir.is_dir():
+            continue
+
+        # Check for gptme-like structure
+        has_lessons = (submodule_dir / "lessons").is_dir()
+        has_skills = (submodule_dir / "skills").is_dir()
+        has_packages = (submodule_dir / "packages").is_dir()
+        has_plugins = (submodule_dir / "plugins").is_dir()
+
+        if has_lessons or has_skills or has_packages or has_plugins:
+            name = path.replace("/", "-")  # Use full path (dashes) to ensure uniqueness
+            submodules.append(
+                {
+                    "name": name,
+                    "path": path,
+                    "abs_path": submodule_dir,
+                    "has_lessons": has_lessons,
+                    "has_skills": has_skills,
+                    "has_packages": has_packages,
+                    "has_plugins": has_plugins,
+                }
+            )
+
+    return submodules
+
+
+def scan_lessons(workspace: Path, source: str = "") -> list[dict]:
     """Scan lessons directory for lesson files."""
     lessons_dir = workspace / "lessons"
     if not lessons_dir.is_dir():
@@ -98,25 +153,39 @@ def scan_lessons(workspace: Path) -> list[dict]:
                 keywords = [kw]
 
         page_url = lesson_page_path(str(rel))
+        if source:
+            # Prefix with source name to avoid collisions when submodule has same-path lessons
+            page_url = f"{source}/{page_url}"
 
-        lessons.append(
-            {
-                "title": title,
-                "category": category,
-                "status": status,
-                "keywords": keywords[:5],  # Limit displayed keywords
-                "all_keywords": keywords,
-                "body": body,
-                "path": str(rel),
-                "page_url": page_url,
-            }
-        )
+        entry: dict = {
+            "title": title,
+            "category": category,
+            "status": status,
+            "keywords": keywords[:5],  # Limit displayed keywords
+            "all_keywords": keywords,
+            "body": body,
+            "path": str(rel),
+            "page_url": page_url,
+            "kind": "lesson",
+        }
+        if source:
+            entry["source"] = source
+
+        lessons.append(entry)
 
     return lessons
 
 
-def scan_plugins(workspace: Path) -> list[dict]:
-    """Scan plugins directory for plugin directories."""
+def scan_plugins(
+    workspace: Path,
+    source: str = "",
+    enabled_plugins: list[str] | None = None,
+) -> list[dict]:
+    """Scan plugins directory for plugin directories.
+
+    If *enabled_plugins* is provided (from ``gptme.toml [plugins] enabled``),
+    each plugin gets an ``enabled`` boolean flag.
+    """
     plugins_dir = workspace / "plugins"
     if not plugins_dir.is_dir():
         return []
@@ -136,18 +205,26 @@ def scan_plugins(workspace: Path) -> list[dict]:
                     description = line[:200]
                     break
 
-        plugins.append(
-            {
-                "name": d.name,
-                "description": description,
-                "path": str(d.relative_to(workspace)),
-            }
-        )
+        # Derive the plugin module name: strip common prefix, convert hyphens
+        # e.g. "gptme-consortium" -> "gptme_consortium", "user_memories" -> "user_memories"
+        module_name = d.name.replace("-", "_")
+
+        entry: dict = {
+            "name": d.name,
+            "description": description,
+            "path": str(d.relative_to(workspace)),
+        }
+        if source:
+            entry["source"] = source
+        if enabled_plugins is not None:
+            entry["enabled"] = module_name in enabled_plugins or d.name in enabled_plugins
+
+        plugins.append(entry)
 
     return plugins
 
 
-def scan_packages(workspace: Path) -> list[dict]:
+def scan_packages(workspace: Path, source: str = "") -> list[dict]:
     """Scan packages directory for Python packages."""
     packages_dir = workspace / "packages"
     if not packages_dir.is_dir():
@@ -180,19 +257,21 @@ def scan_packages(workspace: Path) -> list[dict]:
                     if description and version:
                         break
 
-        packages.append(
-            {
-                "name": d.name,
-                "description": description,
-                "version": version,
-                "path": str(d.relative_to(workspace)),
-            }
-        )
+        entry: dict = {
+            "name": d.name,
+            "description": description,
+            "version": version,
+            "path": str(d.relative_to(workspace)),
+        }
+        if source:
+            entry["source"] = source
+
+        packages.append(entry)
 
     return packages
 
 
-def scan_skills(workspace: Path) -> list[dict]:
+def scan_skills(workspace: Path, source: str = "") -> list[dict]:
     """Scan skills directory for SKILL.md files."""
     skills_dir = workspace / "skills"
     if not skills_dir.is_dir():
@@ -209,66 +288,188 @@ def scan_skills(workspace: Path) -> list[dict]:
 
         rel_dir = str(skill_md.parent.relative_to(workspace))
         page_url = skill_page_path(rel_dir)
+        if source:
+            # Prefix with source name to avoid collisions when submodule has same-path skills
+            page_url = f"{source}/{page_url}"
 
-        skills.append(
-            {
-                "name": name,
-                "description": description,
-                "body": body,
-                "path": rel_dir,
-                "page_url": page_url,
-            }
-        )
+        entry: dict = {
+            "name": name,
+            "description": description,
+            "body": body,
+            "path": rel_dir,
+            "page_url": page_url,
+            "kind": "skill",
+        }
+        if source:
+            entry["source"] = source
+
+        skills.append(entry)
 
     return skills
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata.
+    """Read gptme.toml for workspace metadata using gptme's config module."""
+    from gptme.config import get_project_config
 
-    Parses [agent] section specifically to avoid matching name fields
-    from other sections like [project].
-    """
-    config_path = workspace / "gptme.toml"
-    if not config_path.exists():
+    project_config = get_project_config(workspace, quiet=True)
+    if project_config is None:
         return {}
 
-    text = config_path.read_text()
-    config: dict[str, str] = {}
+    config: dict = {}
 
-    in_agent_section = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("["):
-            in_agent_section = stripped == "[agent]"
-        elif in_agent_section:
-            m = re.match(r'name\s*=\s*"([^"]*)"', stripped)
-            if m:
-                config["agent_name"] = m.group(1)
-                break
+    if project_config.agent and project_config.agent.name:
+        config["agent_name"] = project_config.agent.name
+
+    if project_config.plugins.enabled:
+        config["plugins_enabled"] = list(project_config.plugins.enabled)
 
     return config
 
 
+def detect_github_url(workspace: Path) -> str:
+    """Detect GitHub repository URL from git remote.
+
+    Tries ``git remote get-url origin`` and converts SSH/HTTPS URLs to
+    a browsable ``https://github.com/owner/repo`` URL.  Returns empty
+    string if detection fails.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return ""
+        url = result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+    # SSH: git@github.com:owner/repo.git
+    m = re.match(r"git@github\.com:(.+?)(?:\.git)?$", url)
+    if m:
+        return f"https://github.com/{m.group(1)}"
+
+    # HTTPS: https://github.com/owner/repo.git
+    m = re.match(r"https://github\.com/(.+?)(?:\.git)?$", url)
+    if m:
+        return f"https://github.com/{m.group(1)}"
+
+    return ""
+
+
+def github_blob_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
+    """Build a GitHub blob URL for a file path.
+
+    ``prefix`` is prepended to the path (e.g. for submodule-relative paths).
+    """
+    if not gh_repo_url:
+        return ""
+    full_path = f"{prefix}/{path}" if prefix else path
+    return f"{gh_repo_url}/blob/HEAD/{full_path}"
+
+
+def github_tree_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
+    """Build a GitHub tree URL for a directory path.
+
+    Use this for directories (plugins, packages, skills).
+    ``prefix`` is prepended to the path.
+    """
+    if not gh_repo_url:
+        return ""
+    full_path = f"{prefix}/{path}" if prefix else path
+    return f"{gh_repo_url}/tree/HEAD/{full_path}"
+
+
 def collect_workspace_data(workspace: Path) -> dict:
-    """Collect all workspace data into a dict suitable for JSON export or rendering."""
-    lessons = scan_lessons(workspace)
-    plugins = scan_plugins(workspace)
-    packages = scan_packages(workspace)
-    skills = scan_skills(workspace)
+    """Collect all workspace data into a dict suitable for JSON export or rendering.
+
+    Scans the workspace and any nested submodules with gptme-like structure.
+    Items from submodules are tagged with a ``source`` field.
+    Lessons and skills are merged into a unified ``guidance`` list.
+    """
     config = read_workspace_config(workspace)
 
-    lesson_categories: dict[str, int] = {}
+    lessons = scan_lessons(workspace)
+    enabled_plugins = config.get("plugins_enabled")
+    plugins = scan_plugins(workspace, enabled_plugins=enabled_plugins)
+    packages = scan_packages(workspace)
+    skills = scan_skills(workspace)
+
+    # Scan submodules for additional content
+    submodules = detect_submodules(workspace)
+    submodule_names: list[str] = []
+    for sub in submodules:
+        sub_path: Path = sub["abs_path"]
+        sub_name: str = sub["name"]
+        submodule_names.append(sub_name)
+
+        if sub["has_lessons"]:
+            lessons.extend(scan_lessons(sub_path, source=sub_name))
+        if sub["has_skills"]:
+            skills.extend(scan_skills(sub_path, source=sub_name))
+        if sub["has_packages"]:
+            packages.extend(scan_packages(sub_path, source=sub_name))
+        if sub["has_plugins"]:
+            plugins.extend(scan_plugins(sub_path, source=sub_name))
+
+    # Detect GitHub repo URL for source links
+    gh_repo_url = detect_github_url(workspace)
+
+    # Add GitHub source links to main-workspace items only.
+    # Submodule items (source != "") belong to a different repository and would
+    # get incorrect URLs if we applied the main workspace's gh_repo_url to them.
+    if gh_repo_url:
+        for lesson in lessons:
+            if not lesson.get("source"):
+                lesson["gh_url"] = github_blob_url(gh_repo_url, lesson["path"], prefix="lessons")
+        for plugin in plugins:
+            if not plugin.get("source"):
+                plugin["gh_url"] = github_tree_url(gh_repo_url, plugin["path"])
+        for pkg in packages:
+            if not pkg.get("source"):
+                pkg["gh_url"] = github_tree_url(gh_repo_url, pkg["path"])
+        for skill in skills:
+            if not skill.get("source"):
+                skill["gh_url"] = github_tree_url(gh_repo_url, skill["path"])
+
+    # Build unified guidance list (lessons + skills together)
+    guidance: list[dict] = []
     for lesson in lessons:
-        cat = lesson["category"]
+        entry = dict(lesson)
+        entry.setdefault("kind", "lesson")
+        guidance.append(entry)
+    for skill in skills:
+        entry = dict(skill)
+        entry.setdefault("kind", "skill")
+        # Skills don't have category — use "skill" as category for filtering
+        entry.setdefault("category", "skill")
+        entry.setdefault("status", "active")
+        entry.setdefault("keywords", [])
+        guidance.append(entry)
+
+    # Sort guidance: lessons first (alphabetical), then skills
+    guidance.sort(key=lambda x: (x["kind"], x.get("title", x.get("name", ""))))
+
+    lesson_categories: dict[str, int] = {}
+    for item in guidance:
+        cat = item.get("category", "uncategorized")
         lesson_categories[cat] = lesson_categories.get(cat, 0) + 1
     lesson_categories = dict(sorted(lesson_categories.items()))
+
+    # Collect unique sources for UI filtering (from all content types, not just guidance)
+    all_items = guidance + packages + plugins
+    sources: list[str] = sorted({item.get("source", "") for item in all_items} - {""})
 
     stats = {
         "total_lessons": len(lessons),
         "total_plugins": len(plugins),
         "total_packages": len(packages),
         "total_skills": len(skills),
+        "total_guidance": len(guidance),
         "lesson_categories": lesson_categories,
     }
 
@@ -276,12 +477,16 @@ def collect_workspace_data(workspace: Path) -> dict:
 
     return {
         "workspace_name": workspace_name,
+        "gh_repo_url": gh_repo_url,
         "lessons": lessons,
         "plugins": plugins,
         "packages": packages,
         "skills": skills,
+        "guidance": guidance,
         "stats": stats,
         "lesson_categories": lesson_categories,
+        "submodules": submodule_names,
+        "sources": sources,
     }
 
 
@@ -364,6 +569,9 @@ def generate_json(workspace: Path, output: Path | None = None) -> str:
         ],
         "skills": [
             {k: v for k, v in skill.items() if k not in _JSON_EXCLUDE} for skill in data["skills"]
+        ],
+        "guidance": [
+            {k: v for k, v in item.items() if k not in _JSON_EXCLUDE} for item in data["guidance"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)

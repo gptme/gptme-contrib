@@ -106,7 +106,7 @@ header h1 {
 {% block content %}
 <nav class="breadcrumb">
   <a href="{{ root_prefix }}index.html">{{ workspace_name }}</a>
-  &rsaquo; <a href="{{ root_prefix }}index.html#lessons">Lessons</a>
+  &rsaquo; <a href="{{ root_prefix }}index.html#guidance">Lessons</a>
   &rsaquo; {{ lesson.title }}
 </nav>
 
@@ -116,6 +116,7 @@ header h1 {
     <span class="tag tag-category">{{ lesson.category }}</span>
     <span class="tag {% if lesson.status == 'active' %}tag-active{% elif lesson.status == 'deprecated' %}tag-deprecated{% endif %}">{{ lesson.status }}</span>
     <span style="color: var(--text-dim); font-size: 0.85rem;">{{ lesson.path }}</span>
+    {% if lesson.gh_url %}<a href="{{ lesson.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
 </header>
 
