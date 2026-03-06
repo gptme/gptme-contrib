@@ -46,7 +46,7 @@ from gptme_dashboard.generate import generate, generate_json
 )
 @click.option(
     "--sessions-days",
-    type=int,
+    type=click.IntRange(min=1),
     default=30,
     show_default=True,
     help="Number of days back to scan for sessions (used with --sessions).",
