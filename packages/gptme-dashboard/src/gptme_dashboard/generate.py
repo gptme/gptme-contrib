@@ -115,8 +115,12 @@ def scan_lessons(workspace: Path) -> list[dict]:
     return lessons
 
 
-def scan_plugins(workspace: Path) -> list[dict]:
-    """Scan plugins directory for plugin directories."""
+def scan_plugins(workspace: Path, enabled_plugins: list[str] | None = None) -> list[dict]:
+    """Scan plugins directory for plugin directories.
+
+    If *enabled_plugins* is provided (from ``gptme.toml [plugins] enabled``),
+    each plugin gets an ``enabled`` boolean flag.
+    """
     plugins_dir = workspace / "plugins"
     if not plugins_dir.is_dir():
         return []
@@ -136,13 +140,19 @@ def scan_plugins(workspace: Path) -> list[dict]:
                     description = line[:200]
                     break
 
-        plugins.append(
-            {
-                "name": d.name,
-                "description": description,
-                "path": str(d.relative_to(workspace)),
-            }
-        )
+        # Derive the plugin module name: strip common prefix, convert hyphens
+        # e.g. "gptme-consortium" -> "gptme_consortium", "user_memories" -> "user_memories"
+        module_name = d.name.replace("-", "_")
+
+        entry: dict = {
+            "name": d.name,
+            "description": description,
+            "path": str(d.relative_to(workspace)),
+        }
+        if enabled_plugins is not None:
+            entry["enabled"] = module_name in enabled_plugins or d.name in enabled_plugins
+
+        plugins.append(entry)
 
     return plugins
 
@@ -226,37 +236,59 @@ def scan_skills(workspace: Path) -> list[dict]:
 def read_workspace_config(workspace: Path) -> dict:
     """Read gptme.toml for workspace metadata.
 
-    Parses [agent] section specifically to avoid matching name fields
-    from other sections like [project].
+    Parses [agent] and [plugins] sections. Agent name is read from [agent]
+    specifically to avoid matching name fields from other sections like [project].
     """
     config_path = workspace / "gptme.toml"
     if not config_path.exists():
         return {}
 
     text = config_path.read_text()
-    config: dict[str, str] = {}
+    config: dict = {}
 
-    in_agent_section = False
+    current_section = ""
     for line in text.splitlines():
         stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
         if stripped.startswith("["):
-            in_agent_section = stripped == "[agent]"
-        elif in_agent_section:
+            current_section = stripped
+            continue
+
+        if current_section == "[agent]":
             m = re.match(r'name\s*=\s*"([^"]*)"', stripped)
             if m:
                 config["agent_name"] = m.group(1)
-                break
+
+        elif current_section == "[plugins]":
+            m = re.match(r"enabled\s*=\s*\[(.+)\]", stripped)
+            if m:
+                config["plugins_enabled"] = [
+                    s.strip().strip('"').strip("'") for s in m.group(1).split(",") if s.strip()
+                ]
+            # Multi-line paths array
+            m = re.match(r"paths\s*=\s*\[", stripped)
+            if m and "]" in stripped:
+                # Single-line paths = ["a", "b"]
+                inner = stripped[stripped.index("[") + 1 : stripped.rindex("]")]
+                config["plugins_paths"] = [
+                    s.strip().strip('"').strip("'")
+                    for s in inner.split(",")
+                    if s.strip() and not s.strip().startswith("#")
+                ]
 
     return config
 
 
 def collect_workspace_data(workspace: Path) -> dict:
     """Collect all workspace data into a dict suitable for JSON export or rendering."""
+    config = read_workspace_config(workspace)
+
     lessons = scan_lessons(workspace)
-    plugins = scan_plugins(workspace)
+    enabled_plugins = config.get("plugins_enabled")
+    plugins = scan_plugins(workspace, enabled_plugins=enabled_plugins)
     packages = scan_packages(workspace)
     skills = scan_skills(workspace)
-    config = read_workspace_config(workspace)
 
     lesson_categories: dict[str, int] = {}
     for lesson in lessons:
