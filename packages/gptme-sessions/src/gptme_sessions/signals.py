@@ -974,12 +974,42 @@ def infer_category(signals: dict) -> str | None:
     return best
 
 
+def extract_usage_copilot(msgs: list[dict]) -> dict:
+    """Extract model info from Copilot CLI events.jsonl trajectories.
+
+    Copilot events do not include per-turn token counts or cost data.
+    We extract the model name from ``session.model_change`` events (or
+    from ``session.start`` context if available) so callers always get a
+    consistent ``{"model": ...}`` dict across all harnesses.
+
+    Returns an empty dict if no model information is found.
+    """
+    model: str | None = None
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+        if rec_type == "session.model_change":
+            m = (record.get("data") or {}).get("newModel")
+            if m:
+                model = m
+        elif rec_type == "session.start" and model is None:
+            # Some versions may include model in start context
+            data = record.get("data") or {}
+            m = data.get("selectedModel")
+            if m:
+                model = m
+
+    if model is None:
+        return {}
+    return {"model": model}
+
+
 def extract_from_path(jsonl_path: Path) -> dict:
     """Parse trajectory and return signals + grade in one call.
 
     Auto-detects format: gptme, Claude Code, Codex, or Copilot.
     Token usage is extracted when available (CC has full counts, Codex has
-    rate-limit percentages only, Copilot has no token data).
+    rate-limit percentages only, Copilot has model info only).
     """
     msgs = parse_trajectory(jsonl_path)
     fmt = detect_format(msgs)
@@ -991,7 +1021,7 @@ def extract_from_path(jsonl_path: Path) -> dict:
         usage = extract_usage_codex(msgs)
     elif fmt == "copilot":
         signals = extract_signals_copilot(msgs)
-        usage = {}  # Copilot has no token data in events
+        usage = extract_usage_copilot(msgs)
     else:
         signals = extract_signals(msgs)
         usage = extract_usage_gptme(msgs)
