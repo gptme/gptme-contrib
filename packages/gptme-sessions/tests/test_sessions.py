@@ -2920,3 +2920,159 @@ def test_extract_usage_codex_null_rate_limits():
     usage = extract_usage_codex(msgs)
     assert usage["model"] == "gpt-5.3-codex"
     assert "rate_limit_primary_pct" not in usage
+
+
+# --- CLI discover subcommand ---
+
+
+def _make_codex_session(path: Path, model: str = "gpt-5.3-codex") -> None:
+    """Write a minimal Codex session JSONL to *path*."""
+    msgs = [
+        {
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec", "session_id": "abc"},
+        },
+        {
+            "type": "turn_context",
+            "payload": {"model": model, "task": "do stuff"},
+        },
+    ]
+    with open(path, "w") as f:
+        for m in msgs:
+            f.write(json.dumps(m) + "\n")
+
+
+def test_cli_discover_no_sessions(tmp_path: Path, capsys, monkeypatch):
+    """discover returns 0 and friendly message when no sessions exist."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    # Point all harness dirs to empty tmp dirs
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "7d"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No sessions found" in captured.out
+
+
+def test_cli_discover_lists_paths(tmp_path: Path, capsys, monkeypatch):
+    """discover prints paths for each discovered session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--harness", "codex"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert str(fake_file) in captured.out
+    assert "1 session(s) found" in captured.out
+
+
+def test_cli_discover_harness_filter(tmp_path: Path, capsys, monkeypatch):
+    """discover --harness only calls the matching discover function."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    gptme_called: list[int] = []
+    cc_called: list[int] = []
+
+    def _gptme_discover(*a, **kw) -> list:
+        gptme_called.append(1)
+        return []
+
+    def _cc_discover(*a, **kw) -> list:
+        cc_called.append(1)
+        return []
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", _gptme_discover)
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", _cc_discover)
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "discover", "--harness", "codex", "--since", "7d"]
+    )
+    rc = main()
+    assert rc == 0
+    assert not gptme_called, "gptme discover should not be called when --harness codex"
+    assert not cc_called, "cc discover should not be called when --harness codex"
+
+
+def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
+    """discover --json outputs a valid JSON array."""
+    import json as _json
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--harness", "codex", "--json"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = _json.loads(captured.out)
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["harness"] == "codex"
+    assert data[0]["path"] == str(fake_file)
+
+
+def test_cli_discover_with_signals(tmp_path: Path, capsys, monkeypatch):
+    """discover --signals extracts grade and productivity for each session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    session_file = tmp_path / "codex_session.jsonl"
+    _make_codex_session(session_file)
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [session_file]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "discover", "--harness", "codex", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Should include grade in output
+    assert "grade=" in captured.out
+
+
+def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
+    """discover returns non-zero on invalid --since value."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "notadate"])
+    rc = main()
+    assert rc != 0
