@@ -32,13 +32,14 @@ CLI:
     python3 -m gptme_sessions.thompson_sampling dashboard
 """
 
-import argparse
 import json
 import random
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+import click
 
 
 @dataclass
@@ -688,150 +689,171 @@ def discover_state_files(
     return found
 
 
-def main() -> None:
-    """CLI for Thompson sampling bandit management."""
-    parser = argparse.ArgumentParser(description="Thompson Sampling Bandit")
-    parser.add_argument(
-        "--state-dir",
-        default=None,
-        help="State directory (default: state/bandit/)",
-    )
-    parser.add_argument(
-        "--state-file",
-        default="bandit-state.json",
-        help="State filename (default: bandit-state.json)",
-    )
-    subparsers = parser.add_subparsers(dest="command", help="Command")
+@click.group("bandit")
+@click.option("--state-dir", default=None, help="State directory (default: state/bandit/)")
+@click.option(
+    "--state-file", default="bandit-state.json", help="State filename (default: bandit-state.json)"
+)
+@click.pass_context
+def bandit_cli(ctx: click.Context, state_dir: str | None, state_file: str) -> None:
+    """Thompson Sampling Bandit."""
+    ctx.ensure_object(dict)
+    ctx.obj["state_dir"] = state_dir
+    ctx.obj["state_file"] = state_file
 
-    # status
-    subparsers.add_parser("status", help="Show bandit status report")
 
-    # dashboard
-    dash_p = subparsers.add_parser("dashboard", help="Unified dashboard across state files")
-    dash_p.add_argument(
-        "--base-dirs",
-        nargs="+",
-        help="Base directories to scan",
-    )
+@bandit_cli.command()
+@click.pass_context
+def status(ctx: click.Context) -> None:
+    """Show bandit status report."""
+    bandit = Bandit(state_dir=ctx.obj["state_dir"], state_file=ctx.obj["state_file"])
+    print(bandit.status_report())
 
-    # sample
-    sample_p = subparsers.add_parser("sample", help="Sample scores for arms")
-    sample_p.add_argument("--arms", nargs="+", help="Arm IDs to sample (default: all known)")
-    sample_p.add_argument("--seed", type=int, help="Random seed")
-    sample_p.add_argument(
-        "--context", nargs="+", help="Context tuple, e.g. --context infrastructure opus"
-    )
-    sample_p.add_argument(
-        "--format", choices=["text", "json"], default="text", help="Output format"
-    )
 
-    # update
-    update_p = subparsers.add_parser("update", help="Update after session")
-    update_p.add_argument(
-        "--outcome",
-        required=True,
-        help="Session outcome: productive/noop/failed or a float in [0,1]",
-    )
-    update_p.add_argument("--arms", nargs="+", required=True, help="Active arm IDs")
-    update_p.add_argument(
-        "--context", nargs="+", help="Context tuple, e.g. --context infrastructure opus"
-    )
-    update_p.add_argument(
-        "--decay-rate", type=float, default=None, help="Apply decay before updating (e.g. 0.99)"
-    )
+@bandit_cli.command(name="dashboard")
+@click.option("--base-dirs", multiple=True, help="Base directories to scan")
+def dashboard_cmd(base_dirs: tuple[str, ...]) -> None:
+    """Unified dashboard across state files."""
+    dirs = [Path(d) for d in base_dirs] if base_dirs else None
+    state_files = discover_state_files(dirs)
+    if not state_files:
+        print("No Thompson sampling state files found.")
+        return
+    print(dashboard(state_files))
 
-    # decay
-    decay_p = subparsers.add_parser("decay", help="Apply exponential decay to all arms")
-    decay_p.add_argument(
-        "--rate", type=float, default=0.99, help="Decay rate gamma (default: 0.99)"
-    )
 
-    # prune
-    prune_p = subparsers.add_parser("prune", help="Remove stale arms from the bandit")
-    prune_p.add_argument(
-        "--min-selections",
-        type=int,
-        default=0,
-        help="Prune arms with at most this many selections (default: 0, prunes never-selected arms)",
-    )
-    prune_p.add_argument(
-        "--max-age-days",
-        type=int,
-        default=90,
-        help="Prune arms not updated in this many days (default: 90)",
-    )
-
-    args = parser.parse_args()
-
-    if args.command == "dashboard":
-        base_dirs = [Path(d) for d in args.base_dirs] if args.base_dirs else None
-        state_files = discover_state_files(base_dirs)
-        if not state_files:
-            print("No Thompson sampling state files found.")
-            sys.exit(0)
-        print(dashboard(state_files))
-        sys.exit(0)
-
-    bandit = Bandit(state_dir=args.state_dir, state_file=args.state_file)
-
-    if args.command == "status":
-        print(bandit.status_report())
-
-    elif args.command == "sample":
-        arms = args.arms or list(bandit.state.arms.keys())
-        if not arms:
-            print("No arms to sample. Run `update` first.", file=sys.stderr)
-            sys.exit(1)
-        ctx = tuple(args.context) if args.context else None
-        scores = bandit.sample(arms, seed=args.seed, context=ctx)
-        if args.format == "json":
-            print(json.dumps(scores, indent=2))
-        else:
-            print(f"{'Arm':<40} {'Score':>6}")
-            print("-" * 48)
-            for arm_id, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
-                print(f"{arm_id[:38]:<40} {score:>5.3f}")
-
-    elif args.command == "update":
-        ctx = tuple(args.context) if args.context else None
-        # Parse outcome: try float first, fall back to string
-        outcome: str | float
-        try:
-            outcome = float(args.outcome)
-            if not 0.0 <= outcome <= 1.0:
-                print("Error: float outcome must be in [0, 1]", file=sys.stderr)
-                sys.exit(1)
-        except ValueError:
-            if args.outcome not in ("productive", "noop", "failed"):
-                print(
-                    "Error: outcome must be productive/noop/failed or a float in [0,1]",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            outcome = args.outcome
-        result = bandit.update(args.arms, outcome, context=ctx, decay_rate=args.decay_rate)
-        for arm_id, reward in result.items():
-            symbol = "+" if reward else "-"
-            print(f"  [{symbol}] {arm_id}")
-        ctx_str = f" context={list(ctx)}" if ctx else ""
-        print(f"\nUpdated {len(result)} arms (outcome: {args.outcome}{ctx_str})")
-
-    elif args.command == "decay":
-        if not (0 < args.rate < 1):
-            print("Error: --rate must be between 0 and 1", file=sys.stderr)
-            sys.exit(1)
-        count = bandit.decay(args.rate)
-        print(f"Applied decay (gamma={args.rate}) to {count} arms")
-
-    elif args.command == "prune":
-        count = bandit.prune(min_selections=args.min_selections, max_age_days=args.max_age_days)
-        print(
-            f"Pruned {count} stale arms (min_selections={args.min_selections}, max_age_days={args.max_age_days})"
-        )
-
+@bandit_cli.command()
+@click.option("--arms", multiple=True, help="Arm IDs to sample (default: all known)")
+@click.option("--seed", type=int, default=None, help="Random seed")
+@click.option("--context", multiple=True, help="Context tuple, e.g. --context infrastructure opus")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format",
+)
+@click.pass_context
+def sample(
+    ctx: click.Context,
+    arms: tuple[str, ...],
+    seed: int | None,
+    context: tuple[str, ...],
+    output_format: str,
+) -> None:
+    """Sample scores for arms."""
+    bandit = Bandit(state_dir=ctx.obj["state_dir"], state_file=ctx.obj["state_file"])
+    arm_list = list(arms) or list(bandit.state.arms.keys())
+    if not arm_list:
+        print("No arms to sample. Run `update` first.", file=sys.stderr)
+        raise click.exceptions.Exit(1)
+    ctx_tuple = tuple(context) if context else None
+    scores = bandit.sample(arm_list, seed=seed, context=ctx_tuple)
+    if output_format == "json":
+        print(json.dumps(scores, indent=2))
     else:
-        parser.print_help()
+        print(f"{'Arm':<40} {'Score':>6}")
+        print("-" * 48)
+        for arm_id, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+            print(f"{arm_id[:38]:<40} {score:>5.3f}")
+
+
+@bandit_cli.command()
+@click.option(
+    "--outcome",
+    required=True,
+    help="Session outcome: productive/noop/failed or a float in [0,1]",
+)
+@click.option("--arms", multiple=True, required=True, help="Active arm IDs")
+@click.option("--context", multiple=True, help="Context tuple, e.g. --context infrastructure opus")
+@click.option(
+    "--decay-rate", type=float, default=None, help="Apply decay before updating (e.g. 0.99)"
+)
+@click.pass_context
+def update(
+    ctx: click.Context,
+    outcome: str,
+    arms: tuple[str, ...],
+    context: tuple[str, ...],
+    decay_rate: float | None,
+) -> None:
+    """Update after session."""
+    bandit = Bandit(state_dir=ctx.obj["state_dir"], state_file=ctx.obj["state_file"])
+    ctx_tuple = tuple(context) if context else None
+    # Parse outcome: try float first, fall back to string
+    parsed_outcome: str | float
+    try:
+        parsed_outcome = float(outcome)
+        if not 0.0 <= parsed_outcome <= 1.0:
+            print("Error: float outcome must be in [0, 1]", file=sys.stderr)
+            raise click.exceptions.Exit(1)
+    except ValueError:
+        if outcome not in ("productive", "noop", "failed"):
+            print(
+                "Error: outcome must be productive/noop/failed or a float in [0,1]",
+                file=sys.stderr,
+            )
+            raise click.exceptions.Exit(1)
+        parsed_outcome = outcome
+    result = bandit.update(list(arms), parsed_outcome, context=ctx_tuple, decay_rate=decay_rate)
+    for arm_id, reward in result.items():
+        symbol = "+" if reward else "-"
+        print(f"  [{symbol}] {arm_id}")
+    ctx_str = f" context={list(ctx_tuple)}" if ctx_tuple else ""
+    print(f"\nUpdated {len(result)} arms (outcome: {outcome}{ctx_str})")
+
+
+@bandit_cli.command()
+@click.option("--rate", type=float, default=0.99, help="Decay rate gamma (default: 0.99)")
+@click.pass_context
+def decay(ctx: click.Context, rate: float) -> None:
+    """Apply exponential decay to all arms."""
+    if not (0 < rate < 1):
+        print("Error: --rate must be between 0 and 1", file=sys.stderr)
+        raise click.exceptions.Exit(1)
+    bandit = Bandit(state_dir=ctx.obj["state_dir"], state_file=ctx.obj["state_file"])
+    count = bandit.decay(rate)
+    print(f"Applied decay (gamma={rate}) to {count} arms")
+
+
+@bandit_cli.command()
+@click.option(
+    "--min-selections",
+    type=int,
+    default=0,
+    help="Prune arms with at most this many selections (default: 0)",
+)
+@click.option(
+    "--max-age-days",
+    type=int,
+    default=90,
+    help="Prune arms not updated in this many days (default: 90)",
+)
+@click.pass_context
+def prune(ctx: click.Context, min_selections: int, max_age_days: int) -> None:
+    """Remove stale arms from the bandit."""
+    bandit = Bandit(state_dir=ctx.obj["state_dir"], state_file=ctx.obj["state_file"])
+    count = bandit.prune(min_selections=min_selections, max_age_days=max_age_days)
+    print(
+        f"Pruned {count} stale arms (min_selections={min_selections}, max_age_days={max_age_days})"
+    )
+
+
+def main() -> int:
+    """Backward-compatible entry point."""
+    try:
+        bandit_cli(standalone_mode=False)
+        return 0
+    except click.ClickException as e:
+        e.show()
+        return 1
+    except click.exceptions.Exit as e:
+        return e.exit_code
+    except click.exceptions.Abort:
+        return 1
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
