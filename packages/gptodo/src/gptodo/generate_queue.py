@@ -19,7 +19,6 @@ Configuration via environment variables:
 - STATE_DIR: State directory name (default: state)
 """
 
-import argparse
 import json
 import os
 import subprocess
@@ -27,6 +26,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
+
+import click
 
 try:
     import frontmatter
@@ -553,60 +554,75 @@ class QueueGenerator:
         print(f"  Planned next: {min(len(all_tasks), 5)} tasks")
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Generate work queue from task files and GitHub issues"
-    )
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=Path.cwd(),
-        help="Path to agent workspace (default: current directory)",
-    )
-    parser.add_argument(
-        "--github-username",
-        help="GitHub username for assignee filtering (default: from gh CLI)",
-    )
-    parser.add_argument(
-        "--user",
-        help="Filter tasks by assigned_to field (e.g., 'human', 'agent', 'both')",
-    )
-    parser.add_argument(
-        "--journal-dir",
-        default="journal",
-        help="Journal directory name (default: journal)",
-    )
-    parser.add_argument(
-        "--tasks-dir",
-        default="tasks",
-        help="Tasks directory name (default: tasks)",
-    )
-    parser.add_argument(
-        "--state-dir",
-        default="state",
-        help="State directory name (default: state)",
-    )
-
-    args = parser.parse_args()
-
+@click.command("generate-queue")
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd(),
+    help="Path to agent workspace (default: current directory)",
+)
+@click.option(
+    "--github-username",
+    default=None,
+    help="GitHub username for assignee filtering (default: from env/gh CLI)",
+)
+@click.option(
+    "--user",
+    default=None,
+    help="Filter tasks by assigned_to field (e.g., 'human', 'agent', 'both')",
+)
+@click.option(
+    "--journal-dir",
+    default="journal",
+    help="Journal directory name (default: journal)",
+)
+@click.option(
+    "--tasks-dir",
+    default="tasks",
+    help="Tasks directory name (default: tasks)",
+)
+@click.option(
+    "--state-dir",
+    default="state",
+    help="State directory name (default: state)",
+)
+def generate_queue(
+    workspace: Path,
+    github_username: str | None,
+    user: str | None,
+    journal_dir: str,
+    tasks_dir: str,
+    state_dir: str,
+) -> None:
+    """Generate work queue from task files and GitHub issues."""
     # Get GitHub username if not provided
-    github_username = args.github_username
     if not github_username:
         github_username = os.environ.get("GITHUB_USERNAME")
 
     # Create generator and run
     generator = QueueGenerator(
-        workspace_path=args.workspace,
+        workspace_path=workspace,
         github_username=github_username,
-        journal_dir=args.journal_dir,
-        tasks_dir=args.tasks_dir,
-        state_dir=args.state_dir,
-        user=args.user,
+        journal_dir=journal_dir,
+        tasks_dir=tasks_dir,
+        state_dir=state_dir,
+        user=user,
     )
 
     generator.generate()
 
 
+def main() -> int:
+    """Backward-compatible entry point."""
+    try:
+        generate_queue(standalone_mode=False)
+        return 0
+    except click.ClickException as e:
+        e.show()
+        return 1
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

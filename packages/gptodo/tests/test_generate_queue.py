@@ -3,8 +3,9 @@
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
-from gptodo.generate_queue import QueueGenerator, Task
+from gptodo.generate_queue import QueueGenerator, Task, generate_queue
 
 
 @pytest.fixture
@@ -276,3 +277,45 @@ class TestPriorityScoreWithUnblocking:
 
         # medium (2) + 3 = 5 > high (3) + 0 = 3
         assert task_medium.priority_score() > task_high.priority_score()
+
+
+class TestClickCLI:
+    def test_help(self) -> None:
+        """generate-queue --help should show Click-formatted help."""
+        runner = CliRunner()
+        result = runner.invoke(generate_queue, ["--help"])
+        assert result.exit_code == 0
+        assert "Generate work queue" in result.output
+        assert "--workspace" in result.output
+        assert "--github-username" in result.output
+
+    def test_generate_with_workspace(self, workspace: Path) -> None:
+        """generate-queue should run with a valid workspace."""
+        write_task(workspace / "tasks", "task-a", state="active", priority="high")
+
+        runner = CliRunner()
+        result = runner.invoke(generate_queue, ["--workspace", str(workspace)])
+        assert result.exit_code == 0
+        assert "Work queue generated" in result.output
+
+        # Verify output file was created
+        queue_file = workspace / "state" / "queue-generated.md"
+        assert queue_file.exists()
+        content = queue_file.read_text()
+        assert "task-a" in content.lower() or "Work Queue" in content
+
+    def test_generate_with_user_filter(self, workspace: Path) -> None:
+        """generate-queue --user should filter tasks by assigned_to."""
+        write_task(
+            workspace / "tasks", "bob-task", state="active", priority="medium", assigned_to="bob"
+        )
+        write_task(
+            workspace / "tasks", "erik-task", state="active", priority="medium", assigned_to="erik"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(generate_queue, ["--workspace", str(workspace), "--user", "bob"])
+        assert result.exit_code == 0
+
+        queue_file = workspace / "state" / "queue-generated-bob.md"
+        assert queue_file.exists()

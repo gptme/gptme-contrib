@@ -131,6 +131,9 @@ from gptodo.utils import (
     update_task_state,
 )
 
+# Import generate-queue command (migrated from argparse to Click)
+from gptodo.generate_queue import generate_queue
+
 # Import worktree workflow (Issue #246)
 from gptodo.worktree import (
     cleanup_merged_worktrees,
@@ -4986,6 +4989,10 @@ def worktree_cleanup_cmd(output_json: bool):
             console.print(f"[green]✅ Cleaned up {count} merged worktree(s)[/]")
         else:
             console.print("[dim]No merged worktrees to clean up[/]")
+
+
+# Register generate-queue as a top-level subcommand
+cli.add_command(generate_queue)
 
 
 if __name__ == "__main__":
