@@ -132,8 +132,8 @@ def main() -> int:
         help=(
             "Explicit deliverables (commit SHAs, PR URLs). "
             "Omit this flag to extract deliverables from the trajectory. "
-            "Passing the flag with no values (--deliverables) produces an empty list "
-            "and bypasses trajectory extraction; provide at least one value if using this flag."
+            "Passing the flag with no values (--deliverables) is treated the same as omitting it "
+            "(trajectory extraction still runs); provide at least one value to set explicit deliverables."
         ),
     )
     ps_parser.add_argument("--journal-path", help="Path to journal entry for this session")
