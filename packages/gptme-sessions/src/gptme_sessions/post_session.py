@@ -61,6 +61,7 @@ def post_session(
     run_type: str | None = None,
     trigger: str | None = None,
     category: str | None = None,
+    recommended_category: str | None = None,
     exit_code: int = 0,
     duration_seconds: int = 0,
     trajectory_path: Path | None = None,
@@ -88,7 +89,13 @@ def post_session(
         ``"spawn"``.  Records trigger mechanism as metadata without implying
         bandit treatment.  Added in PR #351.
     category:
-        Work category for the session (e.g. ``"code"``, ``"triage"``).
+        Explicit work category override (e.g. ``"code"``, ``"triage"``).
+        When ``None`` and a trajectory is available, category is inferred
+        from commit messages and file paths.
+    recommended_category:
+        Category recommended by the selector (e.g. Thompson sampling,
+        CASCADE). Stored alongside the actual category so drift between
+        recommendation and reality can be tracked.
     exit_code:
         Exit code from the agent process.  Non-zero (except 124 = timeout)
         marks the session as ``"failed"``.
@@ -184,10 +191,8 @@ def post_session(
 
     # --- Category: inferred (actual) vs recommended (intended) ---
     inferred_category = signals.get("inferred_category") if signals else None
-    # category field = what actually happened (inferred from signals)
-    # recommended_category = what was intended (passed by caller, e.g. Thompson sampling)
-    recommended_category = category  # caller's explicit value, if any
-    actual_category = inferred_category or category  # inferred wins, fallback to explicit
+    # Actual category: explicit override > inferred from signals
+    actual_category = category or inferred_category
 
     # --- Build SessionRecord kwargs ---
     record_kwargs: dict[str, Any] = {

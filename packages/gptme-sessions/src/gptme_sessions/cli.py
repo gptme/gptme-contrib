@@ -365,7 +365,7 @@ def main() -> int:
             model=args.model,
             run_type=args.run_type,
             trigger=args.trigger,
-            category=args.category,
+            recommended_category=args.category,
             exit_code=args.exit_code,
             duration_seconds=args.duration,
             trajectory_path=args.trajectory,

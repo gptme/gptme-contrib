@@ -767,10 +767,10 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
 def infer_category(signals: dict) -> str | None:
     """Infer work category from commit messages and file writes.
 
-    Analyzes conventional commit prefixes (feat, fix, docs, chore, etc.)
-    and file paths to classify what kind of work a session did.
+    Analyzes conventional commit prefixes (feat, fix, docs, ci, etc.),
+    commit scopes, and file paths to classify what kind of work a session did.
 
-    Returns a category string or None if no confident classification.
+    Returns a category string or None if insufficient signal (< 2 votes).
     """
     commits = signals.get("git_commits", [])
     file_writes = signals.get("file_writes", [])
@@ -779,7 +779,7 @@ def infer_category(signals: dict) -> str | None:
     prefix_counts: dict[str, int] = {}
     for commit in commits:
         # Extract conventional commit prefix: "type(scope): msg (sha)"
-        m = re.match(r"(feat|fix|refactor|perf|test|ci|build|chore|docs|style)\b", commit)
+        m = re.match(r"(feat|fix|refactor|perf|test|ci|build|docs|style)\b", commit)
         if m:
             prefix_counts[m.group(1)] = prefix_counts.get(m.group(1), 0) + 1
 
@@ -849,8 +849,11 @@ def infer_category(signals: dict) -> str | None:
     if not votes:
         return None
 
-    # Return the category with the most votes
-    return max(votes, key=lambda k: votes[k])
+    best = max(votes, key=lambda k: votes[k])
+    # Require at least 2 votes for confident classification
+    if votes[best] < 2:
+        return None
+    return best
 
 
 def extract_from_path(jsonl_path: Path) -> dict:
