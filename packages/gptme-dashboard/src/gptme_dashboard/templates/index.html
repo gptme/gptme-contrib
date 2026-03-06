@@ -245,12 +245,13 @@ tr:hover { background: var(--accent-dim); }
 <section id="plugins">
   <h2>Plugins ({{ stats.total_plugins }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Description</th>{% if sources %}<th>Source</th>{% endif %}</tr></thead>
+    <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if sources %}<th>Source</th>{% endif %}</tr></thead>
     <tbody>
     {% for plugin in plugins %}
       <tr>
         <td><strong>{{ plugin.name }}</strong></td>
         <td>{{ plugin.description }}</td>
+        <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
         {% if sources %}<td>{% if plugin.source %}<span class="tag tag-source">{{ plugin.source }}</span>{% endif %}</td>{% endif %}
       </tr>
     {% endfor %}

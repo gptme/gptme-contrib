@@ -175,8 +175,16 @@ def scan_lessons(workspace: Path, source: str = "") -> list[dict]:
     return lessons
 
 
-def scan_plugins(workspace: Path, source: str = "") -> list[dict]:
-    """Scan plugins directory for plugin directories."""
+def scan_plugins(
+    workspace: Path,
+    source: str = "",
+    enabled_plugins: list[str] | None = None,
+) -> list[dict]:
+    """Scan plugins directory for plugin directories.
+
+    If *enabled_plugins* is provided (from ``gptme.toml [plugins] enabled``),
+    each plugin gets an ``enabled`` boolean flag.
+    """
     plugins_dir = workspace / "plugins"
     if not plugins_dir.is_dir():
         return []
@@ -196,6 +204,10 @@ def scan_plugins(workspace: Path, source: str = "") -> list[dict]:
                     description = line[:200]
                     break
 
+        # Derive the plugin module name: strip common prefix, convert hyphens
+        # e.g. "gptme-consortium" -> "gptme_consortium", "user_memories" -> "user_memories"
+        module_name = d.name.replace("-", "_")
+
         entry: dict = {
             "name": d.name,
             "description": description,
@@ -203,6 +215,8 @@ def scan_plugins(workspace: Path, source: str = "") -> list[dict]:
         }
         if source:
             entry["source"] = source
+        if enabled_plugins is not None:
+            entry["enabled"] = module_name in enabled_plugins or d.name in enabled_plugins
 
         plugins.append(entry)
 
@@ -296,26 +310,61 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 def read_workspace_config(workspace: Path) -> dict:
     """Read gptme.toml for workspace metadata.
 
-    Parses [agent] section specifically to avoid matching name fields
-    from other sections like [project].
+    Parses [agent] and [plugins] sections. Agent name is read from [agent]
+    specifically to avoid matching name fields from other sections like [project].
     """
     config_path = workspace / "gptme.toml"
     if not config_path.exists():
         return {}
 
     text = config_path.read_text()
-    config: dict[str, str] = {}
+    config: dict = {}
 
-    in_agent_section = False
+    current_section = ""
+    in_enabled_list = False
+    enabled_items: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("["):
-            in_agent_section = stripped == "[agent]"
-        elif in_agent_section:
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and not in_enabled_list:
+            current_section = stripped
+            continue
+
+        if in_enabled_list:
+            # End of list (line is "]" or ends with "]")
+            if stripped.rstrip(",") == "]" or stripped == "]":
+                config["plugins_enabled"] = enabled_items
+                in_enabled_list = False
+            elif "]" in stripped:
+                # Item on same line as closing bracket: "  \"foo\","  or just "]"
+                item = stripped.split("]")[0].rstrip(",").strip().strip('"').strip("'")
+                if item:
+                    enabled_items.append(item)
+                config["plugins_enabled"] = enabled_items
+                in_enabled_list = False
+            else:
+                item = stripped.rstrip(",").strip().strip('"').strip("'")
+                if item:
+                    enabled_items.append(item)
+            continue
+
+        if current_section == "[agent]":
             m = re.match(r'name\s*=\s*"([^"]*)"', stripped)
             if m:
                 config["agent_name"] = m.group(1)
-                break
+
+        elif current_section == "[plugins]":
+            # Single-line: enabled = ["a", "b"]
+            m = re.match(r"enabled\s*=\s*\[(.+)\]", stripped)
+            if m:
+                config["plugins_enabled"] = [
+                    s.strip().strip('"').strip("'") for s in m.group(1).split(",") if s.strip()
+                ]
+            # Multi-line: enabled = [
+            elif re.match(r"enabled\s*=\s*\[\s*$", stripped):
+                in_enabled_list = True
+                enabled_items = []
 
     return config
 
@@ -327,11 +376,13 @@ def collect_workspace_data(workspace: Path) -> dict:
     Items from submodules are tagged with a ``source`` field.
     Lessons and skills are merged into a unified ``guidance`` list.
     """
+    config = read_workspace_config(workspace)
+
     lessons = scan_lessons(workspace)
-    plugins = scan_plugins(workspace)
+    enabled_plugins = config.get("plugins_enabled")
+    plugins = scan_plugins(workspace, enabled_plugins=enabled_plugins)
     packages = scan_packages(workspace)
     skills = scan_skills(workspace)
-    config = read_workspace_config(workspace)
 
     # Scan submodules for additional content
     submodules = detect_submodules(workspace)

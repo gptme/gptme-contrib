@@ -759,3 +759,139 @@ def test_submodule_page_url_no_collision(workspace_with_submodules: Path, tmp_pa
         assert (output / "contrib" / "lessons" / "workflow" / "test-lesson.html").exists()
     except Exception:
         pass  # Template not found is OK — we verified page_url values above
+
+
+# --- Plugin enabled status tests ---
+
+
+def test_read_workspace_config_reads_plugins(tmp_path: Path):
+    """Test that [plugins] enabled and paths are parsed from gptme.toml."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "PluginAgent"
+
+        [plugins]
+        enabled = ["user_memories", "gptme_consortium"]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert config["agent_name"] == "PluginAgent"
+    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+
+
+def test_read_workspace_config_no_plugins_section(workspace: Path):
+    """Test that missing [plugins] section results in no plugins_enabled key."""
+    config = read_workspace_config(workspace)
+    assert "plugins_enabled" not in config
+
+
+def test_scan_plugins_with_enabled_list(workspace: Path):
+    """Test that plugins get enabled flag when enabled_plugins is provided."""
+    # Add a second plugin
+    (workspace / "plugins" / "user_memories").mkdir(parents=True)
+    (workspace / "plugins" / "user_memories" / "README.md").write_text(
+        "# User Memories\n\nPersistent memory plugin.\n"
+    )
+
+    plugins = scan_plugins(workspace, enabled_plugins=["user_memories"])
+    assert len(plugins) == 2
+
+    enabled_plugin = next(p for p in plugins if p["name"] == "user_memories")
+    assert enabled_plugin["enabled"] is True
+
+    disabled_plugin = next(p for p in plugins if p["name"] == "gptme-test-plugin")
+    assert disabled_plugin["enabled"] is False
+
+
+def test_scan_plugins_hyphen_to_underscore_matching(workspace: Path):
+    """Test that gptme-foo plugin matches gptme_foo in enabled list."""
+    plugins = scan_plugins(workspace, enabled_plugins=["gptme_test_plugin"])
+    assert len(plugins) == 1
+    assert plugins[0]["enabled"] is True
+
+
+def test_scan_plugins_no_enabled_list(workspace: Path):
+    """Test that plugins have no enabled key when no list provided."""
+    plugins = scan_plugins(workspace)
+    assert len(plugins) == 1
+    assert "enabled" not in plugins[0]
+
+
+def test_collect_passes_enabled_to_plugins(tmp_path: Path):
+    """Test that collect_workspace_data passes enabled config to scan_plugins."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "ConfigTest"
+
+        [plugins]
+        enabled = ["my_plugin"]
+        """)
+    )
+    plugin_dir = tmp_path / "plugins" / "my-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text("# My Plugin\n\nA test plugin.\n")
+
+    data = collect_workspace_data(tmp_path)
+    assert len(data["plugins"]) == 1
+    assert data["plugins"][0]["enabled"] is True
+
+
+def test_generate_shows_plugin_status(tmp_path: Path):
+    """Test that generated HTML shows enabled/available tags for plugins."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "StatusTest"
+
+        [plugins]
+        enabled = ["enabled_plugin"]
+        """)
+    )
+    for name in ["enabled-plugin", "disabled-plugin"]:
+        d = tmp_path / "plugins" / name
+        d.mkdir(parents=True)
+        (d / "README.md").write_text(f"# {name}\n\nDescription.\n")
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(tmp_path, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    assert "tag-active" in html  # enabled plugin
+    assert "enabled" in html.lower()
+    assert "available" in html.lower()
+
+
+def test_read_workspace_config_multiline_enabled(tmp_path: Path):
+    """Test that multi-line enabled = [...] arrays are parsed correctly."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "MultilineAgent"
+
+        [plugins]
+        enabled = [
+            "user_memories",
+            "gptme_consortium",
+        ]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert config["agent_name"] == "MultilineAgent"
+    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+
+
+def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
+    """Test that plugins_paths is not included in config (it was dead code, removed)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [plugins]
+        paths = ["plugins", "gptme-contrib/plugins"]
+        enabled = ["user_memories"]
+        """)
+    )
+    config = read_workspace_config(tmp_path)
+    assert "plugins_paths" not in config
+    assert config["plugins_enabled"] == ["user_memories"]
