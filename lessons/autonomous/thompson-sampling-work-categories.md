@@ -1,5 +1,12 @@
 ---
 status: active
+category: autonomous
+tags:
+- thompson-sampling
+- work-category
+- session-optimization
+- cascade
+- bandit
 match:
   keywords:
   - work category bandit
@@ -19,7 +26,7 @@ Use a `Bandit` from `gptme_sessions.thompson_sampling` to learn which *work cate
 ## Context
 When building autonomous agent sessions that span multiple types of work — code fixes, issue triage, infrastructure improvement, content creation, etc. — the question "what should I work on today?" is an explore/exploit problem that Thompson sampling can answer using accumulated session data.
 
-This pattern is the complement to [rule-driven session gating](../autonomous/rule-driven-session-gating.md): gating decides *whether* to run; category selection decides *what kind of work* to do when running.
+This pattern is the complement to [rule-driven session gating](./rule-driven-session-gating.md): gating decides *whether* to run; category selection decides *what kind of work* to do when running.
 
 ## Detection
 Observable signals indicating this pattern applies:
@@ -101,18 +108,18 @@ bandit.update([selected_category], outcome=reward)
 If you run different models, use contextual arms to learn per-model category effectiveness:
 
 ```python
-# Sample with context
-scores = bandit.sample(CATEGORIES, context=(selected_category, "opus"))
+# Sample with context — use only the model name, NOT the category being selected
+scores = bandit.sample(CATEGORIES, context=("opus",))
 
-# Update with context
-bandit.update([selected_category], outcome=reward, context=(selected_category, "opus"))
+# Update with context — selected_category is known here, safe to include
+bandit.update([selected_category], outcome=reward, context=("opus",))
 ```
 
 ### 5. View the current posterior
 
 ```bash
 python3 -m gptme_sessions.thompson_sampling status --state-dir state/category-bandit
-python3 -m gptme_sessions.thompson_sampling dashboard
+python3 -m gptme_sessions.thompson_sampling dashboard --state-dir state/category-bandit
 ```
 
 ## Anti-Pattern: Optimizing Session Modes
@@ -145,7 +152,7 @@ Following this pattern results in:
 - **Transparency**: `dashboard` shows posterior means so you can see what the agent has learned
 
 ## Related
-- [Rule-Driven Session Gating](../autonomous/rule-driven-session-gating.md) — Complementary pattern (when to run)
+- [Rule-Driven Session Gating](./rule-driven-session-gating.md) — Complementary pattern (when to run)
 - `gptme_sessions.thompson_sampling` — Thompson sampling engine (BanditArm, BanditState, Bandit)
 - `gptme_sessions.post_session` — Post-session hook that provides the grade signal
 - `gptme_sessions.load_bandit_means` — Read-only posterior integration for existing scorers
