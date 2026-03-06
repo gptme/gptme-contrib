@@ -24,7 +24,6 @@ Observable signals that you need PR recovery:
 - Force-push resulted in 0 commits on PR
 - Branch was deleted or corrupted
 - Attempting to reopen PR fails or shows errors
-- PR has messy commit history that can't be easily cleaned
 
 ## Pattern
 
@@ -52,13 +51,13 @@ git fetch origin
 git checkout -b <new-branch-name> origin/master
 
 # Cherry-pick or copy changes from old branch
-# Option A: If old branch exists
-git cherry-pick <oldest-commit>^..<old-branch>
+# Option A: If old branch exists — identify the commit range first
+git log origin/master..<old-branch> --oneline   # shows commits to cherry-pick
+git cherry-pick <oldest-commit>^..<old-branch>  # cherry-pick creates commits; no git commit needed
 
 # Option B: Copy files manually if commits are lost
-
-# Commit with clean message
-git commit -m "type(scope): descriptive message"
+#   git add <files>
+#   git commit -m "type(scope): descriptive message"
 
 # Push and create new PR
 git push -u origin <new-branch-name>
