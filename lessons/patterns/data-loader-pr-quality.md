@@ -1,10 +1,4 @@
 ---
-category: patterns
-tags:
-- data-loaders
-- pr-quality
-- testing
-- python
 match:
   keywords:
   - data loader
