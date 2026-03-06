@@ -769,6 +769,10 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
 
     Parses commit SHAs from the git_commits list (format: "message (sha)")
     and returns all unique file paths changed across those commits.
+
+    For SHAs that don't resolve in the current repo, tries common submodule
+    directories as fallback (cross-repo commits from submodules).
+
     Returns empty list if git is unavailable or SHAs can't be resolved.
     """
     import subprocess
@@ -780,21 +784,45 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
         if m:
             shas.append(m.group(1))
 
+    # Discover submodule paths (cached after first call)
+    submodule_paths: list[str] = []
+    try:
+        result = subprocess.run(
+            ["git", "submodule", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.strip().lstrip("+-U").split()
+                if len(parts) >= 2:
+                    submodule_paths.append(parts[1])
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    def _diff_tree(sha: str, cwd: str | None = None) -> list[str]:
+        try:
+            cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=cwd)
+            if result.returncode == 0:
+                return [line for line in result.stdout.strip().splitlines() if line]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return []
+
     files: list[str] = []
     for sha in shas:
-        try:
-            result = subprocess.run(
-                ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().splitlines():
-                    if line:
-                        files.append(line)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            break  # git not available or too slow
+        found = _diff_tree(sha)
+        if not found:
+            # Try submodules
+            for sub_path in submodule_paths:
+                found = _diff_tree(sha, cwd=sub_path)
+                if found:
+                    # Prefix with submodule path for context
+                    found = [f"{sub_path}/{f}" for f in found]
+                    break
+        files.extend(found)
     return files
 
 
