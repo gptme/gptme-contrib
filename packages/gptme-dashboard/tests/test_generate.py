@@ -256,6 +256,15 @@ def test_generate_json_stdout(workspace: Path):
     assert len(data["lessons"]) == 3
 
 
+def test_generate_json_excludes_large_fields(workspace: Path):
+    """JSON export should not include body or all_keywords (size/schema concern)."""
+    json_str = generate_json(workspace)
+    data = json.loads(json_str)
+    for lesson in data["lessons"]:
+        assert "body" not in lesson, "body should not appear in JSON export"
+        assert "all_keywords" not in lesson, "all_keywords should not appear in JSON export"
+
+
 def test_generate_json_to_file(workspace: Path, tmp_path: Path):
     """Test JSON dump to file."""
     output = tmp_path / "output"

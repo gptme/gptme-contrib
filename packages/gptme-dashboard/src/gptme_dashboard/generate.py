@@ -21,7 +21,7 @@ def render_markdown_to_html(md_text: str) -> str:
     return markdown.markdown(
         md_text,
         extensions=["fenced_code", "tables", "codehilite"],
-        extension_configs={"codehilite": {"css_class": "code"}},
+        extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
     )
 
 
@@ -310,12 +310,11 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
     stats = data["stats"]
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
-        f"  {stats['total_lessons']} lessons, "
+        f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins, "
         f"{stats['total_packages']} packages, "
         f"{stats['total_skills']} skills"
     )
-    print(f"  {stats['total_lessons']} lesson detail pages generated")
 
 
 def generate_json(workspace: Path, output: Path | None = None) -> str:
@@ -325,7 +324,17 @@ def generate_json(workspace: Path, output: Path | None = None) -> str:
     Returns the JSON string in all cases.
     """
     data = collect_workspace_data(workspace)
-    json_str = json.dumps(data, indent=2)
+    # Exclude large fields (body, all_keywords) from JSON export — they are only
+    # needed for HTML page generation and would bloat data.json unnecessarily.
+    _JSON_EXCLUDE = {"body", "all_keywords"}
+    export_data = {
+        **data,
+        "lessons": [
+            {k: v for k, v in lesson.items() if k not in _JSON_EXCLUDE}
+            for lesson in data["lessons"]
+        ],
+    }
+    json_str = json.dumps(export_data, indent=2)
 
     if output is not None:
         output.mkdir(parents=True, exist_ok=True)
