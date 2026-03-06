@@ -5,7 +5,6 @@ tags:
 - thompson-sampling
 - work-category
 - session-optimization
-- cascade
 - bandit
 match:
   keywords:
@@ -57,6 +56,9 @@ If you have a base scoring system (like CASCADE), add an additive boost:
 ```python
 from gptme_sessions import load_bandit_means
 
+# Call load_bandit_means() fresh at the start of each scheduling cycle.
+# In a long-running process that loops, stale means won't reflect bandit
+# updates from earlier cycles — so reload rather than reusing a closure.
 means = load_bandit_means("state/category-bandit", arm_ids=CATEGORIES)
 
 def apply_ts_boost(base_score: float, category: str, weight: float = 1.5) -> float:
