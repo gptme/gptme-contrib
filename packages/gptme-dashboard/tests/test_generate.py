@@ -377,3 +377,56 @@ def test_generate_index_links_to_lessons(workspace: Path, tmp_path: Path):
     html = (output / "index.html").read_text()
     assert 'href="lessons/workflow/test-lesson.html"' in html
     assert 'href="lessons/tools/shell-safety.html"' in html
+
+
+def test_lesson_detail_page_renders_html_not_escaped(workspace: Path, tmp_path: Path):
+    """Test that markdown is rendered as HTML, not escaped as text."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "lessons" / "workflow" / "test-lesson.html").read_text()
+    # Rendered markdown should contain actual HTML tags, not escaped entities
+    assert "<h2>" in html or "<h1>" in html, "Headings should be rendered as HTML <h> tags"
+    assert "<p>" in html, "Paragraphs should be rendered as HTML <p> tags"
+    # Escaped tags would look like &lt;h2&gt; — must not appear
+    assert "&lt;h" not in html, "HTML tags must not be escaped"
+    assert "&lt;p&gt;" not in html, "Paragraph tags must not be escaped"
+
+
+def test_lesson_detail_breadcrumb_single_level(workspace: Path, tmp_path: Path):
+    """Test that breadcrumb uses correct relative path for single-level lessons."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # workflow/test-lesson.html is two levels deep → needs ../../
+    html = (output / "lessons" / "workflow" / "test-lesson.html").read_text()
+    assert 'href="../../index.html"' in html
+
+
+def test_lesson_detail_breadcrumb_deep_nesting(workspace: Path, tmp_path: Path):
+    """Test breadcrumb for lessons nested two directories deep (a/b/lesson.md)."""
+    # Add a deeply nested lesson
+    deep_dir = workspace / "lessons" / "a" / "b"
+    deep_dir.mkdir(parents=True)
+    (deep_dir / "deep-lesson.md").write_text(
+        textwrap.dedent("""\
+        ---
+        status: active
+        ---
+        # Deep Lesson
+
+        Nested content.
+        """)
+    )
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    deep_page = output / "lessons" / "a" / "b" / "deep-lesson.html"
+    assert deep_page.exists()
+    html = deep_page.read_text()
+    # Three levels deep → needs ../../../
+    assert 'href="../../../index.html"' in html

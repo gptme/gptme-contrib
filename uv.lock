@@ -1055,6 +1055,7 @@ dependencies = [
     { name = "click" },
     { name = "jinja2" },
     { name = "markdown" },
+    { name = "pygments" },
     { name = "pyyaml" },
 ]
 
@@ -1073,6 +1074,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.0" },
     { name = "markdown", specifier = ">=3.4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pygments", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },

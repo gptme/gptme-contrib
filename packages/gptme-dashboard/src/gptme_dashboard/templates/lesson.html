@@ -159,8 +159,8 @@ footer {
 <div class="container">
 
 <nav class="breadcrumb">
-  <a href="../{% if '/' in lesson.path %}../{% endif %}index.html">{{ workspace_name }}</a>
-  &rsaquo; <a href="../{% if '/' in lesson.path %}../{% endif %}index.html#lessons">Lessons</a>
+  <a href="{{ root_prefix }}index.html">{{ workspace_name }}</a>
+  &rsaquo; <a href="{{ root_prefix }}index.html#lessons">Lessons</a>
   &rsaquo; {{ lesson.title }}
 </nav>
 
@@ -174,7 +174,7 @@ footer {
 </header>
 
 <div class="content">
-  {{ body_html }}
+  {{ body_html | safe }}
 </div>
 
 {% if lesson.all_keywords %}

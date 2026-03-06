@@ -30,7 +30,7 @@ def lesson_page_path(lesson_path: str) -> str:
 
     E.g. 'workflow/test-lesson.md' -> 'lessons/workflow/test-lesson.html'
     """
-    return "lessons/" + lesson_path.replace(".md", ".html")
+    return "lessons/" + str(Path(lesson_path).with_suffix(".html"))
 
 
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
@@ -281,7 +281,6 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         loader=FileSystemLoader(str(template_dir)),
         autoescape=True,
     )
-    env.filters["render_markdown"] = render_markdown_to_html
 
     data = collect_workspace_data(workspace)
 
@@ -294,10 +293,15 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
     # Generate per-lesson detail pages
     lesson_template = env.get_template("lesson.html")
     for lesson in data["lessons"]:
+        # Compute how many levels up from the lesson page to the site root.
+        # page_url is e.g. "lessons/workflow/test.html" (depth=2), so root_prefix="../../"
+        depth = len(Path(lesson["page_url"]).parts) - 1
+        root_prefix = "../" * depth
         lesson_html = lesson_template.render(
             workspace_name=data["workspace_name"],
             lesson=lesson,
             body_html=render_markdown_to_html(lesson["body"]),
+            root_prefix=root_prefix,
         )
         page_path = output / lesson["page_url"]
         page_path.parent.mkdir(parents=True, exist_ok=True)
