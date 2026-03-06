@@ -285,15 +285,40 @@ def detect_github_url(workspace: Path) -> str:
     return ""
 
 
-def github_blob_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
+def detect_default_branch(workspace: Path) -> str:
+    """Detect the default branch of the git remote.
+
+    Uses ``git symbolic-ref refs/remotes/origin/HEAD`` to detect the default
+    branch (e.g. ``main`` or ``master``).  Falls back to ``"master"`` if
+    detection fails (no remote, no HEAD ref set, etc.).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            # Output is e.g. "refs/remotes/origin/main\n"
+            return result.stdout.strip().split("/")[-1]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "master"
+
+
+def github_blob_url(gh_repo_url: str, path: str, prefix: str = "", branch: str = "master") -> str:
     """Build a GitHub blob URL for a file path.
 
     ``prefix`` is prepended to the path (e.g. for submodule-relative paths).
+    ``branch`` defaults to ``"master"``; pass the detected default branch from
+    :func:`detect_default_branch` for accurate links.
     """
     if not gh_repo_url:
         return ""
     full_path = f"{prefix}/{path}" if prefix else path
-    return f"{gh_repo_url}/blob/master/{full_path}"
+    return f"{gh_repo_url}/blob/{branch}/{full_path}"
 
 
 def collect_workspace_data(workspace: Path) -> dict:
@@ -304,19 +329,22 @@ def collect_workspace_data(workspace: Path) -> dict:
     skills = scan_skills(workspace)
     config = read_workspace_config(workspace)
 
-    # Detect GitHub repo URL for source links
+    # Detect GitHub repo URL and default branch for source links
     gh_repo_url = detect_github_url(workspace)
+    default_branch = detect_default_branch(workspace) if gh_repo_url else "master"
 
-    # Add GitHub source links to all items
-    if gh_repo_url:
-        for lesson in lessons:
-            lesson["gh_url"] = github_blob_url(gh_repo_url, lesson["path"], prefix="lessons")
-        for plugin in plugins:
-            plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"])
-        for pkg in packages:
-            pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"])
-        for skill in skills:
-            skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"])
+    # Always set gh_url on every item (empty string when no remote is detected).
+    # This ensures templates work safely under StrictUndefined.
+    for lesson in lessons:
+        lesson["gh_url"] = github_blob_url(
+            gh_repo_url, lesson["path"], prefix="lessons", branch=default_branch
+        )
+    for plugin in plugins:
+        plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"], branch=default_branch)
+    for pkg in packages:
+        pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"], branch=default_branch)
+    for skill in skills:
+        skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"], branch=default_branch)
 
     lesson_categories: dict[str, int] = {}
     for lesson in lessons:

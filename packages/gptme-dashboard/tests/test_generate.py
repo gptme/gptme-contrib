@@ -8,6 +8,7 @@ import pytest
 
 from gptme_dashboard.generate import (
     collect_workspace_data,
+    detect_default_branch,
     detect_github_url,
     extract_title,
     generate,
@@ -621,3 +622,59 @@ def test_generate_html_includes_github_links(tmp_path: Path):
     lesson_html = (output / "lessons" / "workflow" / "test.html").read_text()
     assert "View on GitHub" in lesson_html
     assert "https://github.com/test/repo/blob/master/lessons/workflow/test.md" in lesson_html
+
+
+def test_github_blob_url_with_branch():
+    """Test GitHub blob URL respects explicit branch parameter."""
+    url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo", branch="main")
+    assert url == "https://github.com/gptme/gptme-contrib/blob/main/plugins/foo"
+    # Default branch is "master"
+    assert github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo").endswith(
+        "/blob/master/plugins/foo"
+    )
+
+
+def test_detect_default_branch_fallback(tmp_path: Path):
+    """Test that detect_default_branch falls back to 'master' when HEAD not set."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    # No remote → symbolic-ref fails → should fall back to "master"
+    assert detect_default_branch(tmp_path) == "master"
+
+
+def test_detect_default_branch_main(tmp_path: Path):
+    """Test that detect_default_branch detects 'main' when origin/HEAD points to main."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/test/repo.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    # Manually set the symbolic ref to simulate a "main"-defaulting repo
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    assert detect_default_branch(tmp_path) == "main"
+
+
+def test_collect_workspace_data_gh_url_always_present(workspace: Path):
+    """Test that gh_url key is always present on items, even without a GitHub remote."""
+    # workspace fixture has no git remote, so gh_url should be "" (not missing)
+    data = collect_workspace_data(workspace)
+    for lesson in data["lessons"]:
+        assert "gh_url" in lesson, "gh_url must always be present on lessons"
+        assert lesson["gh_url"] == "", "gh_url should be empty string when no remote"
+    for plugin in data["plugins"]:
+        assert "gh_url" in plugin
+        assert plugin["gh_url"] == ""
+    for pkg in data["packages"]:
+        assert "gh_url" in pkg
+        assert pkg["gh_url"] == ""
+    for skill in data["skills"]:
+        assert "gh_url" in skill
+        assert skill["gh_url"] == ""
