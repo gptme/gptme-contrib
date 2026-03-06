@@ -784,8 +784,10 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
         if m:
             shas.append(m.group(1))
 
-    # Discover submodule paths (cached after first call)
-    submodule_paths: list[str] = []
+    # Discover candidate repos: submodules + sibling git repos in ../
+    candidate_repos: list[str] = []
+
+    # Submodules
     try:
         result = subprocess.run(
             ["git", "submodule", "status"],
@@ -797,7 +799,28 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
             for line in result.stdout.strip().splitlines():
                 parts = line.strip().lstrip("+-U").split()
                 if len(parts) >= 2:
-                    submodule_paths.append(parts[1])
+                    candidate_repos.append(parts[1])
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Sibling directories that are git repos (../*)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            from pathlib import Path
+
+            workspace_root = Path(result.stdout.strip())
+            parent = workspace_root.parent
+            for sibling in parent.iterdir():
+                if sibling == workspace_root or not sibling.is_dir():
+                    continue
+                if (sibling / ".git").exists():
+                    candidate_repos.append(str(sibling))
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
@@ -815,12 +838,14 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
     for sha in shas:
         found = _diff_tree(sha)
         if not found:
-            # Try submodules
-            for sub_path in submodule_paths:
-                found = _diff_tree(sha, cwd=sub_path)
+            for repo_path in candidate_repos:
+                found = _diff_tree(sha, cwd=repo_path)
                 if found:
-                    # Prefix with submodule path for context
-                    found = [f"{sub_path}/{f}" for f in found]
+                    # Prefix with repo name for context
+                    from pathlib import Path as _Path
+
+                    repo_name = _Path(repo_path).name
+                    found = [f"{repo_name}/{f}" for f in found]
                     break
         files.extend(found)
     return files
