@@ -7,42 +7,67 @@ status: active
 # Inter-Agent Communication
 
 ## Rule
-Use GitHub issues for inter-agent communication, not local file-based message systems.
+Use a channel that the other agent can actually read. GitHub issues work for any agent.
+If your team uses a shared coordination repo, that's also valid. What doesn't work is
+writing messages in your own workspace — they never leave your repo.
 
 ## Context
 When you want to communicate with other agents or respond to messages from them.
 
 ## Detection
 Observable signals that you need this rule:
-- About to write a message to messages/ directory for another agent
+- About to write a message to your own `messages/` or `sent/` directory
 - Received a GitHub issue from another agent but thinking of responding locally
 - Want to coordinate with another agent on a task
-- Building a "message system" for agent communication
+- Unsure which channel to use
 
 ## Pattern
-Use GitHub issues for cross-agent communication:
-```text
-# ❌ Wrong: Local file-based messages (don't cross repos)
-messages/sent/message-to-agent.md  # Other agent can't see this!
 
-# ✅ Correct: GitHub issues (both agents can see)
+### Option A: GitHub issues (works for any agent setup)
+```text
+# ✅ Comment on an existing issue to respond
 gh issue comment <issue-number> --repo owner/agent-repo --body "Response..."
 
-# ✅ Correct: Create new issue to initiate communication
-gh issue create --repo owner/other-agent-repo --title "Question for Agent" --body "..."
+# ✅ Create new issue to initiate communication
+gh issue create --repo owner/other-agent-repo --title "Topic" --body "..."
 ```
 
-**Why GitHub issues work**:
-- Both agents have GitHub context in their autonomous runs
-- Issues are visible to both agents
-- Comments create a clear thread
-- Maintainers can also see and participate
+**When to use**: Any inter-agent communication. Default when you don't have a shared repo.
 
-**Why local messages don't work**:
-- Messages in your workspace stay in YOUR workspace
-- Other agent would have to manually check your repo
-- No notification mechanism
-- No way for other agent to "receive" the message
+**Why it works**:
+- Both agents have GitHub context in their autonomous runs
+- Issues are visible to both agents and maintainers
+- Comments create a clear thread with notification
+
+### Option B: Shared coordination repo (if your team has one)
+Some multi-agent setups use a shared git repository (e.g., `gptme-superuser`) that all
+agents on the team have read/write access to. If your setup includes this:
+```bash
+# Write to a shared messages directory in the coordination repo
+cat > shared-repo/messages/YYYY-MM-DD/from-alice-to-bob.md << 'EOF'
+---
+from: alice
+to: bob
+subject: "..."
+---
+Message content here.
+EOF
+cd shared-repo && git add messages/ && git commit -m "msg(bob): ..." && git push
+```
+
+**When to use**: Agent-to-agent messages that don't need human visibility, or when the
+team uses the shared repo as the coordination hub.
+
+**Why it works**: All agents pull the shared repo at session start, so messages reach them.
+
+### ❌ Wrong: Messages in your own workspace
+```text
+# ❌ Wrong: Only you can see this
+messages/sent/message-to-bob.md   # Stays in YOUR repo — Bob never sees it
+```
+
+The anti-pattern is messages written to your own workspace, not to a shared location.
+If you're writing to a repo only you have access to, use GitHub issues instead.
 
 ## Responding to External Mentions
 
