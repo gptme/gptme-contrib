@@ -7,8 +7,29 @@ on:
     branches: [ main, master ]
 
 jobs:
+  # Detect which paths changed to skip expensive jobs on unrelated PRs
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      plugins: ${{ steps.filter.outputs.plugins }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          plugins:
+            - 'plugins/**'
+            - '.github/workflows/test-plugins.yml'
+
   # Discovery job - outputs plugin matrix dynamically using Makefile (single source of truth)
   discover:
+    needs: changes
+    # Always run on push to master; on PRs, only when plugin code changed
+    if: github.event_name == 'push' || needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-latest
     outputs:
       plugins: ${{ steps.discover.outputs.plugins }}
@@ -89,7 +110,9 @@ jobs:
 
   # Coverage report (combined for all plugins)
   coverage:
-    needs: discover
+    needs: changes
+    # Always run on push to master; on PRs, only when plugin code changed
+    if: github.event_name == 'push' || needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

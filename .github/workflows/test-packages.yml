@@ -7,8 +7,32 @@ on:
     branches: [ main, master ]
 
 jobs:
+  # Detect which paths changed to skip expensive jobs on unrelated PRs
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      packages: ${{ steps.filter.outputs.packages }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          packages:
+            - 'packages/**'
+            - 'pyproject.toml'
+            - 'uv.lock'
+            - 'Makefile'
+            - '.github/workflows/test-packages.yml'
+
   # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
   discover:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.discover.outputs.packages }}
@@ -54,6 +78,9 @@ jobs:
 
   # Typecheck all packages (single job, not parallelized per-package)
   typecheck:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
