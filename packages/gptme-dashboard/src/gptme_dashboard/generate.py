@@ -233,31 +233,26 @@ def scan_skills(workspace: Path) -> list[dict]:
     return skills
 
 
-def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata using gptme's config module."""
+def read_workspace_config(workspace: Path):
+    """Read gptme.toml using gptme's config module. Returns ProjectConfig or None."""
     from gptme.config import get_project_config
 
-    project_config = get_project_config(workspace, quiet=True)
-    if project_config is None:
-        return {}
-
-    config: dict = {}
-
-    if project_config.agent and project_config.agent.name:
-        config["agent_name"] = project_config.agent.name
-
-    if project_config.plugins.enabled:
-        config["plugins_enabled"] = list(project_config.plugins.enabled)
-
-    return config
+    return get_project_config(workspace, quiet=True)
 
 
 def collect_workspace_data(workspace: Path) -> dict:
     """Collect all workspace data into a dict suitable for JSON export or rendering."""
-    config = read_workspace_config(workspace)
+    project_config = read_workspace_config(workspace)
+
+    workspace_name = workspace.resolve().name
+    enabled_plugins: list[str] | None = None
+    if project_config is not None:
+        if project_config.agent and project_config.agent.name:
+            workspace_name = project_config.agent.name
+        if project_config.plugins.enabled:
+            enabled_plugins = list(project_config.plugins.enabled)
 
     lessons = scan_lessons(workspace)
-    enabled_plugins = config.get("plugins_enabled")
     plugins = scan_plugins(workspace, enabled_plugins=enabled_plugins)
     packages = scan_packages(workspace)
     skills = scan_skills(workspace)
@@ -275,8 +270,6 @@ def collect_workspace_data(workspace: Path) -> dict:
         "total_skills": len(skills),
         "lesson_categories": lesson_categories,
     }
-
-    workspace_name = config.get("agent_name", workspace.resolve().name)
 
     return {
         "workspace_name": workspace_name,

@@ -171,12 +171,14 @@ def test_extract_title():
 def test_read_workspace_config_reads_agent_section(workspace: Path):
     """Test that [agent] name is returned from gptme.toml."""
     config = read_workspace_config(workspace)
-    assert config["agent_name"] == "TestAgent"
+    assert config is not None
+    assert config.agent is not None
+    assert config.agent.name == "TestAgent"
 
 
 def test_read_workspace_config_missing(tmp_path: Path):
     """Test config reading when gptme.toml absent."""
-    assert read_workspace_config(tmp_path) == {}
+    assert read_workspace_config(tmp_path) is None
 
 
 def test_scan_lessons(workspace: Path):
@@ -500,7 +502,7 @@ def test_skill_detail_breadcrumb(workspace: Path, tmp_path: Path):
 
 
 def test_read_workspace_config_reads_plugins(tmp_path: Path):
-    """Test that [plugins] enabled and paths are parsed from gptme.toml."""
+    """Test that [plugins] enabled is parsed from gptme.toml."""
     (tmp_path / "gptme.toml").write_text(
         textwrap.dedent("""\
         [agent]
@@ -511,14 +513,17 @@ def test_read_workspace_config_reads_plugins(tmp_path: Path):
         """)
     )
     config = read_workspace_config(tmp_path)
-    assert config["agent_name"] == "PluginAgent"
-    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+    assert config is not None
+    assert config.agent is not None
+    assert config.agent.name == "PluginAgent"
+    assert config.plugins.enabled == ["user_memories", "gptme_consortium"]
 
 
 def test_read_workspace_config_no_plugins_section(workspace: Path):
-    """Test that missing [plugins] section results in no plugins_enabled key."""
+    """Test that missing [plugins] section results in empty enabled list."""
     config = read_workspace_config(workspace)
-    assert "plugins_enabled" not in config
+    assert config is not None
+    assert config.plugins.enabled == []
 
 
 def test_scan_plugins_with_enabled_list(workspace: Path):
@@ -614,12 +619,14 @@ def test_read_workspace_config_multiline_enabled(tmp_path: Path):
         """)
     )
     config = read_workspace_config(tmp_path)
-    assert config["agent_name"] == "MultilineAgent"
-    assert config["plugins_enabled"] == ["user_memories", "gptme_consortium"]
+    assert config is not None
+    assert config.agent is not None
+    assert config.agent.name == "MultilineAgent"
+    assert config.plugins.enabled == ["user_memories", "gptme_consortium"]
 
 
-def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
-    """Test that plugins_paths is not included in config (it was dead code, removed)."""
+def test_read_workspace_config_plugins_paths_accessible(tmp_path: Path):
+    """Test that plugins.paths is accessible via the typed config object."""
     (tmp_path / "gptme.toml").write_text(
         textwrap.dedent("""\
         [plugins]
@@ -628,5 +635,5 @@ def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
         """)
     )
     config = read_workspace_config(tmp_path)
-    assert "plugins_paths" not in config
-    assert config["plugins_enabled"] == ["user_memories"]
+    assert config is not None
+    assert config.plugins.enabled == ["user_memories"]
