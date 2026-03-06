@@ -1272,11 +1272,11 @@ def check_new(file: str, threshold: float) -> None:
     results = embedder.check_new_lesson(text, threshold)
 
     if not results:
-        print(f"\nNo similar lessons found above threshold {threshold}")
+        print(f"\n✅ No similar lessons found above threshold {threshold}")
         print("Safe to create new lesson.")
     else:
         print(
-            f"\nFound {len(results)} similar lesson(s) above threshold {threshold}:\n"
+            f"\n⚠️ Found {len(results)} similar lesson(s) above threshold {threshold}:\n"
         )
         for lesson_id, similarity in results[:5]:
             meta = embedder.metadata[lesson_id]
@@ -1295,9 +1295,9 @@ def suggest_merges_cmd(threshold: float) -> None:
     suggestions = embedder.suggest_merges(threshold)
 
     if not suggestions:
-        print(f"\nNo merge suggestions at threshold {threshold}")
+        print(f"\n✅ No merge suggestions at threshold {threshold}")
     else:
-        print(f"\nMerge Suggestions (threshold={threshold}):\n")
+        print(f"\n📋 Merge Suggestions (threshold={threshold}):\n")
         for i, suggestion in enumerate(suggestions, 1):
             print(
                 f"{i}. {suggestion['lesson1']['name']} <-> {suggestion['lesson2']['name']}"
@@ -1319,7 +1319,7 @@ def preview_merge(lesson1: str, lesson2: str) -> None:
     preview = embedder.get_merge_preview(lesson1, lesson2)
 
     if "error" in preview:
-        print(f"\nError: {preview['error']}")
+        print(f"\n❌ Error: {preview['error']}")
     else:
         print("\n=== Merge Preview ===")
         print(f"Similarity: {preview['similarity']:.3f}\n")

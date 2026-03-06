@@ -600,6 +600,9 @@ def review(delta_id: str, reviewer: str, auto_approve: bool) -> None:
 @click.option("--reviewer", default="ace_reviewer", help="Reviewer name")
 def batch(review_all: bool, auto_approve: bool, reviewer: str) -> None:
     """Review all pending deltas."""
+    # review_all is always True here — required=True on --all acts as a safety gate,
+    # forcing users to explicitly opt in and preventing accidental batch operations.
+    _ = review_all
     rev = DeltaReviewer(auto_approve=auto_approve)
     results = rev.batch_review(reviewer_name=reviewer)
     print(f"\nReviewed {len(results)} deltas:")
