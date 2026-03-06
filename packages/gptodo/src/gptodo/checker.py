@@ -190,7 +190,7 @@ def check_state_validity(task: TaskInfo, previous_state: str | None = None) -> C
         if task.state not in allowed and task.state != previous_state:
             result["passed"] = False
             result["message"] = (
-                f"Invalid state transition: {previous_state} → {task.state}. " f"Allowed: {allowed}"
+                f"Invalid state transition: {previous_state} → {task.state}. Allowed: {allowed}"
             )
             details["previous_state"] = previous_state
             details["allowed_transitions"] = allowed
