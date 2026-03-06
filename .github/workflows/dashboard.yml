@@ -9,14 +9,11 @@ on:
       - 'packages/**'
       - 'skills/**'
       - 'gptme.toml'
-      - 'packages/gptme-dashboard/**'
       - '.github/workflows/dashboard.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -50,6 +47,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
