@@ -8,6 +8,7 @@ import pytest
 
 from gptme_dashboard.generate import (
     collect_workspace_data,
+    detect_submodules,
     extract_title,
     generate,
     generate_json,
@@ -121,6 +122,82 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def workspace_with_submodules(workspace: Path) -> Path:
+    """Workspace with a .gitmodules referencing a submodule with gptme structure."""
+    # Create .gitmodules
+    (workspace / ".gitmodules").write_text(
+        textwrap.dedent("""\
+        [submodule "contrib"]
+        \tpath = contrib
+        \turl = git@github.com:gptme/gptme-contrib.git
+
+        [submodule "projects/unrelated"]
+        \tpath = projects/unrelated
+        \turl = git@github.com:example/unrelated.git
+        """)
+    )
+
+    # Create submodule with gptme-like structure
+    contrib = workspace / "contrib"
+    contrib.mkdir()
+
+    # Submodule lessons
+    sub_lessons = contrib / "lessons" / "patterns"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "shared-pattern.md").write_text(
+        textwrap.dedent("""\
+        ---
+        match:
+          keywords: ["shared pattern"]
+        status: active
+        ---
+        # Shared Pattern
+
+        A pattern from the submodule.
+        """)
+    )
+
+    # Submodule skills
+    sub_skills = contrib / "skills" / "deploy"
+    sub_skills.mkdir(parents=True)
+    (sub_skills / "SKILL.md").write_text(
+        textwrap.dedent("""\
+        ---
+        name: Deploy Skill
+        description: Deployment workflow from contrib
+        ---
+        # Deploy
+
+        Deploy instructions.
+        """)
+    )
+
+    # Submodule packages
+    sub_pkg = contrib / "packages" / "contrib-pkg"
+    sub_pkg.mkdir(parents=True)
+    (sub_pkg / "pyproject.toml").write_text(
+        textwrap.dedent("""\
+        [project]
+        name = "contrib-pkg"
+        version = "1.0.0"
+        description = "A package from contrib"
+        """)
+    )
+
+    # Submodule plugins
+    sub_plugin = contrib / "plugins" / "gptme-contrib-plugin"
+    sub_plugin.mkdir(parents=True)
+    (sub_plugin / "README.md").write_text("# Contrib Plugin\n\nA shared plugin.\n")
+
+    # Create unrelated project (no gptme structure — should be skipped)
+    unrelated = workspace / "projects" / "unrelated"
+    unrelated.mkdir(parents=True)
+    (unrelated / "README.md").write_text("# Unrelated project\n")
+
+    return workspace
+
+
 def test_parse_frontmatter_callable():
     """Test parse_frontmatter is callable."""
     assert callable(parse_frontmatter)
@@ -201,6 +278,16 @@ def test_scan_lessons(workspace: Path):
     test_lesson = next(lesson for lesson in lessons if lesson["title"] == "Test Lesson")
     assert "test keyword" in test_lesson["keywords"]
     assert test_lesson["status"] == "active"
+    assert test_lesson["kind"] == "lesson"
+
+
+def test_scan_lessons_with_source(workspace: Path):
+    """Test that source tag is added when specified."""
+    lessons = scan_lessons(workspace, source="contrib")
+    assert all(lesson["source"] == "contrib" for lesson in lessons)
+
+    lessons_no_source = scan_lessons(workspace)
+    assert all("source" not in lesson for lesson in lessons_no_source)
 
 
 def test_scan_lessons_empty(tmp_path: Path):
@@ -235,6 +322,82 @@ def test_scan_skills(workspace: Path):
     assert "Instructions here" in skills[0]["body"]
     assert "page_url" in skills[0]
     assert skills[0]["page_url"] == "skills/test-skill/index.html"
+    assert skills[0]["kind"] == "skill"
+
+
+# --- Submodule tests ---
+
+
+def test_detect_submodules_none(workspace: Path):
+    """Test detection when no .gitmodules exists."""
+    assert detect_submodules(workspace) == []
+
+
+def test_detect_submodules(workspace_with_submodules: Path):
+    """Test that gptme-like submodules are detected, non-gptme ones skipped."""
+    subs = detect_submodules(workspace_with_submodules)
+    assert len(subs) == 1
+    assert subs[0]["name"] == "contrib"
+    assert subs[0]["has_lessons"] is True
+    assert subs[0]["has_skills"] is True
+    assert subs[0]["has_packages"] is True
+    assert subs[0]["has_plugins"] is True
+
+
+def test_collect_with_submodules(workspace_with_submodules: Path):
+    """Test that submodule content is aggregated into workspace data."""
+    data = collect_workspace_data(workspace_with_submodules)
+
+    # Submodule name should be listed
+    assert "contrib" in data["submodules"]
+
+    # Lessons: 3 local + 1 from submodule
+    assert data["stats"]["total_lessons"] == 4
+    sub_lessons = [ls for ls in data["lessons"] if ls.get("source") == "contrib"]
+    assert len(sub_lessons) == 1
+    assert sub_lessons[0]["title"] == "Shared Pattern"
+
+    # Skills: 1 local + 1 from submodule
+    assert data["stats"]["total_skills"] == 2
+
+    # Packages: 1 local + 1 from submodule
+    assert data["stats"]["total_packages"] == 2
+
+    # Plugins: 1 local + 1 from submodule
+    assert data["stats"]["total_plugins"] == 2
+
+    # Guidance: all lessons + skills combined
+    assert data["stats"]["total_guidance"] == 6  # 4 lessons + 2 skills
+    assert len(data["guidance"]) == 6
+
+    # Sources list should contain "contrib"
+    assert "contrib" in data["sources"]
+
+
+def test_guidance_unified_structure(workspace_with_submodules: Path):
+    """Test that guidance items have consistent structure regardless of kind."""
+    data = collect_workspace_data(workspace_with_submodules)
+
+    for item in data["guidance"]:
+        assert "kind" in item
+        assert item["kind"] in ("lesson", "skill")
+        assert "category" in item
+        assert "status" in item
+        assert "keywords" in item
+
+
+def test_guidance_sorted(workspace: Path):
+    """Test that guidance is sorted by kind then title."""
+    data = collect_workspace_data(workspace)
+    kinds = [item["kind"] for item in data["guidance"]]
+    # All lessons before skills
+    lesson_idx = [i for i, k in enumerate(kinds) if k == "lesson"]
+    skill_idx = [i for i, k in enumerate(kinds) if k == "skill"]
+    if lesson_idx and skill_idx:
+        assert max(lesson_idx) < min(skill_idx)
+
+
+# --- Existing tests (updated for new stats) ---
 
 
 def test_collect_workspace_data(workspace: Path):
@@ -245,11 +408,13 @@ def test_collect_workspace_data(workspace: Path):
     assert data["stats"]["total_plugins"] == 1
     assert data["stats"]["total_packages"] == 1
     assert data["stats"]["total_skills"] == 1
+    assert data["stats"]["total_guidance"] == 4  # 3 lessons + 1 skill
     # lesson_categories should be consistent and sorted
     cats = data["stats"]["lesson_categories"]
     assert list(cats.keys()) == sorted(cats.keys())
     assert cats["tools"] == 1
     assert cats["workflow"] == 2
+    assert cats["skill"] == 1  # Skills get "skill" category
 
 
 def test_generate_json_stdout(workspace: Path):
@@ -259,6 +424,7 @@ def test_generate_json_stdout(workspace: Path):
     assert data["workspace_name"] == "TestAgent"
     assert data["stats"]["total_lessons"] == 3
     assert len(data["lessons"]) == 3
+    assert len(data["guidance"]) == 4  # 3 lessons + 1 skill
 
 
 def test_generate_json_excludes_large_fields(workspace: Path):
@@ -298,9 +464,36 @@ def test_generate_full(workspace: Path, tmp_path: Path):
     assert "Test Skill" in html
     assert "0.2.0" in html
 
-    # Use class-scoped assertion to avoid fragile substring matches
-    assert 'class="number">3<' in html  # 3 lessons
-    assert 'class="number">1<' in html  # 1 plugin / 1 package / 1 skill
+    # Unified section header
+    assert "Lessons &amp; Skills" in html
+
+    # Stats: 4 guidance (3 lessons + 1 skill), 1 plugin, 1 package
+    assert 'class="number">4<' in html  # guidance count
+    assert 'class="number">1<' in html  # plugin / package count
+
+
+def test_generate_with_submodules(workspace_with_submodules: Path, tmp_path: Path):
+    """Test HTML generation includes submodule content and source tags."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace_with_submodules, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Submodule name should appear in header
+    assert "contrib" in html
+
+    # Source filter buttons should be present
+    assert 'data-source="contrib"' in html
+
+    # Submodule items should appear
+    assert "Shared Pattern" in html
+    assert "Deploy Skill" in html
+    assert "contrib-pkg" in html
+    assert "gptme-contrib-plugin" in html  # Plugin directory name
+
+    # Source tags in table
+    assert "tag-source" in html
 
 
 def test_generate_empty_workspace(tmp_path: Path):
