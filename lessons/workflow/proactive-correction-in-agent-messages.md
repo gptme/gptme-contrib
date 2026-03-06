@@ -1,5 +1,4 @@
 ---
-category: workflow
 status: active
 tags: [inter-agent, correction, orchestration, epistemic-integrity, communication]
 match:
@@ -34,24 +33,30 @@ Observable signals that a correction is needed:
 
 ### 1. Send immediately via the same channel
 
-Use whichever channel the original message used (shared message directory, GitHub issue, etc.):
+Use the same channel as the original message. For GitHub issue-based communication
+(per [inter-agent-communication.md](./inter-agent-communication.md)), comment on the
+same issue or create a follow-up issue:
 
 ```bash
-# Example: shared message directory pattern
-cat > messages/YYYY-MM-DD/from-<sender>-to-<recipient>-correction.md << 'EOF'
----
-from: <sender>
-to: <recipient>
-date: YYYY-MM-DD
-subject: "Correction: <brief description of what to retract>"
-type: correction
----
+# Comment on the original issue (keeps context together)
+gh issue comment <issue-number> --repo owner/agent-repo --body "$(cat <<'EOF'
+**Correction to my earlier message:**
 
-<content>
+I wrote:
+> [quote the incorrect advice]
+
+**Retract that.** [One sentence explaining why it was wrong.]
+
+**The correct approach**: [correct recommendation]
+
+Steps 1-2 and 4-5 from the original still apply.
 EOF
+)"
 
-# Commit and push so the recipient's next session picks it up
-git add messages/ && git commit -m "msg(<recipient>): correction — <brief>" && git push
+# Or, for a larger correction, create a follow-up issue
+gh issue create --repo owner/agent-repo \
+  --title "Correction: [brief description]" \
+  --body "..."
 ```
 
 ### 2. Structure the correction clearly
@@ -73,10 +78,6 @@ I wrote:
 
 Steps 1-2 and 4-5 from the original message still apply.
 ```
-
-### 3. Use `type: correction` in frontmatter
-
-This allows agents to filter their inbox by type and prioritize corrections over routine messages.
 
 ## Anti-Patterns
 
