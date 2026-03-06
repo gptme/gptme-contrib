@@ -1,30 +1,20 @@
-#!/usr/bin/env python3
 """Static dashboard generator for gptme workspaces.
 
 Scans a gptme workspace (lessons, plugins, packages, skills) and generates
-a static HTML site suitable for gh-pages deployment.
-
-Usage:
-    python dashboard/generate.py [--workspace .] [--output _site]
+a static HTML site suitable for gh-pages deployment, or a JSON data dump
+for custom frontends.
 
 Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 """
 
-import argparse
+import json
 import re
-import sys
+import warnings
 from pathlib import Path
 
-try:
-    from jinja2 import Environment, FileSystemLoader
-except ImportError:
-    print("jinja2 required: pip install jinja2", file=sys.stderr)
-    sys.exit(1)
+import yaml
 
-try:
-    import yaml
-except ImportError:
-    yaml = None  # type: ignore[assignment]
+from jinja2 import Environment, FileSystemLoader
 
 
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
@@ -40,18 +30,10 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
     fm_text = text[3:end].strip()
     body = text[end + 3 :].strip()
 
-    if yaml:
-        try:
-            fm = yaml.safe_load(fm_text) or {}
-        except yaml.YAMLError:
-            fm = {}
-    else:
-        # Minimal fallback parser for key: value pairs
+    try:
+        fm = yaml.safe_load(fm_text) or {}
+    except yaml.YAMLError:
         fm = {}
-        for line in fm_text.splitlines():
-            if ":" in line:
-                k, v = line.split(":", 1)
-                fm[k.strip()] = v.strip().strip('"').strip("'")
 
     return fm, body
 
@@ -82,12 +64,14 @@ def scan_lessons(workspace: Path) -> list[dict]:
         title = extract_title(body, md.stem.replace("-", " ").title())
         status = fm.get("status", "active")
 
-        keywords = []
-        match = fm.get("match", {})
-        if isinstance(match, dict):
-            keywords = match.get("keywords", [])
-        if isinstance(keywords, str):
-            keywords = [keywords]
+        keywords: list[str] = []
+        match_fm = fm.get("match", {})
+        if isinstance(match_fm, dict):
+            kw = match_fm.get("keywords", [])
+            if isinstance(kw, list):
+                keywords = kw
+            elif isinstance(kw, str):
+                keywords = [kw]
 
         lessons.append(
             {
@@ -117,7 +101,6 @@ def scan_plugins(workspace: Path) -> list[dict]:
         description = ""
         if readme.exists():
             _, body = parse_frontmatter(readme)
-            # First non-empty, non-heading line
             for line in body.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):
@@ -197,23 +180,68 @@ def scan_skills(workspace: Path) -> list[dict]:
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata."""
+    """Read gptme.toml for workspace metadata.
+
+    Parses [agent] section specifically to avoid matching name fields
+    from other sections like [project].
+    """
     config_path = workspace / "gptme.toml"
     if not config_path.exists():
         return {}
 
     text = config_path.read_text()
-    config = {}
+    config: dict[str, str] = {}
 
-    m = re.search(r'name\s*=\s*"([^"]*)"', text)
-    if m:
-        config["agent_name"] = m.group(1)
+    in_agent_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_agent_section = stripped == "[agent]"
+        elif in_agent_section:
+            m = re.match(r'name\s*=\s*"([^"]*)"', stripped)
+            if m:
+                config["agent_name"] = m.group(1)
+                break
 
     return config
 
 
+def collect_workspace_data(workspace: Path) -> dict:
+    """Collect all workspace data into a dict suitable for JSON export or rendering."""
+    lessons = scan_lessons(workspace)
+    plugins = scan_plugins(workspace)
+    packages = scan_packages(workspace)
+    skills = scan_skills(workspace)
+    config = read_workspace_config(workspace)
+
+    lesson_categories: dict[str, int] = {}
+    for lesson in lessons:
+        cat = lesson["category"]
+        lesson_categories[cat] = lesson_categories.get(cat, 0) + 1
+    lesson_categories = dict(sorted(lesson_categories.items()))
+
+    stats = {
+        "total_lessons": len(lessons),
+        "total_plugins": len(plugins),
+        "total_packages": len(packages),
+        "total_skills": len(skills),
+        "lesson_categories": lesson_categories,
+    }
+
+    workspace_name = config.get("agent_name", workspace.resolve().name)
+
+    return {
+        "workspace_name": workspace_name,
+        "lessons": lessons,
+        "plugins": plugins,
+        "packages": packages,
+        "skills": skills,
+        "stats": stats,
+    }
+
+
 def generate(workspace: Path, output: Path, template_dir: Path | None = None) -> None:
-    """Generate static dashboard from workspace."""
+    """Generate static HTML dashboard from workspace."""
     if template_dir is None:
         template_dir = Path(__file__).parent / "templates"
 
@@ -222,44 +250,15 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         autoescape=True,
     )
 
-    # Scan workspace
-    lessons = scan_lessons(workspace)
-    plugins = scan_plugins(workspace)
-    packages = scan_packages(workspace)
-    skills = scan_skills(workspace)
-    config = read_workspace_config(workspace)
+    data = collect_workspace_data(workspace)
 
-    # Compute stats
-    lesson_categories: dict[str, int] = {}
-    for lesson in lessons:
-        cat = lesson["category"]
-        lesson_categories[cat] = lesson_categories.get(cat, 0) + 1
-
-    stats = {
-        "total_lessons": len(lessons),
-        "total_plugins": len(plugins),
-        "total_packages": len(packages),
-        "total_skills": len(skills),
-        "lesson_categories": dict(sorted(lesson_categories.items())),
-    }
-
-    # Determine workspace name
-    workspace_name = config.get("agent_name", workspace.resolve().name)
-
-    # Render
     template = env.get_template("index.html")
-    html = template.render(
-        workspace_name=workspace_name,
-        stats=stats,
-        lessons=lessons,
-        plugins=plugins,
-        packages=packages,
-        skills=skills,
-        lesson_categories=lesson_categories,
-    )
+    html = template.render(**data)
 
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(html)
+
+    stats = data["stats"]
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
         f"  {stats['total_lessons']} lessons, "
@@ -269,32 +268,22 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate static gptme workspace dashboard"
-    )
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=Path("."),
-        help="Path to gptme workspace (default: current directory)",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("_site"),
-        help="Output directory (default: _site)",
-    )
-    parser.add_argument(
-        "--templates",
-        type=Path,
-        default=None,
-        help="Custom template directory (default: dashboard/templates/)",
-    )
-    args = parser.parse_args()
+def generate_json(workspace: Path, output: Path | None = None) -> str:
+    """Generate JSON data dump from workspace.
 
-    generate(args.workspace, args.output, args.templates)
+    If output is provided, writes data.json to that directory.
+    Returns the JSON string in all cases.
+    """
+    data = collect_workspace_data(workspace)
+    json_str = json.dumps(data, indent=2)
+
+    if output is not None:
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "data.json").write_text(json_str)
+        print(f"Generated data dump at {output / 'data.json'}")
+
+    return json_str
 
 
-if __name__ == "__main__":
-    main()
+# Suppress unused import warning — yaml is always available (required dependency)
+warnings.filterwarnings("ignore", category=UserWarning, module="gptme_dashboard")

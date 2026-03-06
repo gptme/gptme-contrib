@@ -227,7 +227,7 @@ footer {
 <!-- Lesson Categories -->
 <section>
   <h2>Lesson Categories</h2>
-  {% for cat, count in lesson_categories.items() %}
+  {% for cat, count in stats.lesson_categories.items() %}
   <div class="cat-bar">
     <span class="cat-name">{{ cat }}</span>
     <div class="bar" style="width: {{ (count / stats.total_lessons * 100) | round(1) }}%"></div>
@@ -242,7 +242,7 @@ footer {
   <input type="text" class="search-box" id="lesson-search" placeholder="Filter lessons...">
   <div class="filter-row" id="lesson-filters">
     <button class="filter-btn active" data-cat="all">All</button>
-    {% for cat in lesson_categories %}
+    {% for cat in stats.lesson_categories %}
     <button class="filter-btn" data-cat="{{ cat }}">{{ cat }}</button>
     {% endfor %}
   </div>

@@ -1,14 +1,18 @@
 """Tests for static dashboard generator."""
 
+import json
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from dashboard.generate import (
+from gptme_dashboard.generate import (
+    collect_workspace_data,
     extract_title,
     generate,
+    generate_json,
     parse_frontmatter,
+    read_workspace_config,
     scan_lessons,
     scan_packages,
     scan_plugins,
@@ -19,9 +23,12 @@ from dashboard.generate import (
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a minimal gptme workspace for testing."""
-    # gptme.toml
+    # gptme.toml with [agent] section (name must be read from [agent], not other sections)
     (tmp_path / "gptme.toml").write_text(
         textwrap.dedent("""\
+        [project]
+        name = "should-not-be-used"
+
         [agent]
         name = "TestAgent"
         """)
@@ -134,11 +141,44 @@ def test_parse_frontmatter_no_frontmatter(tmp_path: Path):
     assert "Just a Title" in body
 
 
+def test_parse_frontmatter_keywords_as_list(tmp_path: Path):
+    """Test that keyword lists are parsed correctly (not silently dropped)."""
+    f = tmp_path / "lesson.md"
+    f.write_text(
+        textwrap.dedent("""\
+        ---
+        match:
+          keywords:
+            - "first keyword"
+            - "second keyword"
+        status: active
+        ---
+        # Lesson
+        """)
+    )
+    fm, _ = parse_frontmatter(f)
+    assert isinstance(fm["match"]["keywords"], list)
+    assert "first keyword" in fm["match"]["keywords"]
+    assert "second keyword" in fm["match"]["keywords"]
+
+
 def test_extract_title():
     """Test title extraction from markdown."""
     assert extract_title("# My Title\nBody", "fallback") == "My Title"
     assert extract_title("No heading here", "fallback") == "fallback"
     assert extract_title("## H2 heading\n# H1 heading", "fb") == "H1 heading"
+
+
+def test_read_workspace_config_reads_agent_section(workspace: Path):
+    """Test that [agent] name is returned, not [project] name."""
+    config = read_workspace_config(workspace)
+    assert config["agent_name"] == "TestAgent"
+    assert config["agent_name"] != "should-not-be-used"
+
+
+def test_read_workspace_config_missing(tmp_path: Path):
+    """Test config reading when gptme.toml absent."""
+    assert read_workspace_config(tmp_path) == {}
 
 
 def test_scan_lessons(workspace: Path):
@@ -151,12 +191,10 @@ def test_scan_lessons(workspace: Path):
     assert "Shell Safety" in titles
     assert "Old Lesson" in titles
 
-    # Check categories
     categories = {lesson["category"] for lesson in lessons}
     assert "workflow" in categories
     assert "tools" in categories
 
-    # Check keyword parsing
     test_lesson = next(lesson for lesson in lessons if lesson["title"] == "Test Lesson")
     assert "test keyword" in test_lesson["keywords"]
     assert test_lesson["status"] == "active"
@@ -192,33 +230,66 @@ def test_scan_skills(workspace: Path):
     assert "testing" in skills[0]["description"].lower()
 
 
+def test_collect_workspace_data(workspace: Path):
+    """Test full data collection."""
+    data = collect_workspace_data(workspace)
+    assert data["workspace_name"] == "TestAgent"
+    assert data["stats"]["total_lessons"] == 3
+    assert data["stats"]["total_plugins"] == 1
+    assert data["stats"]["total_packages"] == 1
+    assert data["stats"]["total_skills"] == 1
+    # lesson_categories should be consistent and sorted
+    cats = data["stats"]["lesson_categories"]
+    assert list(cats.keys()) == sorted(cats.keys())
+    assert cats["tools"] == 1
+    assert cats["workflow"] == 2
+
+
+def test_generate_json_stdout(workspace: Path):
+    """Test JSON dump to string."""
+    json_str = generate_json(workspace)
+    data = json.loads(json_str)
+    assert data["workspace_name"] == "TestAgent"
+    assert data["stats"]["total_lessons"] == 3
+    assert len(data["lessons"]) == 3
+
+
+def test_generate_json_to_file(workspace: Path, tmp_path: Path):
+    """Test JSON dump to file."""
+    output = tmp_path / "output"
+    generate_json(workspace, output)
+    assert (output / "data.json").exists()
+    data = json.loads((output / "data.json").read_text())
+    assert data["workspace_name"] == "TestAgent"
+
+
 def test_generate_full(workspace: Path, tmp_path: Path):
     """Test full HTML generation."""
     output = tmp_path / "output"
-    template_dir = Path(__file__).parent.parent / "templates"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
     generate(workspace, output, template_dir)
 
     index = output / "index.html"
     assert index.exists()
 
     html = index.read_text()
-    assert "TestAgent" in html  # workspace name from gptme.toml
+    assert "TestAgent" in html
     assert "Test Lesson" in html
     assert "gptme-test-plugin" in html
     assert "test-pkg" in html
     assert "Test Skill" in html
     assert "0.2.0" in html
 
-    # Check stats rendered
-    assert ">3<" in html  # 3 lessons
-    assert ">1<" in html  # 1 plugin, 1 package, 1 skill
+    # Use class-scoped assertion to avoid fragile substring matches
+    assert 'class="number">3<' in html  # 3 lessons
+    assert 'class="number">1<' in html  # 1 plugin / 1 package / 1 skill
 
 
 def test_generate_empty_workspace(tmp_path: Path):
     """Test generation on workspace with no content."""
     output = tmp_path / "output"
-    template_dir = Path(__file__).parent.parent / "templates"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
     generate(tmp_path, output, template_dir)
 
     html = (output / "index.html").read_text()
-    assert ">0<" in html  # Zero counts
+    assert 'class="number">0<' in html  # Zero counts
