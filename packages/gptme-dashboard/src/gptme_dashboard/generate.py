@@ -86,7 +86,7 @@ def detect_submodules(workspace: Path) -> list[dict]:
     if not gitmodules.exists():
         return []
 
-    config = configparser.ConfigParser()
+    config = configparser.RawConfigParser()
     config.read(str(gitmodules))
 
     submodules = []
@@ -152,6 +152,9 @@ def scan_lessons(workspace: Path, source: str = "") -> list[dict]:
                 keywords = [kw]
 
         page_url = lesson_page_path(str(rel))
+        if source:
+            # Prefix with source name to avoid collisions when submodule has same-path lessons
+            page_url = f"{source}/{page_url}"
 
         entry: dict = {
             "title": title,
@@ -270,6 +273,9 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 
         rel_dir = str(skill_md.parent.relative_to(workspace))
         page_url = skill_page_path(rel_dir)
+        if source:
+            # Prefix with source name to avoid collisions when submodule has same-path skills
+            page_url = f"{source}/{page_url}"
 
         entry: dict = {
             "name": name,
