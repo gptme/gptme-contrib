@@ -478,8 +478,7 @@ def generate_json(workspace: Path, output: Path | None = None) -> str:
             {k: v for k, v in skill.items() if k not in _JSON_EXCLUDE} for skill in data["skills"]
         ],
         "guidance": [
-            {k: v for k, v in item.items() if k not in _JSON_EXCLUDE}
-            for item in data["guidance"]
+            {k: v for k, v in item.items() if k not in _JSON_EXCLUDE} for item in data["guidance"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)
