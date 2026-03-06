@@ -784,6 +784,9 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
         if m:
             shas.append(m.group(1))
 
+    if not shas:
+        return []
+
     # Discover candidate repos: submodules + sibling git repos in ../
     candidate_repos: list[str] = []
 
@@ -871,9 +874,6 @@ def infer_category(signals: dict) -> str | None:
     # is misleading for these. e.g. "docs(journal)" isn't content work,
     # "chore(submodule)" isn't meaningful. But "feat(sessions)" IS real work.
     _SUPPRESS_PREFIX_PAIRS = {
-        ("chore", "sessions"),
-        ("chore", "submodule"),
-        ("chore", "submodules"),
         ("docs", "journal"),
     }
 
@@ -898,9 +898,7 @@ def infer_category(signals: dict) -> str | None:
 
     def _dir_in_path(segment: str, p: str) -> bool:
         """True if `segment` appears as a directory component in path `p`."""
-        import re as _re
-
-        return bool(_re.search(r"(^|/)" + _re.escape(segment) + r"(/|$)", p))
+        return bool(re.search(r"(^|/)" + re.escape(segment) + r"(/|$)", p))
 
     # Path-based signals from tool writes + committed files
     # Committed files are ground truth — weight them higher than tool writes
