@@ -1,4 +1,12 @@
 ---
+status: active
+category: autonomous
+tags:
+- event-watch
+- orchestration
+- monitoring
+- settlement
+- trigger-check
 match:
   keywords:
     - event watch
@@ -10,7 +18,6 @@ match:
     - event trigger
     - monitor for result
     - waiting for outcome
-status: active
 ---
 
 # Agent Event Watch Workflow
@@ -31,6 +38,19 @@ conference result arriving. These events:
 
 Without a structured watch task, results get processed late or with insufficient context —
 the analysis happens days after the event when memory is stale and context must be re-researched.
+
+## Detection
+
+Observable signals that a watch task is warranted:
+- An upcoming event will produce data that triggers a decision (scale / hold / reduce / rollback)
+- The result will appear in a predictable location (standup, GitHub PR, log file) at a known future time
+- Missing or delaying the analysis would mean acting on stale information
+- The event is one-off or infrequent — not routine daily output that's already monitored
+
+Do NOT create watch tasks for:
+- Routine monitoring that's already handled by scheduled sessions
+- Events with no decision attached (informational only)
+- Events where timing of analysis doesn't matter
 
 ## Workflow
 
@@ -95,7 +115,7 @@ Then check if the trigger condition is met:
 
 ```bash
 # For standup-based triggers:
-ls gptme-superuser/standups/$(date +%Y-%m-%d)/gordon.md 2>/dev/null || echo "Not yet"
+[[ -f "gptme-superuser/standups/$(date +%Y-%m-%d)/gordon.md" ]] && echo "TRIGGERED" || echo "Not yet"
 
 # For file-based triggers:
 [[ -f "path/to/result/file" ]] && echo "TRIGGERED" || echo "Not yet"
