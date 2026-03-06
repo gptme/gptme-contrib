@@ -36,14 +36,14 @@ gh api notifications --jq '.[] | select(.unread == true)'
 # Focus on understanding scope, not deep investigation
 ```
 
-### Phase 2: Classification — GREEN vs RED Work (2 minutes)
-**RED (Action Required):**
+### Phase 2: Classification — ACT vs DEF Work (2 minutes)
+**ACT (Action Required):**
 - CI failures blocking PRs you created
 - Critical bugs in your contributions
 - Communication loops requiring closure
 - Time-sensitive responses needed
 
-**GREEN (Monitoring Only):**
+**DEF (Deferred/Monitoring Only):**
 - PRs under review (no action needed from you)
 - Issues assigned to others (observation only)
 - Successfully merged/completed work
@@ -51,7 +51,7 @@ gh api notifications --jq '.[] | select(.unread == true)'
 
 ### Phase 3: Focused Execution (7 minutes)
 ```bash
-# Handle RED items systematically:
+# Handle ACT items systematically:
 # 1. Fix critical blockers first (CI failures, bugs)
 # 2. Close communication loops (PR comments, status updates)
 # 3. Quick wins that unblock others
@@ -74,9 +74,9 @@ gh api notifications --jq '.[] | select(.unread == true)'
 - Identified specific blocker: missing YAML frontmatter
 
 **Classification Phase (2 min):**
-- **RED**: PR CI failure (action required)
-- **GREEN**: Open issue (under review, monitoring only)
-- **GREEN**: Sibling PR (already merged, no action needed)
+- **ACT**: PR CI failure (action required)
+- **DEF**: Open issue (under review, monitoring only)
+- **DEF**: Sibling PR (already merged, no action needed)
 
 **Execution Phase (7 min):**
 - Fixed critical CI blocker: added YAML frontmatter to 2 files
@@ -110,8 +110,8 @@ gh api notifications --jq '.[] | select(.unread == true)'
 **Correct: Systematic triage and focused execution**
 ```text
 # Quick context scan across all items (3 min)
-# Clear RED/GREEN classification (2 min)
-# Focused execution on RED items only (7 min)
+# Clear ACT/DEF classification (2 min)
+# Focused execution on ACT items only (7 min)
 # Result: Critical work completed, all projects properly monitored
 ```
 
@@ -120,15 +120,15 @@ gh api notifications --jq '.[] | select(.unread == true)'
 **Investigation Discipline:**
 - 3 minutes max for context gathering across ALL items
 - Quick read sufficient for classification
-- Deep investigation only for RED items during execution
+- Deep investigation only for ACT items during execution
 
 **Classification Efficiency:**
 - Binary decision: Action Required vs. Monitoring Only
 - Focus on impact: what blocks others vs. what's just awareness
-- Default to GREEN unless clear RED criteria are met
+- Default to DEF unless clear ACT criteria are met
 
 **Execution Focus:**
-- RED items only during monitoring sessions
+- ACT items only during monitoring sessions
 - Complex work deferred to dedicated sessions
 - Communication loops closed immediately after fixes
 
