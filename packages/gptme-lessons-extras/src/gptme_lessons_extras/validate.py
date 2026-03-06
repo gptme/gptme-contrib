@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
+import click
 import yaml
 
 # Configuration
@@ -476,36 +477,27 @@ def validate_directory(
     return valid_count, total_count
 
 
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Validate lesson files")
-    parser.add_argument(
-        "paths",
-        type=Path,
-        nargs="+",
-        help="Path(s) to lesson file(s) or directory(ies)",
-    )
-    parser.add_argument(
-        "--recursive",
-        "-r",
-        action="store_true",
-        default=True,
-        help="Recursively validate directories (default: True)",
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Show warnings and additional details",
-    )
-
-    args = parser.parse_args()
-
+@click.command()
+@click.argument("paths", nargs=-1, required=True, type=click.Path(path_type=Path))
+@click.option(
+    "--recursive",
+    "-r",
+    is_flag=True,
+    default=True,
+    help="Recursively validate directories (default: True)",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Show warnings and additional details",
+)
+def main(paths: tuple[Path, ...], recursive: bool, verbose: bool):
+    """Validate lesson files."""
     # Track overall success across all paths
     all_valid = True
 
-    for path in args.paths:
+    for path in paths:
         if not path.exists():
             print(f"Error: Path not found: {path}")
             all_valid = False
@@ -513,13 +505,13 @@ def main():
 
         if path.is_file():
             # Validate single file
-            valid = validate_lesson_file(path, verbose=args.verbose)
+            valid = validate_lesson_file(path, verbose=verbose)
             if not valid:
                 all_valid = False
         else:
             # Validate directory
             valid_count, total_count = validate_directory(
-                path, recursive=args.recursive, verbose=args.verbose
+                path, recursive=recursive, verbose=verbose
             )
             if valid_count != total_count:
                 all_valid = False

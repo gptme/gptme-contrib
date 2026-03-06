@@ -240,109 +240,101 @@ def report_adoption_metrics(lessons_dir: Path) -> dict[str, Any]:
 
 
 def main():
-    import argparse
+    import click
 
-    parser = argparse.ArgumentParser(description="Adopt network lessons")
-    parser.add_argument("--agent", default="agent", help="Current agent name")
-    parser.add_argument(
+    @click.group()
+    @click.option("--agent", default="agent", help="Current agent name")
+    @click.option(
         "--network-dir",
-        type=Path,
-        default=Path.home() / ".gptme" / "network",
+        type=click.Path(),
+        default=str(Path.home() / ".gptme" / "network"),
         help="Network repository directory",
     )
-    parser.add_argument(
+    @click.option(
         "--lessons-dir",
-        type=Path,
-        default=Path(__file__).parent.parent.parent / "lessons",
+        type=click.Path(),
+        default=str(Path(__file__).parent.parent.parent / "lessons"),
         help="Local lessons directory",
     )
+    @click.pass_context
+    def cli(ctx, agent, network_dir, lessons_dir):
+        """Adopt network lessons."""
+        ctx.ensure_object(dict)
+        ctx.obj["agent"] = agent
+        ctx.obj["network_dir"] = Path(network_dir)
+        ctx.obj["lessons_dir"] = Path(lessons_dir)
 
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    @cli.command()
+    @click.argument("lesson_id")
+    @click.option("--force", is_flag=True, help="Overwrite if local lesson exists")
+    @click.pass_context
+    def adopt(ctx, lesson_id, force):
+        """Adopt a specific lesson."""
+        network_dir = ctx.obj["network_dir"]
+        lessons_dir = ctx.obj["lessons_dir"]
+        agent = ctx.obj["agent"]
 
-    # Adopt single lesson
-    adopt_parser = subparsers.add_parser("adopt", help="Adopt a specific lesson")
-    adopt_parser.add_argument("lesson_id", help="Lesson ID to adopt")
-    adopt_parser.add_argument(
-        "--force", action="store_true", help="Overwrite if local lesson exists"
-    )
-
-    # Batch adopt recommendations
-    batch_parser = subparsers.add_parser("batch", help="Adopt recommended lessons")
-    batch_parser.add_argument(
-        "--min-confidence", type=float, default=0.7, help="Minimum confidence threshold"
-    )
-    batch_parser.add_argument(
-        "--min-adoption", type=int, default=0, help="Minimum adoption count"
-    )
-    batch_parser.add_argument(
-        "--force", action="store_true", help="Overwrite existing lessons"
-    )
-    batch_parser.add_argument(
-        "--auto-confirm",
-        "-y",
-        action="store_true",
-        help="Adopt all without confirmation",
-    )
-
-    # Show metrics
-    subparsers.add_parser("metrics", help="Show adoption metrics")
-
-    args = parser.parse_args()
-
-    if not args.command:
-        parser.print_help()
-        return 1
-
-    # Adopt specific lesson
-    if args.command == "adopt":
         # Get lesson metadata
-        lessons = review_module.list_network_lessons(args.network_dir, args.agent)
+        lessons = review_module.list_network_lessons(network_dir, agent)
 
         target_lesson = None
         for lesson in lessons:
             network_meta = lesson.get("network", {})
-            if network_meta.get("lesson_id") == args.lesson_id:
+            if network_meta.get("lesson_id") == lesson_id:
                 target_lesson = lesson
                 break
 
         if not target_lesson:
-            print(f"Lesson not found: {args.lesson_id}")
-            return 1
+            print(f"Lesson not found: {lesson_id}")
+            sys.exit(1)
 
         success, message = adopt_lesson(
             lesson_metadata=target_lesson,
-            network_dir=args.network_dir,
-            lessons_dir=args.lessons_dir,
-            force=args.force,
+            network_dir=network_dir,
+            lessons_dir=lessons_dir,
+            force=force,
         )
 
         if success:
             print(f"✓ {message}")
-            return 0
         else:
             print(f"✗ {message}")
-            return 1
+            sys.exit(1)
 
-    # Batch adopt recommendations
-    elif args.command == "batch":
+    @cli.command()
+    @click.option(
+        "--min-confidence", type=float, default=0.7, help="Minimum confidence threshold"
+    )
+    @click.option("--min-adoption", type=int, default=0, help="Minimum adoption count")
+    @click.option("--force", is_flag=True, help="Overwrite existing lessons")
+    @click.option(
+        "--auto-confirm", "-y", is_flag=True, help="Adopt all without confirmation"
+    )
+    @click.pass_context
+    def batch(ctx, min_confidence, min_adoption, force, auto_confirm):
+        """Adopt recommended lessons."""
+        network_dir = ctx.obj["network_dir"]
+        lessons_dir = ctx.obj["lessons_dir"]
+        agent = ctx.obj["agent"]
+
         # Get recommendations
-        lessons = review_module.list_network_lessons(args.network_dir, args.agent)
+        lessons = review_module.list_network_lessons(network_dir, agent)
         recommendations = review_module.recommend_lessons(
-            lessons, args.lessons_dir, args.min_confidence, args.min_adoption
+            lessons, lessons_dir, min_confidence, min_adoption
         )
 
         if not recommendations:
             print("No lessons recommended for adoption")
-            return 0
+            return
 
         print(f"Found {len(recommendations)} recommended lessons\n")
 
         results = batch_adopt(
             recommendations=recommendations,
-            network_dir=args.network_dir,
-            lessons_dir=args.lessons_dir,
-            force=args.force,
-            auto_confirm=args.auto_confirm,
+            network_dir=network_dir,
+            lessons_dir=lessons_dir,
+            force=force,
+            auto_confirm=auto_confirm,
         )
 
         # Print summary
@@ -356,9 +348,12 @@ def main():
             for error in results["errors"]:
                 print(f"  {error['lesson_id']}: {error['error']}")
 
-    # Show metrics
-    elif args.command == "metrics":
-        metrics = report_adoption_metrics(args.lessons_dir)
+    @cli.command("metrics")
+    @click.pass_context
+    def metrics_cmd(ctx):
+        """Show adoption metrics."""
+        lessons_dir = ctx.obj["lessons_dir"]
+        metrics = report_adoption_metrics(lessons_dir)
 
         print("Adoption Metrics:\n")
         print(f"Total adoptions: {metrics['total_adoptions']}")
@@ -376,8 +371,8 @@ def main():
                 print(f"  {adoption['lesson_id']} from {adoption['agent_origin']}")
                 print(f"    at {adoption['adopted_at']}")
 
-    return 0
+    cli()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

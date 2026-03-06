@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import click
+
 
 @dataclass
 class LessonStats:
@@ -405,78 +407,79 @@ class EffectivenessTracker:
             self.state_file.unlink()
 
 
-def main() -> None:
-    """CLI entry point."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Track lesson effectiveness across conversation logs"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Maximum logs to process",
-    )
-    parser.add_argument(
-        "--full",
-        action="store_true",
-        help="Full reprocess (not incremental)",
-    )
-    parser.add_argument(
-        "--reset",
-        action="store_true",
-        help="Reset all tracking state",
-    )
-    parser.add_argument(
-        "--report",
-        action="store_true",
-        help="Generate effectiveness report",
-    )
-    parser.add_argument(
-        "--top-n",
-        type=int,
-        default=20,
-        help="Number of top/bottom lessons in report",
-    )
-    parser.add_argument(
-        "--logs-dir",
-        type=Path,
-        default=None,
-        help="Override logs directory",
-    )
-    parser.add_argument(
-        "--state-file",
-        type=Path,
-        default=None,
-        help="Override state file path",
-    )
-
-    args = parser.parse_args()
-
+@click.command()
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Maximum logs to process",
+)
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Full reprocess (not incremental)",
+)
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Reset all tracking state",
+)
+@click.option(
+    "--report",
+    is_flag=True,
+    help="Generate effectiveness report",
+)
+@click.option(
+    "--top-n",
+    type=int,
+    default=20,
+    help="Number of top/bottom lessons in report",
+)
+@click.option(
+    "--logs-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Override logs directory",
+)
+@click.option(
+    "--state-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Override state file path",
+)
+def main(
+    limit: int | None,
+    full: bool,
+    reset: bool,
+    report: bool,
+    top_n: int,
+    logs_dir: Path | None,
+    state_file: Path | None,
+) -> None:
+    """Track lesson effectiveness across conversation logs."""
     tracker = EffectivenessTracker(
-        logs_dir=args.logs_dir,
-        state_file=args.state_file,
+        logs_dir=logs_dir,
+        state_file=state_file,
     )
 
-    if args.reset:
+    if reset:
         tracker.reset()
         print("Tracking state reset.")
         return
 
-    if args.report:
-        print(tracker.report(top_n=args.top_n))
+    if report:
+        print(tracker.report(top_n=top_n))
         return
 
     # Run analysis
     tracker.analyze(
-        limit=args.limit,
-        incremental=not args.full,
+        limit=limit,
+        incremental=not full,
     )
 
     # Print summary report
     print()
-    print(tracker.report(top_n=args.top_n))
+    print(tracker.report(top_n=top_n))
 
 
 if __name__ == "__main__":

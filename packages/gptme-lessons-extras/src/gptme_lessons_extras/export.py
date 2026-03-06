@@ -10,11 +10,11 @@ Usage:
     ./scripts/lessons/export.py --lesson lessons/workflow/autonomous-run.md
 """
 
-import argparse
 import os
 import sys
 from pathlib import Path
 
+import click
 import yaml
 
 from gptme_lessons_extras.network_schema import (
@@ -203,66 +203,54 @@ def export_all_lessons(
     return counts
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Export lessons to agent network interchange format"
-    )
-    parser.add_argument(
-        "--lessons-dir",
-        type=Path,
-        default=Path("lessons"),
-        help="Lessons directory to export from (default: lessons/)",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        default=Path("network-lessons"),
-        help="Output directory for exported lessons (default: network-lessons/)",
-    )
-    parser.add_argument(
-        "--lesson",
-        type=Path,
-        help="Export single lesson file instead of all",
-    )
-    parser.add_argument(
-        "--agent",
-        default="agent",
-        help="Agent origin identifier (default: agent)",
-    )
-    parser.add_argument(
-        "--force",
-        "-f",
-        action="store_true",
-        help="Overwrite existing exports",
-    )
-
-    args = parser.parse_args()
-
-    # Validate inputs
-    if not args.lessons_dir.exists():
-        print(f"Error: Lessons directory not found: {args.lessons_dir}")
-        sys.exit(1)
-
+@click.command()
+@click.option(
+    "--lessons-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default="lessons",
+    help="Lessons directory to export from (default: lessons/)",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default="network-lessons",
+    help="Output directory for exported lessons (default: network-lessons/)",
+)
+@click.option(
+    "--lesson",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Export single lesson file instead of all",
+)
+@click.option(
+    "--agent",
+    default="agent",
+    help="Agent origin identifier (default: agent)",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Overwrite existing exports",
+)
+def main(lessons_dir: Path, output: Path, lesson: Path | None, agent: str, force: bool):
+    """Export lessons to agent network interchange format."""
     # Create output directory
-    args.output.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
 
     print("Agent Network Lesson Export")
-    print(f"Agent: {args.agent}")
-    print(f"Output: {args.output}")
+    print(f"Agent: {agent}")
+    print(f"Output: {output}")
     print()
 
-    if args.lesson:
+    if lesson:
         # Export single lesson
-        if not args.lesson.exists():
-            print(f"Error: Lesson file not found: {args.lesson}")
-            sys.exit(1)
-
         success = export_lesson(
-            lesson_path=args.lesson,
-            output_dir=args.output,
-            agent_origin=args.agent,
-            force=args.force,
+            lesson_path=lesson,
+            output_dir=output,
+            agent_origin=agent,
+            force=force,
         )
 
         sys.exit(0 if success else 1)
@@ -270,10 +258,10 @@ def main():
     else:
         # Export all lessons
         counts = export_all_lessons(
-            lessons_dir=args.lessons_dir,
-            output_dir=args.output,
-            agent_origin=args.agent,
-            force=args.force,
+            lessons_dir=lessons_dir,
+            output_dir=output,
+            agent_origin=agent,
+            force=force,
         )
 
         print()

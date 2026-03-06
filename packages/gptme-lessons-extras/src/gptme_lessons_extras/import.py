@@ -10,10 +10,10 @@ Usage:
     ./scripts/lessons/import.py --lesson network-lessons/workflow/autonomous-run.md --adopt
 """
 
-import argparse
 import sys
 from pathlib import Path
 
+import click
 import yaml
 
 from gptme_lessons_extras.network_schema import validate_network_metadata
@@ -240,93 +240,89 @@ def adopt_network_lesson(
         return False
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Import lessons from agent network interchange format"
-    )
-    parser.add_argument(
-        "--source",
-        "-s",
-        type=Path,
-        help="Source directory with network lessons",
-    )
-    parser.add_argument(
-        "--lesson",
-        type=Path,
-        help="Import single lesson file",
-    )
-    parser.add_argument(
-        "--lessons-dir",
-        type=Path,
-        default=Path("lessons"),
-        help="Local lessons directory (default: lessons/)",
-    )
-    parser.add_argument(
-        "--review",
-        action="store_true",
-        help="Review lessons without adopting",
-    )
-    parser.add_argument(
-        "--adopt",
-        action="store_true",
-        help="Adopt reviewed lessons",
-    )
-    parser.add_argument(
-        "--force",
-        "-f",
-        action="store_true",
-        help="Force adoption even if exists locally",
-    )
-
-    args = parser.parse_args()
-
-    # Validate inputs
-    if not args.lessons_dir.exists():
-        print(f"Error: Lessons directory not found: {args.lessons_dir}")
-        sys.exit(1)
-
+@click.command()
+@click.option(
+    "--source",
+    "-s",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Source directory with network lessons",
+)
+@click.option(
+    "--lesson",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Import single lesson file",
+)
+@click.option(
+    "--lessons-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default="lessons",
+    help="Local lessons directory (default: lessons/)",
+)
+@click.option(
+    "--review",
+    is_flag=True,
+    help="Review lessons without adopting",
+)
+@click.option(
+    "--adopt",
+    is_flag=True,
+    help="Adopt reviewed lessons",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Force adoption even if exists locally",
+)
+def main(
+    source: Path | None,
+    lesson: Path | None,
+    lessons_dir: Path,
+    review: bool,
+    adopt: bool,
+    force: bool,
+):
+    """Import lessons from agent network interchange format."""
     print("Agent Network Lesson Import")
-    print(f"Local lessons: {args.lessons_dir}")
+    print(f"Local lessons: {lessons_dir}")
     print()
 
-    if args.lesson:
+    if lesson:
         # Import single lesson
-        if not args.lesson.exists():
-            print(f"Error: Lesson file not found: {args.lesson}")
-            sys.exit(1)
-
-        if args.review:
+        if review:
             # Review only
-            review = review_network_lesson(args.lesson, args.lessons_dir)
+            review_result = review_network_lesson(lesson, lessons_dir)
 
-            print(f"Review: {args.lesson.name}")
-            print(f"  Valid: {review['valid']}")
-            if review["errors"]:
-                print(f"  Errors: {', '.join(review['errors'])}")
-            print(f"  Compatible: {review['compatible']}")
-            if not review["compatible"]:
-                print(f"  Reason: {review['compatibility_reason']}")
+            print(f"Review: {lesson.name}")
+            print(f"  Valid: {review_result['valid']}")
+            if review_result["errors"]:
+                print(f"  Errors: {', '.join(review_result['errors'])}")
+            print(f"  Compatible: {review_result['compatible']}")
+            if not review_result["compatible"]:
+                print(f"  Reason: {review_result['compatibility_reason']}")
 
-            if review["metadata"]:
+            if review_result["metadata"]:
                 print("\n  Metadata:")
-                print(f"    ID: {review['metadata'].get('lesson_id')}")
-                print(f"    Origin: {review['metadata'].get('agent_origin')}")
-                print(f"    Confidence: {review['metadata'].get('confidence')}")
+                print(f"    ID: {review_result['metadata'].get('lesson_id')}")
+                print(f"    Origin: {review_result['metadata'].get('agent_origin')}")
+                print(f"    Confidence: {review_result['metadata'].get('confidence')}")
                 print(
-                    f"    Adoption count: {review['metadata'].get('adoption_count', 0)}"
+                    f"    Adoption count: {review_result['metadata'].get('adoption_count', 0)}"
                 )
 
-            if review["content_preview"]:
-                print(f"\n  Preview: {review['content_preview']}...")
+            if review_result["content_preview"]:
+                print(f"\n  Preview: {review_result['content_preview']}...")
 
-            sys.exit(0 if review["valid"] and review["compatible"] else 1)
+            sys.exit(0 if review_result["valid"] and review_result["compatible"] else 1)
 
-        elif args.adopt:
+        elif adopt:
             # Adopt lesson
             success = adopt_network_lesson(
-                args.lesson,
-                args.lessons_dir,
-                force=args.force,
+                lesson,
+                lessons_dir,
+                force=force,
             )
             sys.exit(0 if success else 1)
 
@@ -334,53 +330,53 @@ def main():
             print("Error: Specify --review or --adopt")
             sys.exit(1)
 
-    elif args.source:
+    elif source:
         # Import from directory
-        if not args.source.exists():
-            print(f"Error: Source directory not found: {args.source}")
-            sys.exit(1)
-
         # Find all lesson files
-        lesson_files = list(args.source.rglob("*.md"))
+        lesson_files = list(source.rglob("*.md"))
         lesson_files = [f for f in lesson_files if f.name != "README.md"]
 
         print(f"Found {len(lesson_files)} lessons in source")
         print()
 
-        if args.review:
+        if review:
             # Review all
             for lesson_file in lesson_files:
-                review = review_network_lesson(lesson_file, args.lessons_dir)
+                review_result = review_network_lesson(lesson_file, lessons_dir)
 
-                status = "✓" if review["valid"] and review["compatible"] else "✗"
+                status = (
+                    "✓"
+                    if review_result["valid"] and review_result["compatible"]
+                    else "✗"
+                )
                 print(f"{status} {lesson_file.name}")
 
-                if review["metadata"]:
-                    print(f"   ID: {review['metadata'].get('lesson_id')}")
-                    print(f"   Origin: {review['metadata'].get('agent_origin')}")
+                if review_result["metadata"]:
+                    print(f"   ID: {review_result['metadata'].get('lesson_id')}")
+                    print(f"   Origin: {review_result['metadata'].get('agent_origin')}")
 
-                if not review["valid"]:
-                    print(f"   Errors: {', '.join(review['errors'])}")
+                if not review_result["valid"]:
+                    print(f"   Errors: {', '.join(review_result['errors'])}")
 
-                if not review["compatible"]:
-                    print(f"   {review['compatibility_reason']}")
+                if not review_result["compatible"]:
+                    print(f"   {review_result['compatibility_reason']}")
 
                 print()
 
-        elif args.adopt:
+        elif adopt:
             # Adopt all compatible
             adopted = 0
             failed = 0
 
             for lesson_file in lesson_files:
                 # Review first
-                review = review_network_lesson(lesson_file, args.lessons_dir)
+                review_result = review_network_lesson(lesson_file, lessons_dir)
 
-                if review["valid"] and review["compatible"]:
+                if review_result["valid"] and review_result["compatible"]:
                     success = adopt_network_lesson(
                         lesson_file,
-                        args.lessons_dir,
-                        force=args.force,
+                        lessons_dir,
+                        force=force,
                     )
 
                     if success:

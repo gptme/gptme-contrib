@@ -443,47 +443,27 @@ class LessonDiscovery:
 
 def main():
     """CLI interface for lesson discovery."""
-    import argparse
+    import click
 
-    parser = argparse.ArgumentParser(description="Lesson Discovery System")
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    @click.group()
+    def cli():
+        """Lesson Discovery System."""
+        pass
 
-    # Recommend command
-    recommend_parser = subparsers.add_parser("recommend", help="Recommend lessons")
-    recommend_parser.add_argument(
-        "--context", type=str, help="Context keywords (comma-separated)"
+    @cli.command()
+    @click.option(
+        "--context", type=str, default=None, help="Context keywords (comma-separated)"
     )
-    recommend_parser.add_argument(
-        "--keywords", nargs="+", help="Context keywords (space-separated)"
+    @click.option(
+        "--keywords", multiple=True, help="Context keywords (space-separated)"
     )
-    recommend_parser.add_argument(
-        "--top-k", type=int, default=5, help="Number of recommendations"
-    )
-
-    # Similar command
-    similar_parser = subparsers.add_parser("similar", help="Find similar lessons")
-    similar_parser.add_argument("lesson_id", type=str, help="Lesson ID to compare")
-    similar_parser.add_argument(
-        "--threshold", type=float, default=0.5, help="Similarity threshold"
-    )
-
-    # Duplicates command
-    duplicates_parser = subparsers.add_parser(
-        "duplicates", help="Find duplicate lessons"
-    )
-    duplicates_parser.add_argument(
-        "--threshold", type=float, default=0.8, help="Duplicate threshold"
-    )
-
-    args = parser.parse_args()
-
-    # Initialize discovery system
-    discovery = LessonDiscovery()
-
-    if args.command == "recommend":
-        # Get recommendations
+    @click.option("--top-k", type=int, default=5, help="Number of recommendations")
+    def recommend(context, keywords, top_k):
+        """Recommend lessons."""
+        discovery = LessonDiscovery()
+        keywords_list = list(keywords) if keywords else None
         recommendations = discovery.recommend(
-            context=args.context, keywords=args.keywords, top_k=args.top_k
+            context=context, keywords=keywords_list, top_k=top_k
         )
 
         print(f"\nTop {len(recommendations)} Recommended Lessons:\n")
@@ -494,11 +474,15 @@ def main():
             print(f"   - Adoption: {rec.adoption_score:.2f}")
             print()
 
-    elif args.command == "similar":
-        # Find similar lessons
-        results = discovery.find_similar(args.lesson_id, args.threshold)
+    @cli.command()
+    @click.argument("lesson_id", type=str)
+    @click.option("--threshold", type=float, default=0.5, help="Similarity threshold")
+    def similar(lesson_id, threshold):
+        """Find similar lessons."""
+        discovery = LessonDiscovery()
+        results = discovery.find_similar(lesson_id, threshold)
 
-        print(f"\nLessons similar to {args.lesson_id}:\n")
+        print(f"\nLessons similar to {lesson_id}:\n")
         for result in results:
             print(f"- {result.lesson_b} (similarity: {result.similarity_score:.2f})")
             print(f"  Keyword overlap: {result.keyword_overlap:.2f}")
@@ -506,13 +490,18 @@ def main():
             print(f"  Relationship: {result.relationship}")
             print()
 
-    elif args.command == "duplicates":
-        # Find all duplicates
-        duplicates = discovery.find_all_duplicates(args.threshold)
+    @cli.command()
+    @click.option("--threshold", type=float, default=0.8, help="Duplicate threshold")
+    def duplicates(threshold):
+        """Find duplicate lessons."""
+        discovery = LessonDiscovery()
+        dupes = discovery.find_all_duplicates(threshold)
 
-        print(f"\nFound {len(duplicates)} potential duplicate pairs:\n")
-        for lesson_a, lesson_b, similarity in duplicates:
+        print(f"\nFound {len(dupes)} potential duplicate pairs:\n")
+        for lesson_a, lesson_b, similarity in dupes:
             print(f"- {lesson_a} ≈ {lesson_b} (similarity: {similarity:.2f})")
+
+    cli()
 
 
 if __name__ == "__main__":

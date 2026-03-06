@@ -228,60 +228,43 @@ def print_lesson_summary(lesson: dict[str, Any]):
 
 
 def main():
-    import argparse
+    import click
 
-    parser = argparse.ArgumentParser(description="Review network lessons")
-    parser.add_argument("--agent", default="agent", help="Current agent name")
-    parser.add_argument(
+    @click.group()
+    @click.option("--agent", default="agent", help="Current agent name")
+    @click.option(
         "--network-dir",
-        type=Path,
-        default=Path.home() / ".gptme" / "network",
+        type=click.Path(),
+        default=str(Path.home() / ".gptme" / "network"),
         help="Network repository directory",
     )
-    parser.add_argument(
+    @click.option(
         "--lessons-dir",
-        type=Path,
-        default=Path(__file__).parent.parent.parent / "lessons",
+        type=click.Path(),
+        default=str(Path(__file__).parent.parent.parent / "lessons"),
         help="Local lessons directory",
     )
+    @click.pass_context
+    def cli(ctx, agent, network_dir, lessons_dir):
+        """Review network lessons."""
+        ctx.ensure_object(dict)
+        ctx.obj["agent"] = agent
+        ctx.obj["network_dir"] = Path(network_dir)
+        ctx.obj["lessons_dir"] = Path(lessons_dir)
 
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    @cli.command("list")
+    @click.option("--verbose", "-v", is_flag=True, help="Show detailed information")
+    @click.pass_context
+    def list_cmd(ctx, verbose):
+        """List network lessons."""
+        network_dir = ctx.obj["network_dir"]
+        agent = ctx.obj["agent"]
 
-    # List command
-    list_parser = subparsers.add_parser("list", help="List network lessons")
-    list_parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Show detailed information"
-    )
-
-    # Show command
-    show_parser = subparsers.add_parser("show", help="Show lesson details")
-    show_parser.add_argument("lesson_id", help="Lesson ID to show")
-    show_parser.add_argument(
-        "--preview-lines", type=int, default=20, help="Number of preview lines"
-    )
-
-    # Recommend command
-    rec_parser = subparsers.add_parser("recommend", help="Recommend lessons")
-    rec_parser.add_argument(
-        "--min-confidence", type=float, default=0.7, help="Minimum confidence threshold"
-    )
-    rec_parser.add_argument(
-        "--min-adoption", type=int, default=0, help="Minimum adoption count"
-    )
-
-    args = parser.parse_args()
-
-    if not args.command:
-        parser.print_help()
-        return 1
-
-    # List lessons
-    if args.command == "list":
-        lessons = list_network_lessons(args.network_dir, args.agent)
+        lessons = list_network_lessons(network_dir, agent)
 
         if not lessons:
             print("No lessons available from other agents")
-            return 0
+            return
 
         print(f"Found {len(lessons)} lessons from network:\n")
 
@@ -289,28 +272,38 @@ def main():
             print_lesson_summary(lesson)
             print()
 
-    # Show specific lesson
-    elif args.command == "show":
-        lessons = list_network_lessons(args.network_dir, args.agent)
+    @cli.command()
+    @click.argument("lesson_id")
+    @click.option(
+        "--preview-lines", type=int, default=20, help="Number of preview lines"
+    )
+    @click.pass_context
+    def show(ctx, lesson_id, preview_lines):
+        """Show lesson details."""
+        network_dir = ctx.obj["network_dir"]
+        lessons_dir = ctx.obj["lessons_dir"]
+        agent = ctx.obj["agent"]
+
+        lessons = list_network_lessons(network_dir, agent)
 
         # Find lesson by ID
         target_lesson = None
         for lesson in lessons:
             network_meta = lesson.get("network", {})
-            if network_meta.get("lesson_id") == args.lesson_id:
+            if network_meta.get("lesson_id") == lesson_id:
                 target_lesson = lesson
                 break
 
         if not target_lesson:
-            print(f"Lesson not found: {args.lesson_id}")
-            return 1
+            print(f"Lesson not found: {lesson_id}")
+            sys.exit(1)
 
         # Show metadata
         print_lesson_summary(target_lesson)
         print()
 
         # Show comparison with local
-        comparison = compare_with_local(target_lesson, args.lessons_dir)
+        comparison = compare_with_local(target_lesson, lessons_dir)
         print("Comparison:")
         print(f"  Exists locally: {comparison['exists_locally']}")
         if comparison["exists_locally"]:
@@ -322,21 +315,31 @@ def main():
         print()
 
         # Show preview
-        lesson_file = args.network_dir / target_lesson["_file"]
+        lesson_file = network_dir / target_lesson["_file"]
         print("Preview:")
         print("-" * 40)
-        print(show_lesson_preview(lesson_file, args.preview_lines))
+        print(show_lesson_preview(lesson_file, preview_lines))
 
-    # Recommend lessons
-    elif args.command == "recommend":
-        lessons = list_network_lessons(args.network_dir, args.agent)
+    @cli.command()
+    @click.option(
+        "--min-confidence", type=float, default=0.7, help="Minimum confidence threshold"
+    )
+    @click.option("--min-adoption", type=int, default=0, help="Minimum adoption count")
+    @click.pass_context
+    def recommend(ctx, min_confidence, min_adoption):
+        """Recommend lessons."""
+        network_dir = ctx.obj["network_dir"]
+        lessons_dir = ctx.obj["lessons_dir"]
+        agent = ctx.obj["agent"]
+
+        lessons = list_network_lessons(network_dir, agent)
         recommendations = recommend_lessons(
-            lessons, args.lessons_dir, args.min_confidence, args.min_adoption
+            lessons, lessons_dir, min_confidence, min_adoption
         )
 
         if not recommendations:
             print("No lessons recommended for adoption")
-            return 0
+            return
 
         print(f"Found {len(recommendations)} recommended lessons:\n")
 
@@ -346,8 +349,8 @@ def main():
             print(f"  Rationale: {rec['rationale']}")
             print()
 
-    return 0
+    cli()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

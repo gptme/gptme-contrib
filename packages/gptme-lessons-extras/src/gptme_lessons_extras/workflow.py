@@ -15,7 +15,6 @@ Usage:
     ./workflow.py validate <lesson-file>
 """
 
-import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,87 +208,68 @@ def create_from_failure_log(log_file: Path) -> str | None:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Lesson generation workflow tools",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    import click
 
-    # Create from template
-    create_parser = subparsers.add_parser(
-        "create-from-template", help="Create new lesson from template"
-    )
-    create_parser.add_argument("title", help="Lesson title")
-    create_parser.add_argument(
+    @click.group()
+    def cli():
+        """Lesson generation workflow tools."""
+        pass
+
+    @cli.command("create-from-template")
+    @click.argument("title")
+    @click.option(
         "--category",
         default="workflow",
         help="Lesson category (default: workflow)",
     )
-    create_parser.add_argument(
+    @click.option(
         "--output",
-        type=Path,
+        type=click.Path(),
+        default=None,
         help="Output file path (default: stdout)",
     )
-
-    # Create from failure log
-    failure_parser = subparsers.add_parser(
-        "create-from-failure", help="Create lesson from failure log"
-    )
-    failure_parser.add_argument(
-        "log_file",
-        type=Path,
-        help="Path to failure log file",
-    )
-    failure_parser.add_argument(
-        "--output",
-        type=Path,
-        help="Output file path (default: stdout)",
-    )
-
-    # Validate lesson
-    validate_parser = subparsers.add_parser("validate", help="Validate lesson file")
-    validate_parser.add_argument(
-        "lesson_file",
-        type=Path,
-        help="Path to lesson file to validate",
-    )
-
-    args = parser.parse_args()
-
-    if args.command == "create-from-template":
-        lesson: str | None = create_lesson_from_template(args.title, args.category)
-        if args.output:
-            args.output.write_text(lesson)
-            print(f"Created lesson template: {args.output}")
+    def create_from_template(title, category, output):
+        """Create new lesson from template."""
+        lesson = create_lesson_from_template(title, category)
+        if output:
+            Path(output).write_text(lesson)
+            print(f"Created lesson template: {output}")
         else:
             print(lesson)
 
-    elif args.command == "create-from-failure":
-        lesson = create_from_failure_log(args.log_file)
+    @cli.command("create-from-failure")
+    @click.argument("log_file", type=click.Path(exists=True))
+    @click.option(
+        "--output",
+        type=click.Path(),
+        default=None,
+        help="Output file path (default: stdout)",
+    )
+    def create_from_failure(log_file, output):
+        """Create lesson from failure log."""
+        lesson = create_from_failure_log(Path(log_file))
         if lesson:
-            if args.output:
-                args.output.write_text(lesson)
-                print(f"Created lesson from failure log: {args.output}")
+            if output:
+                Path(output).write_text(lesson)
+                print(f"Created lesson from failure log: {output}")
             else:
                 print(lesson)
 
-    elif args.command == "validate":
-        valid, errors = validate_lesson(args.lesson_file)
+    @cli.command()
+    @click.argument("lesson_file", type=click.Path(exists=True))
+    def validate(lesson_file):
+        """Validate lesson file."""
+        valid, errors = validate_lesson(Path(lesson_file))
         if valid:
-            print(f"✅ Lesson is valid: {args.lesson_file}")
-            return 0
+            print(f"✅ Lesson is valid: {lesson_file}")
         else:
-            print(f"❌ Lesson validation failed: {args.lesson_file}")
+            print(f"❌ Lesson validation failed: {lesson_file}")
             for error in errors:
                 print(f"  - {error}")
-            return 1
+            sys.exit(1)
 
-    else:
-        parser.print_help()
-        return 1
-
-    return 0
+    cli()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
