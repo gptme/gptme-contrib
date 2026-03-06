@@ -366,7 +366,7 @@ def detect_github_url(workspace: Path) -> str:
         if result.returncode != 0:
             return ""
         url = result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return ""
 
     # SSH: git@github.com:owner/repo.git
