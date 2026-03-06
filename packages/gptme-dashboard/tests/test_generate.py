@@ -19,6 +19,7 @@ from gptme_dashboard.generate import (
     scan_packages,
     scan_plugins,
     scan_skills,
+    skill_page_path,
 )
 
 
@@ -230,6 +231,10 @@ def test_scan_skills(workspace: Path):
     assert len(skills) == 1
     assert skills[0]["name"] == "Test Skill"
     assert "testing" in skills[0]["description"].lower()
+    assert "body" in skills[0]
+    assert "Instructions here" in skills[0]["body"]
+    assert "page_url" in skills[0]
+    assert skills[0]["page_url"] == "skills/test-skill/index.html"
 
 
 def test_collect_workspace_data(workspace: Path):
@@ -263,6 +268,8 @@ def test_generate_json_excludes_large_fields(workspace: Path):
     for lesson in data["lessons"]:
         assert "body" not in lesson, "body should not appear in JSON export"
         assert "all_keywords" not in lesson, "all_keywords should not appear in JSON export"
+    for skill in data["skills"]:
+        assert "body" not in skill, "skill body should not appear in JSON export"
 
 
 def test_generate_json_to_file(workspace: Path, tmp_path: Path):
@@ -439,3 +446,56 @@ def test_lesson_detail_breadcrumb_deep_nesting(workspace: Path, tmp_path: Path):
     html = deep_page.read_text()
     # Three levels deep → needs ../../../
     assert 'href="../../../index.html"' in html
+
+
+def test_skill_page_path():
+    """Test skill directory to URL conversion."""
+    assert skill_page_path("skills/my-skill") == "skills/my-skill/index.html"
+    assert skill_page_path("skills/nested/deep-skill") == "skills/nested/deep-skill/index.html"
+
+
+def test_generate_skill_detail_pages(workspace: Path, tmp_path: Path):
+    """Test that per-skill detail pages are generated."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    skill_page = output / "skills" / "test-skill" / "index.html"
+    assert skill_page.exists(), f"Expected {skill_page} to exist"
+
+    html = skill_page.read_text()
+    assert "Test Skill" in html
+    assert "Instructions here" in html
+    assert "A skill for testing workflows" in html
+
+
+def test_generate_index_links_to_skills(workspace: Path, tmp_path: Path):
+    """Test that index.html skill names are links to detail pages."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    assert 'href="skills/test-skill/index.html"' in html
+
+
+def test_skill_detail_renders_html_not_escaped(workspace: Path, tmp_path: Path):
+    """Test that skill markdown is rendered as HTML, not escaped as text."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "skills" / "test-skill" / "index.html").read_text()
+    assert "<h1>" in html or "<h2>" in html, "Headings should be rendered as HTML"
+    assert "&lt;h" not in html, "HTML tags must not be escaped"
+
+
+def test_skill_detail_breadcrumb(workspace: Path, tmp_path: Path):
+    """Test that skill detail page breadcrumb uses correct relative root prefix."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # skills/test-skill/index.html is two levels deep → needs ../../
+    html = (output / "skills" / "test-skill" / "index.html").read_text()
+    assert 'href="../../index.html"' in html

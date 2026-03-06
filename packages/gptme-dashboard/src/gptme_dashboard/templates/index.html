@@ -251,7 +251,7 @@ tr:hover { background: var(--accent-dim); }
     <tbody>
     {% for skill in skills %}
       <tr>
-        <td><strong>{{ skill.name }}</strong></td>
+        <td><strong><a href="{{ skill.page_url }}">{{ skill.name }}</a></strong></td>
         <td>{{ skill.description }}</td>
       </tr>
     {% endfor %}
