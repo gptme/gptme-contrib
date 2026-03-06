@@ -14,18 +14,46 @@ jobs:
       packages: ${{ steps.discover.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Discover packages
         id: discover
         run: |
           # Use Makefile for package discovery (single source of truth)
-          packages=$(make ci-list-packages-json)
+          all_packages=$(make ci-list-packages-json)
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # On PRs, only test packages with changed files
+            git fetch origin "${{ github.base_ref }}" --depth=1 2>/dev/null || true
+
+            # If shared/CI files changed, run all packages
+            shared_changed=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+              | grep -cE '^(Makefile|pyproject\.toml|uv\.lock|\.github/)' || echo 0)
+
+            if [ "$shared_changed" -gt 0 ]; then
+              packages="$all_packages"
+              echo "Shared files changed → running all packages"
+            else
+              # Filter to only packages with changed files
+              changed_pkgs=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+                | grep '^packages/' | cut -d/ -f2 | sort -u \
+                | jq -R . | jq -sc .)
+              packages=$(echo "$all_packages" \
+                | jq --argjson changed "$changed_pkgs" \
+                  '[.[] | select(. as $p | $changed | any(. == $p))]')
+            fi
+          else
+            packages="$all_packages"
+          fi
+
           echo "packages=$packages" >> $GITHUB_OUTPUT
-          echo "Discovered packages: $packages"
+          echo "Running tests for packages: $packages"
 
   # Test each package in parallel
   test:
     needs: discover
+    if: needs.discover.outputs.packages != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

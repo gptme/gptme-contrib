@@ -14,18 +14,46 @@ jobs:
       plugins: ${{ steps.discover.outputs.plugins }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Discover plugins with tests
         id: discover
         run: |
           # Use Makefile for plugin discovery (single source of truth)
-          plugins=$(make ci-list-plugins-json)
+          all_plugins=$(make ci-list-plugins-json)
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # On PRs, only test plugins with changed files
+            git fetch origin "${{ github.base_ref }}" --depth=1 2>/dev/null || true
+
+            # If shared/CI files changed, run all plugins
+            shared_changed=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+              | grep -cE '^(Makefile|pyproject\.toml|uv\.lock|\.github/)' || echo 0)
+
+            if [ "$shared_changed" -gt 0 ]; then
+              plugins="$all_plugins"
+              echo "Shared files changed → running all plugins"
+            else
+              # Filter to only plugins with changed files
+              changed_plugins=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+                | grep '^plugins/' | cut -d/ -f2 | sort -u \
+                | jq -R . | jq -sc .)
+              plugins=$(echo "$all_plugins" \
+                | jq --argjson changed "$changed_plugins" \
+                  '[.[] | select(. as $p | $changed | any(. == $p))]')
+            fi
+          else
+            plugins="$all_plugins"
+          fi
+
           echo "plugins=$plugins" >> $GITHUB_OUTPUT
-          echo "Discovered plugins: $plugins"
+          echo "Running tests for plugins: $plugins"
 
   # Test each plugin in parallel
   test:
     needs: discover
+    if: needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -54,7 +82,7 @@ jobs:
   # Integration tests (only on master push, with API keys)
   integration-tests:
     needs: discover
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -90,6 +118,7 @@ jobs:
   # Coverage report (combined for all plugins)
   coverage:
     needs: discover
+    if: needs.discover.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
