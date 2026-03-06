@@ -558,7 +558,7 @@ class QueueGenerator:
 @click.option(
     "--workspace",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=Path.cwd(),
+    default=".",
     help="Path to agent workspace (default: current directory)",
 )
 @click.option(
@@ -620,8 +620,6 @@ def main() -> int:
     except click.ClickException as e:
         e.show()
         return 1
-    except SystemExit as e:
-        return e.code if isinstance(e.code, int) else 0
 
 
 if __name__ == "__main__":

@@ -319,3 +319,6 @@ class TestClickCLI:
 
         queue_file = workspace / "state" / "queue-generated-bob.md"
         assert queue_file.exists()
+        content = queue_file.read_text()
+        assert "bob-task" in content
+        assert "erik-task" not in content
