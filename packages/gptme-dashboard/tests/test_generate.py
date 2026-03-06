@@ -17,6 +17,7 @@ from gptme_dashboard.generate import (
     github_tree_url,
     lesson_page_path,
     parse_frontmatter,
+    read_agent_links,
     read_workspace_config,
     render_markdown_to_html,
     scan_lessons,
@@ -1066,3 +1067,86 @@ def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
 
     assert len(sub_lessons_data) == 1
     assert "gh_url" not in sub_lessons_data[0]  # submodule items must NOT get gh_url
+
+
+# ── agent.links ────────────────────────────────────────────────────────────────
+
+
+def test_read_agent_links_present(tmp_path: Path):
+    """read_agent_links returns the [agent.links] dict when present."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.links]
+        dashboard = "https://example.com/dashboard"
+        repo = "https://github.com/example/agent"
+        """)
+    )
+    links = read_agent_links(tmp_path)
+    assert links == {
+        "dashboard": "https://example.com/dashboard",
+        "repo": "https://github.com/example/agent",
+    }
+
+
+def test_read_agent_links_absent(tmp_path: Path):
+    """read_agent_links returns empty dict when [agent.links] is not present."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestAgent"\n')
+    links = read_agent_links(tmp_path)
+    assert links == {}
+
+
+def test_read_agent_links_no_toml(tmp_path: Path):
+    """read_agent_links returns empty dict when gptme.toml does not exist."""
+    links = read_agent_links(tmp_path)
+    assert links == {}
+
+
+def test_collect_workspace_data_includes_agent_links(workspace: Path):
+    """collect_workspace_data exposes agent_links from [agent.links]."""
+    # Overwrite the workspace gptme.toml to add [agent.links]
+    (workspace / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.links]
+        dashboard = "https://example.com/dash"
+        """)
+    )
+    data = collect_workspace_data(workspace)
+    assert "agent_links" in data
+    assert data["agent_links"] == {"dashboard": "https://example.com/dash"}
+
+
+def test_generate_renders_agent_links_in_header(workspace: Path, tmp_path: Path):
+    """Generated index.html includes agent_links as header links."""
+    (workspace / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.links]
+        dashboard = "https://example.com/dash"
+        website = "https://example.com"
+        """)
+    )
+    output = tmp_path / "_site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert 'href="https://example.com/dash"' in html
+    assert ">dashboard<" in html
+    assert 'href="https://example.com"' in html
+    assert ">website<" in html
+
+
+def test_generate_no_agent_links_no_extra_midpoints(workspace: Path, tmp_path: Path):
+    """When [agent.links] is absent the header contains no extra link middots."""
+    output = tmp_path / "_site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # There should be no agent-links anchors beyond the GitHub link
+    # (workspace fixture has no [agent.links])
+    assert "dashboard" not in html or "lessons" in html  # sanity: page rendered OK

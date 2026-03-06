@@ -15,6 +15,7 @@ import configparser
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import markdown
@@ -75,6 +76,41 @@ def extract_title(body: str, fallback: str) -> str:
         if line.startswith("# "):
             return line[2:].strip()
     return fallback
+
+
+def _parse_toml(path: Path) -> dict:
+    """Parse a TOML file, returning an empty dict on failure."""
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return {}
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return {}
+
+
+def read_agent_links(workspace: Path) -> dict[str, str]:
+    """Read [agent.links] from gptme.toml.
+
+    Returns a dict of link name → URL, e.g. ``{"dashboard": "https://...", "repo": "..."}``.
+    Returns an empty dict if the section is absent or gptme.toml is missing.
+
+    Note: ``[agent.links]`` is not yet part of gptme's ``AgentConfig`` schema, so we
+    parse gptme.toml directly rather than going through ``get_project_config``.
+    """
+    gptme_toml = workspace / "gptme.toml"
+    if not gptme_toml.exists():
+        return {}
+    data = _parse_toml(gptme_toml)
+    links = data.get("agent", {}).get("links", {})
+    if isinstance(links, dict):
+        return {str(k): str(v) for k, v in links.items()}
+    return {}
 
 
 def detect_submodules(workspace: Path) -> list[dict]:
@@ -309,20 +345,35 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata using gptme's config module."""
-    from gptme.config import get_project_config
+    """Read gptme.toml for workspace metadata using gptme's config module.
 
-    project_config = get_project_config(workspace, quiet=True)
-    if project_config is None:
-        return {}
+    Falls back to raw TOML parsing when gptme's schema doesn't recognise all
+    keys (e.g. ``[agent.links]`` is not yet part of ``AgentConfig``).
+    """
+    from gptme.config import get_project_config
 
     config: dict = {}
 
-    if project_config.agent and project_config.agent.name:
-        config["agent_name"] = project_config.agent.name
+    try:
+        project_config = get_project_config(workspace, quiet=True)
+        if project_config is not None:
+            if project_config.agent and project_config.agent.name:
+                config["agent_name"] = project_config.agent.name
+            if project_config.plugins.enabled:
+                config["plugins_enabled"] = list(project_config.plugins.enabled)
+            return config
+    except Exception:
+        pass
 
-    if project_config.plugins.enabled:
-        config["plugins_enabled"] = list(project_config.plugins.enabled)
+    # Fallback: parse gptme.toml directly when gptme's schema rejects the file
+    # (e.g. future keys like [agent.links] not yet in AgentConfig).
+    raw = _parse_toml(workspace / "gptme.toml")
+    agent = raw.get("agent", {})
+    if isinstance(agent, dict) and agent.get("name"):
+        config["agent_name"] = str(agent["name"])
+    plugins_enabled = raw.get("plugins", {}).get("enabled", [])
+    if isinstance(plugins_enabled, list) and plugins_enabled:
+        config["plugins_enabled"] = [str(p) for p in plugins_enabled]
 
     return config
 
@@ -392,6 +443,7 @@ def collect_workspace_data(workspace: Path) -> dict:
     Lessons and skills are merged into a unified ``guidance`` list.
     """
     config = read_workspace_config(workspace)
+    agent_links = read_agent_links(workspace)
 
     lessons = scan_lessons(workspace)
     enabled_plugins = config.get("plugins_enabled")
@@ -478,6 +530,7 @@ def collect_workspace_data(workspace: Path) -> dict:
     return {
         "workspace_name": workspace_name,
         "gh_repo_url": gh_repo_url,
+        "agent_links": agent_links,
         "lessons": lessons,
         "plugins": plugins,
         "packages": packages,

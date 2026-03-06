@@ -16,6 +16,7 @@ dependencies = [
     "markdown>=3.4",
     "pygments>=2.0",
     "pyyaml>=6.0",
+    "tomli>=1.1; python_version < '3.11'",
 ]
 
 [project.urls]
