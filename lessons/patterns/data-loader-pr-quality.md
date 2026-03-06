@@ -105,7 +105,7 @@ else:  # treats anything unknown as mmol/L — silent failure
 # Correct: raise on unsupported values
 VALID_UNITS = {"mmol/L", "mg/dL"}
 if unit not in VALID_UNITS:
-    raise ValueError(f"Unsupported unit: {unit!r}. Expected one of {VALID_UNITS}")
+    raise ValueError(f"Unsupported unit: {unit!r}. Expected one of {sorted(VALID_UNITS)}")
 ```
 
 ### 6. Hub vs. per-device architecture
@@ -150,7 +150,7 @@ Following these patterns results in:
 
 ## Origin
 2026-03-06: Extracted from Sourcery AI review feedback across three data loader PRs
-(nutrition, glucose CGM, environmental sensors). All five code patterns appeared in at
+(nutrition, glucose CGM, environmental sensors). All six code patterns appeared in at
 least two of the three PRs, indicating they are systematic gaps rather than one-offs.
 The hub vs. per-device pattern emerged from a closed PR where a per-device parser was
 superseded by an existing hub integration.
