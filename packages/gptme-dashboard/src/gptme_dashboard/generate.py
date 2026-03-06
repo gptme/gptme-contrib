@@ -102,20 +102,20 @@ def _parse_toml(path: Path) -> dict:
         return {}
 
 
-def read_agent_links(workspace: Path) -> dict[str, str]:
-    """Read [agent.links] from gptme.toml.
+def read_agent_urls(workspace: Path) -> dict[str, str]:
+    """Read [agent.urls] from gptme.toml.
 
     Returns a dict of link name → URL, e.g. ``{"dashboard": "https://...", "repo": "..."}``.
     Returns an empty dict if the section is absent or gptme.toml is missing.
 
-    Note: ``[agent.links]`` is not yet part of gptme's ``AgentConfig`` schema, so we
+    Note: ``[agent.urls]`` is not yet part of gptme's ``AgentConfig`` schema, so we
     parse gptme.toml directly rather than going through ``get_project_config``.
     """
     gptme_toml = workspace / "gptme.toml"
     if not gptme_toml.exists():
         return {}
     data = _parse_toml(gptme_toml)
-    links = data.get("agent", {}).get("links", {})
+    links = data.get("agent", {}).get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}
         for key, value in links.items():
@@ -364,7 +364,7 @@ def read_workspace_config(workspace: Path) -> dict:
     """Read gptme.toml for workspace metadata using gptme's config module.
 
     Falls back to raw TOML parsing when gptme's schema doesn't recognise all
-    keys (e.g. ``[agent.links]`` is not yet part of ``AgentConfig``).
+    keys (e.g. ``[agent.urls]`` is not yet part of ``AgentConfig``).
     """
     from gptme.config import get_project_config
 
@@ -374,7 +374,7 @@ def read_workspace_config(workspace: Path) -> dict:
         project_config = get_project_config(workspace, quiet=True)
     except TypeError:
         # gptme currently raises TypeError when AgentConfig sees unsupported keys
-        # like [agent.links]. Fall back to raw TOML parsing in that case.
+        # like [agent.urls]. Fall back to raw TOML parsing in that case.
         project_config = None
     else:
         if project_config is None:
@@ -386,7 +386,7 @@ def read_workspace_config(workspace: Path) -> dict:
         return config
 
     # Fallback: parse gptme.toml directly when gptme's schema rejects the file
-    # (e.g. future keys like [agent.links] not yet in AgentConfig).
+    # (e.g. future keys like [agent.urls] not yet in AgentConfig).
     raw = _parse_toml(workspace / "gptme.toml")
     agent = raw.get("agent", {})
     if isinstance(agent, dict) and agent.get("name"):
@@ -463,7 +463,7 @@ def collect_workspace_data(workspace: Path) -> dict:
     Lessons and skills are merged into a unified ``guidance`` list.
     """
     config = read_workspace_config(workspace)
-    agent_links = read_agent_links(workspace)
+    agent_urls = read_agent_urls(workspace)
 
     lessons = scan_lessons(workspace)
     enabled_plugins = config.get("plugins_enabled")
@@ -550,7 +550,7 @@ def collect_workspace_data(workspace: Path) -> dict:
     return {
         "workspace_name": workspace_name,
         "gh_repo_url": gh_repo_url,
-        "agent_links": agent_links,
+        "agent_urls": agent_urls,
         "lessons": lessons,
         "plugins": plugins,
         "packages": packages,
