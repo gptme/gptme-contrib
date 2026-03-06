@@ -2714,8 +2714,128 @@ def test_extract_from_path_copilot(tmp_path: Path):
     result = extract_from_path(trajectory_file)
     assert result["format"] == "copilot"
     assert result["tool_calls"]["bash"] == 1
-    # Copilot has no token data
-    assert "usage" not in result
+    # Model extracted from session.start.selectedModel
+    assert result["usage"] == {"model": "claude-opus-4.6"}
+
+
+def test_extract_usage_copilot_model_change():
+    """extract_usage_copilot extracts model from session.model_change events."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent"},
+            "timestamp": "2026-03-04T10:50:00Z",
+        },
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "claude-sonnet-4.6"},
+            "timestamp": "2026-03-04T10:51:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash"}]},
+            "timestamp": "2026-03-04T10:51:05Z",
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage == {"model": "claude-sonnet-4.6"}
+
+
+def test_extract_usage_copilot_session_start_selected_model():
+    """extract_usage_copilot falls back to selectedModel from session.start."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+            },
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": []},
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage == {"model": "claude-opus-4.6"}
+
+
+def test_extract_usage_copilot_no_model():
+    """extract_usage_copilot returns empty dict when no model info available."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent"},
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": []},
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage == {}
+
+
+def test_extract_usage_copilot_multiple_model_changes():
+    """extract_usage_copilot uses the last model change (matches CC/gptme behavior)."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "claude-sonnet-4.6"},
+        },
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "gpt-5.4"},
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage == {"model": "gpt-5.4"}
+
+
+def test_extract_from_path_copilot_with_model(tmp_path: Path):
+    """extract_from_path includes usage with model when model_change is present."""
+    trajectory_file = tmp_path / "events.jsonl"
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent"},
+            "timestamp": "2026-03-04T10:50:00Z",
+        },
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "claude-sonnet-4.6"},
+            "timestamp": "2026-03-04T10:51:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash"}]},
+            "timestamp": "2026-03-04T10:51:05Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {"toolCallId": "tc_1", "success": True, "result": {"content": "ok"}},
+            "timestamp": "2026-03-04T10:51:10Z",
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    from gptme_sessions.signals import extract_from_path
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "copilot"
+    assert "usage" in result
+    assert result["usage"]["model"] == "claude-sonnet-4.6"
 
 
 # --- Null-guard regression tests ---
