@@ -64,7 +64,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             {
                 "mode": "dynamic",
                 "agent": config.get("agent_name", ws.name),
-                "workspace": str(ws),
+                "workspace": ws.name,
             }
         )
 
@@ -75,11 +75,12 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             from gptme_sessions.store import SessionStore
 
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
-            records = store.load_all()
 
             days = request.args.get("days", type=int)
             if days:
                 records = store.query(since_days=days)
+            else:
+                records = store.load_all()
 
             stats = store.stats(records)
             return jsonify(stats)
