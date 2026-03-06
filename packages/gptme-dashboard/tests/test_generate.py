@@ -1135,6 +1135,9 @@ def test_collect_workspace_data_includes_agent_urls(workspace: Path):
     data = collect_workspace_data(workspace)
     assert "agent_urls" in data
     assert data["agent_urls"] == {"dashboard": "https://example.com/dash"}
+    # Verify fallback name-extraction: when gptme raises TypeError for [agent.urls],
+    # read_workspace_config falls back to raw TOML and must still extract agent_name.
+    assert data["workspace_name"] == "TestAgent"
 
 
 def test_generate_renders_agent_urls_in_header(workspace: Path, tmp_path: Path):
