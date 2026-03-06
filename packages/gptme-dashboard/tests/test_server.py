@@ -118,6 +118,16 @@ def test_api_sessions_stats_with_days(client):
     assert "total" in data
 
 
+def test_api_sessions_stats_days_zero(client):
+    """Test ?days=0 falls through to load_all (0 is not a valid positive filter)."""
+    # days=0 is falsy in Python; ensure the guard `days is not None and days > 0`
+    # treats it the same as no filter (load all sessions).
+    resp = client.get("/api/sessions/stats?days=0")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 3  # all sessions returned, same as no filter
+
+
 def test_api_sessions_list(client):
     """Test /api/sessions returns recent sessions."""
     resp = client.get("/api/sessions")

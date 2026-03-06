@@ -21,7 +21,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     Args:
         workspace: Path to the gptme workspace root.
         site_dir: Directory containing the generated static site.
-            If None, generates into a temporary ``_site`` directory.
+            If None, generates into ``<workspace>/_site``.
 
     Returns:
         A Flask application instance.
@@ -41,7 +41,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
     # Generate static site if needed
     if site_dir is None:
-        site_dir = Path("_site")
+        site_dir = workspace / "_site"
     if not (site_dir / "index.html").exists():
         generate(workspace, site_dir)
 
@@ -77,7 +77,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
 
             days = request.args.get("days", type=int)
-            if days:
+            if days is not None and days > 0:
                 records = store.query(since_days=days)
             else:
                 records = store.load_all()
