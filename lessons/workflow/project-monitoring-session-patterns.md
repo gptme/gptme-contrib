@@ -31,7 +31,7 @@ Implement a systematic 4-phase monitoring workflow:
 ### Phase 1: Investigation and Context Gathering (3 minutes)
 ```bash
 # Systematic notification review
-gh api notifications --jq '.[] | select(.unread == true)'
+gh api notifications --jq '.[]'
 # Quick context reading for each item
 # Focus on understanding scope, not deep investigation
 ```
