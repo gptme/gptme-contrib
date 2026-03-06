@@ -746,7 +746,7 @@ def sample(
     arm_list = list(arms) or list(bandit.state.arms.keys())
     if not arm_list:
         print("No arms to sample. Run `update` first.", file=sys.stderr)
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
     ctx_tuple = tuple(context) if context else None
     scores = bandit.sample(arm_list, seed=seed, context=ctx_tuple)
     if output_format == "json":
@@ -786,14 +786,14 @@ def update(
         parsed_outcome = float(outcome)
         if not 0.0 <= parsed_outcome <= 1.0:
             print("Error: float outcome must be in [0, 1]", file=sys.stderr)
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
     except ValueError:
         if outcome not in ("productive", "noop", "failed"):
             print(
                 "Error: outcome must be productive/noop/failed or a float in [0,1]",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
         parsed_outcome = outcome
     result = bandit.update(list(arms), parsed_outcome, context=ctx_tuple, decay_rate=decay_rate)
     for arm_id, reward in result.items():
@@ -810,7 +810,7 @@ def decay(ctx: click.Context, rate: float) -> None:
     """Apply exponential decay to all arms."""
     if not (0 < rate < 1):
         print("Error: --rate must be between 0 and 1", file=sys.stderr)
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
     bandit = Bandit(state_dir=ctx.obj["state_dir"], state_file=ctx.obj["state_file"])
     count = bandit.decay(rate)
     print(f"Applied decay (gamma={rate}) to {count} arms")
