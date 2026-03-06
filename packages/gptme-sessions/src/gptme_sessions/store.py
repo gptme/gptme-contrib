@@ -206,7 +206,7 @@ def format_stats(stats: dict, out: TextIO = sys.stdout) -> None:
         avg_min = dur["avg"] / 60
         total_hrs = dur["total_hours"]
         out.write(
-            f"Duration: {dur['count']} with data, " f"avg {avg_min:.0f}m, total {total_hrs:.1f}h\n"
+            f"Duration: {dur['count']} with data, avg {avg_min:.0f}m, total {total_hrs:.1f}h\n"
         )
     out.write("\n")
 

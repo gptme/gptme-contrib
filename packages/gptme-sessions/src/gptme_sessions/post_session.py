@@ -168,8 +168,7 @@ def post_session(
         outcome = "productive" if start_commit != end_commit else "noop"
     elif (start_commit is None) != (end_commit is None):
         logger.warning(
-            "Only one of start_commit/end_commit provided (%s=%r, %s=%r); "
-            "git comparison skipped",
+            "Only one of start_commit/end_commit provided (%s=%r, %s=%r); git comparison skipped",
             "start_commit",
             start_commit,
             "end_commit",

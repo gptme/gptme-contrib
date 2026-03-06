@@ -1646,6 +1646,8 @@ def test_extract_usage_gptme_cache_tokens():
     # total_tokens includes cache tokens (consistent with extract_usage_cc)
     assert usage["total_tokens"] == 1150  # 100 + 50 + 800 + 200
     assert abs(usage["cost"] - 0.01) < 1e-9
+
+
 # ---------------------------------------------------------------------------
 # post_session() tests
 # ---------------------------------------------------------------------------

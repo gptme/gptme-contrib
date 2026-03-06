@@ -222,7 +222,7 @@ def main() -> int:
             harness=args.harness,
             model=args.model,
             run_type=args.run_type,
-            trigger=getattr(args, "trigger", None),
+            trigger=args.trigger,
             category=args.category,
             exit_code=args.exit_code,
             duration_seconds=args.duration,
