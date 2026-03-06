@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
+from .discovery import (
+    discover_cc_sessions,
+    discover_codex_sessions,
+    discover_copilot_sessions,
+    discover_gptme_sessions,
+)
 from .post_session import post_session
 from .record import SessionRecord
 from .signals import extract_from_path
@@ -67,6 +74,32 @@ def main() -> int:
     runs_parser = subparsers.add_parser("runs", help="Run analytics (duration, NOOP rate, trends)")
     runs_parser.add_argument("--since", default="14d", help="Time window (e.g. 7d, 30d)")
     runs_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Discover — find trajectory files from all harnesses
+    discover_parser = subparsers.add_parser(
+        "discover",
+        help="Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses",
+    )
+    discover_parser.add_argument(
+        "--harness",
+        choices=["gptme", "claude-code", "codex", "copilot"],
+        help="Limit to a specific harness (default: all)",
+    )
+    discover_parser.add_argument(
+        "--since",
+        default="7d",
+        help="How far back to scan (e.g. 7d, 30d). Default: 7d",
+    )
+    discover_parser.add_argument(
+        "--signals",
+        action="store_true",
+        help="Extract and display productivity signals for each session",
+    )
+    discover_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
 
     # Signals — extract productivity signals from a trajectory file
     signals_parser = subparsers.add_parser(
@@ -224,6 +257,92 @@ def main() -> int:
             print("Deliverables:")
             for d in result["deliverables"][:10]:
                 print(f"  - {d}")
+        return 0
+
+    if args.command == "discover":
+        # Parse --since into a date range ending today
+        since_val = getattr(args, "since", "7d")
+        since_days: int | None
+        try:
+            if since_val.endswith("d"):
+                since_days = int(since_val[:-1])
+            else:
+                since_days = int(since_val)
+        except ValueError:
+            print(
+                f"error: invalid --since value {since_val!r} (expected e.g. 7d, 30d)",
+                file=sys.stderr,
+            )
+            return 1
+        today = date.today()
+        start = today - timedelta(days=since_days)
+
+        # Collect sessions per harness
+        harness_filter = getattr(args, "harness", None)
+        discovered: list[dict] = []
+
+        if harness_filter in (None, "gptme"):
+            for p in discover_gptme_sessions(start, today):
+                # discover_gptme_sessions returns session directories; resolve to the
+                # actual conversation file so extract_from_path can open it.
+                jsonl = p / "conversation.jsonl"
+                resolved = jsonl if jsonl.exists() else p
+                discovered.append({"harness": "gptme", "path": str(resolved)})
+
+        if harness_filter in (None, "claude-code"):
+            for p in discover_cc_sessions(start, today):
+                discovered.append({"harness": "claude-code", "path": str(p)})
+
+        if harness_filter in (None, "codex"):
+            for p in discover_codex_sessions(start, today):
+                discovered.append({"harness": "codex", "path": str(p)})
+
+        if harness_filter in (None, "copilot"):
+            for p in discover_copilot_sessions(start, today):
+                discovered.append({"harness": "copilot", "path": str(p)})
+
+        # Optionally enrich with signals
+        if getattr(args, "signals", False):
+            for entry in discovered:
+                try:
+                    result = extract_from_path(Path(entry["path"]))
+                    entry["grade"] = result["grade"]
+                    entry["productive"] = result["productive"]
+                    entry["tool_calls"] = sum(result["tool_calls"].values())
+                    entry["git_commits"] = len(result["git_commits"])
+                    entry["error_count"] = result["error_count"]
+                except Exception as exc:  # noqa: BLE001
+                    entry["signals_error"] = str(exc)
+
+        if getattr(args, "json", False):
+            print(json.dumps(discovered, indent=2))
+        else:
+            if not discovered:
+                print(f"No sessions found in the last {since_days} day(s).")
+                return 0
+            # Human-readable table
+            harness_width = max(len(e["harness"]) for e in discovered)
+            for entry in discovered:
+                path_str = entry["path"]
+                harness_str = entry["harness"].ljust(harness_width)
+                if getattr(args, "signals", False) and "grade" in entry:
+                    grade = entry["grade"]
+                    prod = "+" if entry["productive"] else "-"
+                    tools = entry["tool_calls"]
+                    commits = entry["git_commits"]
+                    errors = entry["error_count"]
+                    print(
+                        f"[{prod}] {harness_str}  grade={grade:.2f}"
+                        f"  tools={tools} commits={commits} errors={errors}"
+                        f"  {path_str}"
+                    )
+                elif "signals_error" in entry:
+                    print(
+                        f"[?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
+                    )
+                else:
+                    print(f"    {harness_str}  {path_str}")
+            print(f"\n{len(discovered)} session(s) found ({start} to {today})")
         return 0
 
     store = SessionStore(sessions_dir=args.sessions_dir)
