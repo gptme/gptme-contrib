@@ -378,7 +378,9 @@ def signals(path: Path, as_json: bool, grade: bool, usage: bool) -> None:
                 primary = u["rate_limit_primary_pct"]
                 secondary = u.get("rate_limit_secondary_pct")
                 sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
-                click.echo(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
+                click.echo(
+                    f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)"
+                )
         return
 
     # Human-readable summary
