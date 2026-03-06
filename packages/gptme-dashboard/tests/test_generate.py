@@ -905,7 +905,7 @@ def test_read_workspace_config_no_plugins_paths_in_result(tmp_path: Path):
 def test_github_blob_url():
     """Test GitHub blob URL construction."""
     url = github_blob_url("https://github.com/gptme/gptme-contrib", "plugins/foo")
-    assert url == "https://github.com/gptme/gptme-contrib/blob/master/plugins/foo"
+    assert url == "https://github.com/gptme/gptme-contrib/blob/HEAD/plugins/foo"
 
 
 def test_github_blob_url_with_prefix():
@@ -915,7 +915,7 @@ def test_github_blob_url_with_prefix():
         "workflow/test.md",
         prefix="lessons",
     )
-    assert url == "https://github.com/gptme/gptme-contrib/blob/master/lessons/workflow/test.md"
+    assert url == "https://github.com/gptme/gptme-contrib/blob/HEAD/lessons/workflow/test.md"
 
 
 def test_github_blob_url_empty():
@@ -979,11 +979,9 @@ def test_collect_workspace_data_includes_gh_urls(tmp_path: Path):
 
     assert data["gh_repo_url"] == "https://github.com/test/repo"
     assert data["lessons"][0]["gh_url"].startswith(
-        "https://github.com/test/repo/blob/master/lessons/"
+        "https://github.com/test/repo/blob/HEAD/lessons/"
     )
-    assert (
-        data["packages"][0]["gh_url"] == "https://github.com/test/repo/blob/master/packages/mypkg"
-    )
+    assert data["packages"][0]["gh_url"] == "https://github.com/test/repo/blob/HEAD/packages/mypkg"
 
 
 def test_generate_html_includes_github_links(tmp_path: Path):
@@ -1016,4 +1014,48 @@ def test_generate_html_includes_github_links(tmp_path: Path):
     # Lesson detail page should have "View on GitHub" link
     lesson_html = (output / "lessons" / "workflow" / "test.html").read_text()
     assert "View on GitHub" in lesson_html
-    assert "https://github.com/test/repo/blob/master/lessons/workflow/test.md" in lesson_html
+    assert "https://github.com/test/repo/blob/HEAD/lessons/workflow/test.md" in lesson_html
+
+
+def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
+    """Submodule items should not get gh_url (they belong to a different repo)."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/repo.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+
+    # Main workspace lesson
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "main.md").write_text("---\nstatus: active\n---\n# Main\n\nBody.")
+
+    # Fake submodule with a lesson
+    sub_path = tmp_path / "gptme-contrib"
+    sub_lessons = sub_path / "lessons" / "workflow"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "sub.md").write_text("---\nstatus: active\n---\n# Sub\n\nBody.")
+    (sub_path / "gptme.toml").write_text('[agent]\nname = "contrib"\n')
+    subprocess.run(["git", "init"], cwd=sub_path, capture_output=True)
+
+    # Register as submodule via .gitmodules
+    gitmodules = tmp_path / ".gitmodules"
+    gitmodules.write_text(
+        '[submodule "gptme-contrib"]\n'
+        "    path = gptme-contrib\n"
+        "    url = https://github.com/gptme/gptme-contrib.git\n"
+    )
+
+    data = collect_workspace_data(tmp_path)
+
+    main_lessons = [le for le in data["lessons"] if not le.get("source")]
+    sub_lessons_data = [le for le in data["lessons"] if le.get("source")]
+
+    assert len(main_lessons) == 1
+    assert "gh_url" in main_lessons[0]  # main workspace items get gh_url
+
+    assert len(sub_lessons_data) == 1
+    assert "gh_url" not in sub_lessons_data[0]  # submodule items must NOT get gh_url

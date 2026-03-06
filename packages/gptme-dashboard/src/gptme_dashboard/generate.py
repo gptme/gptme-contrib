@@ -15,7 +15,16 @@ import configparser
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
 
 import markdown
 import yaml
@@ -311,63 +320,32 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 def read_workspace_config(workspace: Path) -> dict:
     """Read gptme.toml for workspace metadata.
 
-    Parses [agent] and [plugins] sections. Agent name is read from [agent]
-    specifically to avoid matching name fields from other sections like [project].
+    Parses [agent] and [plugins] sections using tomllib for correct TOML handling.
+    Returns a flat dict with keys: agent_name, plugins_enabled.
     """
     config_path = workspace / "gptme.toml"
     if not config_path.exists():
         return {}
 
-    text = config_path.read_text()
-    config: dict = {}
+    if tomllib is None:
+        return {}
 
-    current_section = ""
-    in_enabled_list = False
-    enabled_items: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        if stripped.startswith("[") and not in_enabled_list:
-            current_section = stripped
-            continue
+    try:
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return {}
 
-        if in_enabled_list:
-            # End of list (line is "]" or ends with "]")
-            if stripped.rstrip(",") == "]" or stripped == "]":
-                config["plugins_enabled"] = enabled_items
-                in_enabled_list = False
-            elif "]" in stripped:
-                # Item on same line as closing bracket: "  \"foo\","  or just "]"
-                item = stripped.split("]")[0].rstrip(",").strip().strip('"').strip("'")
-                if item:
-                    enabled_items.append(item)
-                config["plugins_enabled"] = enabled_items
-                in_enabled_list = False
-            else:
-                item = stripped.rstrip(",").strip().strip('"').strip("'")
-                if item:
-                    enabled_items.append(item)
-            continue
+    result: dict = {}
+    agent = data.get("agent", {})
+    if "name" in agent:
+        result["agent_name"] = agent["name"]
 
-        if current_section == "[agent]":
-            m = re.match(r'name\s*=\s*"([^"]*)"', stripped)
-            if m:
-                config["agent_name"] = m.group(1)
+    plugins = data.get("plugins", {})
+    if "enabled" in plugins:
+        result["plugins_enabled"] = plugins["enabled"]
 
-        elif current_section == "[plugins]":
-            # Single-line: enabled = ["a", "b"]
-            m = re.match(r"enabled\s*=\s*\[(.+)\]", stripped)
-            if m:
-                config["plugins_enabled"] = [
-                    s.strip().strip('"').strip("'") for s in m.group(1).split(",") if s.strip()
-                ]
-            # Multi-line: enabled = [
-            elif re.match(r"enabled\s*=\s*\[\s*$", stripped):
-                in_enabled_list = True
-                enabled_items = []
-
-    return config
+    return result
 
 
 def detect_github_url(workspace: Path) -> str:
@@ -412,7 +390,7 @@ def github_blob_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
     if not gh_repo_url:
         return ""
     full_path = f"{prefix}/{path}" if prefix else path
-    return f"{gh_repo_url}/blob/master/{full_path}"
+    return f"{gh_repo_url}/blob/HEAD/{full_path}"
 
 
 def collect_workspace_data(workspace: Path) -> dict:
@@ -450,16 +428,22 @@ def collect_workspace_data(workspace: Path) -> dict:
     # Detect GitHub repo URL for source links
     gh_repo_url = detect_github_url(workspace)
 
-    # Add GitHub source links to all items
+    # Add GitHub source links to main-workspace items only.
+    # Submodule items (source != "") belong to a different repository and would
+    # get incorrect URLs if we applied the main workspace's gh_repo_url to them.
     if gh_repo_url:
         for lesson in lessons:
-            lesson["gh_url"] = github_blob_url(gh_repo_url, lesson["path"], prefix="lessons")
+            if not lesson.get("source"):
+                lesson["gh_url"] = github_blob_url(gh_repo_url, lesson["path"], prefix="lessons")
         for plugin in plugins:
-            plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"])
+            if not plugin.get("source"):
+                plugin["gh_url"] = github_blob_url(gh_repo_url, plugin["path"])
         for pkg in packages:
-            pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"])
+            if not pkg.get("source"):
+                pkg["gh_url"] = github_blob_url(gh_repo_url, pkg["path"])
         for skill in skills:
-            skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"])
+            if not skill.get("source"):
+                skill["gh_url"] = github_blob_url(gh_repo_url, skill["path"])
 
     # Build unified guidance list (lessons + skills together)
     guidance: list[dict] = []
