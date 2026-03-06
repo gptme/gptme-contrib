@@ -182,6 +182,13 @@ def post_session(
     else:
         outcome = "productive"
 
+    # --- Category: inferred (actual) vs recommended (intended) ---
+    inferred_category = signals.get("inferred_category") if signals else None
+    # category field = what actually happened (inferred from signals)
+    # recommended_category = what was intended (passed by caller, e.g. Thompson sampling)
+    recommended_category = category  # caller's explicit value, if any
+    actual_category = inferred_category or category  # inferred wins, fallback to explicit
+
     # --- Build SessionRecord kwargs ---
     record_kwargs: dict[str, Any] = {
         "harness": harness,
@@ -193,8 +200,10 @@ def post_session(
     }
     if trigger is not None:
         record_kwargs["trigger"] = trigger
-    if category is not None:
-        record_kwargs["category"] = category
+    if actual_category is not None:
+        record_kwargs["category"] = actual_category
+    if recommended_category is not None:
+        record_kwargs["recommended_category"] = recommended_category
     if journal_path is not None:
         record_kwargs["journal_path"] = journal_path
     if session_id is not None:

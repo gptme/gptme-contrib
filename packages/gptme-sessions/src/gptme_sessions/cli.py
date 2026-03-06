@@ -53,7 +53,12 @@ def main() -> int:
     append_parser.add_argument("--harness", default="claude-code", help="Harness name")
     append_parser.add_argument("--model", default="unknown", help="Model name")
     append_parser.add_argument("--run-type", default="autonomous", help="Run type")
-    append_parser.add_argument("--category", help="Category (e.g. code, content)")
+    append_parser.add_argument(
+        "--category", help="Work category inferred or actual (e.g. code, infrastructure)"
+    )
+    append_parser.add_argument(
+        "--recommended-category", help="Category recommended by selector (e.g. Thompson sampling)"
+    )
     append_parser.add_argument("--outcome", default="unknown", help="Session outcome")
     append_parser.add_argument("--duration", type=int, default=0, help="Duration in seconds")
     append_parser.add_argument("--selector-mode", help="Selector mode used")
@@ -143,7 +148,10 @@ def main() -> int:
         "--trigger",
         help="Session trigger: timer, dispatch, manual, spawn",
     )
-    ps_parser.add_argument("--category", help="Work category (code, triage, …)")
+    ps_parser.add_argument(
+        "--category",
+        help="Recommended work category from selector (e.g. Thompson sampling). Actual category is inferred from trajectory.",
+    )
     ps_parser.add_argument(
         "--exit-code",
         type=int,
@@ -239,6 +247,9 @@ def main() -> int:
         print(f"Duration: {result['session_duration_s']}s")
         print(f"Productive: {result['productive']}")
         print(f"Grade: {result['grade']:.4f}")
+        inferred = result.get("inferred_category")
+        if inferred:
+            print(f"Category: {inferred}")
         if result.get("usage"):
             u = result["usage"]
             if "total_tokens" in u:
@@ -385,11 +396,13 @@ def main() -> int:
         return 0
 
     if args.command == "append":
+        recommended = getattr(args, "recommended_category", None)
         record = SessionRecord(
             harness=args.harness,
             model=args.model,
             run_type=args.run_type,
             category=args.category,
+            recommended_category=recommended,
             outcome=args.outcome,
             duration_seconds=args.duration,
             selector_mode=args.selector_mode,
