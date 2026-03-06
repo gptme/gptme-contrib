@@ -764,6 +764,95 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
     return result
 
 
+def infer_category(signals: dict) -> str | None:
+    """Infer work category from commit messages and file writes.
+
+    Analyzes conventional commit prefixes (feat, fix, docs, chore, etc.)
+    and file paths to classify what kind of work a session did.
+
+    Returns a category string or None if no confident classification.
+    """
+    commits = signals.get("git_commits", [])
+    file_writes = signals.get("file_writes", [])
+
+    # Count commit prefix signals
+    prefix_counts: dict[str, int] = {}
+    for commit in commits:
+        # Extract conventional commit prefix: "type(scope): msg (sha)"
+        m = re.match(r"(feat|fix|refactor|perf|test|ci|build|chore|docs|style)\b", commit)
+        if m:
+            prefix_counts[m.group(1)] = prefix_counts.get(m.group(1), 0) + 1
+
+    # Count scope signals from commits
+    scope_counts: dict[str, int] = {}
+    for commit in commits:
+        m = re.match(r"\w+\(([^)]+)\)", commit)
+        if m:
+            scope = m.group(1).lower()
+            scope_counts[scope] = scope_counts.get(scope, 0) + 1
+
+    # Path-based signals
+    path_signals: dict[str, int] = {}
+    for path in file_writes:
+        p = path.lower()
+        if "/lesson" in p or "/patterns/" in p:
+            path_signals["knowledge"] = path_signals.get("knowledge", 0) + 1
+        elif "/test" in p or "_test." in p or "test_" in p:
+            path_signals["code"] = path_signals.get("code", 0) + 1
+        elif "/scripts/" in p or "/hooks/" in p or "ci" in p.split("/"):
+            path_signals["infrastructure"] = path_signals.get("infrastructure", 0) + 1
+        elif "/journal/" in p or "/standup" in p:
+            path_signals["coordination"] = path_signals.get("coordination", 0) + 1
+        elif "/tasks/" in p:
+            path_signals["triage"] = path_signals.get("triage", 0) + 1
+
+    # Map commit prefixes → categories
+    prefix_to_category = {
+        "feat": "code",
+        "fix": "code",
+        "refactor": "code",
+        "perf": "code",
+        "test": "code",
+        "ci": "infrastructure",
+        "build": "infrastructure",
+        "docs": "content",
+        "style": "code",
+    }
+
+    # Scope overrides: certain scopes imply category regardless of prefix
+    scope_to_category = {
+        "lessons": "knowledge",
+        "lesson": "knowledge",
+        "tasks": "triage",
+        "standup": "coordination",
+        "orchestration": "coordination",
+        "sessions": "coordination",
+        "scripts": "infrastructure",
+        "hooks": "infrastructure",
+        "ci": "infrastructure",
+    }
+
+    # Tally votes
+    votes: dict[str, int] = {}
+    for prefix, count in prefix_counts.items():
+        cat = prefix_to_category.get(prefix)
+        if cat:
+            votes[cat] = votes.get(cat, 0) + count
+    for scope, count in scope_counts.items():
+        cat = scope_to_category.get(scope)
+        if cat:
+            # Scope signals are stronger than prefix alone
+            votes[cat] = votes.get(cat, 0) + count * 2
+    for cat, count in path_signals.items():
+        votes[cat] = votes.get(cat, 0) + count
+
+    if not votes:
+        return None
+
+    # Return the category with the most votes
+    return max(votes, key=lambda k: votes[k])
+
+
 def extract_from_path(jsonl_path: Path) -> dict:
     """Parse trajectory and return signals + grade in one call.
 
@@ -791,6 +880,7 @@ def extract_from_path(jsonl_path: Path) -> dict:
         "format": fmt,
         "productive": is_productive(signals),
         "grade": round(grade, 4),
+        "inferred_category": infer_category(signals),
     }
     if usage:
         result["usage"] = usage
