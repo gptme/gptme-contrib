@@ -89,13 +89,14 @@ def post_session(
         ``"spawn"``.  Records trigger mechanism as metadata without implying
         bandit treatment.  Added in PR #351.
     category:
-        Explicit work category override (e.g. ``"code"``, ``"triage"``).
-        When ``None`` and a trajectory is available, category is inferred
-        from commit messages and file paths.
+        Work category for the session (e.g. ``"code"``, ``"infrastructure"``).
+        When provided, used as-is (e.g. from a post-hoc classifier).
+        When ``None`` and a trajectory is available, inferred from commit
+        messages and file paths.
     recommended_category:
-        Category recommended by the selector (e.g. Thompson sampling,
-        CASCADE). Stored alongside the actual category so drift between
-        recommendation and reality can be tracked.
+        Category recommended by the selector before the session ran
+        (e.g. Thompson sampling, CASCADE). Stored alongside the actual
+        category so drift between recommendation and reality is trackable.
     exit_code:
         Exit code from the agent process.  Non-zero (except 124 = timeout)
         marks the session as ``"failed"``.
