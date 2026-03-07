@@ -1598,6 +1598,15 @@ def test_preprocess_markdown_skips_fenced_code_blocks():
     assert "```yaml\n\n- service: nginx" not in result
 
 
+def test_preprocess_markdown_no_blank_after_closing_fence():
+    """Closing fence followed by a sibling list item must not get a blank line inserted."""
+    md = "- First item:\n  ```yaml\n  key: value\n  ```\n- Second item"
+    result = _preprocess_markdown(md)
+    # No blank line should be inserted between the closing fence and the next list item
+    assert "```\n\n- Second item" not in result
+    assert "```\n- Second item" in result
+
+
 def test_render_markdown_lists():
     """Lists after a paragraph should render as <li> elements."""
     md = "External resources:\n- LLM evaluation benchmarks\n- Agent evaluation research"

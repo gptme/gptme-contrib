@@ -60,6 +60,7 @@ def _preprocess_markdown(md_text: str) -> str:
                 prev
                 and not prev.startswith(("- ", "* ", "+ "))
                 and not (len(prev) > 2 and prev[0].isdigit() and ". " in prev[:5])
+                and not prev.startswith(("```", "~~~"))  # closing fence — list context
             ):
                 result.append("")
         result.append(line)
