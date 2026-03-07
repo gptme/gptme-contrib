@@ -335,6 +335,17 @@ def append(
 @click.option("--outcome", default=None, help="Override outcome (productive, noop, failed)")
 @click.option("--duration", type=int, default=None, help="Override duration in seconds")
 @click.option("--journal-path", default=None, help="Override journal path")
+@click.option(
+    "--selector-mode",
+    default=None,
+    help="Override selector mode (e.g. scored, llm-context)",
+)
+@click.option(
+    "--trigger",
+    default=None,
+    help="Override trigger (timer, dispatch, manual, spawn)",
+)
+@click.option("--token-count", type=int, default=None, help="Override token count")
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
 @click.option(
     "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
@@ -350,6 +361,9 @@ def annotate(
     outcome: str | None,
     duration: int | None,
     journal_path: str | None,
+    selector_mode: str | None,
+    trigger: str | None,
+    token_count: int | None,
     add_deliverable: tuple[str, ...],
     as_json: bool,
 ) -> None:
@@ -361,8 +375,8 @@ def annotate(
 
     Only fields explicitly supplied are updated; all other fields are left
     unchanged.  To add deliverables without overwriting existing ones, use
-    ``--add-deliverable``; to replace the whole list, set it via ``append``
-    or ``sync`` first.
+    ``--add-deliverable``.  There is currently no option to replace the whole
+    deliverables list; edit the session-records.jsonl file directly for that.
     """
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     records = store.load_all()
@@ -394,6 +408,9 @@ def annotate(
         and outcome is None
         and duration is None
         and journal_path is None
+        and selector_mode is None
+        and trigger is None
+        and token_count is None
         and not add_deliverable
     )
     if nothing_supplied:
@@ -417,6 +434,12 @@ def annotate(
         record.duration_seconds = duration
     if journal_path is not None:
         record.journal_path = journal_path
+    if selector_mode is not None:
+        record.selector_mode = selector_mode
+    if trigger is not None:
+        record.trigger = trigger
+    if token_count is not None:
+        record.token_count = token_count
     if add_deliverable:
         record.deliverables = list(record.deliverables or []) + list(add_deliverable)
 

@@ -3760,3 +3760,39 @@ def test_annotate_noop_exits_nonzero(tmp_path: Path):
     ]
     rc = main()
     assert rc != 0
+
+
+def test_annotate_selector_mode_trigger_token_count(tmp_path: Path):
+    """annotate updates selector_mode, trigger, and token_count fields."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid,
+        "--selector-mode",
+        "scored",
+        "--trigger",
+        "timer",
+        "--token-count",
+        "42000",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    r = records[0]
+    assert r.selector_mode == "scored"
+    assert r.trigger == "timer"
+    assert r.token_count == 42000
