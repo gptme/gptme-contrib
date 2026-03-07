@@ -22,19 +22,10 @@ class TestJudgeSession:
 
     def test_returns_none_without_anthropic(self) -> None:
         """Judge returns None when anthropic is not installed."""
+        # Setting sys.modules["anthropic"] = None causes `import anthropic` to raise ImportError
         with patch.dict("sys.modules", {"anthropic": None}):
-            # Force re-import to trigger ImportError
-            import importlib
-
-            from gptme_sessions import judge
-
-            importlib.reload(judge)
-            _result = judge.judge_session("test session text", category="code")  # noqa: F841
-            # Restore
-            importlib.reload(judge)
-        # Can't reliably force ImportError with module mocking in all cases,
-        # so just test the no-API-key path instead
-        assert True
+            result = judge_session("test session text", category="code", api_key="fake-key")
+        assert result is None
 
     def test_returns_none_without_api_key(self) -> None:
         """Judge returns None when no API key is available."""
@@ -72,9 +63,8 @@ class TestJudgeSession:
         assert result["reason"] == "Good work"
         assert result["model"] == DEFAULT_JUDGE_MODEL
 
-    def test_score_clamping(self) -> None:
-        """Verify that the prompt template and system are well-formed."""
-        # Test that the prompt template can be formatted
+    def test_prompt_template_wellformed(self) -> None:
+        """Verify that the prompt template and system prompt are well-formed."""
         prompt = JUDGE_PROMPT_TEMPLATE.format(
             goals="Test goals",
             category="code",
@@ -84,9 +74,47 @@ class TestJudgeSession:
         assert "code" in prompt
         assert "Did some work" in prompt
         assert "0.0-1.0" in prompt
-
-        # System prompt is non-empty
         assert "JSON" in JUDGE_SYSTEM
+
+    def test_score_clamping(self) -> None:
+        """Out-of-range scores from the LLM are clamped to [0.0, 1.0]."""
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        # LLM returns score above 1.0
+        mock_response.content = [MagicMock(text='{"score": 1.5, "reason": "Overconfident LLM"}')]
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
+        ):
+            import importlib
+
+            import gptme_sessions.judge
+
+            importlib.reload(gptme_sessions.judge)
+            result = gptme_sessions.judge.judge_session("session text")
+            importlib.reload(gptme_sessions.judge)
+
+        assert result is not None
+        assert result["score"] == 1.0  # clamped from 1.5
+
+        # Also test clamping from below
+        mock_response.content = [MagicMock(text='{"score": -0.3, "reason": "Below zero"}')]
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
+        ):
+            import importlib
+
+            import gptme_sessions.judge
+
+            importlib.reload(gptme_sessions.judge)
+            result = gptme_sessions.judge.judge_session("session text")
+            importlib.reload(gptme_sessions.judge)
+
+        assert result is not None
+        assert result["score"] == 0.0  # clamped from -0.3
 
     def test_default_goals_is_generic(self) -> None:
         """Default goals should work for any agent, not just Bob."""

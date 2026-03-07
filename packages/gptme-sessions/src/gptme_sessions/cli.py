@@ -447,8 +447,8 @@ def signals(
     except UnicodeDecodeError:
         raise click.ClickException(f"{path} contains non-UTF-8 content")
 
-    # Run LLM judge if requested
-    if llm_judge:
+    # Run LLM judge if requested (skip with --grade/--usage — result not displayed in those modes)
+    if llm_judge and not (grade or usage):
         from .judge import judge_from_signals
 
         judge_kwargs: dict = {}
