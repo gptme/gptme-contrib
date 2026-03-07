@@ -297,7 +297,16 @@ def append(
     journal_path: str | None,
     deliverables: tuple[str, ...],
 ) -> None:
-    """Append a session record."""
+    """Append a session record.
+
+    Deprecated: use 'sync' to import sessions from trajectories, or 'annotate'
+    to correct metadata on an existing record.
+    """
+    click.echo(
+        "Warning: 'append' is deprecated. Use 'sync' to import sessions from trajectories "
+        "or 'annotate' to correct metadata on an existing record.",
+        err=True,
+    )
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     record = SessionRecord(
         harness=harness,
