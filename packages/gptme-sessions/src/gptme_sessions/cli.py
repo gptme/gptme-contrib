@@ -856,7 +856,7 @@ def judge(
         if as_json:
             click.echo(json.dumps(results, indent=2))
         else:
-            click.echo(f"\n{len(entries)} session(s) (dry run)")
+            click.echo(f"\n{len(results)} session(s) (dry run)")
         return
 
     # Write scores back to store if requested

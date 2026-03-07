@@ -74,7 +74,7 @@ def _get_api_key() -> str:
 
         config_path = Path.home() / ".config" / "gptme" / "config.toml"
         if config_path.exists():
-            config = tomllib.loads(config_path.read_text())
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
             key = config.get("env", {}).get("ANTHROPIC_API_KEY", "")
     except Exception:
         pass
