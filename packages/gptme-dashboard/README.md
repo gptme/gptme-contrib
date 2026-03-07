@@ -79,6 +79,8 @@ gptme-dashboard --workspace ~/bob
 - `jinja2` (templating)
 - `pyyaml` (frontmatter parsing)
 - `markdown` (lesson/skill detail pages)
+- `pygments` (syntax highlighting in detail pages)
+- `gptme` (workspace data model)
 
 ## Customization
 
