@@ -251,7 +251,10 @@ class TestJudgeCLI:
         assert "llm_judge" in param_names
         assert "goals" in param_names
 
-    @pytest.mark.skipif(os.getuid() == 0, reason="chmod(0o000) has no effect as root")
+    @pytest.mark.skipif(
+        getattr(os, "getuid", lambda: -1)() == 0,
+        reason="chmod(0o000) has no effect as root",
+    )
     def test_judge_skips_unreadable_files(self, tmp_path: "Path") -> None:
         """A single unreadable journal file is skipped; other entries are processed."""
         from click.testing import CliRunner
