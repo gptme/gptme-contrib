@@ -807,28 +807,40 @@ def sync(
 
         if path_str in existing_by_path:
             existing = existing_by_path[path_str]
+            needs_update = False
+
+            # Update model if it was previously unknown and we now know it.
+            entry_model = entry.get("model")
+            if entry_model and (not existing.model or existing.model == "unknown"):
+                existing.model = entry_model
+                needs_update = True
+
             # With --signals, backfill records that have no outcome yet.
             if with_signals and existing.outcome == "unknown" and traj_path.is_file():
-                try:
-                    result = extract_from_path(traj_path)
-                    existing.outcome = "productive" if result.get("productive") else "noop"
-                    existing.duration_seconds = int(result.get("session_duration_s") or 0)
-                    existing.deliverables = result.get("deliverables", [])
-                    if result.get("inferred_category") and not existing.category:
-                        existing.category = result["inferred_category"]
+                if dry_run:
+                    click.echo(f"  would update: {entry['harness']:14s}  {path_str}")
                     updated_paths.add(path_str)
-                    if dry_run:
-                        click.echo(f"  would update: {entry['harness']:14s}  {path_str}")
-                    else:
+                else:
+                    try:
+                        result = extract_from_path(traj_path)
+                        existing.outcome = "productive" if result.get("productive") else "noop"
+                        existing.duration_seconds = int(result.get("session_duration_s") or 0)
+                        existing.deliverables = result.get("deliverables", [])
+                        if result.get("inferred_category") and not existing.category:
+                            existing.category = result["inferred_category"]
+                        needs_update = True
                         updated += 1
-                except Exception as exc:
-                    click.echo(
-                        f"  warning: signals extraction failed for {path_str}: {exc}",
-                        err=True,
-                    )
-                    skipped += 1
-            else:
+                    except Exception as exc:
+                        click.echo(
+                            f"  warning: signals extraction failed for {path_str}: {exc}",
+                            err=True,
+                        )
+                        skipped += 1
+            elif not needs_update:
                 skipped += 1
+
+            if needs_update and not dry_run:
+                updated_paths.add(path_str)
             continue
 
         record_kwargs: dict = {

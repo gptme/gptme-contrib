@@ -136,6 +136,13 @@ def test_extract_cc_model_empty_file(tmp_path: Path) -> None:
     assert extract_cc_model(jsonl_file) is None
 
 
+def test_extract_cc_model_non_utf8_file(tmp_path: Path) -> None:
+    """extract_cc_model returns None for a non-UTF-8 file (no crash)."""
+    jsonl_file = tmp_path / "session.jsonl"
+    jsonl_file.write_bytes(b"\xff\xfe invalid utf-8\n")
+    assert extract_cc_model(jsonl_file) is None
+
+
 # --- discover_gptme_sessions ---
 
 
