@@ -486,3 +486,7 @@ def test_api_tasks_limit(tmp_path: Path):
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) == 3
+
+        # Non-numeric limit falls back to default (100), not a 500 error
+        resp = c.get("/api/tasks?limit=foo")
+        assert resp.status_code == 200
