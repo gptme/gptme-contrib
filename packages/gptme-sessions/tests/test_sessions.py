@@ -3728,3 +3728,49 @@ def test_sync_backfills_model_for_unknown_records(tmp_path: Path, capsys, monkey
     records = store.load_all()
     assert len(records) == 1
     assert records[0].model == "claude-opus-4-6"
+
+
+def test_sync_signals_failure_does_not_double_count_skipped(tmp_path: Path, capsys, monkeypatch):
+    """When model update succeeds but signals extraction fails, session counts as updated not skipped."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Pre-populate with unknown model + unknown outcome → both updates attempted
+    existing = SessionRecord(harness="claude-code", model="unknown", trajectory_path=str(fake_file))
+    store.append(existing)
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+    # Model extraction succeeds
+    monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+    # But signals extraction fails
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: (_ for _ in ()).throw(RuntimeError("signals extraction error")),
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+
+    # Session should be counted as updated (model was fixed), not skipped
+    assert "updated 1" in captured.out
+
+    # Model should have been updated despite signals failure
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-opus-4-6"
