@@ -244,6 +244,12 @@ tr:hover { background: var(--accent-dim); }
     <div class="label">Journal Entries</div>
   </div>
   {% endif %}
+  {% if stats.total_tasks %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_tasks }}</div>
+    <div class="label">Tasks</div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Dynamic: Session Stats (shown when serve API is available) -->
@@ -285,6 +291,40 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody></tbody>
   </table>
+</section>
+{% endif %}
+
+{% if tasks %}
+<!-- Tasks -->
+<section id="tasks">
+  <h2>Tasks <span class="count-badge">({{ stats.total_tasks }})</span></h2>
+  {% if stats.task_states %}
+  <div class="cat-chart">
+    {% for state, count in stats.task_states.items() %}
+    <span class="cat-chip">{{ state }} <span class="chip-count">{{ count }}</span></span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <table id="tasks-table">
+    <thead>
+      <tr><th>Title</th><th>State</th><th>Priority</th><th>Tags</th><th>Assigned</th>{% if gh_repo_url %}<th></th>{% endif %}</tr>
+    </thead>
+    <tbody>
+    {% for task in tasks %}
+      <tr{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td><strong>{{ task.title }}</strong></td>
+        <td><span class="tag {% if task.state == 'active' %}tag-active{% elif task.state == 'waiting' %}tag-medium{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
+        <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>
+        <td>{% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}</td>
+        <td>{% if task.assigned_to %}{{ task.assigned_to }}{% endif %}</td>
+        {% if gh_repo_url %}<td>{% if task.gh_url %}<a href="{{ task.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if tasks | length > 15 %}
+  <button class="show-more-btn" data-noun="tasks" onclick="toggleRows(this, 'tasks-table')">Show all {{ tasks | length }} tasks</button>
+  {% endif %}
 </section>
 {% endif %}
 

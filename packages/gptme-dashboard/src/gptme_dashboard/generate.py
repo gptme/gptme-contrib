@@ -387,6 +387,66 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
     return entries
 
 
+def scan_tasks(workspace: Path) -> list[dict]:
+    """Scan task files from the workspace tasks directory.
+
+    Reads ``tasks/*.md`` files with YAML frontmatter containing task metadata
+    (state, priority, tags, etc.).  Skips subdirectories (templates, archive)
+    and README files.
+
+    Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
+    ``tags``, ``assigned_to``, and ``path`` keys, sorted by state priority
+    then title.
+    """
+    tasks_dir = workspace / "tasks"
+    if not tasks_dir.is_dir():
+        return []
+
+    # State ordering for display (active work first)
+    _STATE_ORDER = {
+        "active": 0,
+        "waiting": 1,
+        "ready_for_review": 2,
+        "todo": 3,
+        "backlog": 4,
+        "someday": 5,
+        "done": 6,
+        "cancelled": 7,
+    }
+
+    tasks: list[dict] = []
+    for md_file in sorted(tasks_dir.glob("*.md")):
+        if md_file.name.lower() == "readme.md":
+            continue
+
+        fm, body = parse_frontmatter(md_file)
+        if not fm:
+            continue  # Skip files without frontmatter
+
+        state = fm.get("state", "backlog")
+        title = extract_title(body, md_file.stem.replace("-", " ").title())
+        priority = fm.get("priority", "")
+        tags = fm.get("tags", [])
+        if not isinstance(tags, list):
+            tags = []
+        assigned_to = fm.get("assigned_to", "")
+
+        tasks.append(
+            {
+                "id": md_file.stem,
+                "title": title,
+                "state": state,
+                "priority": priority,
+                "tags": tags[:5],
+                "assigned_to": assigned_to,
+                "path": f"tasks/{md_file.name}",
+            }
+        )
+
+    tasks.sort(key=lambda t: (_STATE_ORDER.get(t["state"], 99), t["title"]))
+    return tasks
+
+
 def detect_submodules(workspace: Path) -> list[dict]:
     """Detect git submodules with gptme-like structure.
 
@@ -805,10 +865,22 @@ def collect_workspace_data(
     # Scan recent journal entries
     journals = scan_journals(workspace, limit=30)
 
+    # Scan tasks
+    tasks = scan_tasks(workspace)
+    if gh_repo_url:
+        for task in tasks:
+            task["gh_url"] = github_blob_url(gh_repo_url, task["path"])
+
     # Optionally scan recent sessions
     sessions: list[dict] = []
     if include_sessions:
         sessions = scan_recent_sessions(workspace, days=sessions_days)
+
+    # Compute task state counts for stats
+    task_states: dict[str, int] = {}
+    for task in tasks:
+        s = task["state"]
+        task_states[s] = task_states.get(s, 0) + 1
 
     stats = {
         "total_lessons": len(lessons),
@@ -818,6 +890,8 @@ def collect_workspace_data(
         "total_guidance": len(guidance),
         "total_sessions": len(sessions),
         "total_journals": len(journals),
+        "total_tasks": len(tasks),
+        "task_states": task_states,
         "lesson_categories": lesson_categories,
     }
 
@@ -834,6 +908,7 @@ def collect_workspace_data(
         "guidance": guidance,
         "sessions": sessions,
         "journals": journals,
+        "tasks": tasks,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,
