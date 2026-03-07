@@ -40,6 +40,18 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
 
 _md = MarkdownIt("commonmark", options_update={"highlight": _highlight_code}).enable("table")
 
+# State ordering for task display (active work first)
+_STATE_ORDER = {
+    "active": 0,
+    "waiting": 1,
+    "ready_for_review": 2,
+    "todo": 3,
+    "backlog": 4,
+    "someday": 5,
+    "done": 6,
+    "cancelled": 7,
+}
+
 
 def render_markdown_to_html(md_text: str) -> str:
     """Render markdown text to HTML using markdown-it-py (CommonMark compliant).
@@ -402,18 +414,6 @@ def scan_tasks(workspace: Path) -> list[dict]:
     if not tasks_dir.is_dir():
         return []
 
-    # State ordering for display (active work first)
-    _STATE_ORDER = {
-        "active": 0,
-        "waiting": 1,
-        "ready_for_review": 2,
-        "todo": 3,
-        "backlog": 4,
-        "someday": 5,
-        "done": 6,
-        "cancelled": 7,
-    }
-
     tasks: list[dict] = []
     for md_file in sorted(tasks_dir.glob("*.md")):
         if md_file.name.lower() == "readme.md":
@@ -423,13 +423,13 @@ def scan_tasks(workspace: Path) -> list[dict]:
         if not fm:
             continue  # Skip files without frontmatter
 
-        state = fm.get("state", "backlog")
+        state = str(fm.get("state", "backlog") or "backlog")
         title = extract_title(body, md_file.stem.replace("-", " ").title())
-        priority = fm.get("priority", "")
+        priority = str(fm.get("priority", "") or "")
         tags = fm.get("tags", [])
         if not isinstance(tags, list):
             tags = []
-        assigned_to = fm.get("assigned_to", "")
+        assigned_to = str(fm.get("assigned_to", "") or "")
 
         tasks.append(
             {

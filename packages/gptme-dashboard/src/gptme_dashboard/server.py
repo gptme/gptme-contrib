@@ -320,7 +320,9 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             state_filter = request.args.get("state")
             if state_filter:
                 tasks = [t for t in tasks if t["state"] == state_filter]
-            return jsonify(tasks)
+            limit = int(request.args.get("limit", 100))
+            limit = max(1, min(limit, 500))
+            return jsonify(tasks[:limit])
         except Exception as e:
             logger.exception("Error scanning tasks")
             return jsonify({"error": str(e)}), 500

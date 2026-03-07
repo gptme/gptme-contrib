@@ -1690,6 +1690,23 @@ def test_collect_workspace_data_includes_tasks(workspace: Path):
     assert data["stats"]["task_states"]["waiting"] == 1
 
 
+def test_scan_tasks_malformed_yaml_types(tmp_path: Path):
+    """scan_tasks handles non-string YAML field values without crashing."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    # YAML that parses state as a list (non-hashable) — previously caused TypeError in sort()
+    (tasks_dir / "weird-task.md").write_text(
+        "---\nstate:\n  - active\n  - todo\npriority:\n  - high\nassigned_to:\n  - bob\ntags: [dev]\ncreated: 2026-03-01\n---\n# Weird Task\n"
+    )
+    # Should not raise TypeError
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    # Coerced to string — exact value may vary but must be hashable
+    assert isinstance(tasks[0]["state"], str)
+    assert isinstance(tasks[0]["priority"], str)
+    assert isinstance(tasks[0]["assigned_to"], str)
+
+
 def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     """Generated HTML includes task section when tasks exist."""
     tasks_dir = workspace / "tasks"

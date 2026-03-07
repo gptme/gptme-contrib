@@ -463,3 +463,26 @@ def test_api_tasks_state_filter(tmp_path: Path):
         data = resp.get_json()
         assert len(data) == 1
         assert data[0]["state"] == "active"
+
+
+def test_api_tasks_limit(tmp_path: Path):
+    """Test /api/tasks?limit=N caps the response size."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    for i in range(5):
+        (tasks_dir / f"task-{i}.md").write_text(
+            f"---\nstate: active\ncreated: 2026-03-0{i + 1}\n---\n# Task {i}\n"
+        )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/tasks?limit=3")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 3
