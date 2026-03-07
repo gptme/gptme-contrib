@@ -3706,3 +3706,57 @@ def test_annotate_add_deliverable(tmp_path: Path):
 
     records = store.load_all()
     assert records[0].deliverables == ["existing-sha", "new-sha"]
+
+
+def test_annotate_json_output(tmp_path: Path, capsys):
+    """annotate --json outputs the updated record as JSON."""
+    import sys
+    import json
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--model",
+        "claude-opus-4-6",
+        "--json",
+    ]
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["model"] == "claude-opus-4-6"
+    assert data["session_id"] == rec.session_id
+
+
+def test_annotate_noop_exits_nonzero(tmp_path: Path):
+    """annotate without any field option returns non-zero."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+    ]
+    rc = main()
+    assert rc != 0
