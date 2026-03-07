@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -97,6 +98,28 @@ class TestJudgeSession:
 
         assert result is not None
         assert result["score"] == 0.0  # clamped from -0.3
+
+    def test_curly_braces_in_journal_dont_crash(self) -> None:
+        """Journal text with curly braces (JSON, Python dicts) doesn't raise KeyError."""
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text='{"score": 0.6, "reason": "Wrote code"}')]
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+
+        curly_brace_journal = (
+            'Wrote code: {"key": "value", "nested": {"a": 1}}\n'
+            "Shell expansion: ${HOME}/path\n"
+            "Dict literal: {'foo': 'bar'}"
+        )
+
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
+        ):
+            result = judge_session(curly_brace_journal, category="code")
+
+        assert result is not None
+        assert result["score"] == 0.6
 
     def test_default_goals_is_generic(self) -> None:
         """Default goals should work for any agent, not just Bob."""
@@ -220,3 +243,35 @@ class TestJudgeCLI:
         param_names = [p.name for p in signals_cmd.params]
         assert "llm_judge" in param_names
         assert "goals" in param_names
+
+    def test_judge_skips_unreadable_files(self, tmp_path: "Path") -> None:
+        """A single unreadable journal file is skipped; other entries are processed."""
+        from click.testing import CliRunner
+        from gptme_sessions.cli import cli
+
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir()
+
+        # Good entry
+        good_day = journal_dir / "2026-03-07"
+        good_day.mkdir()
+        good_entry = good_day / "session.md"
+        good_entry.write_text("## Session\nDid some work", encoding="utf-8")
+
+        # Bad entry — unreadable (no read permission)
+        bad_day = journal_dir / "2026-03-06"
+        bad_day.mkdir()
+        bad_entry = bad_day / "session.md"
+        bad_entry.write_text("corrupt", encoding="utf-8")
+        bad_entry.chmod(0o000)
+
+        runner = CliRunner()
+        try:
+            result = runner.invoke(
+                cli,
+                ["judge", "--journal-dir", str(journal_dir), "--dry-run"],
+            )
+            # Should not crash; good entry should be processed
+            assert result.exit_code == 0, result.output
+        finally:
+            bad_entry.chmod(0o644)  # restore so tmp_path cleanup works

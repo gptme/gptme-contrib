@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -24,6 +25,8 @@ from .store import (
     format_run_analytics,
     format_stats,
 )
+
+logger = logging.getLogger(__name__)
 
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
 
@@ -808,37 +811,46 @@ def judge(
     results: list[dict] = []
 
     for entry in entries:
-        text = entry.read_text()
-        meta = parse_meta(text)
-        sid = extract_sid(entry)
-        cat = meta.get("category", "unknown")
-        outcome = meta.get("outcome", "unknown")
-        entry_date = entry.parent.name
-
-        result_row: dict = {
-            "session_id": sid,
-            "date": entry_date,
-            "category": cat,
-            "outcome": outcome,
-            "journal_path": str(entry),
-        }
-
-        if dry_run:
-            results.append(result_row)
-            if not as_json:
-                click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
+        try:
+            text = entry.read_text()
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Skipping %s: %s", entry, e)
             continue
 
-        verdict = judge_session(text, category=cat, goals=effective_goals)
-        score = verdict["score"] if verdict else None
-        reason = verdict["reason"] if verdict else "N/A"
+        try:
+            meta = parse_meta(text)
+            sid = extract_sid(entry)
+            cat = meta.get("category", "unknown")
+            outcome = meta.get("outcome", "unknown")
+            entry_date = entry.parent.name
 
-        result_row["llm_judge_score"] = score
-        result_row["llm_judge_reason"] = reason
-        results.append(result_row)
+            result_row: dict = {
+                "session_id": sid,
+                "date": entry_date,
+                "category": cat,
+                "outcome": outcome,
+                "journal_path": str(entry),
+            }
 
-        if not as_json and score is not None:
-            click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {score:.2f}  {reason}")
+            if dry_run:
+                results.append(result_row)
+                if not as_json:
+                    click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
+                continue
+
+            verdict = judge_session(text, category=cat, goals=effective_goals)
+            score = verdict["score"] if verdict else None
+            reason = verdict["reason"] if verdict else "N/A"
+
+            result_row["llm_judge_score"] = score
+            result_row["llm_judge_reason"] = reason
+            results.append(result_row)
+
+            if not as_json and score is not None:
+                click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {score:.2f}  {reason}")
+        except Exception as e:
+            logger.warning("Error processing %s: %s", entry, e)
+            continue
 
     if dry_run:
         if as_json:

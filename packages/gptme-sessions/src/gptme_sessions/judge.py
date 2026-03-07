@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -115,10 +116,15 @@ def judge_session(
     # Truncate journal to ~4000 chars to keep costs low
     truncated = journal_text[:4000] if journal_text else "(empty session)"
 
+    # Escape curly braces in user-controlled content so .format() doesn't raise
+    # KeyError/ValueError on JSON, Python dicts, shell expansions, etc.
+    safe_journal = truncated.replace("{", "{{").replace("}", "}}")
+    safe_goals = goals.replace("{", "{{").replace("}", "}}")
+
     prompt = JUDGE_PROMPT_TEMPLATE.format(
-        goals=goals,
+        goals=safe_goals,
         category=category or "unknown",
-        journal=truncated,
+        journal=safe_journal,
     )
 
     try:
@@ -131,12 +137,12 @@ def judge_session(
         )
         text = getattr(response.content[0], "text", "").strip()
 
-        # Handle markdown code block wrapping
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
+        # Handle markdown code block wrapping — use regex to avoid splitting on
+        # backticks that appear inside the reason string
+        if "```" in text:
+            m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+            if m:
+                text = m.group(1).strip()
 
         verdict = json.loads(text)
         score = float(verdict.get("score", 0.5))
