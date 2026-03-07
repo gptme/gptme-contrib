@@ -771,6 +771,9 @@ def judge(
     """
     from .judge import DEFAULT_GOALS, judge_session
 
+    if dry_run and update_store:
+        raise click.UsageError("--dry-run and --update-store are mutually exclusive")
+
     if journal_dir is None:
         journal_dir = Path.cwd() / "journal"
     if not journal_dir.is_dir():
