@@ -31,6 +31,7 @@ from gptme_dashboard.generate import (
     scan_plugins,
     scan_recent_sessions,
     scan_skills,
+    scan_summaries,
     scan_tasks,
     skill_page_path,
     task_page_path,
@@ -1756,6 +1757,88 @@ def test_journal_gh_url(workspace: Path, tmp_path: Path):
     gh_url = data["journals"][0].get("gh_url", "")
     assert "github.com/owner/repo" in gh_url
     assert "journal/2026-03-07/session.md" in gh_url
+
+
+def test_scan_summaries_all_types(tmp_path: Path):
+    """scan_summaries finds entries across daily/weekly/monthly subdirectories."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "monthly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text(
+        "# Daily Summary: 2026-03-07\n\n**Sessions**: 2 | **Commits**: 3\n"
+    )
+    (summaries_dir / "weekly" / "2026-W10.md").write_text(
+        "# Weekly Summary: 2026-W10\n\nGood week.\n"
+    )
+    (summaries_dir / "monthly" / "2026-03.md").write_text(
+        "# Monthly Summary: March 2026\n\nGreat month.\n"
+    )
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 3
+    types = {e["type"] for e in entries}
+    assert types == {"daily", "weekly", "monthly"}
+    periods = {e["period"] for e in entries}
+    assert "2026-03-07" in periods
+    assert "2026-W10" in periods
+    assert "2026-03" in periods
+
+
+def test_scan_summaries_empty_workspace(tmp_path: Path):
+    """scan_summaries returns empty list when knowledge/summaries is absent."""
+    assert scan_summaries(tmp_path) == []
+
+
+def test_scan_summaries_respects_limit(tmp_path: Path):
+    """scan_summaries caps results at the limit parameter."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    for i in range(1, 8):
+        (daily_dir / f"2026-03-{i:02d}.md").write_text(f"# Day {i}\n\nContent.\n")
+
+    entries = scan_summaries(tmp_path, limit=5)
+    assert len(entries) == 5
+    # Most recent first
+    assert entries[0]["period"] == "2026-03-07"
+
+
+def test_scan_summaries_preview_skips_headings(tmp_path: Path):
+    """scan_summaries preview skips heading/bold lines to get real content."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text(
+        "# Daily Summary: 2026-03-07\n\n**Sessions**: 1\n\nFocused on dashboard work.\n"
+    )
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 1
+    # Preview should skip heading and **bold** lines
+    assert entries[0]["preview"] == "Focused on dashboard work."
+
+
+def test_collect_workspace_data_includes_summaries(workspace: Path):
+    """collect_workspace_data includes summaries when present."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid stuff.\n")
+
+    data = collect_workspace_data(workspace)
+    assert len(data["summaries"]) == 1
+    assert data["stats"]["total_summaries"] == 1
+
+
+def test_generate_html_includes_summaries(workspace: Path, tmp_path: Path):
+    """Generated HTML includes summaries section when entries exist."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid stuff.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "Summaries" in html
+    assert "2026-03-07" in html
 
 
 def test_render_markdown_lists():

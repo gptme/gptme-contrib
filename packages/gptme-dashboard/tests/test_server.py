@@ -490,3 +490,68 @@ def test_api_tasks_limit(tmp_path: Path):
         # Non-numeric limit falls back to default (100), not a 500 error
         resp = c.get("/api/tasks?limit=foo")
         assert resp.status_code == 200
+
+
+def test_api_summaries_empty(tmp_path: Path):
+    """Test /api/summaries returns empty list when no summaries exist."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data == []
+
+
+def test_api_summaries_returns_entries(tmp_path: Path):
+    """Test /api/summaries returns daily/weekly/monthly entries."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text("# Day\n\nGood day.\n")
+    (summaries_dir / "weekly" / "2026-W10.md").write_text("# Week\n\nGood week.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        types = {e["type"] for e in data}
+        assert "daily" in types
+        assert "weekly" in types
+
+
+def test_api_summaries_type_filter(tmp_path: Path):
+    """Test /api/summaries?type= filters by period type."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text("# Day\n\nDaily.\n")
+    (summaries_dir / "weekly" / "2026-W10.md").write_text("# Week\n\nWeekly.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries?type=daily")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert all(e["type"] == "daily" for e in data)
+        assert len(data) == 1
