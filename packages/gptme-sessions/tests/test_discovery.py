@@ -463,7 +463,6 @@ def test_discover_all_mixed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setenv("GPTME_LOGS_DIR", str(gptme_dir))
     monkeypatch.setenv("CLAUDE_HOME", str(cc_dir.parent))  # parent since it appends /projects
-    # Actually CC looks in cc_dir directly (projects dir), let me fix
     monkeypatch.setenv("CODEX_SESSIONS_DIR", str(tmp_path / "no-codex"))
     monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path / "no-copilot"))
 

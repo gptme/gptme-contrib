@@ -40,21 +40,28 @@ def _get_records_with_fallback(
 ) -> tuple[list[SessionRecord], bool]:
     """Get records from the JSONL store, falling back to discovery if empty.
 
-    Returns (records, used_discovery) tuple. When discovery is used,
-    a hint is printed to stderr so the user knows the source.
+    Discovery only triggers when the store has *no records at all* (not when
+    filters narrow an existing store to zero results). This prevents silently
+    substituting discovered data for filtered store data.
+
+    Returns (records, used_discovery) tuple. When discovery is used and
+    produces results, a hint is printed to stderr so the user knows the source.
     """
-    records = store.query(
-        model=model,
-        run_type=run_type,
-        category=category,
-        harness=harness,
-        outcome=outcome,
-        since_days=since_days,
-    )
-    if records:
+    # First check if the store has ANY records (unfiltered)
+    all_records = store.query()
+    if all_records:
+        # Store has data — use it with filters, no discovery fallback
+        records = store.query(
+            model=model,
+            run_type=run_type,
+            category=category,
+            harness=harness,
+            outcome=outcome,
+            since_days=since_days,
+        )
         return records, False
 
-    # Store is empty or filtered to nothing — try discovery
+    # Store is truly empty — try discovery
     discover_days = since_days if since_days is not None else 30
     discovered = discover_all(since_days=discover_days)
     if not discovered:
@@ -72,7 +79,8 @@ def _get_records_with_fallback(
     if outcome:
         discovered = [r for r in discovered if r.outcome == outcome]
 
-    return discovered, True
+    # Only report discovery if it actually produced results after filtering
+    return discovered, len(discovered) > 0
 
 
 def _parse_since(since: str | None) -> int | None:

@@ -297,7 +297,7 @@ def discover_copilot_sessions(
 def _quick_first_last_ts(jsonl_path: Path) -> tuple[str | None, str | None]:
     """Extract first and last timestamps from a JSONL file.
 
-    Reads first line for start, seeks to end for last timestamp.
+    Reads all lines and returns the first and last valid timestamps found.
     Returns (first_ts, last_ts) as ISO strings, or None if not found.
     """
     first_ts: str | None = None
