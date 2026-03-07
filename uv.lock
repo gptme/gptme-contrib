@@ -1081,7 +1081,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.2" },
 ]
 provides-extras = ["dev", "test"]
 
