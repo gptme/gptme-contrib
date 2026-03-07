@@ -28,6 +28,68 @@ from .store import (
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
 
 
+def _discover_all(
+    since_days: int = 30,
+    harness_filter: str | None = None,
+) -> list[dict]:
+    """Collect discovered sessions across all harnesses.
+
+    Returns a list of dicts with keys ``harness`` and ``path``.
+    Used for fallback display and the ``sync`` command.
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+    start = today - timedelta(days=since_days)
+    discovered: list[dict] = []
+
+    if harness_filter in (None, "gptme"):
+        for p in discover_gptme_sessions(start, today):
+            jsonl = p / "conversation.jsonl"
+            resolved = jsonl if jsonl.exists() else p
+            discovered.append({"harness": "gptme", "path": resolved})
+    if harness_filter in (None, "claude-code"):
+        for p in discover_cc_sessions(start, today):
+            discovered.append({"harness": "claude-code", "path": p})
+    if harness_filter in (None, "codex"):
+        for p in discover_codex_sessions(start, today):
+            discovered.append({"harness": "codex", "path": p})
+    if harness_filter in (None, "copilot"):
+        for p in discover_copilot_sessions(start, today):
+            discovered.append({"harness": "copilot", "path": p})
+
+    return discovered
+
+
+def _show_discovery_fallback(since_days: int = 30) -> None:
+    """Show discovered sessions when the store has no records.
+
+    Prints a summary grouped by harness, then a hint to run ``sync``.
+    """
+    discovered = _discover_all(since_days=since_days)
+    click.echo("No session records found in store.")
+    if not discovered:
+        click.echo(
+            f"No sessions discovered in the last {since_days} day(s) either.\n"
+            "To record sessions, run 'gptme-sessions post-session' after each agent run."
+        )
+        return
+
+    # Summarize by harness
+    counts: dict[str, int] = {}
+    for e in discovered:
+        counts[e["harness"]] = counts.get(e["harness"], 0) + 1
+
+    click.echo(f"Discovered {len(discovered)} session(s) in the last {since_days} day(s):\n")
+    for harness, n in sorted(counts.items()):
+        click.echo(f"  {harness:14s}  {n} session(s)")
+
+    click.echo(
+        "\nRun 'gptme-sessions sync' to import sessions into the store for analytics."
+        "\nRun 'gptme-sessions discover' to list session paths."
+    )
+
+
 def _parse_since(since: str | None) -> int | None:
     """Parse a --since value like '7d' or '30' into days."""
     if not since:
@@ -58,7 +120,10 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
     if ctx.invoked_subcommand is None:
         store = SessionStore(sessions_dir=sessions_dir)
         s = store.stats()
-        format_stats(s)
+        if s.get("total", 0) == 0:
+            _show_discovery_fallback()
+        else:
+            format_stats(s)
 
 
 # -- Shared filter options for query/stats -----------------------------------
@@ -171,6 +236,8 @@ def stats(
     s = store.stats(records)
     if as_json:
         click.echo(json.dumps(s, indent=2))
+    elif s.get("total", 0) == 0:
+        _show_discovery_fallback()
     else:
         format_stats(s)
 
@@ -190,6 +257,8 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
     analytics = compute_run_analytics(records)
     if as_json:
         click.echo(json.dumps(analytics, indent=2))
+    elif analytics.get("total", 0) == 0:
+        _show_discovery_fallback(since_days=since_days or 14)
     else:
         format_run_analytics(analytics)
 
@@ -425,6 +494,99 @@ def signals(path: Path, as_json: bool, grade: bool, usage: bool) -> None:
         click.echo("Deliverables:")
         for d in result["deliverables"][:10]:
             click.echo(f"  - {d}")
+
+
+# -- sync --------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--harness",
+    type=click.Choice(HARNESS_CHOICES),
+    default=None,
+    help="Limit to a specific harness (default: all)",
+)
+@click.option("--since", default="14d", help="How far back to scan (e.g. 7d, 30d). Default: 14d")
+@click.option(
+    "--signals",
+    "with_signals",
+    is_flag=True,
+    help="Extract productivity signals from each trajectory (slower but richer)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be imported without writing")
+@click.pass_context
+def sync(
+    ctx: click.Context,
+    harness: str | None,
+    since: str,
+    with_signals: bool,
+    dry_run: bool,
+) -> None:
+    """Discover trajectory files and import them into the session store.
+
+    Scans known trajectory directories for gptme, Claude Code, Codex, and
+    Copilot sessions and appends a :class:`~gptme_sessions.record.SessionRecord`
+    for each one not already in the store.
+
+    Use ``--signals`` to extract productivity signals (outcome, duration,
+    deliverables) from each trajectory.  This is slower but produces richer
+    records suitable for ``stats`` and ``runs`` analytics.
+
+    Re-running ``sync`` is safe: sessions already in the store (matched by
+    trajectory path) are skipped.
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since) or 14
+    discovered = _discover_all(since_days=since_days, harness_filter=harness)
+
+    if not discovered:
+        click.echo(f"No sessions found in the last {since_days} day(s).")
+        return
+
+    # Build a set of already-imported paths for deduplication.
+    # We use journal_path to store the trajectory path when syncing.
+    existing_paths = {r.journal_path for r in store.load_all() if r.journal_path}
+
+    imported = 0
+    skipped = 0
+    for entry in discovered:
+        path_str = str(entry["path"])
+
+        if path_str in existing_paths:
+            skipped += 1
+            continue
+
+        record_kwargs: dict = {
+            "harness": entry["harness"],
+            "journal_path": path_str,  # used for deduplication on re-sync
+        }
+
+        if with_signals:
+            traj_path = entry["path"]
+            if traj_path.is_file():
+                try:
+                    result = extract_from_path(traj_path)
+                    record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
+                    record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
+                    record_kwargs["deliverables"] = result.get("deliverables", [])
+                    if result.get("inferred_category"):
+                        record_kwargs["category"] = result["inferred_category"]
+                except Exception:
+                    pass  # use defaults; non-fatal
+
+        if dry_run:
+            click.echo(f"  would import: {entry['harness']:14s}  {path_str}")
+        else:
+            store.append(SessionRecord(**record_kwargs))
+            imported += 1
+
+    if dry_run:
+        click.echo(
+            f"\n{len(discovered)} found, {skipped} already in store, "
+            f"{len(discovered) - skipped} would be imported"
+        )
+    else:
+        click.echo(f"Imported {imported} session(s), {skipped} already in store.")
 
 
 # -- post-session ------------------------------------------------------------

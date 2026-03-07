@@ -43,18 +43,31 @@ print(f"Success rate: {stats['success_rate']:.0%}")
 ### CLI
 
 ```bash
-# Show stats (default)
+# Show stats (default — auto-falls back to discover if store is empty)
 gptme-sessions stats
 
 # Query with filters
 gptme-sessions query --model opus --since 7d
 gptme-sessions query --run-type autonomous --outcome productive --json
 
-# Append a record
-gptme-sessions append --harness claude-code --model opus --outcome productive
-
 # Run analytics (duration distribution, NOOP rates, trends)
 gptme-sessions runs --since 14d
+
+# Discover trajectory files across all harnesses (no store required)
+gptme-sessions discover --since 7d
+gptme-sessions discover --harness claude-code --signals
+
+# Import discovered sessions into the store (safe to re-run — deduplicates)
+gptme-sessions sync --since 14d
+gptme-sessions sync --signals  # extract productivity signals (slower)
+gptme-sessions sync --dry-run  # preview what would be imported
+
+# Record a session at the end of an agent run (full pipeline)
+gptme-sessions post-session --harness gptme --model opus \
+  --trajectory ~/.local/share/gptme/logs/2026-03-07-foo/conversation.jsonl
+
+# Append a record manually (deprecated: prefer post-session or sync)
+gptme-sessions append --harness claude-code --model opus --outcome productive
 
 # Custom sessions directory
 gptme-sessions --sessions-dir /path/to/state/sessions stats
