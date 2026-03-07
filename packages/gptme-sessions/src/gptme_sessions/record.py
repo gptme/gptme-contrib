@@ -118,7 +118,8 @@ class SessionRecord:
 
     # Artifacts
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
-    journal_path: str | None = None
+    trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
+    journal_path: str | None = None  # path to human-written journal entry
 
     # LLM judge evaluation
     llm_judge_score: float | None = None  # 0.0-1.0 goal-alignment score
@@ -151,9 +152,22 @@ class SessionRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> SessionRecord:
-        """Deserialize from dict, ignoring unknown fields."""
+        """Deserialize from dict, ignoring unknown fields.
+
+        Backward compat: old records stored the trajectory JSONL path in
+        ``journal_path``.  Migrate those by moving the value to
+        ``trajectory_path`` when it ends with ``.jsonl``.
+        """
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known_fields}
+        # Migrate legacy records: journal_path that ends with .jsonl is actually
+        # a trajectory path (set by old sync command before trajectory_path was added)
+        if (
+            filtered.get("trajectory_path") is None
+            and isinstance(filtered.get("journal_path"), str)
+            and filtered["journal_path"].endswith(".jsonl")
+        ):
+            filtered["trajectory_path"] = filtered.pop("journal_path")
         return cls(**filtered)
 
     def to_json(self) -> str:

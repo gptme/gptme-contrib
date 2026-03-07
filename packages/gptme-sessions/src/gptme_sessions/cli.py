@@ -793,7 +793,7 @@ def sync(
 
     # Build lookup structures for deduplication and in-place updates.
     existing_records = store.load_all()
-    existing_by_path = {r.journal_path: r for r in existing_records if r.journal_path}
+    existing_by_path = {r.trajectory_path: r for r in existing_records if r.trajectory_path}
 
     new_records: list[SessionRecord] = []
     updated_paths: set[str] = set()
@@ -845,7 +845,7 @@ def sync(
 
         record_kwargs: dict = {
             "harness": entry["harness"],
-            "journal_path": path_str,  # used for deduplication on re-sync
+            "trajectory_path": path_str,  # used for deduplication on re-sync
         }
         if entry.get("model"):
             record_kwargs["model"] = entry["model"]

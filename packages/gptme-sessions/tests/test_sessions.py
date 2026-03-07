@@ -4262,7 +4262,7 @@ def test_sync_backfills_model_for_unknown_records(tmp_path: Path, capsys, monkey
     sessions_dir = tmp_path / "sessions"
     store = SessionStore(sessions_dir=sessions_dir)
     # Pre-populate store with a record that has model="unknown" and the session path
-    existing = SessionRecord(harness="claude-code", model="unknown", journal_path=str(fake_file))
+    existing = SessionRecord(harness="claude-code", model="unknown", trajectory_path=str(fake_file))
     store.append(existing)
 
     # discover_cc_sessions returns the same file; extract_cc_model will find a real model
