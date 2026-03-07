@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -768,8 +769,6 @@ def judge(
     With --update-store, writes scores back to session-records.jsonl by matching
     session IDs from journal filenames to stored records.
     """
-    import re
-
     from .judge import DEFAULT_GOALS, judge_session
 
     if journal_dir is None:
