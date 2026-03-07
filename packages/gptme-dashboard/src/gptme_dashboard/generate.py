@@ -151,8 +151,10 @@ def read_agent_urls(workspace: Path) -> dict[str, str]:
     """
     data = _parse_toml(workspace / "gptme.toml")
     agent = data.get("agent", {})
-    # Prefer [agent.links] (canonical); fall back to [agent.urls] for backwards compat
-    links = agent.get("links") or agent.get("urls", {})
+    # Prefer [agent.links] (canonical); fall back to [agent.urls] for backwards compat.
+    # Use key-presence check (not `or`) so an empty [agent.links] section doesn't
+    # incorrectly fall through to [agent.urls].
+    links = agent["links"] if "links" in agent else agent.get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}
         for key, value in links.items():

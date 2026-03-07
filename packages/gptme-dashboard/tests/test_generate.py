@@ -1204,6 +1204,25 @@ def test_read_agent_urls_links_preferred_over_urls(tmp_path: Path):
     assert links == {"dashboard": "https://links.example.com"}
 
 
+def test_read_agent_urls_empty_links_does_not_fall_back_to_urls(tmp_path: Path):
+    """An explicitly-empty [agent.links] section does NOT fall back to [agent.urls].
+
+    The key-presence check (``"links" in agent``) prevents the ``or``-operator
+    pitfall where an empty dict is falsy and would silently yield [agent.urls].
+    """
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent.links]
+
+        [agent.urls]
+        dashboard = "https://urls.example.com"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    # [agent.links] is present but empty — should return {} not fall back to [agent.urls]
+    assert links == {}
+
+
 def test_generate_no_agent_urls_no_extra_midpoints(workspace: Path, tmp_path: Path):
     """When [agent.urls] is absent the header contains no extra link middots."""
     output = tmp_path / "_site"
