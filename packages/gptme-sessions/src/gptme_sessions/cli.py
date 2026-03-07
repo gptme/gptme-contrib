@@ -770,7 +770,7 @@ def judge(
     """
     import re
 
-    from .judge import DEFAULT_GOALS, DEFAULT_JUDGE_MODEL, judge_session
+    from .judge import DEFAULT_GOALS, judge_session
 
     if journal_dir is None:
         journal_dir = Path.cwd() / "journal"
@@ -871,7 +871,7 @@ def judge(
                 s = score_map[rec.session_id]
                 rec.llm_judge_score = s["llm_judge_score"]
                 rec.llm_judge_reason = s["llm_judge_reason"]
-                rec.llm_judge_model = DEFAULT_JUDGE_MODEL
+                rec.llm_judge_model = s["llm_judge_model"]
                 updated += 1
         if updated:
             store.rewrite(records)
