@@ -844,6 +844,7 @@ def judge(
 
             result_row["llm_judge_score"] = score
             result_row["llm_judge_reason"] = reason
+            result_row["llm_judge_model"] = verdict["model"] if verdict else None
             results.append(result_row)
 
             if not as_json and score is not None:

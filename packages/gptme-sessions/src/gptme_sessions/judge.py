@@ -116,16 +116,13 @@ def judge_session(
     # Truncate journal to ~4000 chars to keep costs low
     truncated = journal_text[:4000] if journal_text else "(empty session)"
 
-    # Escape curly braces in user-controlled content so .format() doesn't raise
-    # KeyError/ValueError on JSON, Python dicts, shell expansions, etc.
-    safe_journal = truncated.replace("{", "{{").replace("}", "}}")
-    safe_goals = goals.replace("{", "{{").replace("}", "}}")
-    safe_category = (category or "unknown").replace("{", "{{").replace("}", "}}")
-
+    # str.format() only parses {placeholder} in the template itself — values
+    # passed as keyword arguments are substituted verbatim without re-parsing.
+    # No escaping of {/} in user content is needed or correct.
     prompt = JUDGE_PROMPT_TEMPLATE.format(
-        goals=safe_goals,
-        category=safe_category,
-        journal=safe_journal,
+        goals=goals,
+        category=category or "unknown",
+        journal=truncated,
     )
 
     try:

@@ -100,7 +100,11 @@ class TestJudgeSession:
         assert result["score"] == 0.0  # clamped from -0.3
 
     def test_curly_braces_in_journal_dont_crash(self) -> None:
-        """Journal text with curly braces (JSON, Python dicts) doesn't raise KeyError."""
+        """Journal text with curly braces (JSON, Python dicts) doesn't raise KeyError.
+
+        str.format() only parses {placeholder} in the template itself — keyword
+        argument values are substituted verbatim, so {/} in the journal are safe.
+        """
         mock_anthropic = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text='{"score": 0.6, "reason": "Wrote code"}')]
