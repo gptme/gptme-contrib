@@ -844,7 +844,7 @@ def judge(
 
             verdict = judge_session(text, category=cat, goals=effective_goals)
             score = verdict["score"] if verdict else None
-            reason = verdict["reason"] if verdict else "N/A"
+            reason = verdict["reason"] if verdict else None
 
             result_row["llm_judge_score"] = score
             result_row["llm_judge_reason"] = reason
