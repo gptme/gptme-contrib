@@ -3339,3 +3339,218 @@ def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
 )
 def test_infer_category(signals, expected):
     assert infer_category(signals) == expected
+
+
+# -- discovery fallback tests ------------------------------------------------
+
+
+def test_stats_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypatch):
+    """stats shows discovery fallback when the store is empty."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "stats"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No session records found in store" in captured.out
+    assert "claude-code" in captured.out
+    assert "sync" in captured.out
+
+
+def test_default_command_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypatch):
+    """Default command (no subcommand) shows discovery fallback when store is empty."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir)])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No session records found in store" in captured.out
+    assert "gptme" in captured.out
+
+
+def test_runs_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypatch):
+    """runs shows discovery fallback when the store is empty."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "runs"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No session records found in store" in captured.out
+
+
+def test_stats_no_fallback_when_records_exist(tmp_path: Path, capsys, monkeypatch):
+    """stats does not show discovery fallback when records exist in the store."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", model="opus", outcome="productive"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "stats"]
+    )
+    rc = main()
+    assert rc == 0
+    # _show_discovery_fallback uses click.echo() which capsys captures.
+    # The absence of the fallback message confirms normal stats were shown.
+    captured = capsys.readouterr()
+    assert "No session records found" not in captured.out
+
+
+# -- sync command tests -------------------------------------------------------
+
+
+def test_sync_imports_discovered_sessions(tmp_path: Path, capsys, monkeypatch):
+    """sync imports discovered sessions into the store."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Imported 1" in captured.out
+
+    # Verify the record was written to the store
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].harness == "claude-code"
+
+
+def test_sync_deduplicates_on_rerun(tmp_path: Path, capsys, monkeypatch):
+    """sync skips sessions already in the store."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Second sync — should skip the already-imported session
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1 already in store" in captured.out
+
+    # Only one record should exist
+    store = SessionStore(sessions_dir=sessions_dir)
+    assert len(store.load_all()) == 1
+
+
+def test_sync_dry_run(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run shows what would be imported without writing."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "would import" in captured.out
+
+    # Nothing should have been written
+    store = SessionStore(sessions_dir=sessions_dir)
+    assert len(store.load_all()) == 0
+
+
+def test_sync_no_sessions(tmp_path: Path, capsys, monkeypatch):
+    """sync reports no sessions found when discovery returns nothing."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No sessions found" in captured.out
