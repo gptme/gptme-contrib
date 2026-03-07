@@ -1817,6 +1817,49 @@ def test_scan_summaries_preview_skips_headings(tmp_path: Path):
     assert entries[0]["preview"] == "Focused on dashboard work."
 
 
+def test_scan_summaries_period_type_filter(tmp_path: Path):
+    """period_type filter is applied before limit, not after."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    # 3 daily + 3 weekly entries
+    for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+        (summaries_dir / "daily" / f"{day}.md").write_text(f"# {day}\n\nContent.\n")
+    for week in ("2026-W01", "2026-W02", "2026-W03"):
+        (summaries_dir / "weekly" / f"{week}.md").write_text(f"# {week}\n\nContent.\n")
+
+    # With limit=3 and no filter: top-3 of 6 total entries (mixed types)
+    all_entries = scan_summaries(tmp_path, limit=3)
+    assert len(all_entries) == 3
+
+    # With period_type="daily" and limit=3: should return 3 daily entries,
+    # not first 3 overall (which may include weekly) then filter to fewer.
+    daily_entries = scan_summaries(tmp_path, limit=3, period_type="daily")
+    assert len(daily_entries) == 3
+    assert all(e["type"] == "daily" for e in daily_entries)
+
+
+def test_scan_summaries_sort_order_across_types(tmp_path: Path):
+    """Weekly ISO-week strings sort chronologically with daily/monthly entries."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "monthly").mkdir(parents=True)
+    # Week 2 of 2026 starts ~2026-01-05; day 2026-01-15 is later in the month;
+    # monthly 2026-01 represents 2026-01-01.
+    (summaries_dir / "daily" / "2026-01-15.md").write_text("# Mid-Jan\n\nDaily.\n")
+    (summaries_dir / "weekly" / "2026-W02.md").write_text("# Week 2\n\nWeekly.\n")
+    (summaries_dir / "monthly" / "2026-01.md").write_text("# January\n\nMonthly.\n")
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 3
+    periods = [e["period"] for e in entries]
+    # Descending: 2026-01-15 (Jan 15) > 2026-W02 (~Jan 5) > 2026-01 (Jan 1)
+    assert periods[0] == "2026-01-15", f"Expected daily first, got {periods}"
+    assert periods[1] == "2026-W02", f"Expected weekly second, got {periods}"
+    assert periods[2] == "2026-01", f"Expected monthly last, got {periods}"
+
+
 def test_collect_workspace_data_includes_summaries(workspace: Path):
     """collect_workspace_data includes summaries when present."""
     daily_dir = workspace / "knowledge" / "summaries" / "daily"

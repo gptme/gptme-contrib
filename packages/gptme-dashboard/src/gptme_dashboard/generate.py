@@ -535,7 +535,32 @@ def scan_tasks(workspace: Path) -> list[dict]:
     return tasks
 
 
-def scan_summaries(workspace: Path, limit: int = 20) -> list[dict]:
+def _period_sort_key(period: str) -> str:
+    """Convert a period string to a sortable ISO date string.
+
+    Handles daily (2026-03-07), weekly (2026-W10), and monthly (2026-03) formats.
+    Without normalization, weekly strings (containing 'W') sort above daily/monthly
+    strings because 'W' > '0'-'9' in ASCII, breaking chronological order.
+    """
+    if "W" in period:
+        # ISO week: 2026-W10 → first day of that week
+        try:
+            year_str, week_str = period.split("-W")
+            from datetime import date
+
+            d = date.fromisocalendar(int(year_str), int(week_str), 1)
+            return d.isoformat()
+        except (ValueError, AttributeError):
+            return period
+    elif len(period) == 7:
+        # Monthly: 2026-03 → 2026-03-01
+        return period + "-01"
+    else:
+        # Daily: already a sortable ISO date
+        return period
+
+
+def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> list[dict]:
     """Scan knowledge/summaries for daily, weekly, and monthly summary files.
 
     Looks for markdown files in ``knowledge/summaries/{daily,weekly,monthly}/``
@@ -544,6 +569,11 @@ def scan_summaries(workspace: Path, limit: int = 20) -> list[dict]:
 
     Each entry contains ``period`` (the filename stem), ``type`` (daily/weekly/monthly),
     and ``preview`` (first content line).
+
+    Args:
+        workspace: Root directory of the workspace.
+        limit: Maximum number of entries to return.
+        period_type: If non-empty, only include entries of this type (daily/weekly/monthly).
     """
     summaries_dir = workspace / "knowledge" / "summaries"
     if not summaries_dir.is_dir():
@@ -551,8 +581,10 @@ def scan_summaries(workspace: Path, limit: int = 20) -> list[dict]:
 
     entries: list[dict] = []
 
-    for period_type in ("daily", "weekly", "monthly"):
-        type_dir = summaries_dir / period_type
+    for pt in ("daily", "weekly", "monthly"):
+        if period_type and pt != period_type:
+            continue
+        type_dir = summaries_dir / pt
         if not type_dir.is_dir():
             continue
         for md_file in sorted(type_dir.glob("*.md"), reverse=True):
@@ -569,13 +601,14 @@ def scan_summaries(workspace: Path, limit: int = 20) -> list[dict]:
             entries.append(
                 {
                     "period": md_file.stem,
-                    "type": period_type,
+                    "type": pt,
                     "preview": preview,
                 }
             )
 
-    # Sort by period descending (ISO dates sort lexicographically)
-    entries.sort(key=lambda e: e["period"], reverse=True)
+    # Sort by period descending using a normalized sort key so that
+    # daily/weekly/monthly entries compare correctly across formats.
+    entries.sort(key=lambda e: _period_sort_key(e["period"]), reverse=True)
     return entries[:limit]
 
 
