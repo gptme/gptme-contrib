@@ -1184,3 +1184,22 @@ def test_parse_toml_warns_on_syntax_error(tmp_path: Path, capsys):
     captured = capsys.readouterr()
     assert "Warning" in captured.err
     assert str(bad_toml) in captured.err
+
+
+def test_parse_toml_warns_on_missing_tomli(tmp_path: Path, capsys, monkeypatch):
+    """_parse_toml prints a warning to stderr when tomli is missing on Python < 3.11."""
+    import sys
+
+    good_toml = tmp_path / "gptme.toml"
+    good_toml.write_text("[agent]\nname = 'TestAgent'\n")
+
+    # Simulate Python < 3.11 so the code tries to import tomli instead of tomllib
+    monkeypatch.setattr(sys, "version_info", (3, 10, 0))
+    # Make tomli unavailable (sys.modules[key]=None triggers ImportError on import)
+    monkeypatch.setitem(sys.modules, "tomli", None)
+
+    result = _parse_toml(good_toml)
+    assert result == {}
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
+    assert "tomli" in captured.err
