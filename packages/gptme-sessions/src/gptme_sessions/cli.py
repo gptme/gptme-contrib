@@ -361,7 +361,7 @@ def annotate(
     if not records:
         raise click.ClickException("No session records found in store.")
 
-    # Resolve by prefix (case-insensitive) — short IDs like "a1b2" are common
+    # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
     matches = [r for r in records if r.session_id.startswith(session_id)]
     if not matches:
         raise click.ClickException(
@@ -392,7 +392,24 @@ def annotate(
     if journal_path is not None:
         record.journal_path = journal_path
     if add_deliverable:
-        record.deliverables = list(record.deliverables) + list(add_deliverable)
+        record.deliverables = list(record.deliverables or []) + list(add_deliverable)
+
+    # Guard: if nothing was supplied, avoid a no-op rewrite
+    nothing_supplied = (
+        model is None
+        and harness is None
+        and run_type is None
+        and category is None
+        and outcome is None
+        and duration is None
+        and journal_path is None
+        and not add_deliverable
+    )
+    if nothing_supplied:
+        raise click.UsageError(
+            "No fields specified. Provide at least one option to update "
+            "(e.g. --model, --outcome, --add-deliverable)."
+        )
 
     store.rewrite(records)
 
