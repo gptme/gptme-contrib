@@ -334,9 +334,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             limit = request.args.get("limit", 20, type=int)
             limit = max(1, min(limit, 100))
             period_type = request.args.get("type", "")
-            entries = scan_summaries(ws, limit=limit)
-            if period_type:
-                entries = [e for e in entries if e["type"] == period_type]
+            entries = scan_summaries(ws, limit=limit, period_type=period_type)
             return jsonify(entries)
         except Exception as e:
             logger.exception("Error scanning summaries")
