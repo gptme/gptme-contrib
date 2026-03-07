@@ -535,7 +535,7 @@ async function initDynamic() {
     loadSessionStats();
     loadRecentSessions();
     loadServices();
-    loadJournals();
+    if (document.getElementById('dynamic-journals')) loadJournals();
   } catch (e) {
     // No backend — stay in static mode
   }
