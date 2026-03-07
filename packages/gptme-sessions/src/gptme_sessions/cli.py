@@ -817,10 +817,7 @@ def sync(
 
             # With --signals, backfill records that have no outcome yet.
             if with_signals and existing.outcome == "unknown" and traj_path.is_file():
-                if dry_run:
-                    click.echo(f"  would update: {entry['harness']:14s}  {path_str}")
-                    updated_paths.add(path_str)
-                else:
+                if not dry_run:
                     try:
                         result = extract_from_path(traj_path)
                         existing.outcome = "productive" if result.get("productive") else "noop"
@@ -829,18 +826,24 @@ def sync(
                         if result.get("inferred_category") and not existing.category:
                             existing.category = result["inferred_category"]
                         needs_update = True
-                        updated += 1
                     except Exception as exc:
                         click.echo(
                             f"  warning: signals extraction failed for {path_str}: {exc}",
                             err=True,
                         )
                         skipped += 1
+                else:
+                    needs_update = True  # mark for dry-run reporting
             elif not needs_update:
                 skipped += 1
 
-            if needs_update and not dry_run:
-                updated_paths.add(path_str)
+            if needs_update:
+                if dry_run:
+                    click.echo(f"  would update: {entry['harness']:14s}  {path_str}")
+                    updated_paths.add(path_str)
+                else:
+                    updated_paths.add(path_str)
+                    updated += 1
             continue
 
         record_kwargs: dict = {
@@ -850,7 +853,7 @@ def sync(
         if entry.get("model"):
             record_kwargs["model"] = entry["model"]
 
-        if with_signals and traj_path.is_file():
+        if with_signals and traj_path.is_file() and not dry_run:
             try:
                 result = extract_from_path(traj_path)
                 record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
