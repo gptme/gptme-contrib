@@ -6,8 +6,8 @@ suitable for GitHub Pages deployment, and a structured JSON data dump for buildi
 ## Purpose
 
 Every gptme agent (Bob, Alice, etc.) and shared workspace (gptme-contrib, gptme-agent-template)
-can use this tool to publish a browsable dashboard of their workspace contents — lessons, plugins,
-packages, and skills — as a static site on GitHub Pages.
+can use this tool to publish a browsable dashboard of their workspace contents — lessons, skills,
+plugins, and packages — as a static site on GitHub Pages.
 
 The key design principle: **each agent owns their dashboard**. The tool generates a self-contained
 static site that can be hosted anywhere. When gptme-webui gains embedding support, it will load
@@ -32,33 +32,45 @@ uv pip install -e packages/gptme-dashboard
 # Generate dashboard for current workspace (outputs to _site/)
 gptme-dashboard --workspace .
 
-# Custom workspace and output directory
-gptme-dashboard --workspace /path/to/workspace --output _site
+# Custom output directory
+gptme-dashboard --workspace /path/to/workspace --output /path/to/_site
 
 # Custom Jinja2 templates (complete frontend customization)
 gptme-dashboard --workspace . --templates /path/to/templates
 ```
 
-By default, both `_site/index.html` (HTML dashboard) and `_site/data.json` (structured data) are
-generated together. The JSON file is a frontend-independent data source for custom dashboards.
+Both `_site/index.html` (HTML dashboard) and `_site/data.json` (structured data) are generated
+together.
 
-### JSON data dump to stdout
+### Print JSON to stdout
 
 ```bash
-# Print JSON to stdout (pipe to jq, store in CI artifacts, etc.)
 gptme-dashboard --workspace . --json
 ```
 
-The `--json` flag without `--output` prints JSON to stdout and skips HTML generation. Any custom
-frontend — React, Vue, plain JS — can consume `data.json` directly without re-running the generator.
+Prints JSON to stdout and skips HTML generation. Pipe to `jq`, store in CI artifacts, or feed to
+any custom frontend — React, Vue, plain JS — without re-running the generator.
 
 ## What it shows
 
-- **Lessons**: Filterable table with category, status, keywords
-- **Plugins**: Name and description from README
-- **Packages**: Name, version, description from pyproject.toml
-- **Skills**: Name and description from SKILL.md frontmatter
+- **Guidance**: Lessons and skills unified in one filterable table — category, status, keywords,
+  source attribution (submodule name), and clickable detail pages with rendered markdown
+- **Plugins**: Name, description, and enabled/available status from `gptme.toml`
+- **Packages**: Name, version, and description from `pyproject.toml`
 - **Stats**: Counts and category distribution chart
+
+### Submodule support
+
+When running on an agent workspace (e.g. Bob) that contains git submodules with gptme-like
+structure (`lessons/`, `skills/`, `packages/`, `plugins/`, or a `gptme.toml`), the dashboard
+automatically includes their content with a **Source** column showing which submodule it came from.
+
+Typical setup — Bob's workspace containing gptme-contrib and gptme-superuser as submodules:
+
+```bash
+gptme-dashboard --workspace ~/bob
+# merges lessons/skills/packages/plugins from bob, gptme-contrib, and gptme-superuser
+```
 
 ## Requirements
 
@@ -66,28 +78,32 @@ frontend — React, Vue, plain JS — can consume `data.json` directly without r
 - `click` (CLI)
 - `jinja2` (templating)
 - `pyyaml` (frontmatter parsing)
+- `markdown` (lesson/skill detail pages)
 
 ## Customization
 
-Pass `--templates` pointing to a directory with your own `index.html` (Jinja2).
+Pass `--templates` with a directory containing your own `index.html` (Jinja2).
 The template receives these variables:
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `workspace_name` | `str` | From `gptme.toml` `[agent]` name or directory name |
-| `stats` | `dict` | Counts and `lesson_categories` breakdown |
-| `lessons` | `list[dict]` | `title`, `category`, `status`, `keywords`, `path` |
-| `plugins` | `list[dict]` | `name`, `description`, `path` |
-| `packages` | `list[dict]` | `name`, `version`, `description`, `path` |
-| `skills` | `list[dict]` | `name`, `description`, `path` |
-| `lesson_categories` | `dict[str, int]` | Category name to lesson count (also in `stats`) |
-
-`stats.lesson_categories` is the same value, accessible via either path.
+| `workspace_name` | `str` | From `gptme.toml` `[agent]` name, or directory name |
+| `gh_repo_url` | `str` | Auto-detected GitHub remote URL (empty string if none) |
+| `guidance` | `list[dict]` | Lessons + skills unified; each entry has `kind`, `title`, `category`, `status`, `keywords`, `path`, `source`, `gh_url` |
+| `lessons` | `list[dict]` | Lesson entries only (`title`, `category`, `status`, `keywords`, `path`, `source`, `gh_url`) |
+| `skills` | `list[dict]` | Skill entries only (`name`, `description`, `path`, `source`, `gh_url`) |
+| `plugins` | `list[dict]` | `name`, `description`, `path`, `enabled` |
+| `packages` | `list[dict]` | `name`, `version`, `description`, `path`, `gh_url` |
+| `stats` | `dict` | `total_lessons`, `total_skills`, `total_guidance`, `total_plugins`, `total_packages`, `lesson_categories` |
+| `lesson_categories` | `dict[str, int]` | Category → count (same as `stats.lesson_categories`) |
+| `submodules` | `list[str]` | Names of detected submodules (for display/filtering) |
+| `sources` | `list[str]` | Unique source labels across all content (submodule names) |
 
 ## Deployment (GitHub Pages)
 
-The generated `_site/` directory is ready for GitHub Pages or any static host. A typical
-GitHub Actions workflow:
+The generated `_site/` directory is ready for GitHub Pages or any static host. A GitHub Actions
+workflow is included in `.github/workflows/dashboard.yml` for fully automated deployment on push.
+Manual workflow:
 
 ```yaml
 - name: Build dashboard
@@ -97,9 +113,6 @@ GitHub Actions workflow:
   with:
     path: _site
 ```
-
-This generates both `_site/index.html` and `_site/data.json`, giving Pages visitors a browsable
-dashboard and future frontends a machine-readable data source.
 
 ## Tests
 
