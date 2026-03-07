@@ -812,7 +812,7 @@ def judge(
 
     for entry in entries:
         try:
-            text = entry.read_text()
+            text = entry.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             logger.warning("Skipping %s: %s", entry, e)
             continue

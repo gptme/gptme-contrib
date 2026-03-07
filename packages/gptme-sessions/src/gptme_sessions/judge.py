@@ -120,10 +120,11 @@ def judge_session(
     # KeyError/ValueError on JSON, Python dicts, shell expansions, etc.
     safe_journal = truncated.replace("{", "{{").replace("}", "}}")
     safe_goals = goals.replace("{", "{{").replace("}", "}}")
+    safe_category = (category or "unknown").replace("{", "{{").replace("}", "}}")
 
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         goals=safe_goals,
-        category=category or "unknown",
+        category=safe_category,
         journal=safe_journal,
     )
 

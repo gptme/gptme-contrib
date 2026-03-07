@@ -252,16 +252,16 @@ class TestJudgeCLI:
         journal_dir = tmp_path / "journal"
         journal_dir.mkdir()
 
-        # Good entry
+        # Good entry — must match the glob "autonomous-session-*.md"
         good_day = journal_dir / "2026-03-07"
         good_day.mkdir()
-        good_entry = good_day / "session.md"
+        good_entry = good_day / "autonomous-session-abc123.md"
         good_entry.write_text("## Session\nDid some work", encoding="utf-8")
 
         # Bad entry — unreadable (no read permission)
         bad_day = journal_dir / "2026-03-06"
         bad_day.mkdir()
-        bad_entry = bad_day / "session.md"
+        bad_entry = bad_day / "autonomous-session-def456.md"
         bad_entry.write_text("corrupt", encoding="utf-8")
         bad_entry.chmod(0o000)
 
@@ -271,7 +271,9 @@ class TestJudgeCLI:
                 cli,
                 ["judge", "--journal-dir", str(journal_dir), "--dry-run"],
             )
-            # Should not crash; good entry should be processed
+            # Should not crash; good entry should be processed, bad skipped
             assert result.exit_code == 0, result.output
+            # Good entry was found (not "No autonomous session journal entries found")
+            assert "2026-03-07" in result.output or "abc123" in result.output
         finally:
             bad_entry.chmod(0o644)  # restore so tmp_path cleanup works
