@@ -4104,3 +4104,98 @@ def test_annotate_empty_id_no_options_reports_id_error(tmp_path: Path):
     )
     assert result.exit_code != 0
     assert "Session ID must not be empty" in result.output
+
+
+# -- sync model extraction + signals backfill ---------------------------------
+
+
+def test_sync_captures_gptme_model_from_config(tmp_path: Path, capsys, monkeypatch):
+    """sync reads model from gptme session config.toml and stores it in the record."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    # Create a fake gptme session directory with a config.toml declaring the model
+    session_dir = tmp_path / "2026-03-07-test-session"
+    session_dir.mkdir()
+    jsonl = session_dir / "conversation.jsonl"
+    jsonl.touch()
+    (session_dir / "config.toml").write_text('[chat]\nmodel = "claude-sonnet-4-6"\n')
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [session_dir]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-sonnet-4-6"
+    assert records[0].model_normalized == "sonnet"
+
+
+def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals updates existing records that have outcome=unknown."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "unknown"
+
+    # Mock extract_from_path to return a productive result
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": ["abc123"],
+            "inferred_category": "code",
+        },
+    )
+
+    # Second sync with --signals — should update the existing record
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "updated 1" in captured.out
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "productive"
+    assert records[0].duration_seconds == 300
+    assert records[0].category == "code"
