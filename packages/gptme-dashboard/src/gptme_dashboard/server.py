@@ -45,7 +45,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     if site_dir is None:
         site_dir = workspace / "_site"
     if not (site_dir / "index.html").exists():
-        generate(workspace, site_dir, include_sessions=True)
+        # Don't bake sessions into the static HTML in serve mode — the live
+        # /api/sessions endpoint provides fresh session data.  Baking them in
+        # would create a duplicate sessions panel (static + dynamic).
+        generate(workspace, site_dir, include_sessions=False)
 
     app = Flask(
         __name__,
