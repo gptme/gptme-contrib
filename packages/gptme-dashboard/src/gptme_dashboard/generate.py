@@ -490,6 +490,50 @@ def scan_tasks(workspace: Path) -> list[dict]:
     return tasks
 
 
+def scan_summaries(workspace: Path, limit: int = 20) -> list[dict]:
+    """Scan knowledge/summaries for daily, weekly, and monthly summary files.
+
+    Looks for markdown files in ``knowledge/summaries/{daily,weekly,monthly}/``
+    and returns them sorted by date descending (most recent first), capped at
+    *limit* entries.
+
+    Each entry contains ``period`` (the filename stem), ``type`` (daily/weekly/monthly),
+    and ``preview`` (first content line).
+    """
+    summaries_dir = workspace / "knowledge" / "summaries"
+    if not summaries_dir.is_dir():
+        return []
+
+    entries: list[dict] = []
+
+    for period_type in ("daily", "weekly", "monthly"):
+        type_dir = summaries_dir / period_type
+        if not type_dir.is_dir():
+            continue
+        for md_file in sorted(type_dir.glob("*.md"), reverse=True):
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```", "**")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "period": md_file.stem,
+                    "type": period_type,
+                    "preview": preview,
+                }
+            )
+
+    # Sort by period descending (ISO dates sort lexicographically)
+    entries.sort(key=lambda e: e["period"], reverse=True)
+    return entries[:limit]
+
+
 def detect_submodules(workspace: Path) -> list[dict]:
     """Detect git submodules with gptme-like structure.
 
@@ -914,6 +958,9 @@ def collect_workspace_data(
         for task in tasks:
             task["gh_url"] = github_blob_url(gh_repo_url, task["path"])
 
+    # Scan knowledge summaries (daily/weekly/monthly)
+    summaries = scan_summaries(workspace, limit=20)
+
     # Optionally scan recent sessions
     sessions: list[dict] = []
     if include_sessions:
@@ -935,6 +982,7 @@ def collect_workspace_data(
         "total_journals": len(journals),
         "total_tasks": len(tasks),
         "task_states": task_states,
+        "total_summaries": len(summaries),
         "lesson_categories": lesson_categories,
     }
 
@@ -952,6 +1000,7 @@ def collect_workspace_data(
         "sessions": sessions,
         "journals": journals,
         "tasks": tasks,
+        "summaries": summaries,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,
