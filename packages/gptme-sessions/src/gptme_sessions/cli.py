@@ -37,8 +37,6 @@ def _discover_all(
     Returns a list of dicts with keys ``harness`` and ``path``.
     Used for fallback display and the ``sync`` command.
     """
-    from datetime import date, timedelta
-
     today = date.today()
     start = today - timedelta(days=since_days)
     discovered: list[dict] = []
@@ -237,7 +235,11 @@ def stats(
     if as_json:
         click.echo(json.dumps(s, indent=2))
     elif s.get("total", 0) == 0:
-        _show_discovery_fallback()
+        has_filters = any([model, run_type, category, harness, outcome, since_days])
+        if has_filters:
+            click.echo("No records match your filters.")
+        else:
+            _show_discovery_fallback(since_days=30)
     else:
         format_stats(s)
 
@@ -571,8 +573,11 @@ def sync(
                     record_kwargs["deliverables"] = result.get("deliverables", [])
                     if result.get("inferred_category"):
                         record_kwargs["category"] = result["inferred_category"]
-                except Exception:
-                    pass  # use defaults; non-fatal
+                except Exception as exc:
+                    click.echo(
+                        f"  warning: signals extraction failed for {path_str}: {exc}",
+                        err=True,
+                    )
 
         if dry_run:
             click.echo(f"  would import: {entry['harness']:14s}  {path_str}")
