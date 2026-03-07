@@ -271,6 +271,35 @@ tr:hover { background: var(--accent-dim); }
   </table>
 </section>
 
+<!-- Dynamic: Session Stats (hidden by default, shown when API is available) -->
+<section id="session-stats" class="dynamic-panel" style="display:none">
+  <h2>Session Stats</h2>
+  <div class="stats" id="session-stats-grid"></div>
+  <div id="session-stats-models"></div>
+</section>
+
+<!-- Dynamic: Recent Sessions (hidden by default) -->
+<section id="recent-sessions" class="dynamic-panel" style="display:none">
+  <h2>Recent Sessions</h2>
+  <table id="sessions-table">
+    <thead>
+      <tr><th>Time</th><th>Harness</th><th>Model</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Dynamic: Services (hidden by default, shown when services are detected) -->
+<section id="agent-services" class="dynamic-panel" style="display:none">
+  <h2>Services</h2>
+  <table id="services-table">
+    <thead>
+      <tr><th>Name</th><th>Status</th><th>Description</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
 <!-- Packages -->
 <section id="packages">
   <h2>Packages ({{ stats.total_packages }})</h2>
@@ -379,5 +408,162 @@ if (sourceBtns.length > 0) {
 if (searchBox) {
   searchBox.addEventListener('input', applyFilters);
 }
+
+// Dynamic dashboard — progressive enhancement
+// Tries /api/status; if it responds, activates dynamic panels.
+async function initDynamic() {
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) return;
+    document.querySelectorAll('.dynamic-panel').forEach(el => el.style.display = '');
+    loadSessionStats();
+    loadRecentSessions();
+    loadServices();
+  } catch (e) {
+    // No backend — stay in static mode
+  }
+}
+
+async function loadSessionStats() {
+  try {
+    const resp = await fetch('/api/sessions/stats');
+    if (!resp.ok) {
+      const section = document.getElementById('session-stats');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    const stats = await resp.json();
+    const grid = document.getElementById('session-stats-grid');
+    if (!grid) {
+      const section = document.getElementById('session-stats');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    if (stats.total === 0) {
+      const section = document.getElementById('session-stats');
+      if (section) section.style.display = 'none';
+      return;
+    }
+
+    const rate = stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : 'N/A';
+    const dur = stats.duration != null && stats.duration.total_hours != null
+      ? stats.duration.total_hours.toFixed(1) + 'h'
+      : 'N/A';
+
+    grid.innerHTML = [
+      card(stats.total, 'Sessions'),
+      card(stats.productive || 0, 'Productive'),
+      card(rate, 'Success Rate'),
+      card(dur, 'Total Time'),
+    ].join('');
+
+    // Model breakdown
+    const models = stats.by_model;
+    if (models && Object.keys(models).length > 0) {
+      const el = document.getElementById('session-stats-models');
+      let html = '<h3 style="font-size:1rem;margin:1rem 0 0.5rem">By Model</h3>';
+      for (const [m, s] of Object.entries(models)) {
+        const r = s.rate != null ? (s.rate * 100).toFixed(0) + '%' : '';
+        html += '<div class="cat-bar">';
+        html += '<span class="cat-name">' + esc(m) + '</span>';
+        html += '<div class="bar" style="width:' + (s.total / stats.total * 100).toFixed(1) + '%"></div>';
+        html += '<span class="count">' + s.total + ' (' + r + ')</span>';
+        html += '</div>';
+      }
+      el.innerHTML = html;
+    }
+  } catch (e) {
+    const section = document.getElementById('session-stats');
+    if (section) section.style.display = 'none';
+  }
+}
+
+async function loadRecentSessions() {
+  try {
+    const resp = await fetch('/api/sessions?limit=20');
+    if (!resp.ok) {
+      const section = document.getElementById('recent-sessions');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    const sessions = await resp.json();
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      const section = document.getElementById('recent-sessions');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    const tbody = document.querySelector('#sessions-table tbody');
+    if (!tbody) {
+      const section = document.getElementById('recent-sessions');
+      if (section) section.style.display = 'none';
+      return;
+    }
+
+    tbody.innerHTML = sessions.map(s => {
+      const time = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+      const dur = s.duration_seconds > 0 ? Math.round(s.duration_seconds / 60) + 'm' : '';
+      const cls = s.outcome === 'productive' ? 'tag-active' : s.outcome === 'noop' ? 'tag-deprecated' : '';
+      return '<tr>'
+        + '<td>' + esc(time) + '</td>'
+        + '<td>' + esc(s.harness || '') + '</td>'
+        + '<td>' + esc(s.model || '') + '</td>'
+        + '<td>' + esc(s.category || '') + '</td>'
+        + '<td><span class="tag ' + cls + '">' + esc(s.outcome || '') + '</span></td>'
+        + '<td>' + esc(dur) + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) {
+    const section = document.getElementById('recent-sessions');
+    if (section) section.style.display = 'none';
+  }
+}
+
+async function loadServices() {
+  try {
+    const resp = await fetch('/api/services');
+    if (!resp.ok) {
+      const section = document.getElementById('agent-services');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    const data = await resp.json();
+    const services = data.services || [];
+    if (services.length === 0) {
+      const section = document.getElementById('agent-services');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    const tbody = document.querySelector('#services-table tbody');
+    if (!tbody) {
+      const section = document.getElementById('agent-services');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    tbody.innerHTML = services.map(s => {
+      const cls = s.active === 'active' ? 'tag-active' : 'tag-deprecated';
+      return '<tr>'
+        + '<td><strong>' + esc(s.name) + '</strong></td>'
+        + '<td><span class="tag ' + cls + '">' + esc(s.sub || s.active) + '</span></td>'
+        + '<td>' + esc(s.description) + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) {
+    const section = document.getElementById('agent-services');
+    if (section) section.style.display = 'none';
+  }
+}
+
+function card(value, label) {
+  return '<div class="stat-card"><div class="number">' + value + '</div>'
+    + '<div class="label">' + label + '</div></div>';
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+document.addEventListener('DOMContentLoaded', initDynamic);
 </script>
 {% endblock %}

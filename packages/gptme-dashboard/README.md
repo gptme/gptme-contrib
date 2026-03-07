@@ -1,7 +1,8 @@
 # gptme-dashboard
 
-Static site generator and JSON exporter for gptme agent workspaces. Produces an HTML dashboard
-suitable for GitHub Pages deployment, and a structured JSON data dump for building custom frontends.
+Static site generator, JSON exporter, and live server for gptme agent workspaces. Produces an HTML
+dashboard suitable for GitHub Pages deployment, a structured JSON data dump for custom frontends,
+and an optional live server with API endpoints for real-time agent monitoring.
 
 ## Purpose
 
@@ -22,34 +23,79 @@ discussion and requirements.
 pip install gptme-dashboard
 # or, from source:
 uv pip install -e packages/gptme-dashboard
+
+# For the live server (adds Flask + gptme-sessions):
+pip install "gptme-dashboard[serve]"
 ```
 
 ## Usage
 
-### Generate dashboard (HTML + JSON)
+### Generate static dashboard (HTML + JSON)
 
 ```bash
-# Generate dashboard for current workspace (outputs to _site/)
+# Generate dashboard for current workspace (outputs to <workspace>/_site/)
+gptme-dashboard generate --workspace .
+
+# Short form (backward compatible — defaults to generate subcommand)
 gptme-dashboard --workspace .
 
 # Custom output directory
-gptme-dashboard --workspace /path/to/workspace --output /path/to/_site
+gptme-dashboard generate --workspace /path/to/workspace --output /path/to/_site
 
 # Custom Jinja2 templates (complete frontend customization)
-gptme-dashboard --workspace . --templates /path/to/templates
+gptme-dashboard generate --workspace . --templates /path/to/templates
 ```
 
 Both `_site/index.html` (HTML dashboard) and `_site/data.json` (structured data) are generated
-together.
+together. The JSON file is a frontend-independent data source for custom dashboards.
 
 ### Print JSON to stdout
 
 ```bash
-gptme-dashboard --workspace . --json
+gptme-dashboard generate --workspace . --json
 ```
 
 Prints JSON to stdout and skips HTML generation. Pipe to `jq`, store in CI artifacts, or feed to
 any custom frontend — React, Vue, plain JS — without re-running the generator.
+
+### Serve with live API
+
+```bash
+# Serve at http://127.0.0.1:8042 (default)
+gptme-dashboard serve --workspace .
+
+# Custom host/port
+gptme-dashboard serve --workspace . --host 0.0.0.0 --port 9000
+```
+
+Generates the static site then serves it alongside live API endpoints. The dashboard template
+detects API availability and shows dynamic panels (session stats, recent sessions, agent services).
+Static gh-pages deployments are unaffected — the dynamic panels only appear when the API is live.
+
+**Live API endpoints:**
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/status` | Workspace name, agent URLs, session store summary |
+| `GET /api/sessions/stats` | Aggregated session statistics by model/category |
+| `GET /api/sessions[?days=N]` | Recent sessions (last 30 days by default) |
+| `GET /api/services` | Systemd/launchd services matching the agent name |
+
+Requires `pip install "gptme-dashboard[serve]"`.
+
+## Configuration
+
+Add named links to your `gptme.toml` to expose them in the dashboard header:
+
+```toml
+[agent.urls]
+dashboard = "https://timetobuildbob.github.io/bob/"
+repo      = "https://github.com/timetobuildbob/bob"
+website   = "https://example.com"
+```
+
+Any `http`/`https` URL is accepted. The auto-detected GitHub remote URL is always shown alongside
+these links.
 
 ## What it shows
 
@@ -58,6 +104,8 @@ any custom frontend — React, Vue, plain JS — without re-running the generato
 - **Plugins**: Name, description, and enabled/available status from `gptme.toml`
 - **Packages**: Name, version, and description from `pyproject.toml`
 - **Stats**: Counts and category distribution chart
+- **Sessions** (static, opt-in): Snapshot of recent agent sessions when `--sessions` is passed
+- **Session stats / Recent sessions / Services** (live, when served): Real-time panels from the API
 
 ### Submodule support
 
@@ -68,8 +116,8 @@ automatically includes their content with a **Source** column showing which subm
 Typical setup — Bob's workspace containing gptme-contrib and gptme-superuser as submodules:
 
 ```bash
-gptme-dashboard --workspace ~/bob
-# merges lessons/skills/packages/plugins from bob, gptme-contrib, and gptme-superuser
+gptme-dashboard generate --workspace ~/bob
+# → merges lessons/skills/packages/plugins from bob, gptme-contrib, and gptme-superuser
 ```
 
 ## Requirements
@@ -82,6 +130,9 @@ gptme-dashboard --workspace ~/bob
 - `pygments` (syntax highlighting in detail pages)
 - `gptme` (workspace data model)
 
+Optional:
+- `flask` + `gptme-sessions` — required for `gptme-dashboard serve` (`[serve]` extra)
+
 ## Customization
 
 Pass `--templates` with a directory containing your own `index.html` (Jinja2).
@@ -91,6 +142,7 @@ The template receives these variables:
 |----------|------|-------------|
 | `workspace_name` | `str` | From `gptme.toml` `[agent]` name, or directory name |
 | `gh_repo_url` | `str` | Auto-detected GitHub remote URL (empty string if none) |
+| `agent_urls` | `dict[str, str]` | Named links from `gptme.toml` `[agent.urls]` |
 | `guidance` | `list[dict]` | Lessons + skills unified; each entry has `kind`, `title`, `category`, `status`, `keywords`, `path`, `source`, `gh_url` |
 | `lessons` | `list[dict]` | Lesson entries only (`title`, `category`, `status`, `keywords`, `path`, `source`, `gh_url`) |
 | `skills` | `list[dict]` | Skill entries only (`name`, `description`, `path`, `source`, `gh_url`) |
@@ -109,7 +161,7 @@ Manual workflow:
 
 ```yaml
 - name: Build dashboard
-  run: gptme-dashboard --workspace . --output _site
+  run: gptme-dashboard generate --workspace . --output _site
 - name: Deploy to Pages
   uses: actions/upload-pages-artifact@v3
   with:
