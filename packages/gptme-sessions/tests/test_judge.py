@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 from gptme_sessions.judge import (
@@ -248,6 +251,7 @@ class TestJudgeCLI:
         assert "llm_judge" in param_names
         assert "goals" in param_names
 
+    @pytest.mark.skipif(os.getuid() == 0, reason="chmod(0o000) has no effect as root")
     def test_judge_skips_unreadable_files(self, tmp_path: "Path") -> None:
         """A single unreadable journal file is skipped; other entries are processed."""
         from click.testing import CliRunner

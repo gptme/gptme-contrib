@@ -782,6 +782,8 @@ def judge(
     for day_dir in sorted(journal_dir.iterdir()):
         if day_dir.is_dir() and re.match(r"\d{4}-\d{2}-\d{2}", day_dir.name):
             entries.extend(sorted(day_dir.glob("autonomous-session-*.md")))
+    if last <= 0:
+        raise click.UsageError("--last must be a positive integer (got 0 or negative)")
     entries = entries[-last:]
 
     if not entries:
