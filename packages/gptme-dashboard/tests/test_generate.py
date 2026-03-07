@@ -1467,12 +1467,12 @@ class TestScanRecentSessions:
         assert "gptme" in html
 
     def test_sessions_absent_from_html_when_empty(self, workspace: Path, tmp_path: Path) -> None:
-        """Generated HTML has no static sessions section when no sessions are found."""
+        """Generated HTML has no static sessions section when include_sessions=False."""
         output = tmp_path / "site"
         generate(workspace, output, include_sessions=False)
         html = (output / "index.html").read_text()
-        # The dynamic API panel (id="recent-sessions") is always present but hidden;
-        # the static sessions section (id="sessions") is only rendered when sessions data exists.
+        # The dynamic panel is always present (hidden via JS until API is available).
+        # Only the static section (rendered by --sessions flag) should be absent.
         assert 'id="sessions"' not in html
 
     def test_sessions_in_json_output(self, workspace: Path) -> None:

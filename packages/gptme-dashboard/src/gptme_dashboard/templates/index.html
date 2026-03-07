@@ -434,7 +434,11 @@ async function loadSessionStats() {
     }
     const stats = await resp.json();
     const grid = document.getElementById('session-stats-grid');
-    if (!grid) return;
+    if (!grid) {
+      const section = document.getElementById('session-stats');
+      if (section) section.style.display = 'none';
+      return;
+    }
     if (stats.total === 0) {
       const section = document.getElementById('session-stats');
       if (section) section.style.display = 'none';
@@ -489,7 +493,11 @@ async function loadRecentSessions() {
       return;
     }
     const tbody = document.querySelector('#sessions-table tbody');
-    if (!tbody) return;
+    if (!tbody) {
+      const section = document.getElementById('recent-sessions');
+      if (section) section.style.display = 'none';
+      return;
+    }
 
     tbody.innerHTML = sessions.map(s => {
       const time = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
@@ -526,7 +534,11 @@ async function loadServices() {
       return;
     }
     const tbody = document.querySelector('#services-table tbody');
-    if (!tbody) return;
+    if (!tbody) {
+      const section = document.getElementById('agent-services');
+      if (section) section.style.display = 'none';
+      return;
+    }
     tbody.innerHTML = services.map(s => {
       const cls = s.active === 'active' ? 'tag-active' : 'tag-deprecated';
       return '<tr>'

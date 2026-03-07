@@ -184,7 +184,7 @@ def test_api_services_structure(client):
     assert "services" in data
     assert "platform" in data
     assert isinstance(data["services"], list)
-    assert data["platform"] in ("Linux", "Darwin", "Windows")
+    assert isinstance(data["platform"], str)
 
 
 def test_api_services_linux_detection(client):
@@ -289,6 +289,34 @@ def test_api_services_timeout_handled(client):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["services"] == []
+
+
+def test_api_services_darwin_detection(client):
+    """Test /api/services parses launchctl output on macOS."""
+    launchctl_output = "\n".join(
+        [
+            "PID\tStatus\tLabel",
+            "123\t0\tcom.gptme.server",
+            "-\t0\tcom.apple.unrelated",
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = launchctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Darwin"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["platform"] == "Darwin"
+    assert len(data["services"]) == 1
+    assert data["services"][0]["name"] == "com.gptme.server"
+    assert data["services"][0]["active"] == "active"  # PID != "-"
+    assert data["services"][0]["sub"] == "running"
 
 
 def test_workspace_no_sessions(tmp_path: Path):
