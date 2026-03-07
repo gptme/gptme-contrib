@@ -1707,6 +1707,18 @@ def test_scan_tasks_malformed_yaml_types(tmp_path: Path):
     assert isinstance(tasks[0]["assigned_to"], str)
 
 
+def test_scan_tasks_single_string_tags(tmp_path: Path):
+    """scan_tasks promotes a bare string tags value to a one-element list."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "tagged-task.md").write_text(
+        "---\nstate: active\ntags: bugfix\ncreated: 2026-03-01\n---\n# Tagged Task\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["tags"] == ["bugfix"]
+
+
 def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     """Generated HTML includes task section when tasks exist."""
     tasks_dir = workspace / "tasks"

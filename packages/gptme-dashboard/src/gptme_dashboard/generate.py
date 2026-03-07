@@ -427,7 +427,9 @@ def scan_tasks(workspace: Path) -> list[dict]:
         title = extract_title(body, md_file.stem.replace("-", " ").title())
         priority = str(fm.get("priority", "") or "").lower()
         tags = fm.get("tags", [])
-        if not isinstance(tags, list):
+        if isinstance(tags, str):
+            tags = [tags]
+        elif not isinstance(tags, list):
             tags = []
         tags = [str(t) for t in tags]
         assigned_to = str(fm.get("assigned_to", "") or "")
