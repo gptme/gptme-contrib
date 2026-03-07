@@ -314,6 +314,94 @@ def append(
     click.echo(f"Appended session {record.session_id} to {path}")
 
 
+# -- annotate ----------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("session_id")
+@click.option("--model", default=None, help="Override model name")
+@click.option("--harness", default=None, help="Override harness")
+@click.option("--run-type", default=None, help="Override run type")
+@click.option("--category", default=None, help="Override category")
+@click.option("--outcome", default=None, help="Override outcome (productive, noop, failed)")
+@click.option("--duration", type=int, default=None, help="Override duration in seconds")
+@click.option("--journal-path", default=None, help="Override journal path")
+@click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
+)
+@click.pass_context
+def annotate(
+    ctx: click.Context,
+    session_id: str,
+    model: str | None,
+    harness: str | None,
+    run_type: str | None,
+    category: str | None,
+    outcome: str | None,
+    duration: int | None,
+    journal_path: str | None,
+    add_deliverable: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """Amend an existing session record by session ID (prefix match supported).
+
+    Useful for manually correcting metadata extracted at sync time — for
+    example fixing a misidentified model, reclassifying the outcome, or
+    adding a journal path that wasn't set during the session.
+
+    Only fields explicitly supplied are updated; all other fields are left
+    unchanged.  To add deliverables without overwriting existing ones, use
+    ``--add-deliverable``; to replace the whole list, set it via ``append``
+    or ``sync`` first.
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+
+    if not records:
+        raise click.ClickException("No session records found in store.")
+
+    # Resolve by prefix (case-insensitive) — short IDs like "a1b2" are common
+    matches = [r for r in records if r.session_id.startswith(session_id)]
+    if not matches:
+        raise click.ClickException(
+            f"No session found with ID prefix {session_id!r}. "
+            "Run 'gptme-sessions query' to list available session IDs."
+        )
+    if len(matches) > 1:
+        ids = ", ".join(r.session_id for r in matches)
+        raise click.ClickException(
+            f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
+        )
+
+    record = matches[0]
+
+    # Apply only the fields that were explicitly provided
+    if model is not None:
+        record.model = model
+    if harness is not None:
+        record.harness = harness
+    if run_type is not None:
+        record.run_type = run_type
+    if category is not None:
+        record.category = category
+    if outcome is not None:
+        record.outcome = outcome
+    if duration is not None:
+        record.duration_seconds = duration
+    if journal_path is not None:
+        record.journal_path = journal_path
+    if add_deliverable:
+        record.deliverables = list(record.deliverables) + list(add_deliverable)
+
+    store.rewrite(records)
+
+    if as_json:
+        click.echo(json.dumps(record.to_dict(), indent=2))
+    else:
+        click.echo(f"Updated session {record.session_id}.")
+
+
 # -- discover ----------------------------------------------------------------
 
 

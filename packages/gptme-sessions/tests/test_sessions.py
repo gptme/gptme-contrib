@@ -3554,3 +3554,155 @@ def test_sync_no_sessions(tmp_path: Path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     assert "No sessions found" in captured.out
+
+
+# -- annotate ----------------------------------------------------------------
+
+
+def test_annotate_updates_fields(tmp_path: Path, capsys):
+    """annotate amends specified fields on an existing record by session ID."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", model="unknown", outcome="unknown")
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid,
+        "--model",
+        "claude-opus-4-6",
+        "--outcome",
+        "productive",
+        "--category",
+        "code",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert len(records) == 1
+    r = records[0]
+    assert r.model == "claude-opus-4-6"
+    assert r.outcome == "productive"
+    assert r.category == "code"
+    assert r.harness == "gptme"  # unchanged
+
+
+def test_annotate_prefix_match(tmp_path: Path):
+    """annotate resolves session by ID prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", model="unknown")
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid[:4],  # prefix
+        "--outcome",
+        "noop",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].outcome == "noop"
+
+
+def test_annotate_unknown_id_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when session ID prefix has no match."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord())
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "zzzzzzzz",
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_ambiguous_prefix_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when prefix matches more than one record."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Force two records with the same prefix by controlling session_id
+    r1 = SessionRecord()
+    r1.session_id = "aabb1234"
+    r2 = SessionRecord()
+    r2.session_id = "aabb5678"
+    store.append(r1)
+    store.append(r2)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "aabb",
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_add_deliverable(tmp_path: Path):
+    """annotate --add-deliverable appends to existing deliverables list."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(deliverables=["existing-sha"])
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--add-deliverable",
+        "new-sha",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].deliverables == ["existing-sha", "new-sha"]
