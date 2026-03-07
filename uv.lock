@@ -1099,6 +1099,9 @@ serve = [
 sessions = [
     { name = "gptme-sessions" },
 ]
+tasks = [
+    { name = "gptodo" },
+]
 test = [
     { name = "flask" },
     { name = "gptme-sessions" },
@@ -1113,6 +1116,7 @@ requires-dist = [
     { name = "gptme-dashboard", extras = ["test"], marker = "extra == 'dev'" },
     { name = "gptme-sessions", marker = "extra == 'serve'", editable = "packages/gptme-sessions" },
     { name = "gptme-sessions", marker = "extra == 'sessions'", editable = "packages/gptme-sessions" },
+    { name = "gptodo", marker = "extra == 'tasks'", editable = "packages/gptodo" },
     { name = "jinja2", specifier = ">=3.0" },
     { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -1121,7 +1125,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.2" },
 ]
-provides-extras = ["sessions", "serve", "dev", "test"]
+provides-extras = ["sessions", "tasks", "serve", "dev", "test"]
 
 [[package]]
 name = "gptme-gptodo"

@@ -27,6 +27,9 @@ Issues = "https://github.com/gptme/gptme-contrib/issues"
 sessions = [
     "gptme-sessions",
 ]
+tasks = [
+    "gptodo",
+]
 serve = [
     "flask>=3.0",
     "gptme-sessions",

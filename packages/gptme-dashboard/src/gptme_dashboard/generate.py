@@ -399,12 +399,40 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
     return entries
 
 
+def _task_to_dict(md_file: Path) -> dict | None:
+    """Parse a single task file into a dashboard dict (manual fallback)."""
+    fm, body = parse_frontmatter(md_file)
+    if not fm:
+        return None
+
+    state = str(fm.get("state", "backlog") or "backlog").lower()
+    title = extract_title(body, md_file.stem.replace("-", " ").title())
+    priority = str(fm.get("priority", "") or "").lower()
+    tags = fm.get("tags", [])
+    if isinstance(tags, str):
+        tags = [tags]
+    elif not isinstance(tags, list):
+        tags = []
+    tags = [str(t) for t in tags]
+    assigned_to = str(fm.get("assigned_to", "") or "")
+
+    return {
+        "id": md_file.stem,
+        "title": title,
+        "state": state,
+        "priority": priority,
+        "tags": tags[:5],
+        "assigned_to": assigned_to,
+        "path": f"tasks/{md_file.name}",
+    }
+
+
 def scan_tasks(workspace: Path) -> list[dict]:
     """Scan task files from the workspace tasks directory.
 
-    Reads ``tasks/*.md`` files with YAML frontmatter containing task metadata
-    (state, priority, tags, etc.).  Skips subdirectories (templates, archive)
-    and README files.
+    Uses ``gptodo.utils.load_tasks`` when available for proper type coercion and
+    state normalisation (e.g. deprecated ``new`` → ``backlog``).  Falls back to
+    manual YAML parsing when gptodo is not installed.
 
     Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
     ``tags``, ``assigned_to``, and ``path`` keys, sorted by state priority
@@ -415,36 +443,41 @@ def scan_tasks(workspace: Path) -> list[dict]:
         return []
 
     tasks: list[dict] = []
-    for md_file in sorted(tasks_dir.glob("*.md")):
-        if md_file.name.lower() == "readme.md":
-            continue
 
-        fm, body = parse_frontmatter(md_file)
-        if not fm:
-            continue  # Skip files without frontmatter
+    try:
+        from gptodo.utils import load_tasks as _gptodo_load_tasks
 
-        state = str(fm.get("state", "backlog") or "backlog").lower()
-        title = extract_title(body, md_file.stem.replace("-", " ").title())
-        priority = str(fm.get("priority", "") or "").lower()
-        tags = fm.get("tags", [])
-        if isinstance(tags, str):
-            tags = [tags]
-        elif not isinstance(tags, list):
-            tags = []
-        tags = [str(t) for t in tags]
-        assigned_to = str(fm.get("assigned_to", "") or "")
-
-        tasks.append(
-            {
-                "id": md_file.stem,
-                "title": title,
-                "state": state,
-                "priority": priority,
-                "tags": tags[:5],
-                "assigned_to": assigned_to,
-                "path": f"tasks/{md_file.name}",
-            }
-        )
+        for t in _gptodo_load_tasks(tasks_dir):
+            if t.path.name.lower() == "readme.md":
+                continue
+            if not t.metadata:
+                continue  # Skip files without YAML frontmatter
+            # Title lives in the markdown body, not in TaskInfo — read it out
+            _, body = parse_frontmatter(t.path)
+            title = extract_title(body, t.name.replace("-", " ").title())
+            raw_tags = t.tags or []
+            if isinstance(raw_tags, str):
+                raw_tags = [raw_tags]
+            tags = [str(tag) for tag in raw_tags][:5]
+            tasks.append(
+                {
+                    "id": t.name,
+                    "title": title,
+                    "state": (t.state or "backlog").lower(),
+                    "priority": (t.priority or "").lower(),
+                    "tags": tags,
+                    "assigned_to": t.assigned_to or "",
+                    "path": f"tasks/{t.path.name}",
+                }
+            )
+    except ImportError:
+        # gptodo not installed — fall back to manual frontmatter parsing
+        for md_file in sorted(tasks_dir.glob("*.md")):
+            if md_file.name.lower() == "readme.md":
+                continue
+            entry = _task_to_dict(md_file)
+            if entry is not None:
+                tasks.append(entry)
 
     tasks.sort(key=lambda t: (_STATE_ORDER.get(t["state"], 99), t["title"]))
     return tasks
