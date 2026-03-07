@@ -111,10 +111,7 @@ def read_agent_urls(workspace: Path) -> dict[str, str]:
     Note: ``[agent.urls]`` is not yet part of gptme's ``AgentConfig`` schema, so we
     parse gptme.toml directly rather than going through ``get_project_config``.
     """
-    gptme_toml = workspace / "gptme.toml"
-    if not gptme_toml.exists():
-        return {}
-    data = _parse_toml(gptme_toml)
+    data = _parse_toml(workspace / "gptme.toml")
     links = data.get("agent", {}).get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}

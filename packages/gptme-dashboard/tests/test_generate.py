@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gptme_dashboard.generate import (
+    _parse_toml,
     collect_workspace_data,
     detect_github_url,
     detect_submodules,
@@ -1172,3 +1173,14 @@ def test_generate_no_agent_urls_no_extra_midpoints(workspace: Path, tmp_path: Pa
     # git remote, so gh_repo_url is also absent.  Any &middot; in the output would
     # indicate a spurious agent link was rendered.
     assert "&middot;" not in html
+
+
+def test_parse_toml_warns_on_syntax_error(tmp_path: Path, capsys):
+    """_parse_toml prints a warning to stderr when the file has a syntax error."""
+    bad_toml = tmp_path / "gptme.toml"
+    bad_toml.write_text("this = [invalid toml\n")
+    result = _parse_toml(bad_toml)
+    assert result == {}
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
+    assert str(bad_toml) in captured.err
