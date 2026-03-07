@@ -1215,8 +1215,10 @@ def test_parse_toml_warns_on_missing_tomli(tmp_path: Path, capsys, monkeypatch):
 class TestScanRecentSessions:
     """Tests for scan_recent_sessions()."""
 
-    def test_returns_empty_when_gptme_sessions_not_installed(self, tmp_path: Path) -> None:
-        """When gptme-sessions is not importable, return an empty list."""
+    def test_returns_empty_when_gptme_sessions_not_installed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When gptme-sessions is not importable, return an empty list and warn."""
         import sys
 
         # Temporarily remove gptme_sessions from sys.modules so the ImportError path runs
@@ -1241,6 +1243,8 @@ class TestScanRecentSessions:
             if saved_sig is not None:
                 sys.modules["gptme_sessions.signals"] = saved_sig
         assert result == []
+        captured = capsys.readouterr()
+        assert "gptme-sessions is not installed" in captured.err
 
     def test_gptme_sessions_workspace_filter(self, tmp_path: Path) -> None:
         """Sessions whose workspace matches the given workspace are included;

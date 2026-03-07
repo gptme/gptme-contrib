@@ -1062,6 +1062,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "gptme-sessions" },
     { name = "mypy" },
     { name = "pytest" },
 ]
@@ -1077,6 +1078,7 @@ test = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "gptme-sessions", marker = "extra == 'dev'", editable = "packages/gptme-sessions" },
     { name = "gptme-sessions", marker = "extra == 'sessions'", editable = "packages/gptme-sessions" },
     { name = "gptme-sessions", marker = "extra == 'test'", editable = "packages/gptme-sessions" },
     { name = "jinja2", specifier = ">=3.0" },
