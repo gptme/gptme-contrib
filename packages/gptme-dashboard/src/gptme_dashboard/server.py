@@ -39,7 +39,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         )
 
     from . import generate as _gen_mod
-    from .generate import generate, read_workspace_config, scan_journals
+    from .generate import generate, read_workspace_config, scan_journals, scan_summaries, scan_tasks
 
     # Generate static site if needed
     if site_dir is None:
@@ -310,6 +310,34 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             return jsonify(entries)
         except Exception as e:
             logger.exception("Error scanning journals")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/tasks")
+    def api_tasks() -> Any:
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            tasks = scan_tasks(ws)
+            state_filter = request.args.get("state")
+            if state_filter:
+                tasks = [t for t in tasks if t["state"] == state_filter.lower()]
+            limit = request.args.get("limit", 100, type=int)
+            limit = max(1, min(limit, 500))
+            return jsonify(tasks[:limit])
+        except Exception as e:
+            logger.exception("Error scanning tasks")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/summaries")
+    def api_summaries() -> Any:
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            limit = request.args.get("limit", 20, type=int)
+            limit = max(1, min(limit, 100))
+            period_type = request.args.get("type", "")
+            entries = scan_summaries(ws, limit=limit, period_type=period_type)
+            return jsonify(entries)
+        except Exception as e:
+            logger.exception("Error scanning summaries")
             return jsonify({"error": str(e)}), 500
 
     return app
