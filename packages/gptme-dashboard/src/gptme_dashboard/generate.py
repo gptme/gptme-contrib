@@ -13,9 +13,11 @@ Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 
 import configparser
 import json
+import os
 import re
 import subprocess
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -129,6 +131,145 @@ def read_agent_urls(workspace: Path) -> dict[str, str]:
                 safe_links[str(key)] = url
         return safe_links
     return {}
+
+
+def _safe_grade(val: object, default: float = 0.0) -> float:
+    """Convert *val* to a rounded float grade, returning *default* on failure."""
+    try:
+        return round(float(val), 2)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val: object, default: int = 0) -> int:
+    """Convert *val* to int, returning *default* on failure (e.g. None or non-numeric)."""
+    try:
+        return int(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
+    """Scan recent agent sessions using gptme-sessions discovery.
+
+    Returns sessions run in *workspace* over the past *days* days, sorted by
+    date descending (most recent first).  Returns an empty list if
+    gptme-sessions is not installed or no matching sessions are found.
+
+    Each session dict contains:
+    ``name``, ``date``, ``harness``, ``commits``, ``edits``, ``errors``,
+    ``grade``, ``category``.
+
+    Workspace filtering
+    -------------------
+    - **gptme**: sessions whose ``config.toml`` workspace field matches
+      *workspace* are included.  Sessions without a workspace field (older
+      sessions) are always included.
+    - **Claude Code**: sessions whose CC project directory name (an encoded
+      workspace path) matches *workspace* are included.
+    """
+    try:
+        from gptme_sessions.discovery import (
+            decode_cc_project_path,
+            discover_cc_sessions,
+            discover_gptme_sessions,
+            parse_gptme_config,
+        )
+        from gptme_sessions.signals import extract_from_path
+    except ImportError:
+        print(
+            "warning: --sessions requested but gptme-sessions is not installed; "
+            "install it with: pip install gptme-dashboard[sessions]",
+            file=sys.stderr,
+        )
+        return []
+
+    end = date.today()
+    start = end - timedelta(days=days)
+    workspace_resolved = workspace.resolve()
+
+    sessions: list[dict] = []
+
+    # --- gptme sessions ---
+    for session_dir in discover_gptme_sessions(start, end):
+        config = parse_gptme_config(session_dir)
+        session_ws = config.get("workspace", "")
+        # Include when workspace matches or when no workspace metadata is available.
+        if session_ws:
+            session_ws_path = Path(session_ws).resolve()
+            if not (
+                session_ws_path == workspace_resolved
+                or session_ws_path.is_relative_to(workspace_resolved)
+                or workspace_resolved.is_relative_to(session_ws_path)
+            ):
+                continue
+
+        jsonl = session_dir / "conversation.jsonl"
+        if not jsonl.exists():
+            continue
+
+        try:
+            signals = extract_from_path(jsonl)
+        except Exception:
+            signals = {}
+
+        date_str = session_dir.name[:10]
+        try:
+            date.fromisoformat(date_str)
+        except ValueError:
+            continue  # Directory name doesn't start with a valid ISO date — skip
+
+        sessions.append(
+            {
+                "name": session_dir.name,
+                "date": date_str,
+                "harness": "gptme",
+                "commits": len(signals.get("git_commits", [])),
+                "edits": len(set(signals.get("file_writes", []))),
+                "errors": _safe_int(signals.get("error_count", 0)),
+                "grade": _safe_grade(signals.get("grade", 0.0)),
+                "category": signals.get("inferred_category", ""),
+            }
+        )
+
+    # --- Claude Code sessions ---
+    for jsonl in discover_cc_sessions(start, end):
+        # The CC project directory name is the workspace path with '/' → '-'.
+        project_dir_name = jsonl.parent.name
+        decoded = decode_cc_project_path(project_dir_name)
+        decoded_path = Path(decoded).resolve()
+        if not (
+            decoded_path == workspace_resolved
+            or decoded_path.is_relative_to(workspace_resolved)
+            or workspace_resolved.is_relative_to(decoded_path)
+        ):
+            continue
+
+        try:
+            session_date = str(date.fromtimestamp(os.path.getmtime(jsonl)))
+        except (OSError, ValueError):
+            continue  # No usable date — skip this session
+
+        try:
+            signals = extract_from_path(jsonl)
+        except Exception:
+            signals = {}
+
+        sessions.append(
+            {
+                "name": jsonl.stem[:32],
+                "date": session_date,
+                "harness": "claude-code",
+                "commits": len(signals.get("git_commits", [])),
+                "edits": len(set(signals.get("file_writes", []))),
+                "errors": _safe_int(signals.get("error_count", 0)),
+                "grade": _safe_grade(signals.get("grade", 0.0)),
+                "category": signals.get("inferred_category", ""),
+            }
+        )
+
+    sessions.sort(key=lambda s: s["date"], reverse=True)
+    return sessions[:50]
 
 
 def detect_submodules(workspace: Path) -> list[dict]:
@@ -363,39 +504,31 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata using gptme's config module.
+    """Read gptme.toml for workspace metadata using inline TOML parsing."""
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # type: ignore[import-not-found]
 
-    Falls back to raw TOML parsing when gptme's schema doesn't recognise all
-    keys (e.g. ``[agent.urls]`` is not yet part of ``AgentConfig``).
-    """
-    from gptme.config import get_project_config
+    toml_path = workspace / "gptme.toml"
+    if not toml_path.exists():
+        return {}
+
+    try:
+        with toml_path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return {}
 
     config: dict = {}
 
-    try:
-        project_config = get_project_config(workspace, quiet=True)
-    except TypeError:
-        # gptme currently raises TypeError when AgentConfig sees unsupported keys
-        # like [agent.urls]. Fall back to raw TOML parsing in that case.
-        project_config = None
-    else:
-        if project_config is None:
-            return config  # No gptme.toml present; raw-TOML fallback would also find nothing
-        if project_config.agent and project_config.agent.name:
-            config["agent_name"] = project_config.agent.name
-        if project_config.plugins.enabled:
-            config["plugins_enabled"] = list(project_config.plugins.enabled)
-        return config
-
-    # Fallback: parse gptme.toml directly when gptme's schema rejects the file
-    # (e.g. future keys like [agent.urls] not yet in AgentConfig).
-    raw = _parse_toml(workspace / "gptme.toml")
-    agent = raw.get("agent", {})
+    agent = data.get("agent", {})
     if isinstance(agent, dict) and agent.get("name"):
-        config["agent_name"] = str(agent["name"])
-    plugins_enabled = raw.get("plugins", {}).get("enabled", [])
-    if isinstance(plugins_enabled, list) and plugins_enabled:
-        config["plugins_enabled"] = [str(p) for p in plugins_enabled]
+        config["agent_name"] = agent["name"]
+
+    plugins = data.get("plugins", {})
+    if isinstance(plugins, dict) and plugins.get("enabled"):
+        config["plugins_enabled"] = list(plugins["enabled"])
 
     return config
 
@@ -457,12 +590,28 @@ def github_tree_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
     return f"{gh_repo_url}/tree/HEAD/{full_path}"
 
 
-def collect_workspace_data(workspace: Path) -> dict:
+def collect_workspace_data(
+    workspace: Path,
+    include_sessions: bool = False,
+    sessions_days: int = 30,
+) -> dict:
     """Collect all workspace data into a dict suitable for JSON export or rendering.
 
     Scans the workspace and any nested submodules with gptme-like structure.
     Items from submodules are tagged with a ``source`` field.
     Lessons and skills are merged into a unified ``guidance`` list.
+
+    Parameters
+    ----------
+    workspace:
+        Path to the gptme workspace root.
+    include_sessions:
+        When *True*, scan recent agent sessions via gptme-sessions and include
+        them in the returned dict under the ``"sessions"`` key.  Requires the
+        ``gptme-sessions`` package to be installed; returns an empty list when
+        it is absent.
+    sessions_days:
+        How many days back to scan for sessions (default 30).
     """
     config = read_workspace_config(workspace)
     agent_urls = read_agent_urls(workspace)
@@ -538,12 +687,18 @@ def collect_workspace_data(workspace: Path) -> dict:
     all_items = guidance + packages + plugins
     sources: list[str] = sorted({item.get("source", "") for item in all_items} - {""})
 
+    # Optionally scan recent sessions
+    sessions: list[dict] = []
+    if include_sessions:
+        sessions = scan_recent_sessions(workspace, days=sessions_days)
+
     stats = {
         "total_lessons": len(lessons),
         "total_plugins": len(plugins),
         "total_packages": len(packages),
         "total_skills": len(skills),
         "total_guidance": len(guidance),
+        "total_sessions": len(sessions),
         "lesson_categories": lesson_categories,
     }
 
@@ -558,6 +713,7 @@ def collect_workspace_data(workspace: Path) -> dict:
         "packages": packages,
         "skills": skills,
         "guidance": guidance,
+        "sessions": sessions,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,
@@ -565,8 +721,18 @@ def collect_workspace_data(workspace: Path) -> dict:
     }
 
 
-def generate(workspace: Path, output: Path, template_dir: Path | None = None) -> None:
-    """Generate static HTML dashboard from workspace."""
+def generate(
+    workspace: Path,
+    output: Path,
+    template_dir: Path | None = None,
+    include_sessions: bool = False,
+    sessions_days: int = 30,
+) -> dict:
+    """Generate static HTML dashboard from workspace.
+
+    Returns the collected workspace data dict so callers can reuse it
+    (e.g. for JSON export) without rescanning.
+    """
     if template_dir is None:
         template_dir = Path(__file__).parent / "templates"
 
@@ -575,7 +741,9 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         autoescape=True,
     )
 
-    data = collect_workspace_data(workspace)
+    data = collect_workspace_data(
+        workspace, include_sessions=include_sessions, sessions_days=sessions_days
+    )
 
     template = env.get_template("index.html")
     html = template.render(**data)
@@ -617,22 +785,40 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         page_path.write_text(skill_html)
 
     stats = data["stats"]
+    session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins, "
         f"{stats['total_packages']} packages, "
         f"{stats['total_skills']} skills ({stats['total_skills']} detail pages)"
+        f"{session_msg}"
     )
 
+    return data
 
-def generate_json(workspace: Path, output: Path | None = None) -> str:
+
+def generate_json(
+    workspace: Path,
+    output: Path | None = None,
+    include_sessions: bool = False,
+    sessions_days: int = 30,
+    _data: dict | None = None,
+) -> str:
     """Generate JSON data dump from workspace.
 
     If output is provided, writes data.json to that directory.
     Returns the JSON string in all cases.
+
+    If *_data* is provided, reuse it instead of rescanning the workspace.
     """
-    data = collect_workspace_data(workspace)
+    data = (
+        _data
+        if _data is not None
+        else collect_workspace_data(
+            workspace, include_sessions=include_sessions, sessions_days=sessions_days
+        )
+    )
     # Exclude large fields (body, all_keywords) from JSON export — they are only
     # needed for HTML page generation and would bloat data.json unnecessarily.
     _JSON_EXCLUDE = {"body", "all_keywords"}

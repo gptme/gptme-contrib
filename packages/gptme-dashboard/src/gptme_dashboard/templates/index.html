@@ -86,6 +86,7 @@ tr:hover { background: var(--accent-dim); }
 }
 .tag-active { border-color: var(--green); color: var(--green); }
 .tag-deprecated { border-color: var(--orange); color: var(--orange); }
+.tag-medium { border-color: var(--orange); color: var(--orange); }
 .tag-category { border-color: var(--purple); color: var(--purple); }
 .tag-kind-lesson { border-color: var(--accent); color: var(--accent); }
 .tag-kind-skill { border-color: var(--cyan); color: var(--cyan); }
@@ -288,6 +289,45 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
 </section>
+
+{% if sessions %}
+<!-- Sessions -->
+<section id="sessions">
+  <h2>Recent Sessions ({{ stats.total_sessions }})</h2>
+  <table id="sessions-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Session</th>
+        <th>Harness</th>
+        <th>Commits</th>
+        <th>Edits</th>
+        <th>Errors</th>
+        <th>Grade</th>
+        <th>Category</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr>
+        <td>{{ s.date }}</td>
+        <td title="{{ s.name }}">{{ s.name[:40] }}</td>
+        <td><span class="tag">{{ s.harness }}</span></td>
+        <td>{{ s.commits }}</td>
+        <td>{{ s.edits }}</td>
+        <td>{{ s.errors }}</td>
+        <td>
+          <span class="tag {% if s.grade >= 0.7 %}tag-active{% elif s.grade >= 0.4 %}tag-medium{% endif %}">
+            {{ "%.2f"|format(s.grade) }}
+          </span>
+        </td>
+        <td>{% if s.category %}<span class="tag tag-category">{{ s.category }}</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}

@@ -35,19 +35,42 @@ from gptme_dashboard.generate import generate, generate_json
     default=False,
     help="Print JSON data dump to stdout. Without --output, skips HTML generation.",
 )
-def main(workspace: str, output: str | None, templates: str | None, print_json: bool) -> None:
+@click.option(
+    "--sessions/--no-sessions",
+    default=False,
+    show_default=True,
+    help=(
+        "Scan recent agent sessions via gptme-sessions and include them in the "
+        "dashboard.  Requires the gptme-sessions package to be installed."
+    ),
+)
+@click.option(
+    "--sessions-days",
+    type=click.IntRange(min=1),
+    default=30,
+    show_default=True,
+    help="Number of days back to scan for sessions (used with --sessions).",
+)
+def main(
+    workspace: str,
+    output: str | None,
+    templates: str | None,
+    print_json: bool,
+    sessions: bool,
+    sessions_days: int,
+) -> None:
     """Generate a static dashboard and JSON data dump for a gptme workspace."""
     ws = Path(workspace)
     tmpl = Path(templates) if templates is not None else None
 
     if print_json and output is None:
         # Stdout-only JSON mode (for piping to jq, CI artifacts, etc.)
-        click.echo(generate_json(ws))
+        click.echo(generate_json(ws, include_sessions=sessions, sessions_days=sessions_days))
         return
 
     out = Path(output) if output is not None else Path("_site")
-    generate(ws, out, tmpl)
-    json_str = generate_json(ws, out)
+    data = generate(ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days)
+    json_str = generate_json(ws, out, _data=data)
 
     if print_json:
         sys.stdout.write(json_str + "\n")

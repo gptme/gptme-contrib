@@ -1053,26 +1053,33 @@ version = "0.1.0"
 source = { editable = "packages/gptme-dashboard" }
 dependencies = [
     { name = "click" },
-    { name = "gptme" },
     { name = "jinja2" },
     { name = "markdown" },
     { name = "pygments" },
     { name = "pyyaml" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
 dev = [
+    { name = "gptme-sessions" },
     { name = "mypy" },
     { name = "pytest" },
 ]
+sessions = [
+    { name = "gptme-sessions" },
+]
 test = [
+    { name = "gptme-sessions" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
-    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "gptme-sessions", marker = "extra == 'dev'", editable = "packages/gptme-sessions" },
+    { name = "gptme-sessions", marker = "extra == 'sessions'", editable = "packages/gptme-sessions" },
+    { name = "gptme-sessions", marker = "extra == 'test'", editable = "packages/gptme-sessions" },
     { name = "jinja2", specifier = ">=3.0" },
     { name = "markdown", specifier = ">=3.4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -1080,8 +1087,9 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.2" },
 ]
-provides-extras = ["dev", "test"]
+provides-extras = ["sessions", "dev", "test"]
 
 [[package]]
 name = "gptme-gptodo"
