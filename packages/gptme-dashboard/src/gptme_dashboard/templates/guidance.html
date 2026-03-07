@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{{ lesson.title }} - {{ workspace_name }}{% endblock %}
+{% block title %}{{ item.title or item.name }} - {{ workspace_name }}{% endblock %}
 
 {% block extra_style %}
 .container {
@@ -84,6 +84,10 @@ header h1 {
   margin: 0.75rem 0;
 }
 
+/* Kind chip colours */
+.tag-kind-lesson { border-color: var(--accent); color: var(--accent); }
+.tag-kind-skill  { border-color: var(--cyan);   color: var(--cyan);   }
+
 /* Keywords section */
 .keywords-section {
   margin-top: 2rem;
@@ -106,17 +110,22 @@ header h1 {
 {% block content %}
 <nav class="breadcrumb">
   <a href="{{ root_prefix }}index.html">{{ workspace_name }}</a>
-  &rsaquo; <a href="{{ root_prefix }}index.html#guidance">Lessons</a>
-  &rsaquo; {{ lesson.title }}
+  &rsaquo; <a href="{{ root_prefix }}index.html#guidance">Lessons &amp; Skills</a>
+  &rsaquo; {{ item.title or item.name }}
 </nav>
 
 <header>
-  <h1>{{ lesson.title }}</h1>
+  <h1>{{ item.title or item.name }}</h1>
   <div class="meta">
-    <span class="tag tag-category">{{ lesson.category }}</span>
-    <span class="tag {% if lesson.status == 'active' %}tag-active{% elif lesson.status == 'deprecated' %}tag-deprecated{% endif %}">{{ lesson.status }}</span>
-    <span style="color: var(--text-dim); font-size: 0.85rem;">{{ lesson.path }}</span>
-    {% if lesson.gh_url %}<a href="{{ lesson.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
+    <span class="tag tag-kind-{{ item.kind }}">{{ item.kind }}</span>
+    {% if item.kind == "lesson" %}
+    <span class="tag tag-category">{{ item.category }}</span>
+    <span class="tag {% if item.status == 'active' %}tag-active{% elif item.status == 'deprecated' %}tag-deprecated{% endif %}">{{ item.status }}</span>
+    {% elif item.kind == "skill" and item.description %}
+    <span style="color: var(--text-dim); font-size: 0.9rem;">{{ item.description }}</span>
+    {% endif %}
+    <span style="color: var(--text-dim); font-size: 0.85rem;">{{ item.path }}</span>
+    {% if item.gh_url %}<a href="{{ item.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
 </header>
 
@@ -124,10 +133,10 @@ header h1 {
   {{ body_html | safe }}
 </div>
 
-{% if lesson.all_keywords %}
+{% if item.kind == "lesson" and item.all_keywords %}
 <div class="keywords-section">
   <h3>Match Keywords</h3>
-  {% for kw in lesson.all_keywords %}
+  {% for kw in item.all_keywords %}
   <span class="tag">{{ kw }}</span>
   {% endfor %}
 </div>

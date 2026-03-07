@@ -244,6 +244,12 @@ tr:hover { background: var(--accent-dim); }
     <div class="label">Journal Entries</div>
   </div>
   {% endif %}
+  {% if stats.total_tasks %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_tasks }}</div>
+    <div class="label">Tasks</div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Dynamic: Session Stats (shown when serve API is available) -->
@@ -285,6 +291,40 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody></tbody>
   </table>
+</section>
+{% endif %}
+
+{% if tasks %}
+<!-- Tasks -->
+<section id="tasks">
+  <h2>Tasks <span class="count-badge">({{ stats.total_tasks }})</span></h2>
+  {% if stats.task_states %}
+  <div class="cat-chart">
+    {% for state, count in stats.task_states.items() %}
+    <span class="cat-chip">{{ state }} <span class="chip-count">{{ count }}</span></span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <table id="tasks-table">
+    <thead>
+      <tr><th>Title</th><th>State</th><th>Priority</th><th>Tags</th><th>Assigned</th>{% if gh_repo_url %}<th></th>{% endif %}</tr>
+    </thead>
+    <tbody>
+    {% for task in tasks %}
+      <tr{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td><strong>{{ task.title }}</strong></td>
+        <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
+        <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>
+        <td>{% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}</td>
+        <td>{% if task.assigned_to %}{{ task.assigned_to }}{% endif %}</td>
+        {% if gh_repo_url %}<td>{% if task.gh_url %}<a href="{{ task.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if tasks | length > 15 %}
+  <button class="show-more-btn" data-noun="tasks" onclick="toggleRows(this, 'tasks-table')">Show all {{ tasks | length }} tasks</button>
+  {% endif %}
 </section>
 {% endif %}
 
@@ -387,6 +427,30 @@ tr:hover { background: var(--accent-dim); }
   </table>
   {% if journals | length > 10 %}
   <button class="show-more-btn" data-noun="entries" onclick="toggleRows(this, 'journal-table')">Show all {{ journals | length }} entries</button>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if summaries %}
+<!-- Knowledge Summaries -->
+<section id="summaries">
+  <h2>Summaries <span class="count-badge">({{ summaries | length }})</span></h2>
+  <table id="summaries-table">
+    <thead>
+      <tr><th>Period</th><th>Type</th><th>Preview</th></tr>
+    </thead>
+    <tbody>
+    {% for s in summaries %}
+      <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{{ s.period }}</td>
+        <td><span class="tag tag-category">{{ s.type }}</span></td>
+        <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.preview }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if summaries | length > 10 %}
+  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }} summaries</button>
   {% endif %}
 </section>
 {% endif %}

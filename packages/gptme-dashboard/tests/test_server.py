@@ -399,3 +399,159 @@ def test_api_journals_limit(tmp_path: Path):
         data = resp.get_json()
         assert isinstance(data, list)
         assert len(data) == 3
+
+
+def test_api_tasks_empty(client):
+    """Test /api/tasks returns empty list when no tasks directory exists."""
+    resp = client.get("/api/tasks")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert len(data) == 0
+
+
+def test_api_tasks_with_entries(tmp_path: Path):
+    """Test /api/tasks returns task entries from tasks/ directory."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "fix-bug.md").write_text(
+        "---\nstate: active\npriority: high\ntags: [bugfix]\ncreated: 2026-03-01\n---\n# Fix Bug\n"
+    )
+    (tasks_dir / "add-feature.md").write_text(
+        "---\nstate: backlog\npriority: low\ncreated: 2026-02-28\n---\n# Add Feature\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/tasks")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        # Active tasks should come first
+        assert data[0]["state"] == "active"
+        assert data[0]["title"] == "Fix Bug"
+
+
+def test_api_tasks_state_filter(tmp_path: Path):
+    """Test /api/tasks?state=X filters by task state."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "active-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# Active Task\n"
+    )
+    (tasks_dir / "done-task.md").write_text(
+        "---\nstate: done\ncreated: 2026-02-28\n---\n# Done Task\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/tasks?state=active")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["state"] == "active"
+
+
+def test_api_tasks_limit(tmp_path: Path):
+    """Test /api/tasks?limit=N caps the response size."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    for i in range(5):
+        (tasks_dir / f"task-{i}.md").write_text(
+            f"---\nstate: active\ncreated: 2026-03-0{i + 1}\n---\n# Task {i}\n"
+        )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/tasks?limit=3")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 3
+
+        # Non-numeric limit falls back to default (100), not a 500 error
+        resp = c.get("/api/tasks?limit=foo")
+        assert resp.status_code == 200
+
+
+def test_api_summaries_empty(tmp_path: Path):
+    """Test /api/summaries returns empty list when no summaries exist."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data == []
+
+
+def test_api_summaries_returns_entries(tmp_path: Path):
+    """Test /api/summaries returns daily/weekly/monthly entries."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text("# Day\n\nGood day.\n")
+    (summaries_dir / "weekly" / "2026-W10.md").write_text("# Week\n\nGood week.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        types = {e["type"] for e in data}
+        assert "daily" in types
+        assert "weekly" in types
+
+
+def test_api_summaries_type_filter(tmp_path: Path):
+    """Test /api/summaries?type= filters by period type."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text("# Day\n\nDaily.\n")
+    (summaries_dir / "weekly" / "2026-W10.md").write_text("# Week\n\nWeekly.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries?type=daily")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert all(e["type"] == "daily" for e in data)
+        assert len(data) == 1

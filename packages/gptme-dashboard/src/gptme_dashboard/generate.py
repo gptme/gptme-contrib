@@ -40,6 +40,18 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
 
 _md = MarkdownIt("commonmark", options_update={"highlight": _highlight_code}).enable("table")
 
+# State ordering for task display (active work first)
+_STATE_ORDER = {
+    "active": 0,
+    "waiting": 1,
+    "ready_for_review": 2,
+    "todo": 3,
+    "backlog": 4,
+    "someday": 5,
+    "done": 6,
+    "cancelled": 7,
+}
+
 
 def render_markdown_to_html(md_text: str) -> str:
     """Render markdown text to HTML using markdown-it-py (CommonMark compliant).
@@ -110,7 +122,7 @@ def _parse_toml(path: Path) -> dict:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
             print(
-                "Warning: tomli is not installed; [agent.urls] and other TOML features unavailable"
+                "Warning: tomli is not installed; [agent.links], [agent.urls] and other TOML features unavailable"
                 " (install gptme-dashboard[tomli] or upgrade to Python 3.11+)",
                 file=sys.stderr,
             )
@@ -126,16 +138,23 @@ def _parse_toml(path: Path) -> dict:
 
 
 def read_agent_urls(workspace: Path) -> dict[str, str]:
-    """Read [agent.urls] from gptme.toml.
+    """Read agent links from gptme.toml.
+
+    Checks ``[agent.links]`` first (the canonical key), then falls back to
+    ``[agent.urls]`` for backwards compatibility.
 
     Returns a dict of link name → URL, e.g. ``{"dashboard": "https://...", "repo": "..."}``.
     Returns an empty dict if the section is absent or gptme.toml is missing.
 
-    Note: ``[agent.urls]`` is not yet part of gptme's ``AgentConfig`` schema, so we
-    parse gptme.toml directly rather than going through ``get_project_config``.
+    Note: ``[agent.links]`` / ``[agent.urls]`` are not yet part of gptme's ``AgentConfig``
+    schema, so we parse gptme.toml directly rather than going through ``get_project_config``.
     """
     data = _parse_toml(workspace / "gptme.toml")
-    links = data.get("agent", {}).get("urls", {})
+    agent = data.get("agent", {})
+    # Prefer [agent.links] (canonical); fall back to [agent.urls] for backwards compat.
+    # Use key-presence check (not `or`) so an empty [agent.links] section doesn't
+    # incorrectly fall through to [agent.urls].
+    links = agent["links"] if "links" in agent else agent.get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}
         for key, value in links.items():
@@ -385,6 +404,172 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
             )
 
     return entries
+
+
+def _task_to_dict(md_file: Path) -> dict | None:
+    """Parse a single task file into a dashboard dict (manual fallback)."""
+    fm, body = parse_frontmatter(md_file)
+    if not fm:
+        return None
+
+    state = str(fm.get("state", "backlog") or "backlog").lower()
+    title = extract_title(body, md_file.stem.replace("-", " ").title())
+    priority = str(fm.get("priority", "") or "").lower()
+    tags = fm.get("tags", [])
+    if isinstance(tags, str):
+        tags = [tags]
+    elif not isinstance(tags, list):
+        tags = []
+    tags = [str(t) for t in tags]
+    assigned_to = str(fm.get("assigned_to", "") or "")
+
+    return {
+        "id": md_file.stem,
+        "title": title,
+        "state": state,
+        "priority": priority,
+        "tags": tags[:5],
+        "assigned_to": assigned_to,
+        "path": f"tasks/{md_file.name}",
+    }
+
+
+def scan_tasks(workspace: Path) -> list[dict]:
+    """Scan task files from the workspace tasks directory.
+
+    Uses ``gptodo.utils.load_tasks`` when available for proper type coercion and
+    state normalisation (e.g. deprecated ``new`` → ``backlog``).  Falls back to
+    manual YAML parsing when gptodo is not installed.
+
+    Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
+    ``tags``, ``assigned_to``, and ``path`` keys, sorted by state priority
+    then title.
+    """
+    tasks_dir = workspace / "tasks"
+    if not tasks_dir.is_dir():
+        return []
+
+    tasks: list[dict] = []
+
+    _gptodo_load_tasks = None
+    try:
+        from gptodo.utils import load_tasks as _gptodo_load_tasks  # type: ignore[assignment]
+    except ImportError:
+        pass
+
+    if _gptodo_load_tasks is not None:
+        for t in _gptodo_load_tasks(tasks_dir):
+            if t.path.name.lower() == "readme.md":
+                continue
+            if not t.metadata:
+                continue  # Skip files without YAML frontmatter
+            # Title lives in the markdown body, not in TaskInfo.
+            # Read the file once to avoid a second parse_frontmatter call.
+            content = t.path.read_text(errors="replace")
+            parts = content.split("---", 2)
+            body = parts[2] if len(parts) >= 3 else ""
+            title = extract_title(body, t.name.replace("-", " ").title())
+            raw_tags = t.tags or []
+            if isinstance(raw_tags, str):
+                raw_tags = [raw_tags]
+            tags = [str(tag) for tag in raw_tags][:5]
+            tasks.append(
+                {
+                    "id": t.name,
+                    "title": title,
+                    "state": (t.state or "backlog").lower(),
+                    "priority": (t.priority or "").lower(),
+                    "tags": tags,
+                    "assigned_to": t.assigned_to or "",
+                    "path": f"tasks/{t.path.name}",
+                }
+            )
+    else:
+        # gptodo not installed — fall back to manual frontmatter parsing
+        for md_file in sorted(tasks_dir.glob("*.md")):
+            if md_file.name.lower() == "readme.md":
+                continue
+            entry = _task_to_dict(md_file)
+            if entry is not None:
+                tasks.append(entry)
+
+    tasks.sort(key=lambda t: (_STATE_ORDER.get(t["state"], 99), t["title"]))
+    return tasks
+
+
+def _period_sort_key(period: str) -> str:
+    """Convert a period string to a sortable ISO date string.
+
+    Handles daily (2026-03-07), weekly (2026-W10), and monthly (2026-03) formats.
+    Without normalization, weekly strings (containing 'W') sort above daily/monthly
+    strings because 'W' > '0'-'9' in ASCII, breaking chronological order.
+    """
+    if "W" in period:
+        # ISO week: 2026-W10 → first day of that week
+        try:
+            year_str, week_str = period.split("-W")
+            d = date.fromisocalendar(int(year_str), int(week_str), 1)
+            return d.isoformat()
+        except (ValueError, AttributeError):
+            return period
+    elif re.match(r"^\d{4}-\d{2}$", period):
+        # Monthly: 2026-03 → 2026-03-01
+        return period + "-01"
+    else:
+        # Daily: already a sortable ISO date
+        return period
+
+
+def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> list[dict]:
+    """Scan knowledge/summaries for daily, weekly, and monthly summary files.
+
+    Looks for markdown files in ``knowledge/summaries/{daily,weekly,monthly}/``
+    and returns them sorted by date descending (most recent first), capped at
+    *limit* entries.
+
+    Each entry contains ``period`` (the filename stem), ``type`` (daily/weekly/monthly),
+    and ``preview`` (first content line).
+
+    Args:
+        workspace: Root directory of the workspace.
+        limit: Maximum number of entries to return.
+        period_type: If non-empty, only include entries of this type (daily/weekly/monthly).
+    """
+    summaries_dir = workspace / "knowledge" / "summaries"
+    if not summaries_dir.is_dir():
+        return []
+
+    entries: list[dict] = []
+
+    for pt in ("daily", "weekly", "monthly"):
+        if period_type and pt != period_type:
+            continue
+        type_dir = summaries_dir / pt
+        if not type_dir.is_dir():
+            continue
+        for md_file in type_dir.glob("*.md"):
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```", "**")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "period": md_file.stem,
+                    "type": pt,
+                    "preview": preview,
+                }
+            )
+
+    # Sort by period descending using a normalized sort key so that
+    # daily/weekly/monthly entries compare correctly across formats.
+    entries.sort(key=lambda e: _period_sort_key(e["period"]), reverse=True)
+    return entries[:limit]
 
 
 def detect_submodules(workspace: Path) -> list[dict]:
@@ -805,10 +990,25 @@ def collect_workspace_data(
     # Scan recent journal entries
     journals = scan_journals(workspace, limit=30)
 
+    # Scan tasks
+    tasks = scan_tasks(workspace)
+    if gh_repo_url:
+        for task in tasks:
+            task["gh_url"] = github_blob_url(gh_repo_url, task["path"])
+
+    # Scan knowledge summaries (daily/weekly/monthly)
+    summaries = scan_summaries(workspace, limit=20)
+
     # Optionally scan recent sessions
     sessions: list[dict] = []
     if include_sessions:
         sessions = scan_recent_sessions(workspace, days=sessions_days)
+
+    # Compute task state counts for stats
+    task_states: dict[str, int] = {}
+    for task in tasks:
+        s = task["state"]
+        task_states[s] = task_states.get(s, 0) + 1
 
     stats = {
         "total_lessons": len(lessons),
@@ -818,6 +1018,9 @@ def collect_workspace_data(
         "total_guidance": len(guidance),
         "total_sessions": len(sessions),
         "total_journals": len(journals),
+        "total_tasks": len(tasks),
+        "task_states": task_states,
+        "total_summaries": len(summaries),
         "lesson_categories": lesson_categories,
     }
 
@@ -834,6 +1037,8 @@ def collect_workspace_data(
         "guidance": guidance,
         "sessions": sessions,
         "journals": journals,
+        "tasks": tasks,
+        "summaries": summaries,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,
@@ -871,38 +1076,23 @@ def generate(
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(html)
 
-    # Generate per-lesson detail pages
-    lesson_template = env.get_template("lesson.html")
-    for lesson in data["lessons"]:
-        # Compute how many levels up from the lesson page to the site root.
-        # page_url is e.g. "lessons/workflow/test.html" (depth=2), so root_prefix="../../"
-        depth = len(Path(lesson["page_url"]).parts) - 1
+    # Generate per-item detail pages for the unified guidance list (lessons + skills)
+    guidance_template = env.get_template("guidance.html")
+    for item in data["guidance"]:
+        # Compute how many levels up from the detail page to the site root.
+        # e.g. "lessons/workflow/test.html" (depth=2) → root_prefix="../../"
+        # e.g. "skills/my-skill/index.html" (depth=2) → root_prefix="../../"
+        depth = len(Path(item["page_url"]).parts) - 1
         root_prefix = "../" * depth
-        lesson_html = lesson_template.render(
+        item_html = guidance_template.render(
             workspace_name=data["workspace_name"],
-            lesson=lesson,
-            body_html=render_markdown_to_html(lesson["body"]),
+            item=item,
+            body_html=render_markdown_to_html(item["body"]),
             root_prefix=root_prefix,
         )
-        page_path = output / lesson["page_url"]
+        page_path = output / item["page_url"]
         page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(lesson_html)
-
-    # Generate per-skill detail pages
-    skill_template = env.get_template("skill.html")
-    for skill in data["skills"]:
-        # page_url is e.g. "skills/my-skill/index.html" (depth=2), so root_prefix="../../"
-        depth = len(Path(skill["page_url"]).parts) - 1
-        root_prefix = "../" * depth
-        skill_html = skill_template.render(
-            workspace_name=data["workspace_name"],
-            skill=skill,
-            body_html=render_markdown_to_html(skill["body"]),
-            root_prefix=root_prefix,
-        )
-        page_path = output / skill["page_url"]
-        page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(skill_html)
+        page_path.write_text(item_html)
 
     stats = data["stats"]
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""

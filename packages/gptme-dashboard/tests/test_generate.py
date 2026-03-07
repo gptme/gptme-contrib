@@ -29,6 +29,8 @@ from gptme_dashboard.generate import (
     scan_plugins,
     scan_recent_sessions,
     scan_skills,
+    scan_summaries,
+    scan_tasks,
     skill_page_path,
 )
 
@@ -1169,6 +1171,59 @@ def test_generate_renders_agent_urls_in_header(workspace: Path, tmp_path: Path):
     assert ">website<" in html
 
 
+def test_read_agent_urls_agent_links_key(tmp_path: Path):
+    """read_agent_urls reads [agent.links] (canonical key name)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.links]
+        dashboard = "https://example.com/dashboard"
+        repo = "https://github.com/example/agent"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    assert links == {
+        "dashboard": "https://example.com/dashboard",
+        "repo": "https://github.com/example/agent",
+    }
+
+
+def test_read_agent_urls_links_preferred_over_urls(tmp_path: Path):
+    """[agent.links] takes precedence over [agent.urls] when both are present."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent.links]
+        dashboard = "https://links.example.com"
+
+        [agent.urls]
+        dashboard = "https://urls.example.com"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    assert links == {"dashboard": "https://links.example.com"}
+
+
+def test_read_agent_urls_empty_links_does_not_fall_back_to_urls(tmp_path: Path):
+    """An explicitly-empty [agent.links] section does NOT fall back to [agent.urls].
+
+    The key-presence check (``"links" in agent``) prevents the ``or``-operator
+    pitfall where an empty dict is falsy and would silently yield [agent.urls].
+    """
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent.links]
+
+        [agent.urls]
+        dashboard = "https://urls.example.com"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    # [agent.links] is present but empty — should return {} not fall back to [agent.urls]
+    assert links == {}
+
+
 def test_generate_no_agent_urls_no_extra_midpoints(workspace: Path, tmp_path: Path):
     """When [agent.urls] is absent the header contains no extra link middots."""
     output = tmp_path / "_site"
@@ -1573,9 +1628,309 @@ def test_generate_html_includes_journals(workspace: Path, tmp_path: Path):
     assert "2026-03-07" in html
 
 
+def test_scan_summaries_all_types(tmp_path: Path):
+    """scan_summaries finds entries across daily/weekly/monthly subdirectories."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "monthly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text(
+        "# Daily Summary: 2026-03-07\n\n**Sessions**: 2 | **Commits**: 3\n"
+    )
+    (summaries_dir / "weekly" / "2026-W10.md").write_text(
+        "# Weekly Summary: 2026-W10\n\nGood week.\n"
+    )
+    (summaries_dir / "monthly" / "2026-03.md").write_text(
+        "# Monthly Summary: March 2026\n\nGreat month.\n"
+    )
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 3
+    types = {e["type"] for e in entries}
+    assert types == {"daily", "weekly", "monthly"}
+    periods = {e["period"] for e in entries}
+    assert "2026-03-07" in periods
+    assert "2026-W10" in periods
+    assert "2026-03" in periods
+
+
+def test_scan_summaries_empty_workspace(tmp_path: Path):
+    """scan_summaries returns empty list when knowledge/summaries is absent."""
+    assert scan_summaries(tmp_path) == []
+
+
+def test_scan_summaries_respects_limit(tmp_path: Path):
+    """scan_summaries caps results at the limit parameter."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    for i in range(1, 8):
+        (daily_dir / f"2026-03-{i:02d}.md").write_text(f"# Day {i}\n\nContent.\n")
+
+    entries = scan_summaries(tmp_path, limit=5)
+    assert len(entries) == 5
+    # Most recent first
+    assert entries[0]["period"] == "2026-03-07"
+
+
+def test_scan_summaries_preview_skips_headings(tmp_path: Path):
+    """scan_summaries preview skips heading/bold lines to get real content."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text(
+        "# Daily Summary: 2026-03-07\n\n**Sessions**: 1\n\nFocused on dashboard work.\n"
+    )
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 1
+    # Preview should skip heading and **bold** lines
+    assert entries[0]["preview"] == "Focused on dashboard work."
+
+
+def test_scan_summaries_period_type_filter(tmp_path: Path):
+    """period_type filter is applied before limit, not after."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    # 3 daily + 3 weekly entries
+    for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+        (summaries_dir / "daily" / f"{day}.md").write_text(f"# {day}\n\nContent.\n")
+    for week in ("2026-W01", "2026-W02", "2026-W03"):
+        (summaries_dir / "weekly" / f"{week}.md").write_text(f"# {week}\n\nContent.\n")
+
+    # With limit=3 and no filter: top-3 of 6 total entries (mixed types)
+    all_entries = scan_summaries(tmp_path, limit=3)
+    assert len(all_entries) == 3
+
+    # With period_type="daily" and limit=3: should return 3 daily entries,
+    # not first 3 overall (which may include weekly) then filter to fewer.
+    daily_entries = scan_summaries(tmp_path, limit=3, period_type="daily")
+    assert len(daily_entries) == 3
+    assert all(e["type"] == "daily" for e in daily_entries)
+
+
+def test_scan_summaries_sort_order_across_types(tmp_path: Path):
+    """Weekly ISO-week strings sort chronologically with daily/monthly entries."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "monthly").mkdir(parents=True)
+    # Week 2 of 2026 starts ~2026-01-05; day 2026-01-15 is later in the month;
+    # monthly 2026-01 represents 2026-01-01.
+    (summaries_dir / "daily" / "2026-01-15.md").write_text("# Mid-Jan\n\nDaily.\n")
+    (summaries_dir / "weekly" / "2026-W02.md").write_text("# Week 2\n\nWeekly.\n")
+    (summaries_dir / "monthly" / "2026-01.md").write_text("# January\n\nMonthly.\n")
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 3
+    periods = [e["period"] for e in entries]
+    # Descending: 2026-01-15 (Jan 15) > 2026-W02 (~Jan 5) > 2026-01 (Jan 1)
+    assert periods[0] == "2026-01-15", f"Expected daily first, got {periods}"
+    assert periods[1] == "2026-W02", f"Expected weekly second, got {periods}"
+    assert periods[2] == "2026-01", f"Expected monthly last, got {periods}"
+
+
+def test_collect_workspace_data_includes_summaries(workspace: Path):
+    """collect_workspace_data includes summaries when present."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid stuff.\n")
+
+    data = collect_workspace_data(workspace)
+    assert len(data["summaries"]) == 1
+    assert data["stats"]["total_summaries"] == 1
+
+
+def test_generate_html_includes_summaries(workspace: Path, tmp_path: Path):
+    """Generated HTML includes summaries section when entries exist."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid stuff.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "Summaries" in html
+    assert "2026-03-07" in html
+
+
 def test_render_markdown_lists():
     """Lists after a paragraph should render as <li> elements."""
     md = "External resources:\n- LLM evaluation benchmarks\n- Agent evaluation research"
     html = render_markdown_to_html(md)
     assert "<li>" in html
     assert "LLM evaluation benchmarks" in html
+
+
+# --- Task scanning tests ---
+
+
+def test_scan_tasks_basic(tmp_path: Path):
+    """scan_tasks finds task files with YAML frontmatter."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "fix-bug.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        priority: high
+        tags: [bugfix, urgent]
+        assigned_to: bob
+        created: 2026-03-01
+        ---
+        # Fix Critical Bug
+
+        The database connection pool leaks under load.
+        """)
+    )
+    (tasks_dir / "add-feature.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: backlog
+        priority: medium
+        tags: [feature]
+        created: 2026-02-28
+        ---
+        # Add Feature X
+
+        Implement the new feature.
+        """)
+    )
+
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 2
+    # Active tasks sort before backlog
+    assert tasks[0]["state"] == "active"
+    assert tasks[0]["title"] == "Fix Critical Bug"
+    assert tasks[0]["priority"] == "high"
+    assert tasks[0]["assigned_to"] == "bob"
+    assert "bugfix" in tasks[0]["tags"]
+    assert tasks[0]["id"] == "fix-bug"
+    assert tasks[0]["path"] == "tasks/fix-bug.md"
+
+
+def test_scan_tasks_skips_readme(tmp_path: Path):
+    """scan_tasks skips README.md files."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "README.md").write_text("# Tasks\n\nTask management guide.\n")
+    (tasks_dir / "real-task.md").write_text(
+        "---\nstate: todo\ncreated: 2026-03-01\n---\n# Real Task\n"
+    )
+
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == "real-task"
+
+
+def test_scan_tasks_skips_no_frontmatter(tmp_path: Path):
+    """scan_tasks skips files without YAML frontmatter."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "notes.md").write_text("# Just some notes\n\nNo frontmatter here.\n")
+
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 0
+
+
+def test_scan_tasks_empty_workspace(tmp_path: Path):
+    """scan_tasks returns empty list when no tasks directory exists."""
+    assert scan_tasks(tmp_path) == []
+
+
+def test_scan_tasks_state_ordering(tmp_path: Path):
+    """scan_tasks sorts by state priority (active first, done last)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    for state in ["done", "active", "backlog", "waiting"]:
+        (tasks_dir / f"task-{state}.md").write_text(
+            f"---\nstate: {state}\ncreated: 2026-03-01\n---\n# Task {state.title()}\n"
+        )
+
+    tasks = scan_tasks(tmp_path)
+    states = [t["state"] for t in tasks]
+    assert states == ["active", "waiting", "backlog", "done"]
+
+
+def test_collect_workspace_data_includes_tasks(workspace: Path):
+    """collect_workspace_data includes task data and stats."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\npriority: high\ncreated: 2026-03-01\n---\n# My Task\n"
+    )
+    (tasks_dir / "blocked-task.md").write_text(
+        "---\nstate: waiting\ncreated: 2026-03-01\n---\n# Blocked Task\n"
+    )
+
+    data = collect_workspace_data(workspace)
+    assert len(data["tasks"]) == 2
+    assert data["stats"]["total_tasks"] == 2
+    assert data["stats"]["task_states"]["active"] == 1
+    assert data["stats"]["task_states"]["waiting"] == 1
+
+
+def test_scan_tasks_malformed_yaml_types(tmp_path: Path):
+    """scan_tasks handles non-string YAML field values without crashing."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    # YAML that parses state as a list (non-hashable) — previously caused TypeError in sort()
+    (tasks_dir / "weird-task.md").write_text(
+        "---\nstate:\n  - active\n  - todo\npriority:\n  - high\nassigned_to:\n  - bob\ntags: [dev]\ncreated: 2026-03-01\n---\n# Weird Task\n"
+    )
+    # Should not raise — malformed files may be skipped or coerced depending on backend
+    tasks = scan_tasks(tmp_path)
+    assert isinstance(tasks, list)
+    # If the task was included (manual fallback), fields must be hashable strings
+    for t in tasks:
+        assert isinstance(t["state"], str)
+        assert isinstance(t["priority"], str)
+        assert isinstance(t["assigned_to"], str)
+
+
+def test_scan_tasks_single_string_tags(tmp_path: Path):
+    """scan_tasks promotes a bare string tags value to a one-element list."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "tagged-task.md").write_text(
+        "---\nstate: active\ntags: bugfix\ncreated: 2026-03-01\n---\n# Tagged Task\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["tags"] == ["bugfix"]
+
+
+def test_scan_tasks_gptodo_path(tmp_path: Path):
+    """scan_tasks exercises the gptodo code path when gptodo is installed."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\npriority: high\ntags: [feature]\nassigned_to: bob\ncreated: 2026-03-01\n---\n# My Task\n\nDo something useful.\n"
+    )
+    (tasks_dir / "README.md").write_text("# Tasks\n")
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    t = tasks[0]
+    assert t["id"] == "my-task"
+    assert t["title"] == "My Task"
+    assert t["state"] == "active"
+    assert t["priority"] == "high"
+    assert t["tags"] == ["feature"]
+    assert t["assigned_to"] == "bob"
+    assert t["path"] == "tasks/my-task.md"
+
+
+def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
+    """Generated HTML includes task section when tasks exist."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "build-feature.md").write_text(
+        "---\nstate: active\npriority: high\ntags: [feature]\ncreated: 2026-03-01\n---\n# Build Feature\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "Tasks" in html
+    assert "Build Feature" in html
+    assert "active" in html
