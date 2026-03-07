@@ -322,6 +322,86 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
     return sessions
 
 
+def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
+    """Scan recent journal entries from the workspace journal directory.
+
+    Supports two formats:
+    - Subdirectory format: ``journal/YYYY-MM-DD/*.md``
+    - Flat format: ``journal/YYYY-MM-DD.md``
+
+    Returns a list of dicts with ``date``, ``name``, and ``preview`` keys,
+    sorted by date descending (most recent first), capped at *limit* entries.
+    """
+    journal_dir = workspace / "journal"
+    if not journal_dir.is_dir():
+        return []
+
+    entries: list[dict] = []
+
+    # Subdirectory format: journal/YYYY-MM-DD/*.md
+    for day_dir in sorted(journal_dir.iterdir(), reverse=True):
+        if not day_dir.is_dir():
+            continue
+        # Validate date format
+        try:
+            date.fromisoformat(day_dir.name)
+        except ValueError:
+            continue
+        for md_file in sorted(day_dir.glob("*.md"), reverse=True):
+            if len(entries) >= limit:
+                break
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            # Extract first non-empty, non-heading line as preview
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "date": day_dir.name,
+                    "name": md_file.stem,
+                    "preview": preview,
+                }
+            )
+        if len(entries) >= limit:
+            break
+
+    # Flat format fallback: journal/YYYY-MM-DD.md
+    if not entries:
+        for md_file in sorted(journal_dir.glob("*.md"), reverse=True):
+            if len(entries) >= limit:
+                break
+            stem = md_file.stem
+            try:
+                date.fromisoformat(stem[:10])
+            except ValueError:
+                continue
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "date": stem[:10],
+                    "name": stem,
+                    "preview": preview,
+                }
+            )
+
+    return entries
+
+
 def detect_submodules(workspace: Path) -> list[dict]:
     """Detect git submodules with gptme-like structure.
 
@@ -737,6 +817,9 @@ def collect_workspace_data(
     all_items = guidance + packages + plugins
     sources: list[str] = sorted({item.get("source", "") for item in all_items} - {""})
 
+    # Scan recent journal entries
+    journals = scan_journals(workspace, limit=30)
+
     # Optionally scan recent sessions
     sessions: list[dict] = []
     if include_sessions:
@@ -749,6 +832,7 @@ def collect_workspace_data(
         "total_skills": len(skills),
         "total_guidance": len(guidance),
         "total_sessions": len(sessions),
+        "total_journals": len(journals),
         "lesson_categories": lesson_categories,
     }
 
@@ -764,6 +848,7 @@ def collect_workspace_data(
         "skills": skills,
         "guidance": guidance,
         "sessions": sessions,
+        "journals": journals,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,

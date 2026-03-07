@@ -189,6 +189,18 @@ tr:hover { background: var(--accent-dim); }
   background: var(--accent-dim);
 }
 
+/* Two-column layout for short sections */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}
+.two-col section { margin-bottom: 0; }
+
+@media (max-width: 800px) {
+  .two-col { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 600px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
   table { font-size: 0.8rem; }
@@ -226,6 +238,12 @@ tr:hover { background: var(--accent-dim); }
     <div class="label">Sessions</div>
   </div>
   {% endif %}
+  {% if stats.total_journals %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_journals }}</div>
+    <div class="label">Journal Entries</div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Dynamic: Session Stats (shown when serve API is available) -->
@@ -256,6 +274,19 @@ tr:hover { background: var(--accent-dim); }
     <tbody></tbody>
   </table>
 </section>
+
+<!-- Dynamic: Journals (shown when serve API is available and no static journals) -->
+{% if not journals %}
+<section id="dynamic-journals" class="dynamic-panel" style="display:none">
+  <h2>Recent Journal Entries</h2>
+  <table id="dynamic-journal-table">
+    <thead>
+      <tr><th>Date</th><th>Entry</th><th>Preview</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+{% endif %}
 
 {% if sessions %}
 <!-- Static Sessions (from --sessions flag) -->
@@ -299,11 +330,72 @@ tr:hover { background: var(--accent-dim); }
 </section>
 {% endif %}
 
-<!-- Lessons & Skills -->
+<!-- Packages & Plugins (short, infrastructure overview) -->
+<div class="two-col">
+  <section id="packages">
+    <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for pkg in packages %}
+        <tr>
+          <td><strong>{{ pkg.name }}</strong></td>
+          <td>{{ pkg.version }}</td>
+          <td>{{ pkg.description }}</td>
+          {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="plugins">
+    <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for plugin in plugins %}
+        <tr>
+          <td><strong>{{ plugin.name }}</strong></td>
+          <td>{{ plugin.description }}</td>
+          <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
+          {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+{% if journals %}
+<!-- Recent Journal Entries -->
+<section id="journals">
+  <h2>Recent Journal Entries <span class="count-badge">({{ journals | length }})</span></h2>
+  <table id="journal-table">
+    <thead>
+      <tr><th>Date</th><th>Entry</th><th>Preview</th></tr>
+    </thead>
+    <tbody>
+    {% for j in journals %}
+      <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{{ j.date }}</td>
+        <td>{{ j.name }}</td>
+        <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j.preview }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if journals | length > 10 %}
+  <button class="show-more-btn" onclick="toggleRows(this, 'journal-table')">Show all {{ journals | length }} entries</button>
+  {% endif %}
+</section>
+{% endif %}
+
+<!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
   <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
-  <!-- Category chips (inline, replaces standalone Categories section) -->
+  <!-- Category chips -->
   <div class="cat-chart" id="guidance-filters">
     <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
     {% for cat, count in stats.lesson_categories.items() %}
@@ -325,7 +417,7 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody>
     {% for item in guidance %}
-      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}"{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}"{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
         <td>{% if item.page_url %}<a href="{{ item.page_url }}">{{ item.title | default(item.name, true) }}</a>{% else %}{{ item.title | default(item.name, true) }}{% endif %}</td>
         <td><span class="tag tag-kind-{{ item.kind }}">{{ item.kind }}</span></td>
         <td><span class="tag tag-category">{{ item.category }}</span></td>
@@ -337,47 +429,9 @@ tr:hover { background: var(--accent-dim); }
     {% endfor %}
     </tbody>
   </table>
-  {% if guidance | length > 15 %}
+  {% if guidance | length > 10 %}
   <button class="show-more-btn" id="guidance-show-more" onclick="toggleRows(this, 'guidance-table')">Show all {{ guidance | length }} items</button>
   {% endif %}
-</section>
-
-<!-- Plugins -->
-<section id="plugins">
-  <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
-  <table>
-    <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-    <tbody>
-    {% for plugin in plugins %}
-      <tr>
-        <td><strong>{{ plugin.name }}</strong></td>
-        <td>{{ plugin.description }}</td>
-        <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
-        {% if sources %}<td>{% if plugin.source %}<span class="tag tag-source">{{ plugin.source }}</span>{% endif %}</td>{% endif %}
-        {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</section>
-
-<!-- Packages -->
-<section id="packages">
-  <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
-  <table>
-    <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-    <tbody>
-    {% for pkg in packages %}
-      <tr>
-        <td><strong>{{ pkg.name }}</strong></td>
-        <td>{{ pkg.version }}</td>
-        <td>{{ pkg.description }}</td>
-        {% if sources %}<td>{% if pkg.source %}<span class="tag tag-source">{{ pkg.source }}</span>{% endif %}</td>{% endif %}
-        {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
 </section>
 {% endblock %}
 
@@ -435,7 +489,7 @@ function applyFilters() {
     } else {
       // Restore collapse state
       idx++;
-      if (idx > 15) {
+      if (idx > 10) {
         row.classList.add('collapsed-row');
         row.style.display = 'none';
       } else {
@@ -479,6 +533,7 @@ async function initDynamic() {
     loadSessionStats();
     loadRecentSessions();
     loadServices();
+    loadJournals();
   } catch (e) {
     // No backend — stay in static mode
   }
@@ -563,6 +618,24 @@ async function loadServices() {
         + '</tr>';
     }).join('');
   } catch (e) { hide('agent-services'); }
+}
+
+async function loadJournals() {
+  try {
+    const resp = await fetch('/api/journals?limit=20');
+    if (!resp.ok) { hide('dynamic-journals'); return; }
+    const journals = await resp.json();
+    if (!Array.isArray(journals) || journals.length === 0) { hide('dynamic-journals'); return; }
+    const tbody = document.querySelector('#dynamic-journal-table tbody');
+    if (!tbody) { hide('dynamic-journals'); return; }
+    tbody.innerHTML = journals.map(j =>
+      '<tr>'
+      + '<td>' + esc(j.date || '') + '</td>'
+      + '<td>' + esc(j.name || '') + '</td>'
+      + '<td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.preview || '') + '</td>'
+      + '</tr>'
+    ).join('');
+  } catch (e) { hide('dynamic-journals'); }
 }
 
 function hide(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }

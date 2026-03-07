@@ -23,6 +23,7 @@ from gptme_dashboard.generate import (
     read_agent_urls,
     read_workspace_config,
     render_markdown_to_html,
+    scan_journals,
     scan_lessons,
     scan_packages,
     scan_plugins,
@@ -1496,6 +1497,77 @@ class TestScanRecentSessions:
         data = json.loads(json_str)
         assert len(data["sessions"]) == 1
         assert data["sessions"][0]["name"] == "2026-01-10-work"
+
+
+# --- Journal scanning tests ---
+
+
+def test_scan_journals_subdirectory_format(tmp_path: Path):
+    """scan_journals finds entries in journal/YYYY-MM-DD/*.md format."""
+    day_dir = tmp_path / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nDid some work today.\n")
+    (day_dir / "notes.md").write_text("# Notes\n\nSome notes here.\n")
+
+    entries = scan_journals(tmp_path)
+    assert len(entries) == 2
+    assert entries[0]["date"] == "2026-03-07"
+    assert entries[0]["preview"]  # should have extracted a preview
+
+
+def test_scan_journals_flat_format(tmp_path: Path):
+    """scan_journals finds entries in journal/YYYY-MM-DD.md format."""
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "2026-03-07.md").write_text("# March 7\n\nFlat format entry.\n")
+
+    entries = scan_journals(tmp_path)
+    assert len(entries) == 1
+    assert entries[0]["date"] == "2026-03-07"
+    assert "Flat format entry" in entries[0]["preview"]
+
+
+def test_scan_journals_respects_limit(tmp_path: Path):
+    """scan_journals caps results at the limit parameter."""
+    journal_dir = tmp_path / "journal"
+    for i in range(1, 20):
+        day_dir = journal_dir / f"2026-03-{i:02d}"
+        day_dir.mkdir(parents=True)
+        (day_dir / "session.md").write_text(f"# Day {i}\n\nEntry {i}.\n")
+
+    entries = scan_journals(tmp_path, limit=5)
+    assert len(entries) == 5
+    # Most recent first
+    assert entries[0]["date"] == "2026-03-19"
+
+
+def test_scan_journals_empty_workspace(tmp_path: Path):
+    """scan_journals returns empty list when no journal directory exists."""
+    assert scan_journals(tmp_path) == []
+
+
+def test_collect_workspace_data_includes_journals(workspace: Path):
+    """collect_workspace_data includes journal entries."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nWorked on tests.\n")
+
+    data = collect_workspace_data(workspace)
+    assert len(data["journals"]) == 1
+    assert data["stats"]["total_journals"] == 1
+
+
+def test_generate_html_includes_journals(workspace: Path, tmp_path: Path):
+    """Generated HTML includes journal section when entries exist."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nWorked on dashboard.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "Recent Journal Entries" in html
+    assert "2026-03-07" in html
 
 
 def test_preprocess_markdown_inserts_blank_before_list():

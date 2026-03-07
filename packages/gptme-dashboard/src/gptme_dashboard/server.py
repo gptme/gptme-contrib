@@ -38,7 +38,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         )
 
     from . import generate as _gen_mod
-    from .generate import generate, read_workspace_config
+    from .generate import generate, read_workspace_config, scan_journals
 
     # Generate static site if needed
     if site_dir is None:
@@ -278,6 +278,18 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             return jsonify({"services": services, "platform": system})
         except Exception as e:
             logger.exception("Error detecting services")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/journals")
+    def api_journals() -> Any:
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            limit = request.args.get("limit", 30, type=int)
+            limit = max(1, min(limit, 100))
+            entries = scan_journals(ws, limit=limit)
+            return jsonify(entries)
+        except Exception as e:
+            logger.exception("Error scanning journals")
             return jsonify({"error": str(e)}), 500
 
     return app
