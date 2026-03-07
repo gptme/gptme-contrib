@@ -880,6 +880,11 @@ def judge(
         if updated:
             store.rewrite(records)
             click.echo(f"\nUpdated {updated} record(s) in {store.path}", err=True)
+        elif not score_map:
+            click.echo(
+                "\nNo sessions were scored — check ANTHROPIC_API_KEY and the anthropic package.",
+                err=True,
+            )
         else:
             click.echo("\nNo matching records found in store to update.", err=True)
 
