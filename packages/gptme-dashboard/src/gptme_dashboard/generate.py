@@ -546,13 +546,11 @@ def _period_sort_key(period: str) -> str:
         # ISO week: 2026-W10 → first day of that week
         try:
             year_str, week_str = period.split("-W")
-            from datetime import date
-
             d = date.fromisocalendar(int(year_str), int(week_str), 1)
             return d.isoformat()
         except (ValueError, AttributeError):
             return period
-    elif len(period) == 7:
+    elif re.match(r"^\d{4}-\d{2}$", period):
         # Monthly: 2026-03 → 2026-03-01
         return period + "-01"
     else:
@@ -587,7 +585,7 @@ def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> l
         type_dir = summaries_dir / pt
         if not type_dir.is_dir():
             continue
-        for md_file in sorted(type_dir.glob("*.md"), reverse=True):
+        for md_file in type_dir.glob("*.md"):
             try:
                 text = md_file.read_text(errors="replace")[:500]
             except OSError:
