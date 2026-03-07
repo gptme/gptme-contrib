@@ -5,13 +5,32 @@ from pathlib import Path
 
 import click
 
-from gptme_dashboard.generate import generate, generate_json
+
+class DefaultGroup(click.Group):
+    """Click group that defaults to 'generate' when no subcommand is given.
+
+    This preserves backward compatibility: ``gptme-dashboard --workspace .``
+    still works and maps to ``gptme-dashboard generate --workspace .``.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # If no args or first arg looks like an option (not a subcommand), prepend 'generate'
+        if not args or (args[0].startswith("-") and args[0] not in ("--help", "-h")):
+            args = ["generate"] + list(args)
+        elif args[0] not in self.commands and args[0] not in ("--help", "-h"):
+            args = ["generate"] + list(args)
+        return super().parse_args(ctx, args)
 
 
-@click.command()
+@click.group(cls=DefaultGroup)
+def main() -> None:
+    """Dashboard generator and server for gptme workspaces."""
+
+
+@main.command()
 @click.option(
     "--workspace",
-    type=click.Path(),
+    type=click.Path(exists=True),
     default=".",
     show_default=True,
     help="Path to gptme workspace.",
@@ -20,7 +39,7 @@ from gptme_dashboard.generate import generate, generate_json
     "--output",
     type=click.Path(),
     default=None,
-    help="Output directory (default: _site). Generates both index.html and data.json.",
+    help="Output directory (default: <workspace>/_site). Generates both index.html and data.json.",
 )
 @click.option(
     "--templates",
@@ -51,7 +70,7 @@ from gptme_dashboard.generate import generate, generate_json
     show_default=True,
     help="Number of days back to scan for sessions (used with --sessions).",
 )
-def main(
+def generate(
     workspace: str,
     output: str | None,
     templates: str | None,
@@ -60,6 +79,9 @@ def main(
     sessions_days: int,
 ) -> None:
     """Generate a static dashboard and JSON data dump for a gptme workspace."""
+    from gptme_dashboard.generate import generate as do_generate
+    from gptme_dashboard.generate import generate_json
+
     ws = Path(workspace)
     tmpl = Path(templates) if templates is not None else None
 
@@ -68,12 +90,59 @@ def main(
         click.echo(generate_json(ws, include_sessions=sessions, sessions_days=sessions_days))
         return
 
-    out = Path(output) if output is not None else Path("_site")
-    data = generate(ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days)
+    out = Path(output) if output is not None else ws / "_site"
+    data = do_generate(ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days)
     json_str = generate_json(ws, out, _data=data)
 
     if print_json:
         sys.stdout.write(json_str + "\n")
+
+
+@main.command()
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True),
+    default=".",
+    show_default=True,
+    help="Path to gptme workspace.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8042,
+    show_default=True,
+    help="Port to serve on.",
+)
+@click.option(
+    "--host",
+    type=str,
+    default="127.0.0.1",
+    show_default=True,
+    help="Host to bind to.",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Static site directory (default: <workspace>/_site).",
+)
+def serve(workspace: str, port: int, host: str, output: str | None) -> None:
+    """Serve the dashboard with live API endpoints.
+
+    Generates the static site and serves it alongside API endpoints
+    for session stats and agent status. Requires Flask:
+    ``pip install gptme-dashboard[serve]``
+    """
+    from gptme_dashboard.server import create_app
+
+    ws = Path(workspace)
+    site = Path(output) if output else None
+
+    app = create_app(ws, site_dir=site)
+    click.echo(f"Serving dashboard at http://{host}:{port}")
+    click.echo(f"  Workspace: {ws.resolve()}")
+    click.echo(f"  API: http://{host}:{port}/api/status")
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":

@@ -27,14 +27,17 @@ Issues = "https://github.com/gptme/gptme-contrib/issues"
 sessions = [
     "gptme-sessions",
 ]
+serve = [
+    "flask>=3.0",
+    "gptme-sessions",
+]
 dev = [
     "mypy>=1.0.0",
-    "pytest>=7.0",
-    "gptme-sessions",
+    "gptme-dashboard[test]",
 ]
 test = [
     "pytest>=7.0",
-    "gptme-sessions",
+    "gptme-dashboard[serve]",
 ]
 
 [project.scripts]

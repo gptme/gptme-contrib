@@ -1,0 +1,311 @@
+"""Tests for the dynamic dashboard server."""
+
+import json
+import textwrap
+import unittest.mock
+from pathlib import Path
+
+import pytest
+
+from gptme_dashboard.server import create_app
+
+
+@pytest.fixture
+def workspace(tmp_path: Path) -> Path:
+    """Create a minimal workspace with gptme.toml and session data."""
+    # gptme.toml
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestBot"
+        """)
+    )
+
+    # Lessons dir (needed for generate)
+    (tmp_path / "lessons").mkdir()
+
+    # Session records
+    sessions_dir = tmp_path / "state" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    records = [
+        {
+            "session_id": "abc1",
+            "timestamp": "2026-03-06T10:00:00Z",
+            "harness": "claude-code",
+            "model": "claude-opus-4-6",
+            "run_type": "autonomous",
+            "category": "code",
+            "outcome": "productive",
+            "duration_seconds": 600,
+            "deliverables": [],
+        },
+        {
+            "session_id": "abc2",
+            "timestamp": "2026-03-06T11:00:00Z",
+            "harness": "gptme",
+            "model": "claude-sonnet-4-6",
+            "run_type": "autonomous",
+            "category": "triage",
+            "outcome": "noop",
+            "duration_seconds": 120,
+            "deliverables": [],
+        },
+        {
+            "session_id": "abc3",
+            "timestamp": "2026-03-06T12:00:00Z",
+            "harness": "claude-code",
+            "model": "claude-opus-4-6",
+            "run_type": "autonomous",
+            "category": "infrastructure",
+            "outcome": "productive",
+            "duration_seconds": 900,
+            "deliverables": ["commit:abc123"],
+        },
+    ]
+    with open(sessions_dir / "session-records.jsonl", "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+    return tmp_path
+
+
+@pytest.fixture
+def client(workspace: Path, tmp_path: Path):
+    """Create Flask test client."""
+    site_dir = tmp_path / "site"
+    app = create_app(workspace, site_dir=site_dir)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
+
+
+def test_index_served(client):
+    """Test that the static index.html is served at /."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"TestBot" in resp.data
+
+
+def test_api_status(client):
+    """Test /api/status returns dynamic mode info."""
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["mode"] == "dynamic"
+    assert data["agent"] == "TestBot"
+    assert "workspace" in data
+
+
+def test_api_sessions_stats(client):
+    """Test /api/sessions/stats returns session statistics."""
+    resp = client.get("/api/sessions/stats")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 3
+    assert data["productive"] == 2
+    assert data["noop"] == 1
+    assert 0 < data["success_rate"] < 1
+    assert "by_model" in data
+    assert "by_harness" in data
+
+
+def test_api_sessions_stats_with_days(client):
+    """Test /api/sessions/stats?days=N filters by recency."""
+    # Use days=365 (1 year window). Just verify the endpoint responds without error.
+    resp = client.get("/api/sessions/stats?days=365")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "total" in data
+
+
+def test_api_sessions_stats_days_zero(client):
+    """Test ?days=0 falls through to load_all (0 is not a valid positive filter)."""
+    # days=0 is falsy in Python; ensure the guard `days is not None and days > 0`
+    # treats it the same as no filter (load all sessions).
+    resp = client.get("/api/sessions/stats?days=0")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 3  # all sessions returned, same as no filter
+
+
+def test_api_sessions_list(client):
+    """Test /api/sessions returns recent sessions."""
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert len(data) == 3
+    # Most recent first
+    assert data[0]["session_id"] == "abc3"
+    assert data[0]["outcome"] == "productive"
+
+
+def test_api_sessions_limit(client):
+    """Test /api/sessions respects limit parameter."""
+    resp = client.get("/api/sessions?limit=2")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 2
+
+
+def test_api_sessions_limit_capped(client):
+    """Test /api/sessions caps limit at 200."""
+    resp = client.get("/api/sessions?limit=999")
+    assert resp.status_code == 200
+    # Should not error, just cap at 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+
+
+def test_api_sessions_limit_negative(client):
+    """Test /api/sessions clamps negative limit to 1 (returns 1 record)."""
+    resp = client.get("/api/sessions?limit=-1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert len(data) == 1  # clamped to 1, not all-but-last
+
+
+def test_api_sessions_with_days(client):
+    """Test /api/sessions?days=N filters by recency (same guard as stats endpoint)."""
+    resp = client.get("/api/sessions?days=3650")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    # days=3650 (10 years) should include test sessions regardless of when the test runs
+    assert len(data) == 3
+
+
+def test_api_services_structure(client):
+    """Test /api/services returns correct structure even with no gptme services."""
+    resp = client.get("/api/services")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "services" in data
+    assert "platform" in data
+    assert isinstance(data["services"], list)
+    assert data["platform"] in ("Linux", "Darwin", "Windows")
+
+
+def test_api_services_linux_detection(client):
+    """Test /api/services detects systemd services matching agent name on Linux."""
+    systemctl_output = json.dumps(
+        [
+            {
+                "unit": "bob-autonomous.service",
+                "description": "Bob Autonomous Session",
+                "load": "loaded",
+                "active": "active",
+                "sub": "running",
+            },
+            {
+                "unit": "unrelated.service",
+                "description": "Something else",
+                "load": "loaded",
+                "active": "inactive",
+                "sub": "dead",
+            },
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = systemctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # workspace fixture uses agent name "TestBot" — only services with "testbot" or "gptme" match
+    # "bob-autonomous.service" and "unrelated.service" neither contains "gptme" nor "testbot"
+    assert data["platform"] == "Linux"
+    assert isinstance(data["services"], list)
+    assert len(data["services"]) == 0
+
+
+def test_api_services_gptme_filter(client):
+    """Test /api/services includes services with 'gptme' in name."""
+    systemctl_output = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API Server",
+                "load": "loaded",
+                "active": "active",
+                "sub": "running",
+            },
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = systemctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["services"]) == 1
+    assert data["services"][0]["name"] == "gptme-server.service"
+    assert data["services"][0]["active"] == "active"
+    assert data["services"][0]["sub"] == "running"
+
+
+def test_api_services_systemctl_failure(client):
+    """Test /api/services returns empty list when systemctl fails."""
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["services"] == []
+
+
+def test_api_services_timeout_handled(client):
+    """Test /api/services handles subprocess timeout gracefully."""
+    import subprocess
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("systemctl", 5)
+        ),
+    ):
+        resp = client.get("/api/services")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["services"] == []
+
+
+def test_workspace_no_sessions(tmp_path: Path):
+    """Test API gracefully handles missing session data."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Empty"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/sessions/stats")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 0
+
+        resp = c.get("/api/sessions")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
