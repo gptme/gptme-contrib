@@ -429,6 +429,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
         tags = fm.get("tags", [])
         if not isinstance(tags, list):
             tags = []
+        tags = [str(t) for t in tags]
         assigned_to = str(fm.get("assigned_to", "") or "")
 
         tasks.append(
