@@ -9,9 +9,14 @@ from pathlib import Path
 import pytest
 
 from gptme_sessions.discovery import (
+    _duration_from_timestamps,
+    _gptme_session_to_record,
+    _cc_session_to_record,
     _quick_date_from_jsonl,
+    _quick_first_last_ts,
     _session_in_range,
     decode_cc_project_path,
+    discover_all,
     discover_cc_sessions,
     discover_codex_sessions,
     discover_copilot_sessions,
@@ -317,3 +322,153 @@ def test_discover_copilot_sessions_sorted_by_date(tmp_path: Path) -> None:
     # Should be sorted by date: early session first, late session second
     assert result[0].parent.name == "zzz-early"
     assert result[1].parent.name == "aaa-late"
+
+
+# --- _quick_first_last_ts ---
+
+
+def test_quick_first_last_ts(tmp_path: Path) -> None:
+    jsonl = tmp_path / "session.jsonl"
+    jsonl.write_text(
+        json.dumps({"type": "user", "timestamp": "2026-03-05T10:00:00Z"})
+        + "\n"
+        + json.dumps({"type": "assistant", "timestamp": "2026-03-05T10:30:00Z"})
+        + "\n"
+    )
+    first, last = _quick_first_last_ts(jsonl)
+    assert first == "2026-03-05T10:00:00Z"
+    assert last == "2026-03-05T10:30:00Z"
+
+
+def test_quick_first_last_ts_empty(tmp_path: Path) -> None:
+    jsonl = tmp_path / "empty.jsonl"
+    jsonl.write_text("")
+    first, last = _quick_first_last_ts(jsonl)
+    assert first is None
+    assert last is None
+
+
+# --- _duration_from_timestamps ---
+
+
+def test_duration_from_timestamps() -> None:
+    assert _duration_from_timestamps("2026-03-05T10:00:00Z", "2026-03-05T10:30:00Z") == 1800
+
+
+def test_duration_from_timestamps_none() -> None:
+    assert _duration_from_timestamps(None, "2026-03-05T10:30:00Z") == 0
+    assert _duration_from_timestamps("2026-03-05T10:00:00Z", None) == 0
+
+
+# --- _gptme_session_to_record ---
+
+
+def test_gptme_session_to_record(tmp_path: Path) -> None:
+    session_dir = tmp_path / "2026-03-05-test-session"
+    session_dir.mkdir()
+    # Write a config.toml
+    (session_dir / "config.toml").write_text(
+        '[chat]\nmodel = "anthropic/claude-sonnet-4-20250514"\ninteractive = false\n'
+    )
+    # Write a conversation.jsonl
+    (session_dir / "conversation.jsonl").write_text(
+        json.dumps({"role": "user", "timestamp": "2026-03-05T10:00:00Z"})
+        + "\n"
+        + json.dumps({"role": "assistant", "timestamp": "2026-03-05T10:25:00Z"})
+        + "\n"
+    )
+    record = _gptme_session_to_record(session_dir)
+    assert record.harness == "gptme"
+    assert record.model == "anthropic/claude-sonnet-4-20250514"
+    assert record.model_normalized == "sonnet"
+    assert record.run_type == "autonomous"
+    assert record.duration_seconds == 1500  # 25 minutes
+    assert record.session_id == "test-session"
+
+
+def test_gptme_session_to_record_interactive(tmp_path: Path) -> None:
+    session_dir = tmp_path / "2026-03-05-interactive"
+    session_dir.mkdir()
+    (session_dir / "config.toml").write_text('[chat]\nmodel = "openai/gpt-4o"\n')
+    record = _gptme_session_to_record(session_dir)
+    assert record.run_type == "interactive"
+    assert record.duration_seconds == 0  # no conversation.jsonl
+
+
+# --- _cc_session_to_record ---
+
+
+def test_cc_session_to_record(tmp_path: Path) -> None:
+    project_dir = tmp_path / "-home-bob-bob"
+    project_dir.mkdir()
+    jsonl = project_dir / "abc123.jsonl"
+    jsonl.write_text(
+        json.dumps({"type": "user", "timestamp": "2026-03-05T14:00:00Z"})
+        + "\n"
+        + json.dumps({"type": "assistant", "timestamp": "2026-03-05T14:45:00Z"})
+        + "\n"
+    )
+    record = _cc_session_to_record(jsonl)
+    assert record.harness == "claude-code"
+    assert record.session_id == "abc123"
+    assert record.duration_seconds == 2700  # 45 minutes
+
+
+# --- discover_all ---
+
+
+def test_discover_all_gptme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """discover_all finds gptme sessions and converts to records."""
+    # Set up a fake gptme logs dir
+    logs_dir = tmp_path / "gptme-logs"
+    logs_dir.mkdir()
+    session = logs_dir / "2026-03-05-my-session"
+    session.mkdir()
+    (session / "config.toml").write_text(
+        '[chat]\nmodel = "anthropic/claude-opus-4-6"\ninteractive = false\n'
+    )
+    (session / "conversation.jsonl").write_text(
+        json.dumps({"role": "user", "timestamp": "2026-03-05T10:00:00Z"}) + "\n"
+    )
+
+    monkeypatch.setenv("GPTME_LOGS_DIR", str(logs_dir))
+    # Point other dirs to nonexistent paths to avoid picking up real sessions
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / "no-cc"))
+    monkeypatch.setenv("CODEX_SESSIONS_DIR", str(tmp_path / "no-codex"))
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path / "no-copilot"))
+
+    records = discover_all(since_days=7)
+    assert len(records) == 1
+    assert records[0].harness == "gptme"
+    assert records[0].model_normalized == "opus"
+    assert records[0].run_type == "autonomous"
+
+
+def test_discover_all_mixed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """discover_all finds sessions across multiple harnesses."""
+    # gptme
+    gptme_dir = tmp_path / "gptme"
+    gptme_dir.mkdir()
+    session = gptme_dir / "2026-03-05-gptme-sess"
+    session.mkdir()
+    (session / "config.toml").write_text('[chat]\nmodel = "openai/gpt-4o"\ninteractive = false\n')
+
+    # Claude Code
+    cc_dir = tmp_path / "cc"
+    project = cc_dir / "-home-bob-bob"
+    project.mkdir(parents=True)
+    (project / "cc-session.jsonl").write_text(
+        json.dumps({"type": "user", "timestamp": "2026-03-05T12:00:00Z"}) + "\n"
+    )
+
+    monkeypatch.setenv("GPTME_LOGS_DIR", str(gptme_dir))
+    monkeypatch.setenv("CLAUDE_HOME", str(cc_dir.parent))  # parent since it appends /projects
+    # Actually CC looks in cc_dir directly (projects dir), let me fix
+    monkeypatch.setenv("CODEX_SESSIONS_DIR", str(tmp_path / "no-codex"))
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path / "no-copilot"))
+
+    records = discover_all(since_days=7, cc_dir=cc_dir)
+    assert len(records) == 2
+    harnesses = {r.harness for r in records}
+    assert "gptme" in harnesses
+    assert "claude-code" in harnesses

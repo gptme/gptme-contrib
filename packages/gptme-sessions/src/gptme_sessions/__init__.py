@@ -14,6 +14,7 @@ Usage:
 
 from .discovery import (
     decode_cc_project_path,
+    discover_all,
     discover_cc_sessions,
     discover_codex_sessions,
     discover_copilot_sessions,
@@ -54,6 +55,7 @@ __all__ = [
     "extract_signals_copilot",
     "grade_signals",
     "is_productive",
+    "discover_all",
     "discover_gptme_sessions",
     "discover_cc_sessions",
     "discover_codex_sessions",

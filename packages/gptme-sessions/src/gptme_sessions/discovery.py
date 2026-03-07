@@ -11,8 +11,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .record import SessionRecord
 
 logger = logging.getLogger(__name__)
 
@@ -288,3 +292,200 @@ def discover_copilot_sessions(
     except PermissionError:
         logger.debug("Permission denied reading: %s", copilot_dir)
     return [path for _, path in sorted(sessions_with_dates)]
+
+
+def _quick_first_last_ts(jsonl_path: Path) -> tuple[str | None, str | None]:
+    """Extract first and last timestamps from a JSONL file.
+
+    Reads first line for start, seeks to end for last timestamp.
+    Returns (first_ts, last_ts) as ISO strings, or None if not found.
+    """
+    first_ts: str | None = None
+    last_ts: str | None = None
+    try:
+        with open(jsonl_path) as f:
+            lines = f.readlines()
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts_str = entry.get("timestamp")
+            if ts_str:
+                if first_ts is None:
+                    first_ts = ts_str
+                last_ts = ts_str
+    except (OSError, PermissionError):
+        pass
+    return first_ts, last_ts
+
+
+def _duration_from_timestamps(first_ts: str | None, last_ts: str | None) -> int:
+    """Compute duration in seconds between two ISO timestamp strings."""
+    if not first_ts or not last_ts:
+        return 0
+    try:
+        t1 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+        t2 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        return max(0, int((t2 - t1).total_seconds()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _gptme_session_to_record(session_dir: Path) -> SessionRecord:
+    """Convert a discovered gptme session directory to a SessionRecord."""
+    from .record import SessionRecord
+
+    config = parse_gptme_config(session_dir)
+    # Extract date from directory name (YYYY-MM-DD-rest)
+    try:
+        session_date = date.fromisoformat(session_dir.name[:10])
+        timestamp = datetime(
+            session_date.year,
+            session_date.month,
+            session_date.day,
+            tzinfo=timezone.utc,
+        ).isoformat()
+    except (ValueError, IndexError):
+        timestamp = ""
+
+    # Try to get duration from conversation.jsonl
+    duration = 0
+    conv_jsonl = session_dir / "conversation.jsonl"
+    if conv_jsonl.exists():
+        first_ts, last_ts = _quick_first_last_ts(conv_jsonl)
+        duration = _duration_from_timestamps(first_ts, last_ts)
+        if first_ts:
+            timestamp = (
+                first_ts.replace("Z", "+00:00")
+                if "+" not in first_ts and first_ts.endswith("Z")
+                else first_ts
+            )
+
+    run_type = "interactive" if config["interactive"] else "autonomous"
+
+    return SessionRecord(
+        session_id=session_dir.name[11:] if len(session_dir.name) > 11 else session_dir.name,
+        timestamp=timestamp,
+        harness="gptme",
+        model=config["model"] or None,
+        run_type=run_type,
+        duration_seconds=duration,
+    )
+
+
+def _cc_session_to_record(jsonl_path: Path) -> SessionRecord:
+    """Convert a discovered Claude Code session JSONL to a SessionRecord."""
+    from .record import SessionRecord
+
+    first_ts, last_ts = _quick_first_last_ts(jsonl_path)
+    duration = _duration_from_timestamps(first_ts, last_ts)
+    timestamp = ""
+    if first_ts:
+        timestamp = (
+            first_ts.replace("Z", "+00:00")
+            if "+" not in first_ts and first_ts.endswith("Z")
+            else first_ts
+        )
+
+    # CC project dir name encodes the workspace path
+    project_name = jsonl_path.parent.name
+
+    return SessionRecord(
+        session_id=jsonl_path.stem,
+        timestamp=timestamp,
+        harness="claude-code",
+        model=None,  # CC doesn't store model in JSONL reliably
+        run_type="unknown",
+        duration_seconds=duration,
+        journal_path=decode_cc_project_path(project_name),
+    )
+
+
+def _codex_session_to_record(jsonl_path: Path) -> SessionRecord:
+    """Convert a discovered Codex CLI session JSONL to a SessionRecord."""
+    from .record import SessionRecord
+
+    # Date from directory structure: YYYY/MM/DD
+    try:
+        day_dir = jsonl_path.parent
+        month_dir = day_dir.parent
+        year_dir = month_dir.parent
+        session_date = date(int(year_dir.name), int(month_dir.name), int(day_dir.name))
+        timestamp = datetime(
+            session_date.year,
+            session_date.month,
+            session_date.day,
+            tzinfo=timezone.utc,
+        ).isoformat()
+    except (ValueError, TypeError):
+        timestamp = ""
+
+    return SessionRecord(
+        session_id=jsonl_path.stem,
+        timestamp=timestamp,
+        harness="codex",
+        duration_seconds=0,
+    )
+
+
+def _copilot_session_to_record(events_path: Path) -> SessionRecord:
+    """Convert a discovered Copilot CLI events.jsonl to a SessionRecord."""
+    from .record import SessionRecord
+
+    first_ts, last_ts = _quick_first_last_ts(events_path)
+    duration = _duration_from_timestamps(first_ts, last_ts)
+    timestamp = ""
+    if first_ts:
+        timestamp = (
+            first_ts.replace("Z", "+00:00")
+            if "+" not in first_ts and first_ts.endswith("Z")
+            else first_ts
+        )
+
+    return SessionRecord(
+        session_id=events_path.parent.name,
+        timestamp=timestamp,
+        harness="copilot",
+        duration_seconds=duration,
+    )
+
+
+def discover_all(
+    since_days: int = 30,
+    gptme_logs_dir: Path | None = None,
+    cc_dir: Path | None = None,
+    codex_dir: Path | None = None,
+    copilot_dir: Path | None = None,
+) -> list[SessionRecord]:
+    """Discover sessions across all harnesses and return as SessionRecords.
+
+    This is the main entry point for discovery-based session listing.
+    Scans gptme, Claude Code, Codex, and Copilot session directories
+    for the given time window and converts them to SessionRecord objects.
+
+    Records are sorted chronologically by timestamp.
+    """
+    end = date.today()
+    start = end - timedelta(days=since_days)
+
+    records: list[SessionRecord] = []
+
+    for path in discover_gptme_sessions(start, end, logs_dir=gptme_logs_dir):
+        records.append(_gptme_session_to_record(path))
+
+    for path in discover_cc_sessions(start, end, cc_dir=cc_dir):
+        records.append(_cc_session_to_record(path))
+
+    for path in discover_codex_sessions(start, end, codex_dir=codex_dir):
+        records.append(_codex_session_to_record(path))
+
+    for path in discover_copilot_sessions(start, end, copilot_dir=copilot_dir):
+        records.append(_copilot_session_to_record(path))
+
+    # Sort by timestamp
+    records.sort(key=lambda r: r.timestamp or "")
+    return records

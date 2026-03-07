@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from .discovery import (
+    discover_all,
     discover_cc_sessions,
     discover_codex_sessions,
     discover_copilot_sessions,
@@ -26,6 +27,52 @@ from .store import (
 )
 
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
+
+
+def _get_records_with_fallback(
+    store: SessionStore,
+    since_days: int | None = None,
+    model: str | None = None,
+    run_type: str | None = None,
+    category: str | None = None,
+    harness: str | None = None,
+    outcome: str | None = None,
+) -> tuple[list[SessionRecord], bool]:
+    """Get records from the JSONL store, falling back to discovery if empty.
+
+    Returns (records, used_discovery) tuple. When discovery is used,
+    a hint is printed to stderr so the user knows the source.
+    """
+    records = store.query(
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+        since_days=since_days,
+    )
+    if records:
+        return records, False
+
+    # Store is empty or filtered to nothing — try discovery
+    discover_days = since_days if since_days is not None else 30
+    discovered = discover_all(since_days=discover_days)
+    if not discovered:
+        return [], False
+
+    # Apply the same filters that store.query() would
+    if model:
+        discovered = [r for r in discovered if r.model_normalized == model or r.model == model]
+    if run_type:
+        discovered = [r for r in discovered if r.run_type == run_type]
+    if category:
+        discovered = [r for r in discovered if r.category == category]
+    if harness:
+        discovered = [r for r in discovered if r.harness == harness]
+    if outcome:
+        discovered = [r for r in discovered if r.outcome == outcome]
+
+    return discovered, True
 
 
 def _parse_since(since: str | None) -> int | None:
@@ -57,7 +104,10 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
     ctx.obj["sessions_dir"] = sessions_dir
     if ctx.invoked_subcommand is None:
         store = SessionStore(sessions_dir=sessions_dir)
-        s = store.stats()
+        records, used_discovery = _get_records_with_fallback(store)
+        if used_discovery:
+            click.echo("(auto-discovered from session directories)\n", err=True)
+        s = store.stats(records)
         format_stats(s)
 
 
@@ -103,30 +153,25 @@ def query(
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     since_days = _parse_since(since)
 
+    records, used_discovery = _get_records_with_fallback(
+        store,
+        since_days=since_days,
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+    )
+    if used_discovery:
+        click.echo("(auto-discovered from session directories)\n", err=True)
+
     if show_stats:
-        records = store.query(
-            model=model,
-            run_type=run_type,
-            category=category,
-            harness=harness,
-            outcome=outcome,
-            since_days=since_days,
-        )
         s = store.stats(records)
         if as_json:
             click.echo(json.dumps(s, indent=2))
         else:
             format_stats(s)
         return
-
-    records = store.query(
-        model=model,
-        run_type=run_type,
-        category=category,
-        harness=harness,
-        outcome=outcome,
-        since_days=since_days,
-    )
     if as_json:
         click.echo(json.dumps([r.to_dict() for r in records], indent=2))
     else:
@@ -160,14 +205,17 @@ def stats(
     """Show summary statistics."""
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     since_days = _parse_since(since)
-    records = store.query(
+    records, used_discovery = _get_records_with_fallback(
+        store,
+        since_days=since_days,
         model=model,
         run_type=run_type,
         category=category,
         harness=harness,
         outcome=outcome,
-        since_days=since_days,
     )
+    if used_discovery:
+        click.echo("(auto-discovered from session directories)\n", err=True)
     s = store.stats(records)
     if as_json:
         click.echo(json.dumps(s, indent=2))
@@ -186,7 +234,9 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
     """Run analytics (duration, NOOP rate, trends)."""
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     since_days = _parse_since(since)
-    records = store.query(since_days=since_days)
+    records, used_discovery = _get_records_with_fallback(store, since_days=since_days)
+    if used_discovery:
+        click.echo("(auto-discovered from session directories)\n", err=True)
     analytics = compute_run_analytics(records)
     if as_json:
         click.echo(json.dumps(analytics, indent=2))
