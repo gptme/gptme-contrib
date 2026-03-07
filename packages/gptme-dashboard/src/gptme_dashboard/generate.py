@@ -158,7 +158,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
     Each session dict contains:
     ``name``, ``date``, ``harness``, ``commits``, ``edits``, ``errors``,
-    ``grade``, ``productive``, ``category``.
+    ``grade``, ``category``.
 
     Workspace filtering
     -------------------
@@ -228,7 +228,6 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "edits": len(set(signals.get("file_writes", []))),
                 "errors": _safe_int(signals.get("error_count", 0)),
                 "grade": _safe_grade(signals.get("grade", 0.0)),
-                "productive": bool(signals.get("productive", False)),
                 "category": signals.get("inferred_category", ""),
             }
         )
@@ -248,7 +247,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
         try:
             session_date = str(date.fromtimestamp(os.path.getmtime(jsonl)))
-        except OSError:
+        except (OSError, ValueError):
             continue  # No usable date — skip this session
 
         try:
@@ -265,7 +264,6 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "edits": len(set(signals.get("file_writes", []))),
                 "errors": _safe_int(signals.get("error_count", 0)),
                 "grade": _safe_grade(signals.get("grade", 0.0)),
-                "productive": bool(signals.get("productive", False)),
                 "category": signals.get("inferred_category", ""),
             }
         )
@@ -506,39 +504,31 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 
 
 def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata using gptme's config module.
+    """Read gptme.toml for workspace metadata using inline TOML parsing."""
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # type: ignore[import-not-found]
 
-    Falls back to raw TOML parsing when gptme's schema doesn't recognise all
-    keys (e.g. ``[agent.urls]`` is not yet part of ``AgentConfig``).
-    """
-    from gptme.config import get_project_config
+    toml_path = workspace / "gptme.toml"
+    if not toml_path.exists():
+        return {}
+
+    try:
+        with toml_path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return {}
 
     config: dict = {}
 
-    try:
-        project_config = get_project_config(workspace, quiet=True)
-    except TypeError:
-        # gptme currently raises TypeError when AgentConfig sees unsupported keys
-        # like [agent.urls]. Fall back to raw TOML parsing in that case.
-        project_config = None
-    else:
-        if project_config is None:
-            return config  # No gptme.toml present; raw-TOML fallback would also find nothing
-        if project_config.agent and project_config.agent.name:
-            config["agent_name"] = project_config.agent.name
-        if project_config.plugins.enabled:
-            config["plugins_enabled"] = list(project_config.plugins.enabled)
-        return config
-
-    # Fallback: parse gptme.toml directly when gptme's schema rejects the file
-    # (e.g. future keys like [agent.urls] not yet in AgentConfig).
-    raw = _parse_toml(workspace / "gptme.toml")
-    agent = raw.get("agent", {})
+    agent = data.get("agent", {})
     if isinstance(agent, dict) and agent.get("name"):
-        config["agent_name"] = str(agent["name"])
-    plugins_enabled = raw.get("plugins", {}).get("enabled", [])
-    if isinstance(plugins_enabled, list) and plugins_enabled:
-        config["plugins_enabled"] = [str(p) for p in plugins_enabled]
+        config["agent_name"] = agent["name"]
+
+    plugins = data.get("plugins", {})
+    if isinstance(plugins, dict) and plugins.get("enabled"):
+        config["plugins_enabled"] = list(plugins["enabled"])
 
     return config
 
