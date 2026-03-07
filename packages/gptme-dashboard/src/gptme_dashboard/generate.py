@@ -423,7 +423,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
         if not fm:
             continue  # Skip files without frontmatter
 
-        state = str(fm.get("state", "backlog") or "backlog")
+        state = str(fm.get("state", "backlog") or "backlog").lower()
         title = extract_title(body, md_file.stem.replace("-", " ").title())
         priority = str(fm.get("priority", "") or "")
         tags = fm.get("tags", [])
