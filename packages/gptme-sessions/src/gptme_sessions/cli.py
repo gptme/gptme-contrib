@@ -260,7 +260,13 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(analytics, indent=2))
     elif analytics.get("total", 0) == 0:
-        _show_discovery_fallback(since_days=since_days or 14)
+        # --since always acts as a filter (default: 14d). Only show discovery
+        # fallback when the store itself is empty, not when the time window
+        # simply has no runs.
+        if store.query():
+            click.echo(f"No runs found in the last {since_days or 14} day(s).")
+        else:
+            _show_discovery_fallback(since_days=since_days or 14)
     else:
         format_run_analytics(analytics)
 
