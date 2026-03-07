@@ -112,6 +112,7 @@ tr:hover { background: var(--accent-dim); }
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.25rem 0.6rem;
+  font: inherit;
   font-size: 0.8rem;
   color: var(--text-dim);
   cursor: pointer;
@@ -304,9 +305,9 @@ tr:hover { background: var(--accent-dim); }
   <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
   <!-- Category chips (inline, replaces standalone Categories section) -->
   <div class="cat-chart" id="guidance-filters">
-    <div class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></div>
+    <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
     {% for cat, count in stats.lesson_categories.items() %}
-    <div class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></div>
+    <button class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></button>
     {% endfor %}
   </div>
   {% if sources %}
@@ -409,6 +410,11 @@ function applyFilters() {
   // When filtering, show all rows (override collapse)
   if (showMoreBtn) {
     showMoreBtn.style.display = isFiltering ? 'none' : '';
+    if (!isFiltering) {
+      // Reset button text when collapse is restored after a filter cycle
+      const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
+      showMoreBtn.textContent = 'Show all ' + total + ' items';
+    }
   }
 
   let idx = 0;

@@ -311,13 +311,15 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             }
         )
 
+    total_found = len(sessions)
+    sessions.sort(key=lambda s: s["date"], reverse=True)
+    sessions = sessions[:50]
+    cap_msg = f", showing {len(sessions)}" if total_found > len(sessions) else ""
     print(
-        f" done ({gptme_count} gptme + {cc_count} claude-code = {len(sessions)} matching)",
+        f" done ({gptme_count} gptme + {cc_count} claude-code = {total_found} matching{cap_msg})",
         file=sys.stderr,
     )
-
-    sessions.sort(key=lambda s: s["date"], reverse=True)
-    return sessions[:50]
+    return sessions
 
 
 def detect_submodules(workspace: Path) -> list[dict]:
