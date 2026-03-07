@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gptme_dashboard.generate import (
+    _parse_toml,
     collect_workspace_data,
     detect_github_url,
     detect_submodules,
@@ -17,6 +18,7 @@ from gptme_dashboard.generate import (
     github_tree_url,
     lesson_page_path,
     parse_frontmatter,
+    read_agent_urls,
     read_workspace_config,
     render_markdown_to_html,
     scan_lessons,
@@ -1066,3 +1068,138 @@ def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
 
     assert len(sub_lessons_data) == 1
     assert "gh_url" not in sub_lessons_data[0]  # submodule items must NOT get gh_url
+
+
+# ── agent.urls ────────────────────────────────────────────────────────────────
+
+
+def test_read_agent_urls_present(tmp_path: Path):
+    """read_agent_urls returns the [agent.urls] dict when present."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.urls]
+        dashboard = "https://example.com/dashboard"
+        repo = "https://github.com/example/agent"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    assert links == {
+        "dashboard": "https://example.com/dashboard",
+        "repo": "https://github.com/example/agent",
+    }
+
+
+def test_read_agent_urls_absent(tmp_path: Path):
+    """read_agent_urls returns empty dict when [agent.urls] is not present."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestAgent"\n')
+    links = read_agent_urls(tmp_path)
+    assert links == {}
+
+
+def test_read_agent_urls_no_toml(tmp_path: Path):
+    """read_agent_urls returns empty dict when gptme.toml does not exist."""
+    links = read_agent_urls(tmp_path)
+    assert links == {}
+
+
+def test_read_agent_urls_strips_non_http_schemes(tmp_path: Path):
+    """read_agent_urls filters out non-http/https URLs (e.g. javascript:)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent.urls]
+        safe = "https://example.com"
+        unsafe = "javascript:alert(1)"
+        also_unsafe = "data:text/html,<h1>x</h1>"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    assert links == {"safe": "https://example.com"}
+    assert "unsafe" not in links
+    assert "also_unsafe" not in links
+
+
+def test_collect_workspace_data_includes_agent_urls(workspace: Path):
+    """collect_workspace_data exposes agent_urls from [agent.urls]."""
+    # Overwrite the workspace gptme.toml to add [agent.urls]
+    (workspace / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.urls]
+        dashboard = "https://example.com/dash"
+        """)
+    )
+    data = collect_workspace_data(workspace)
+    assert "agent_urls" in data
+    assert data["agent_urls"] == {"dashboard": "https://example.com/dash"}
+    # Verify fallback name-extraction: when gptme raises TypeError for [agent.urls],
+    # read_workspace_config falls back to raw TOML and must still extract agent_name.
+    assert data["workspace_name"] == "TestAgent"
+
+
+def test_generate_renders_agent_urls_in_header(workspace: Path, tmp_path: Path):
+    """Generated index.html includes agent_urls as header links."""
+    (workspace / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.urls]
+        dashboard = "https://example.com/dash"
+        website = "https://example.com"
+        """)
+    )
+    output = tmp_path / "_site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert 'href="https://example.com/dash"' in html
+    assert ">dashboard<" in html
+    assert 'href="https://example.com"' in html
+    assert ">website<" in html
+
+
+def test_generate_no_agent_urls_no_extra_midpoints(workspace: Path, tmp_path: Path):
+    """When [agent.urls] is absent the header contains no extra link middots."""
+    output = tmp_path / "_site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Sanity: page rendered OK
+    assert "lessons" in html
+    # No agent-link middot separators — workspace fixture has no [agent.urls] and no
+    # git remote, so gh_repo_url is also absent.  Any &middot; in the output would
+    # indicate a spurious agent link was rendered.
+    assert "&middot;" not in html
+
+
+def test_parse_toml_warns_on_syntax_error(tmp_path: Path, capsys):
+    """_parse_toml prints a warning to stderr when the file has a syntax error."""
+    bad_toml = tmp_path / "gptme.toml"
+    bad_toml.write_text("this = [invalid toml\n")
+    result = _parse_toml(bad_toml)
+    assert result == {}
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
+    assert str(bad_toml) in captured.err
+
+
+def test_parse_toml_warns_on_missing_tomli(tmp_path: Path, capsys, monkeypatch):
+    """_parse_toml prints a warning to stderr when tomli is missing on Python < 3.11."""
+    import sys
+
+    good_toml = tmp_path / "gptme.toml"
+    good_toml.write_text("[agent]\nname = 'TestAgent'\n")
+
+    # Simulate Python < 3.11 so the code tries to import tomli instead of tomllib
+    monkeypatch.setattr(sys, "version_info", (3, 10, 0))
+    # Make tomli unavailable (sys.modules[key]=None triggers ImportError on import)
+    monkeypatch.setitem(sys.modules, "tomli", None)
+
+    result = _parse_toml(good_toml)
+    assert result == {}
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
+    assert "tomli" in captured.err

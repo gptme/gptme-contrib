@@ -175,7 +175,7 @@ tr:hover { background: var(--accent-dim); }
 {% block content %}
 <header>
   <h1>{{ workspace_name }} <span>workspace</span></h1>
-  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, skills, plugins, and packages{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}</p>
+  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, skills, plugins, and packages{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}{% if agent_urls %}{% for name, url in agent_urls.items() %} &middot; <a href="{{ url }}">{{ name }}</a>{% endfor %}{% endif %}</p>
 </header>
 
 <!-- Stats -->
