@@ -21,76 +21,34 @@ from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-import markdown  # type: ignore[import-untyped]
 import yaml  # type: ignore[import-untyped]
 from jinja2 import Environment, FileSystemLoader
+from markdown_it import MarkdownIt
+from pygments import highlight  # type: ignore[import-untyped]
+from pygments.formatters import HtmlFormatter  # type: ignore[import-untyped]
+from pygments.lexers import TextLexer, get_lexer_by_name  # type: ignore[import-untyped]
 
 
-def _preprocess_markdown(md_text: str) -> str:
-    """Ensure blank lines before list blocks so the markdown library renders them.
+def _highlight_code(code: str, lang: str, attrs: str) -> str:
+    """Syntax-highlight a fenced code block using pygments."""
+    try:
+        lexer = get_lexer_by_name(lang or "text", stripall=True)
+    except Exception:
+        lexer = TextLexer()
+    return str(highlight(code, lexer, HtmlFormatter(cssclass="code", noclasses=True)))  # type: ignore[no-any-return]
 
-    Python's ``markdown`` library follows the original Markdown spec which requires
-    a blank line before a list.  Without it, ``- item`` after a paragraph is treated
-    as continuation text, not a list.  This preprocessor inserts blank lines where
-    needed.
 
-    Lines inside fenced code blocks (delimited by ``` or ~~~) are skipped so that
-    list-like lines in YAML/shell examples do not receive spurious blank lines.
-    """
-    lines = md_text.split("\n")
-    result: list[str] = []
-    in_fence = False
-    fence_char = ""
-    fence_len = 0
-    for i, line in enumerate(lines):
-        stripped = line.lstrip()
-        # Track fenced code block boundaries (CommonMark: 3+ backticks or tildes).
-        # Track fence char and length so 4-backtick outer fences aren't closed by
-        # nested 3-backtick inner fences (handles markdown-codeblock-syntax.md style).
-        m = re.match(r"^(`{3,}|~{3,})", stripped)
-        if m:
-            if not in_fence:
-                in_fence = True
-                fence_char = m.group(1)[0]
-                fence_len = len(m.group(1))
-                result.append(line)
-                continue
-            elif m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
-                in_fence = False
-                fence_char = ""
-                fence_len = 0
-                result.append(line)
-                continue
-        if in_fence:
-            result.append(line)
-            continue
-        is_list = stripped.startswith(("- ", "* ", "+ ")) or (
-            len(stripped) > 2 and stripped[0].isdigit() and ". " in stripped[:5]
-        )
-        if is_list and i > 0:
-            prev = lines[i - 1].strip()
-            # Insert blank line if previous line is non-empty and not itself a list item
-            if (
-                prev
-                and not prev.startswith(("- ", "* ", "+ "))
-                and not (len(prev) > 2 and prev[0].isdigit() and ". " in prev[:5])
-                and not re.match(r"^(`{3,}|~{3,})", prev)  # closing fence
-            ):
-                result.append("")
-        result.append(line)
-    return "\n".join(result)
+_md = MarkdownIt("commonmark", options_update={"highlight": _highlight_code}).enable("table")
 
 
 def render_markdown_to_html(md_text: str) -> str:
-    """Render markdown text to HTML using the markdown library."""
-    preprocessed = _preprocess_markdown(md_text)
-    return str(
-        markdown.markdown(
-            preprocessed,
-            extensions=["fenced_code", "tables", "codehilite"],
-            extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
-        )
-    )
+    """Render markdown text to HTML using markdown-it-py (CommonMark compliant).
+
+    Uses markdown-it-py instead of the ``markdown`` library because CommonMark
+    does not require a blank line before lists — content like ``"External resources:\\n- item"``
+    renders correctly as a ``<ul>`` without pre-processing hacks.
+    """
+    return _md.render(md_text)  # type: ignore[no-any-return]
 
 
 def lesson_page_path(lesson_path: str) -> str:

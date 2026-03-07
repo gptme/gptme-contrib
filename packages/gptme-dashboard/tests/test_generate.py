@@ -10,7 +10,6 @@ import pytest
 
 from gptme_dashboard.generate import (
     _parse_toml,
-    _preprocess_markdown,
     collect_workspace_data,
     detect_github_url,
     detect_submodules,
@@ -1572,51 +1571,6 @@ def test_generate_html_includes_journals(workspace: Path, tmp_path: Path):
     html = (output / "index.html").read_text()
     assert "Recent Journal Entries" in html
     assert "2026-03-07" in html
-
-
-def test_preprocess_markdown_inserts_blank_before_list():
-    """Ensure _preprocess_markdown adds blank lines before list markers."""
-    md = "Some text:\n- item one\n- item two"
-    result = _preprocess_markdown(md)
-    assert result == "Some text:\n\n- item one\n- item two"
-
-
-def test_preprocess_markdown_no_double_blank():
-    """Don't add extra blank if one already exists."""
-    md = "Some text:\n\n- item one\n- item two"
-    result = _preprocess_markdown(md)
-    assert result == md
-
-
-def test_preprocess_markdown_skips_fenced_code_blocks():
-    """Lines inside fenced code blocks must not receive spurious blank lines."""
-    md = "Example config:\n```yaml\n- service: nginx\n- service: redis\n```\nDone."
-    result = _preprocess_markdown(md)
-    # The ````yaml``` fence and its contents should be unchanged
-    assert "```yaml\n- service: nginx\n- service: redis\n```" in result
-    # No blank line inserted between fence opener and first code line
-    assert "```yaml\n\n- service: nginx" not in result
-
-
-def test_preprocess_markdown_no_blank_after_closing_fence():
-    """Closing fence followed by a sibling list item must not get a blank line inserted."""
-    md = "- First item:\n  ```yaml\n  key: value\n  ```\n- Second item"
-    result = _preprocess_markdown(md)
-    # No blank line should be inserted between the closing fence and the next list item
-    assert "```\n\n- Second item" not in result
-    assert "```\n- Second item" in result
-
-
-def test_preprocess_markdown_four_backtick_fence():
-    """4-backtick outer fences must not be closed by nested 3-backtick inner fences."""
-    md = "Example:\n````markdown\n```txt\n- inner list\n```\n````\nDone."
-    result = _preprocess_markdown(md)
-    # Inner 3-backtick fence contents must be unchanged
-    assert "```txt\n- inner list\n```" in result
-    # No spurious blank line inserted inside the outer fence
-    assert "```txt\n\n- inner list" not in result
-    # Content after outer closing fence is preserved
-    assert "````\nDone." in result
 
 
 def test_render_markdown_lists():
