@@ -319,7 +319,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             tasks = scan_tasks(ws)
             state_filter = request.args.get("state")
             if state_filter:
-                tasks = [t for t in tasks if t["state"] == state_filter]
+                tasks = [t for t in tasks if t["state"] == state_filter.lower()]
             limit = request.args.get("limit", 100, type=int)
             limit = max(1, min(limit, 500))
             return jsonify(tasks[:limit])

@@ -425,7 +425,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
 
         state = str(fm.get("state", "backlog") or "backlog").lower()
         title = extract_title(body, md_file.stem.replace("-", " ").title())
-        priority = str(fm.get("priority", "") or "")
+        priority = str(fm.get("priority", "") or "").lower()
         tags = fm.get("tags", [])
         if not isinstance(tags, list):
             tags = []
