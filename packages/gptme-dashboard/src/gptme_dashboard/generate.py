@@ -138,16 +138,21 @@ def _parse_toml(path: Path) -> dict:
 
 
 def read_agent_urls(workspace: Path) -> dict[str, str]:
-    """Read [agent.urls] from gptme.toml.
+    """Read agent links from gptme.toml.
+
+    Checks ``[agent.links]`` first (the canonical key), then falls back to
+    ``[agent.urls]`` for backwards compatibility.
 
     Returns a dict of link name → URL, e.g. ``{"dashboard": "https://...", "repo": "..."}``.
     Returns an empty dict if the section is absent or gptme.toml is missing.
 
-    Note: ``[agent.urls]`` is not yet part of gptme's ``AgentConfig`` schema, so we
-    parse gptme.toml directly rather than going through ``get_project_config``.
+    Note: ``[agent.links]`` / ``[agent.urls]`` are not yet part of gptme's ``AgentConfig``
+    schema, so we parse gptme.toml directly rather than going through ``get_project_config``.
     """
     data = _parse_toml(workspace / "gptme.toml")
-    links = data.get("agent", {}).get("urls", {})
+    agent = data.get("agent", {})
+    # Prefer [agent.links] (canonical); fall back to [agent.urls] for backwards compat
+    links = agent.get("links") or agent.get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}
         for key, value in links.items():
@@ -989,38 +994,23 @@ def generate(
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(html)
 
-    # Generate per-lesson detail pages
-    lesson_template = env.get_template("lesson.html")
-    for lesson in data["lessons"]:
-        # Compute how many levels up from the lesson page to the site root.
-        # page_url is e.g. "lessons/workflow/test.html" (depth=2), so root_prefix="../../"
-        depth = len(Path(lesson["page_url"]).parts) - 1
+    # Generate per-item detail pages for the unified guidance list (lessons + skills)
+    guidance_template = env.get_template("guidance.html")
+    for item in data["guidance"]:
+        # Compute how many levels up from the detail page to the site root.
+        # e.g. "lessons/workflow/test.html" (depth=2) → root_prefix="../../"
+        # e.g. "skills/my-skill/index.html" (depth=2) → root_prefix="../../"
+        depth = len(Path(item["page_url"]).parts) - 1
         root_prefix = "../" * depth
-        lesson_html = lesson_template.render(
+        item_html = guidance_template.render(
             workspace_name=data["workspace_name"],
-            lesson=lesson,
-            body_html=render_markdown_to_html(lesson["body"]),
+            item=item,
+            body_html=render_markdown_to_html(item["body"]),
             root_prefix=root_prefix,
         )
-        page_path = output / lesson["page_url"]
+        page_path = output / item["page_url"]
         page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(lesson_html)
-
-    # Generate per-skill detail pages
-    skill_template = env.get_template("skill.html")
-    for skill in data["skills"]:
-        # page_url is e.g. "skills/my-skill/index.html" (depth=2), so root_prefix="../../"
-        depth = len(Path(skill["page_url"]).parts) - 1
-        root_prefix = "../" * depth
-        skill_html = skill_template.render(
-            workspace_name=data["workspace_name"],
-            skill=skill,
-            body_html=render_markdown_to_html(skill["body"]),
-            root_prefix=root_prefix,
-        )
-        page_path = output / skill["page_url"]
-        page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(skill_html)
+        page_path.write_text(item_html)
 
     stats = data["stats"]
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
