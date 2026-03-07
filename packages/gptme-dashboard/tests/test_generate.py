@@ -1171,6 +1171,40 @@ def test_generate_renders_agent_urls_in_header(workspace: Path, tmp_path: Path):
     assert ">website<" in html
 
 
+def test_read_agent_urls_agent_links_key(tmp_path: Path):
+    """read_agent_urls reads [agent.links] (canonical key name)."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "TestAgent"
+
+        [agent.links]
+        dashboard = "https://example.com/dashboard"
+        repo = "https://github.com/example/agent"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    assert links == {
+        "dashboard": "https://example.com/dashboard",
+        "repo": "https://github.com/example/agent",
+    }
+
+
+def test_read_agent_urls_links_preferred_over_urls(tmp_path: Path):
+    """[agent.links] takes precedence over [agent.urls] when both are present."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent.links]
+        dashboard = "https://links.example.com"
+
+        [agent.urls]
+        dashboard = "https://urls.example.com"
+        """)
+    )
+    links = read_agent_urls(tmp_path)
+    assert links == {"dashboard": "https://links.example.com"}
+
+
 def test_generate_no_agent_urls_no_extra_midpoints(workspace: Path, tmp_path: Path):
     """When [agent.urls] is absent the header contains no extra link middots."""
     output = tmp_path / "_site"
