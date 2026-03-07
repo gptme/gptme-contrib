@@ -21,20 +21,34 @@ from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-import markdown  # type: ignore[import-untyped]
 import yaml  # type: ignore[import-untyped]
 from jinja2 import Environment, FileSystemLoader
+from markdown_it import MarkdownIt
+from pygments import highlight  # type: ignore[import-untyped]
+from pygments.formatters import HtmlFormatter  # type: ignore[import-untyped]
+from pygments.lexers import TextLexer, get_lexer_by_name  # type: ignore[import-untyped]
+
+
+def _highlight_code(code: str, lang: str, attrs: str) -> str:
+    """Syntax-highlight a fenced code block using pygments."""
+    try:
+        lexer = get_lexer_by_name(lang or "text", stripall=True)
+    except Exception:
+        lexer = TextLexer()
+    return str(highlight(code, lexer, HtmlFormatter(cssclass="code", noclasses=True)))  # type: ignore[no-any-return]
+
+
+_md = MarkdownIt("commonmark", options_update={"highlight": _highlight_code}).enable("table")
 
 
 def render_markdown_to_html(md_text: str) -> str:
-    """Render markdown text to HTML using the markdown library."""
-    return str(
-        markdown.markdown(
-            md_text,
-            extensions=["fenced_code", "tables", "codehilite"],
-            extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
-        )
-    )
+    """Render markdown text to HTML using markdown-it-py (CommonMark compliant).
+
+    Uses markdown-it-py instead of the ``markdown`` library because CommonMark
+    does not require a blank line before lists — content like ``"External resources:\\n- item"``
+    renders correctly as a ``<ul>`` without pre-processing hacks.
+    """
+    return _md.render(md_text)  # type: ignore[no-any-return]
 
 
 def lesson_page_path(lesson_path: str) -> str:
@@ -192,6 +206,10 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
     sessions: list[dict] = []
 
+    print("Scanning sessions...", end="", flush=True, file=sys.stderr)
+    gptme_count = 0
+    cc_count = 0
+
     # --- gptme sessions ---
     for session_dir in discover_gptme_sessions(start, end):
         config = parse_gptme_config(session_dir)
@@ -220,6 +238,10 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             date.fromisoformat(date_str)
         except ValueError:
             continue  # Directory name doesn't start with a valid ISO date — skip
+
+        gptme_count += 1
+        if gptme_count % 50 == 0:
+            print(f" {gptme_count} gptme", end="", flush=True, file=sys.stderr)
 
         sessions.append(
             {
@@ -257,6 +279,10 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
         except Exception:
             signals = {}
 
+        cc_count += 1
+        if cc_count % 50 == 0:
+            print(f" {cc_count} cc", end="", flush=True, file=sys.stderr)
+
         sessions.append(
             {
                 "name": jsonl.stem[:32],
@@ -270,8 +296,95 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             }
         )
 
+    total_found = len(sessions)
     sessions.sort(key=lambda s: s["date"], reverse=True)
-    return sessions[:50]
+    sessions = sessions[:50]
+    cap_msg = f", showing {len(sessions)}" if total_found > len(sessions) else ""
+    print(
+        f" done ({gptme_count} gptme + {cc_count} claude-code = {total_found} matching{cap_msg})",
+        file=sys.stderr,
+    )
+    return sessions
+
+
+def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
+    """Scan recent journal entries from the workspace journal directory.
+
+    Supports two formats:
+    - Subdirectory format: ``journal/YYYY-MM-DD/*.md``
+    - Flat format: ``journal/YYYY-MM-DD.md``
+
+    Returns a list of dicts with ``date``, ``name``, and ``preview`` keys,
+    sorted by date descending (most recent first), capped at *limit* entries.
+    """
+    journal_dir = workspace / "journal"
+    if not journal_dir.is_dir():
+        return []
+
+    entries: list[dict] = []
+
+    # Subdirectory format: journal/YYYY-MM-DD/*.md
+    for day_dir in sorted(journal_dir.iterdir(), reverse=True):
+        if not day_dir.is_dir():
+            continue
+        # Validate date format
+        try:
+            date.fromisoformat(day_dir.name)
+        except ValueError:
+            continue
+        for md_file in sorted(day_dir.glob("*.md"), reverse=True):
+            if len(entries) >= limit:
+                break
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            # Extract first non-empty, non-heading line as preview
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "date": day_dir.name,
+                    "name": md_file.stem,
+                    "preview": preview,
+                }
+            )
+        if len(entries) >= limit:
+            break
+
+    # Flat format fallback: journal/YYYY-MM-DD.md
+    if not entries:
+        for md_file in sorted(journal_dir.glob("*.md"), reverse=True):
+            if len(entries) >= limit:
+                break
+            stem = md_file.stem
+            try:
+                date.fromisoformat(stem[:10])
+            except ValueError:
+                continue
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "date": stem[:10],
+                    "name": stem,
+                    "preview": preview,
+                }
+            )
+
+    return entries
 
 
 def detect_submodules(workspace: Path) -> list[dict]:
@@ -689,6 +802,9 @@ def collect_workspace_data(
     all_items = guidance + packages + plugins
     sources: list[str] = sorted({item.get("source", "") for item in all_items} - {""})
 
+    # Scan recent journal entries
+    journals = scan_journals(workspace, limit=30)
+
     # Optionally scan recent sessions
     sessions: list[dict] = []
     if include_sessions:
@@ -701,6 +817,7 @@ def collect_workspace_data(
         "total_skills": len(skills),
         "total_guidance": len(guidance),
         "total_sessions": len(sessions),
+        "total_journals": len(journals),
         "lesson_categories": lesson_categories,
     }
 
@@ -716,6 +833,7 @@ def collect_workspace_data(
         "skills": skills,
         "guidance": guidance,
         "sessions": sessions,
+        "journals": journals,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,

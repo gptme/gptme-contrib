@@ -119,13 +119,12 @@ def test_api_sessions_stats_with_days(client):
 
 
 def test_api_sessions_stats_days_zero(client):
-    """Test ?days=0 falls through to load_all (0 is not a valid positive filter)."""
-    # days=0 is falsy in Python; ensure the guard `days is not None and days > 0`
-    # treats it the same as no filter (load all sessions).
+    """Test ?days=0 uses the default 30-day window (matching the fallback scan behaviour)."""
+    # days=0 → query(since_days=30); all 3 fixture sessions are recent so total==3.
     resp = client.get("/api/sessions/stats?days=0")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["total"] == 3  # all sessions returned, same as no filter
+    assert data["total"] == 3  # all fixture sessions fall within the 30-day window
 
 
 def test_api_sessions_list(client):
@@ -328,7 +327,10 @@ def test_workspace_no_sessions(tmp_path: Path):
     app = create_app(tmp_path, site_dir=site_dir)
     app.config["TESTING"] = True
 
-    with app.test_client() as c:
+    with (
+        app.test_client() as c,
+        unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+    ):
         resp = c.get("/api/sessions/stats")
         assert resp.status_code == 200
         data = resp.get_json()

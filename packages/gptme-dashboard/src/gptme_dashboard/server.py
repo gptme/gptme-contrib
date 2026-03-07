@@ -9,6 +9,7 @@ and dynamic panels activate when the API is reachable.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,13 +38,17 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             "Install with: pip install gptme-dashboard[serve]"
         )
 
-    from .generate import generate, read_workspace_config
+    from . import generate as _gen_mod
+    from .generate import generate, read_workspace_config, scan_journals
 
     # Generate static site if needed
     if site_dir is None:
         site_dir = workspace / "_site"
     if not (site_dir / "index.html").exists():
-        generate(workspace, site_dir)
+        # Don't bake sessions into the static HTML in serve mode — the live
+        # /api/sessions endpoint provides fresh session data.  Baking them in
+        # would create a duplicate sessions panel (static + dynamic).
+        generate(workspace, site_dir, include_sessions=False)
 
     app = Flask(
         __name__,
@@ -72,24 +77,101 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.exception("Error reading workspace config")
             return jsonify({"error": str(e)}), 500
 
-    @app.route("/api/sessions/stats")
-    def api_session_stats() -> Any:
-        ws = Path(app.config["WORKSPACE"])
+    def _load_sessions_from_store(
+        ws: Path, days: int | None = None
+    ) -> tuple[list[Any], Any] | None:
+        """Try loading sessions from SessionStore (structured JSONL records).
+
+        Returns (records, store) if data is available, or None to signal the
+        caller to fall back to scan_recent_sessions.
+
+        ``days=None`` means no time filter (load all records).
+        ``days=0`` is treated as the default window (30 days) to stay consistent
+        with the scan_recent_sessions fallback path.
+        ``days>0`` filters to the last N days.
+        """
         try:
             from gptme_sessions.store import SessionStore
 
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
-
-            days = request.args.get("days", type=int)
-            if days is not None and days > 0:
+            if days and days > 0:
                 records = store.query(since_days=days)
-            else:
+            elif days is None:
                 records = store.load_all()
+            else:
+                # days=0: use default window to match scan fallback behaviour
+                records = store.query(since_days=30)
+            if not records:
+                return None
+            return list(records), store
+        except Exception:
+            return None
 
-            stats = store.stats(records)
-            return jsonify(stats)
-        except ImportError:
-            return jsonify({"error": "gptme-sessions not installed"}), 501
+    # Cache for scan_recent_sessions (expensive); expires after 5 minutes
+    _SCAN_CACHE_TTL = 300
+    _scan_cache: dict[str, Any] = {"data": None, "days": None, "expires": 0.0}
+
+    def _get_scanned_sessions(ws: Path, days: int = 30) -> list[dict[str, Any]]:
+        """Fallback: discover sessions from gptme/CC log directories."""
+        now = time.monotonic()
+        if (
+            _scan_cache["data"] is None
+            or _scan_cache["days"] != days
+            or now >= _scan_cache["expires"]
+        ):
+            _scan_cache["data"] = list(_gen_mod.scan_recent_sessions(ws, days=days))
+            _scan_cache["days"] = days
+            _scan_cache["expires"] = now + _SCAN_CACHE_TTL
+        return _scan_cache["data"]  # type: ignore[no-any-return]
+
+    @app.route("/api/sessions/stats")
+    def api_session_stats() -> Any:
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            days = request.args.get("days", type=int)
+
+            # Try SessionStore first (fast, structured)
+            store_result = _load_sessions_from_store(ws, days)
+            if store_result is not None:
+                records, store = store_result
+                return jsonify(store.stats(records))
+
+            # Fallback: scan actual session logs
+            scanned = _get_scanned_sessions(ws, days if days and days > 0 else 30)
+            if not scanned:
+                return jsonify({"total": 0})
+
+            total = len(scanned)
+            productive = sum(1 for s in scanned if s.get("grade", 0) >= 0.4)
+            noop = total - productive
+            success_rate = productive / total if total > 0 else 0
+
+            by_model: dict[str, dict] = {}
+            by_harness: dict[str, dict] = {}
+            for s in scanned:
+                for key, bucket in [
+                    (s.get("model", "unknown"), by_model),
+                    (s.get("harness", "unknown"), by_harness),
+                ]:
+                    if key not in bucket:
+                        bucket[key] = {"total": 0, "productive": 0}
+                    bucket[key]["total"] += 1
+                    if s.get("grade", 0) >= 0.4:
+                        bucket[key]["productive"] += 1
+            for bucket in (by_model, by_harness):
+                for m in bucket.values():
+                    m["rate"] = m["productive"] / m["total"] if m["total"] > 0 else 0
+
+            return jsonify(
+                {
+                    "total": total,
+                    "productive": productive,
+                    "noop": noop,
+                    "success_rate": success_rate,
+                    "by_model": by_model,
+                    "by_harness": by_harness,
+                }
+            )
         except Exception as e:
             logger.exception("Error computing session stats")
             return jsonify({"error": str(e)}), 500
@@ -98,23 +180,32 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     def api_sessions() -> Any:
         ws = Path(app.config["WORKSPACE"])
         try:
-            from gptme_sessions.store import SessionStore
-
-            store = SessionStore(sessions_dir=ws / "state" / "sessions")
-
             limit = request.args.get("limit", 50, type=int)
-            limit = max(1, min(limit, 200))  # Clamp to [1, 200]
-
+            limit = max(1, min(limit, 200))
             days = request.args.get("days", type=int)
-            if days is not None and days > 0:
-                records = store.query(since_days=days)
-            else:
-                records = store.load_all()
-            # Most recent first
-            records = sorted(records, key=lambda r: r.timestamp, reverse=True)[:limit]
-            return jsonify([r.to_dict() for r in records])
-        except ImportError:
-            return jsonify({"error": "gptme-sessions not installed"}), 501
+
+            # Try SessionStore first
+            store_result = _load_sessions_from_store(ws, days)
+            if store_result is not None:
+                records, _store = store_result
+                records = sorted(records, key=lambda r: r.timestamp, reverse=True)[:limit]
+                return jsonify([r.to_dict() for r in records])
+
+            # Fallback: scan actual session logs
+            scanned = _get_scanned_sessions(ws, days if days and days > 0 else 30)[:limit]
+            result = []
+            for s in scanned:
+                result.append(
+                    {
+                        "timestamp": s.get("date", ""),
+                        "harness": s.get("harness", ""),
+                        "model": s.get("model", ""),
+                        "category": s.get("category", ""),
+                        "outcome": "productive" if s.get("grade", 0) >= 0.4 else "noop",
+                        "duration_seconds": 0,
+                    }
+                )
+            return jsonify(result)
         except Exception as e:
             logger.exception("Error loading sessions")
             return jsonify({"error": str(e)}), 500
@@ -207,6 +298,18 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             return jsonify({"services": services, "platform": system})
         except Exception as e:
             logger.exception("Error detecting services")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/journals")
+    def api_journals() -> Any:
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            limit = request.args.get("limit", 30, type=int)
+            limit = max(1, min(limit, 100))
+            entries = scan_journals(ws, limit=limit)
+            return jsonify(entries)
+        except Exception as e:
+            logger.exception("Error scanning journals")
             return jsonify({"error": str(e)}), 500
 
     return app
