@@ -328,7 +328,10 @@ def test_workspace_no_sessions(tmp_path: Path):
     app = create_app(tmp_path, site_dir=site_dir)
     app.config["TESTING"] = True
 
-    with app.test_client() as c:
+    with (
+        app.test_client() as c,
+        unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+    ):
         resp = c.get("/api/sessions/stats")
         assert resp.status_code == 200
         data = resp.get_json()
