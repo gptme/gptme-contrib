@@ -122,7 +122,7 @@ def _parse_toml(path: Path) -> dict:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
             print(
-                "Warning: tomli is not installed; [agent.urls] and other TOML features unavailable"
+                "Warning: tomli is not installed; [agent.links], [agent.urls] and other TOML features unavailable"
                 " (install gptme-dashboard[tomli] or upgrade to Python 3.11+)",
                 file=sys.stderr,
             )
