@@ -19,7 +19,7 @@ class DefaultGroup(click.Group):
             args = ["generate"] + list(args)
         elif args[0] not in self.commands and args[0] not in ("--help", "-h"):
             args = ["generate"] + list(args)
-        return super().parse_args(ctx, args)
+        return super().parse_args(ctx, args)  # type: ignore[no-any-return]
 
 
 @click.group(cls=DefaultGroup)

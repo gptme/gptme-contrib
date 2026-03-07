@@ -21,17 +21,19 @@ from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-import markdown
-import yaml
+import markdown  # type: ignore[import-untyped]
+import yaml  # type: ignore[import-untyped]
 from jinja2 import Environment, FileSystemLoader
 
 
 def render_markdown_to_html(md_text: str) -> str:
     """Render markdown text to HTML using the markdown library."""
-    return markdown.markdown(
-        md_text,
-        extensions=["fenced_code", "tables", "codehilite"],
-        extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
+    return str(
+        markdown.markdown(
+            md_text,
+            extensions=["fenced_code", "tables", "codehilite"],
+            extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
+        )
     )
 
 
@@ -101,7 +103,7 @@ def _parse_toml(path: Path) -> dict:
             return {}
     try:
         with open(path, "rb") as f:
-            return tomllib.load(f)
+            return tomllib.load(f)  # type: ignore[no-any-return]
     except FileNotFoundError:
         return {}
     except tomllib.TOMLDecodeError as exc:
@@ -144,7 +146,7 @@ def _safe_grade(val: object, default: float = 0.0) -> float:
 def _safe_int(val: object, default: int = 0) -> int:
     """Convert *val* to int, returning *default* on failure (e.g. None or non-numeric)."""
     try:
-        return int(val)  # type: ignore[arg-type]
+        return int(val)  # type: ignore[call-overload, no-any-return]
     except (TypeError, ValueError):
         return default
 
