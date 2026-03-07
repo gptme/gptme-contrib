@@ -80,6 +80,7 @@ Static gh-pages deployments are unaffected — the dynamic panels only appear wh
 | `GET /api/sessions/stats` | Aggregated session statistics by model/category |
 | `GET /api/sessions[?days=N]` | Recent sessions (last 30 days by default) |
 | `GET /api/services` | Systemd/launchd services matching the agent name |
+| `GET /api/journals[?limit=N]` | Recent journal entries (last 30 by default) |
 
 Requires `pip install "gptme-dashboard[serve]"`.
 
@@ -126,9 +127,8 @@ gptme-dashboard generate --workspace ~/bob
 - `click` (CLI)
 - `jinja2` (templating)
 - `pyyaml` (frontmatter parsing)
-- `markdown` (lesson/skill detail pages)
+- `markdown-it-py` (lesson/skill detail pages, CommonMark compliant)
 - `pygments` (syntax highlighting in detail pages)
-- `gptme` (workspace data model)
 
 Optional:
 - `flask` + `gptme-sessions` — required for `gptme-dashboard serve` (`[serve]` extra)

@@ -339,3 +339,63 @@ def test_workspace_no_sessions(tmp_path: Path):
         resp = c.get("/api/sessions")
         assert resp.status_code == 200
         assert resp.get_json() == []
+
+
+def test_api_journals_empty(client):
+    """Test /api/journals returns empty list when no journal directory exists."""
+    resp = client.get("/api/journals")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert len(data) == 0
+
+
+def test_api_journals_with_entries(tmp_path: Path):
+    """Test /api/journals returns journal entries when journal directory exists."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    # Create journal entries in subdirectory format
+    day_dir = tmp_path / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("## Morning session\n\nWorked on the dashboard.\n")
+    (day_dir / "notes.md").write_text("## Notes\n\nSome notes here.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/journals")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        # Entries should have date, name, preview
+        entry = data[0]
+        assert entry["date"] == "2026-03-07"
+        assert "name" in entry
+        assert "preview" in entry
+
+
+def test_api_journals_limit(tmp_path: Path):
+    """Test /api/journals respects the limit parameter."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    # Create 5 journal days
+    for i in range(1, 6):
+        day_dir = tmp_path / "journal" / f"2026-03-{i:02d}"
+        day_dir.mkdir(parents=True)
+        (day_dir / "session.md").write_text(f"## Day {i}\n\nContent for day {i}.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/journals?limit=3")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) == 3
