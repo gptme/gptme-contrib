@@ -190,7 +190,10 @@ def judge_from_signals(
             parts.append(f"Tool calls: {total} total ({', '.join(f'{t}:{n}' for t, n in top5)})")
         grade = signals.get("grade")
         if grade is not None:
-            parts.append(f"Trajectory grade: {float(grade):.2f}")
+            try:
+                parts.append(f"Trajectory grade: {float(grade):.2f}")
+            except (ValueError, TypeError):
+                pass
         errors = signals.get("error_count", 0)
         if errors:
             parts.append(f"Errors: {errors}")
