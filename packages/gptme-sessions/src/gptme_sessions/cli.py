@@ -831,7 +831,8 @@ def sync(
                             f"  warning: signals extraction failed for {path_str}: {exc}",
                             err=True,
                         )
-                        skipped += 1
+                        if not needs_update:  # don't double-count if model was already updated
+                            skipped += 1
                 else:
                     needs_update = True  # mark for dry-run reporting
             elif not needs_update:
