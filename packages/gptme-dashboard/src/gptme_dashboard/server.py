@@ -81,15 +81,23 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
         Returns (records, store) if data is available, or None to signal the
         caller to fall back to scan_recent_sessions.
+
+        ``days=None`` means no time filter (load all records).
+        ``days=0`` is treated as the default window (30 days) to stay consistent
+        with the scan_recent_sessions fallback path.
+        ``days>0`` filters to the last N days.
         """
         try:
             from gptme_sessions.store import SessionStore
 
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
-            if days is not None and days > 0:
+            if days and days > 0:
                 records = store.query(since_days=days)
-            else:
+            elif days is None:
                 records = store.load_all()
+            else:
+                # days=0: use default window to match scan fallback behaviour
+                records = store.query(since_days=30)
             if not records:
                 return None
             return list(records), store

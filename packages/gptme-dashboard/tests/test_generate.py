@@ -1,6 +1,7 @@
 """Tests for static dashboard generator."""
 
 import json
+import re
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -474,11 +475,12 @@ def test_generate_full(workspace: Path, tmp_path: Path):
     # Unified section header
     assert "Lessons &amp; Skills" in html
 
-    # Stats: four separate stat cards for lessons, skills, plugins, packages
-    assert '>3</div>\n    <div class="label">Lessons</div>' in html
-    assert '>1</div>\n    <div class="label">Skills</div>' in html
-    assert '>1</div>\n    <div class="label">Plugins</div>' in html
-    assert '>1</div>\n    <div class="label">Packages</div>' in html
+    # Stats: four separate stat cards for lessons, skills, plugins, packages.
+    # Use regex to avoid depending on exact template whitespace.
+    assert re.search(r'class="number">\s*3\s*</div>\s*<div[^>]*class="label">Lessons</div>', html)
+    assert re.search(r'class="number">\s*1\s*</div>\s*<div[^>]*class="label">Skills</div>', html)
+    assert re.search(r'class="number">\s*1\s*</div>\s*<div[^>]*class="label">Plugins</div>', html)
+    assert re.search(r'class="number">\s*1\s*</div>\s*<div[^>]*class="label">Packages</div>', html)
 
 
 def test_generate_with_submodules(workspace_with_submodules: Path, tmp_path: Path):
@@ -1584,6 +1586,16 @@ def test_preprocess_markdown_no_double_blank():
     md = "Some text:\n\n- item one\n- item two"
     result = _preprocess_markdown(md)
     assert result == md
+
+
+def test_preprocess_markdown_skips_fenced_code_blocks():
+    """Lines inside fenced code blocks must not receive spurious blank lines."""
+    md = "Example config:\n```yaml\n- service: nginx\n- service: redis\n```\nDone."
+    result = _preprocess_markdown(md)
+    # The ````yaml``` fence and its contents should be unchanged
+    assert "```yaml\n- service: nginx\n- service: redis\n```" in result
+    # No blank line inserted between fence opener and first code line
+    assert "```yaml\n\n- service: nginx" not in result
 
 
 def test_render_markdown_lists():

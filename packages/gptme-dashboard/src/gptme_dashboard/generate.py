@@ -33,11 +33,23 @@ def _preprocess_markdown(md_text: str) -> str:
     a blank line before a list.  Without it, ``- item`` after a paragraph is treated
     as continuation text, not a list.  This preprocessor inserts blank lines where
     needed.
+
+    Lines inside fenced code blocks (delimited by ``` or ~~~) are skipped so that
+    list-like lines in YAML/shell examples do not receive spurious blank lines.
     """
     lines = md_text.split("\n")
     result: list[str] = []
+    in_fence = False
     for i, line in enumerate(lines):
         stripped = line.lstrip()
+        # Track fenced code block boundaries (``` or ~~~, 3+ chars)
+        if len(stripped) >= 3 and (stripped[:3] in ("```", "~~~")):
+            in_fence = not in_fence
+            result.append(line)
+            continue
+        if in_fence:
+            result.append(line)
+            continue
         is_list = stripped.startswith(("- ", "* ", "+ ")) or (
             len(stripped) > 2 and stripped[0].isdigit() and ". " in stripped[:5]
         )
