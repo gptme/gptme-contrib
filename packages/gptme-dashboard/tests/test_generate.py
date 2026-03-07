@@ -1607,6 +1607,18 @@ def test_preprocess_markdown_no_blank_after_closing_fence():
     assert "```\n- Second item" in result
 
 
+def test_preprocess_markdown_four_backtick_fence():
+    """4-backtick outer fences must not be closed by nested 3-backtick inner fences."""
+    md = "Example:\n````markdown\n```txt\n- inner list\n```\n````\nDone."
+    result = _preprocess_markdown(md)
+    # Inner 3-backtick fence contents must be unchanged
+    assert "```txt\n- inner list\n```" in result
+    # No spurious blank line inserted inside the outer fence
+    assert "```txt\n\n- inner list" not in result
+    # Content after outer closing fence is preserved
+    assert "````\nDone." in result
+
+
 def test_render_markdown_lists():
     """Lists after a paragraph should render as <li> elements."""
     md = "External resources:\n- LLM evaluation benchmarks\n- Agent evaluation research"

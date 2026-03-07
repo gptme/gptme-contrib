@@ -40,13 +40,27 @@ def _preprocess_markdown(md_text: str) -> str:
     lines = md_text.split("\n")
     result: list[str] = []
     in_fence = False
+    fence_char = ""
+    fence_len = 0
     for i, line in enumerate(lines):
         stripped = line.lstrip()
-        # Track fenced code block boundaries (``` or ~~~, 3+ chars)
-        if len(stripped) >= 3 and (stripped[:3] in ("```", "~~~")):
-            in_fence = not in_fence
-            result.append(line)
-            continue
+        # Track fenced code block boundaries (CommonMark: 3+ backticks or tildes).
+        # Track fence char and length so 4-backtick outer fences aren't closed by
+        # nested 3-backtick inner fences (handles markdown-codeblock-syntax.md style).
+        m = re.match(r"^(`{3,}|~{3,})", stripped)
+        if m:
+            if not in_fence:
+                in_fence = True
+                fence_char = m.group(1)[0]
+                fence_len = len(m.group(1))
+                result.append(line)
+                continue
+            elif m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+                result.append(line)
+                continue
         if in_fence:
             result.append(line)
             continue
@@ -60,7 +74,7 @@ def _preprocess_markdown(md_text: str) -> str:
                 prev
                 and not prev.startswith(("- ", "* ", "+ "))
                 and not (len(prev) > 2 and prev[0].isdigit() and ". " in prev[:5])
-                and not prev.startswith(("```", "~~~"))  # closing fence — list context
+                and not re.match(r"^(`{3,}|~{3,})", prev)  # closing fence
             ):
                 result.append("")
         result.append(line)
