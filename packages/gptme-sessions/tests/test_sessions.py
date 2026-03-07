@@ -3646,3 +3646,85 @@ def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeyp
     assert records[0].outcome == "productive"
     assert records[0].duration_seconds == 300
     assert records[0].category == "code"
+
+
+def test_sync_dry_run_signals_skips_extraction(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run --signals does NOT call extract_from_path (just previews)."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    extraction_called = []
+
+    def fake_extract(p):
+        extraction_called.append(p)
+        return {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": [],
+            "inferred_category": "code",
+        }
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", fake_extract)
+
+    # dry-run --signals should preview update without calling extract_from_path
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    assert extraction_called == [], "extract_from_path should not be called in dry-run mode"
+    captured = capsys.readouterr()
+    assert "would update" in captured.out
+
+
+def test_sync_backfills_model_for_unknown_records(tmp_path: Path, capsys, monkeypatch):
+    """sync updates model field on existing records that still have model='unknown'."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Pre-populate store with a record that has model="unknown" and the session path
+    existing = SessionRecord(harness="claude-code", model="unknown", journal_path=str(fake_file))
+    store.append(existing)
+
+    # discover_cc_sessions returns the same file; extract_cc_model will find a real model
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-opus-4-6"
