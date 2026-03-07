@@ -1089,6 +1089,7 @@ dependencies = [
 dev = [
     { name = "flask" },
     { name = "gptme-sessions" },
+    { name = "gptodo" },
     { name = "mypy" },
     { name = "pytest" },
 ]
@@ -1105,6 +1106,7 @@ tasks = [
 test = [
     { name = "flask" },
     { name = "gptme-sessions" },
+    { name = "gptodo" },
     { name = "pytest" },
 ]
 
@@ -1113,6 +1115,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "flask", marker = "extra == 'serve'", specifier = ">=3.0" },
     { name = "gptme-dashboard", extras = ["serve"], marker = "extra == 'test'" },
+    { name = "gptme-dashboard", extras = ["tasks"], marker = "extra == 'test'" },
     { name = "gptme-dashboard", extras = ["test"], marker = "extra == 'dev'" },
     { name = "gptme-sessions", marker = "extra == 'serve'", editable = "packages/gptme-sessions" },
     { name = "gptme-sessions", marker = "extra == 'sessions'", editable = "packages/gptme-sessions" },

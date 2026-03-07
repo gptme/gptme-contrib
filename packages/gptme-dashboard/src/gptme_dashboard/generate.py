@@ -444,16 +444,23 @@ def scan_tasks(workspace: Path) -> list[dict]:
 
     tasks: list[dict] = []
 
+    _gptodo_load_tasks = None
     try:
-        from gptodo.utils import load_tasks as _gptodo_load_tasks
+        from gptodo.utils import load_tasks as _gptodo_load_tasks  # type: ignore[assignment]
+    except ImportError:
+        pass
 
+    if _gptodo_load_tasks is not None:
         for t in _gptodo_load_tasks(tasks_dir):
             if t.path.name.lower() == "readme.md":
                 continue
             if not t.metadata:
                 continue  # Skip files without YAML frontmatter
-            # Title lives in the markdown body, not in TaskInfo — read it out
-            _, body = parse_frontmatter(t.path)
+            # Title lives in the markdown body, not in TaskInfo.
+            # Read the file once to avoid a second parse_frontmatter call.
+            content = t.path.read_text(errors="replace")
+            parts = content.split("---", 2)
+            body = parts[2] if len(parts) >= 3 else ""
             title = extract_title(body, t.name.replace("-", " ").title())
             raw_tags = t.tags or []
             if isinstance(raw_tags, str):
@@ -470,7 +477,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
                     "path": f"tasks/{t.path.name}",
                 }
             )
-    except ImportError:
+    else:
         # gptodo not installed — fall back to manual frontmatter parsing
         for md_file in sorted(tasks_dir.glob("*.md")):
             if md_file.name.lower() == "readme.md":

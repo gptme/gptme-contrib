@@ -1720,6 +1720,27 @@ def test_scan_tasks_single_string_tags(tmp_path: Path):
     assert tasks[0]["tags"] == ["bugfix"]
 
 
+def test_scan_tasks_gptodo_path(tmp_path: Path):
+    """scan_tasks exercises the gptodo code path when gptodo is installed."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\npriority: high\ntags: [feature]\nassigned_to: bob\ncreated: 2026-03-01\n---\n# My Task\n\nDo something useful.\n"
+    )
+    (tasks_dir / "README.md").write_text("# Tasks\n")
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    t = tasks[0]
+    assert t["id"] == "my-task"
+    assert t["title"] == "My Task"
+    assert t["state"] == "active"
+    assert t["priority"] == "high"
+    assert t["tags"] == ["feature"]
+    assert t["assigned_to"] == "bob"
+    assert t["path"] == "tasks/my-task.md"
+
+
 def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     """Generated HTML includes task section when tasks exist."""
     tasks_dir = workspace / "tasks"

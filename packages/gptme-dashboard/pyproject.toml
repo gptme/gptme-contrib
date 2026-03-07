@@ -41,6 +41,7 @@ dev = [
 test = [
     "pytest>=7.0",
     "gptme-dashboard[serve]",
+    "gptme-dashboard[tasks]",
 ]
 
 [project.scripts]
