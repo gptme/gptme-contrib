@@ -474,9 +474,11 @@ def test_generate_full(workspace: Path, tmp_path: Path):
     # Unified section header
     assert "Lessons &amp; Skills" in html
 
-    # Stats: 3 lessons, 1 skill, 1 plugin, 1 package
-    assert 'class="number">3<' in html  # lessons count
-    assert 'class="number">1<' in html  # skill / plugin / package count
+    # Stats: four separate stat cards for lessons, skills, plugins, packages
+    assert '>3</div>\n    <div class="label">Lessons</div>' in html
+    assert '>1</div>\n    <div class="label">Skills</div>' in html
+    assert '>1</div>\n    <div class="label">Plugins</div>' in html
+    assert '>1</div>\n    <div class="label">Packages</div>' in html
 
 
 def test_generate_with_submodules(workspace_with_submodules: Path, tmp_path: Path):

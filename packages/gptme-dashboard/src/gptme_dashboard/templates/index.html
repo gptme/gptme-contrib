@@ -325,7 +325,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if sessions | length > 15 %}
-  <button class="show-more-btn" onclick="toggleRows(this, 'static-sessions-table')">Show all {{ sessions | length }} sessions</button>
+  <button class="show-more-btn" data-noun="sessions" onclick="toggleRows(this, 'static-sessions-table')">Show all {{ sessions | length }} sessions</button>
   {% endif %}
 </section>
 {% endif %}
@@ -386,7 +386,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if journals | length > 10 %}
-  <button class="show-more-btn" onclick="toggleRows(this, 'journal-table')">Show all {{ journals | length }} entries</button>
+  <button class="show-more-btn" data-noun="entries" onclick="toggleRows(this, 'journal-table')">Show all {{ journals | length }} entries</button>
   {% endif %}
 </section>
 {% endif %}
@@ -430,7 +430,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if guidance | length > 10 %}
-  <button class="show-more-btn" id="guidance-show-more" onclick="toggleRows(this, 'guidance-table')">Show all {{ guidance | length }} items</button>
+  <button class="show-more-btn" id="guidance-show-more" data-noun="items" onclick="toggleRows(this, 'guidance-table')">Show all {{ guidance | length }} items</button>
   {% endif %}
 </section>
 {% endblock %}
@@ -444,7 +444,8 @@ function toggleRows(btn, tableId) {
   const showing = rows[0] && rows[0].style.display !== 'none';
   rows.forEach(r => r.style.display = showing ? 'none' : '');
   const total = table.querySelectorAll('tbody tr').length;
-  btn.textContent = showing ? 'Show all ' + total + ' items' : 'Show fewer';
+  const noun = btn.dataset.noun || 'items';
+  btn.textContent = showing ? 'Show all ' + total + ' ' + noun : 'Show fewer';
 }
 
 // Guidance (lessons + skills) filtering
@@ -467,7 +468,8 @@ function applyFilters() {
     if (!isFiltering) {
       // Reset button text when collapse is restored after a filter cycle
       const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
-      showMoreBtn.textContent = 'Show all ' + total + ' items';
+      const noun = showMoreBtn.dataset.noun || 'items';
+      showMoreBtn.textContent = 'Show all ' + total + ' ' + noun;
     }
   }
 

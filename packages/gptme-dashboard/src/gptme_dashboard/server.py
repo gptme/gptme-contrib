@@ -9,6 +9,7 @@ and dynamic panels activate when the API is reachable.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -73,11 +74,13 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.exception("Error reading workspace config")
             return jsonify({"error": str(e)}), 500
 
-    def _load_sessions_from_store(ws: Path, days: int | None = None) -> list[Any] | None:
+    def _load_sessions_from_store(
+        ws: Path, days: int | None = None
+    ) -> tuple[list[Any], Any] | None:
         """Try loading sessions from SessionStore (structured JSONL records).
 
-        Returns None if SessionStore is not available or has no data,
-        signalling the caller to fall back to scan_recent_sessions.
+        Returns (records, store) if data is available, or None to signal the
+        caller to fall back to scan_recent_sessions.
         """
         try:
             from gptme_sessions.store import SessionStore
@@ -89,18 +92,25 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 records = store.load_all()
             if not records:
                 return None
-            return list(records)
-        except (ImportError, Exception):
+            return list(records), store
+        except Exception:
             return None
 
-    # Cache for scan_recent_sessions (expensive)
-    _scan_cache: dict[str, Any] = {"data": None, "days": None}
+    # Cache for scan_recent_sessions (expensive); expires after 5 minutes
+    _SCAN_CACHE_TTL = 300
+    _scan_cache: dict[str, Any] = {"data": None, "days": None, "expires": 0.0}
 
     def _get_scanned_sessions(ws: Path, days: int = 30) -> list[dict[str, Any]]:
         """Fallback: discover sessions from gptme/CC log directories."""
-        if _scan_cache["data"] is None or _scan_cache["days"] != days:
+        now = time.monotonic()
+        if (
+            _scan_cache["data"] is None
+            or _scan_cache["days"] != days
+            or now >= _scan_cache["expires"]
+        ):
             _scan_cache["data"] = list(_gen_mod.scan_recent_sessions(ws, days=days))
             _scan_cache["days"] = days
+            _scan_cache["expires"] = now + _SCAN_CACHE_TTL
         return _scan_cache["data"]  # type: ignore[no-any-return]
 
     @app.route("/api/sessions/stats")
@@ -110,11 +120,9 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             days = request.args.get("days", type=int)
 
             # Try SessionStore first (fast, structured)
-            records = _load_sessions_from_store(ws, days)
-            if records is not None:
-                from gptme_sessions.store import SessionStore
-
-                store = SessionStore(sessions_dir=ws / "state" / "sessions")
+            store_result = _load_sessions_from_store(ws, days)
+            if store_result is not None:
+                records, store = store_result
                 return jsonify(store.stats(records))
 
             # Fallback: scan actual session logs
@@ -166,8 +174,9 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             days = request.args.get("days", type=int)
 
             # Try SessionStore first
-            records = _load_sessions_from_store(ws, days)
-            if records is not None:
+            store_result = _load_sessions_from_store(ws, days)
+            if store_result is not None:
+                records, _store = store_result
                 records = sorted(records, key=lambda r: r.timestamp, reverse=True)[:limit]
                 return jsonify([r.to_dict() for r in records])
 
