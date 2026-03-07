@@ -53,6 +53,11 @@ section h2 {
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--border);
 }
+section h2 .count-badge {
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--text-dim);
+}
 
 /* Tables */
 table {
@@ -92,32 +97,32 @@ tr:hover { background: var(--accent-dim); }
 .tag-kind-skill { border-color: var(--cyan); color: var(--cyan); }
 .tag-source { border-color: var(--orange); color: var(--orange); font-style: italic; }
 
-
-/* Category bar chart */
-.cat-bar {
+/* Category bar chart (compact) */
+.cat-chart {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.cat-chip {
+  display: inline-flex;
   align-items: center;
-  margin-bottom: 0.4rem;
-}
-.cat-bar .cat-name {
-  width: 120px;
-  font-size: 0.85rem;
-  color: var(--text-dim);
-  text-align: right;
-  padding-right: 0.75rem;
-  flex-shrink: 0;
-}
-.cat-bar .bar {
-  height: 20px;
-  background: var(--accent);
-  border-radius: 3px;
-  min-width: 2px;
-  transition: width 0.3s;
-}
-.cat-bar .count {
+  gap: 0.3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
   font-size: 0.8rem;
   color: var(--text-dim);
-  padding-left: 0.5rem;
+  cursor: pointer;
+}
+.cat-chip:hover, .cat-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cat-chip .chip-count {
+  font-weight: 600;
+  color: var(--accent);
 }
 
 /* Filter */
@@ -165,9 +170,26 @@ tr:hover { background: var(--accent-dim); }
 }
 .gh-link:hover { opacity: 1; color: var(--accent); }
 
+/* Show more button */
+.show-more-btn {
+  display: block;
+  width: 100%;
+  padding: 0.6rem;
+  margin-top: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85rem;
+  text-align: center;
+}
+.show-more-btn:hover {
+  background: var(--accent-dim);
+}
+
 @media (max-width: 600px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
-  .cat-bar .cat-name { width: 80px; font-size: 0.75rem; }
   table { font-size: 0.8rem; }
   th, td { padding: 0.4rem 0.5rem; }
 }
@@ -176,14 +198,18 @@ tr:hover { background: var(--accent-dim); }
 {% block content %}
 <header>
   <h1>{{ workspace_name }} <span>workspace</span></h1>
-  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard &mdash; lessons, skills, plugins, and packages{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}{% if agent_urls %}{% for name, url in agent_urls.items() %} &middot; <a href="{{ url }}">{{ name }}</a>{% endfor %}{% endif %}</p>
+  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}{% if agent_urls %}{% for name, url in agent_urls.items() %} &middot; <a href="{{ url }}">{{ name }}</a>{% endfor %}{% endif %}</p>
 </header>
 
 <!-- Stats -->
 <div class="stats">
   <div class="stat-card">
-    <div class="number">{{ stats.total_guidance }}</div>
-    <div class="label">Lessons &amp; Skills</div>
+    <div class="number">{{ stats.total_lessons }}</div>
+    <div class="label">Lessons</div>
+  </div>
+  <div class="stat-card">
+    <div class="number">{{ stats.total_skills }}</div>
+    <div class="label">Skills</div>
   </div>
   <div class="stat-card">
     <div class="number">{{ stats.total_plugins }}</div>
@@ -193,34 +219,94 @@ tr:hover { background: var(--accent-dim); }
     <div class="number">{{ stats.total_packages }}</div>
     <div class="label">Packages</div>
   </div>
-  {% if submodules %}
+  {% if stats.total_sessions %}
   <div class="stat-card">
-    <div class="number">{{ submodules | length }}</div>
-    <div class="label">Submodules</div>
+    <div class="number">{{ stats.total_sessions }}</div>
+    <div class="label">Sessions</div>
   </div>
   {% endif %}
 </div>
 
-<!-- Categories -->
-<section>
-  <h2>Categories</h2>
-  {% for cat, count in stats.lesson_categories.items() %}
-  <div class="cat-bar">
-    <span class="cat-name">{{ cat }}</span>
-    <div class="bar" style="width: {{ (count / stats.total_guidance * 100) | round(1) }}%"></div>
-    <span class="count">{{ count }}</span>
-  </div>
-  {% endfor %}
+<!-- Dynamic: Session Stats (shown when serve API is available) -->
+<section id="session-stats" class="dynamic-panel" style="display:none">
+  <h2>Session Stats</h2>
+  <div class="stats" id="session-stats-grid"></div>
+  <div id="session-stats-models"></div>
 </section>
 
-<!-- Lessons & Skills (unified) -->
+<!-- Dynamic: Recent Sessions (shown when serve API is available) -->
+<section id="recent-sessions" class="dynamic-panel" style="display:none">
+  <h2>Recent Sessions</h2>
+  <table id="dynamic-sessions-table">
+    <thead>
+      <tr><th>Time</th><th>Harness</th><th>Model</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Dynamic: Services (shown when serve API is available) -->
+<section id="agent-services" class="dynamic-panel" style="display:none">
+  <h2>Services</h2>
+  <table id="services-table">
+    <thead>
+      <tr><th>Name</th><th>Status</th><th>Description</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+{% if sessions %}
+<!-- Static Sessions (from --sessions flag) -->
+<section id="sessions">
+  <h2>Recent Sessions <span class="count-badge">({{ stats.total_sessions }})</span></h2>
+  <table id="static-sessions-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Session</th>
+        <th>Harness</th>
+        <th>Commits</th>
+        <th>Edits</th>
+        <th>Errors</th>
+        <th>Grade</th>
+        <th>Category</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{{ s.date }}</td>
+        <td title="{{ s.name }}">{{ s.name[:40] }}</td>
+        <td><span class="tag">{{ s.harness }}</span></td>
+        <td>{{ s.commits }}</td>
+        <td>{{ s.edits }}</td>
+        <td>{{ s.errors }}</td>
+        <td>
+          <span class="tag {% if s.grade >= 0.7 %}tag-active{% elif s.grade >= 0.4 %}tag-medium{% endif %}">
+            {{ "%.2f"|format(s.grade) }}
+          </span>
+        </td>
+        <td>{% if s.category %}<span class="tag tag-category">{{ s.category }}</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if sessions | length > 15 %}
+  <button class="show-more-btn" onclick="toggleRows(this, 'static-sessions-table')">Show all {{ sessions | length }} sessions</button>
+  {% endif %}
+</section>
+{% endif %}
+
+<!-- Lessons & Skills -->
 <section id="guidance">
-  <h2>Lessons &amp; Skills ({{ stats.total_guidance }})</h2>
+  <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
   <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
-  <div class="filter-row" id="guidance-filters">
-    <button class="filter-btn active" data-cat="all">All</button>
-    {% for cat in stats.lesson_categories %}
-    <button class="filter-btn" data-cat="{{ cat }}">{{ cat }}</button>
+  <!-- Category chips (inline, replaces standalone Categories section) -->
+  <div class="cat-chart" id="guidance-filters">
+    <div class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></div>
+    {% for cat, count in stats.lesson_categories.items() %}
+    <div class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></div>
     {% endfor %}
   </div>
   {% if sources %}
@@ -238,7 +324,7 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody>
     {% for item in guidance %}
-      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}">
+      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}"{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
         <td>{% if item.page_url %}<a href="{{ item.page_url }}">{{ item.title | default(item.name, true) }}</a>{% else %}{{ item.title | default(item.name, true) }}{% endif %}</td>
         <td><span class="tag tag-kind-{{ item.kind }}">{{ item.kind }}</span></td>
         <td><span class="tag tag-category">{{ item.category }}</span></td>
@@ -250,11 +336,14 @@ tr:hover { background: var(--accent-dim); }
     {% endfor %}
     </tbody>
   </table>
+  {% if guidance | length > 15 %}
+  <button class="show-more-btn" id="guidance-show-more" onclick="toggleRows(this, 'guidance-table')">Show all {{ guidance | length }} items</button>
+  {% endif %}
 </section>
 
 <!-- Plugins -->
 <section id="plugins">
-  <h2>Plugins ({{ stats.total_plugins }})</h2>
+  <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
   <table>
     <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
@@ -271,38 +360,9 @@ tr:hover { background: var(--accent-dim); }
   </table>
 </section>
 
-<!-- Dynamic: Session Stats (hidden by default, shown when API is available) -->
-<section id="session-stats" class="dynamic-panel" style="display:none">
-  <h2>Session Stats</h2>
-  <div class="stats" id="session-stats-grid"></div>
-  <div id="session-stats-models"></div>
-</section>
-
-<!-- Dynamic: Recent Sessions (hidden by default) -->
-<section id="recent-sessions" class="dynamic-panel" style="display:none">
-  <h2>Recent Sessions</h2>
-  <table id="sessions-table">
-    <thead>
-      <tr><th>Time</th><th>Harness</th><th>Model</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
-</section>
-
-<!-- Dynamic: Services (hidden by default, shown when services are detected) -->
-<section id="agent-services" class="dynamic-panel" style="display:none">
-  <h2>Services</h2>
-  <table id="services-table">
-    <thead>
-      <tr><th>Name</th><th>Status</th><th>Description</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
-</section>
-
 <!-- Packages -->
 <section id="packages">
-  <h2>Packages ({{ stats.total_packages }})</h2>
+  <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
   <table>
     <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
     <tbody>
@@ -318,60 +378,40 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
 </section>
-
-{% if sessions %}
-<!-- Sessions -->
-<section id="sessions">
-  <h2>Recent Sessions ({{ stats.total_sessions }})</h2>
-  <table id="sessions-table">
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Session</th>
-        <th>Harness</th>
-        <th>Commits</th>
-        <th>Edits</th>
-        <th>Errors</th>
-        <th>Grade</th>
-        <th>Category</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for s in sessions %}
-      <tr>
-        <td>{{ s.date }}</td>
-        <td title="{{ s.name }}">{{ s.name[:40] }}</td>
-        <td><span class="tag">{{ s.harness }}</span></td>
-        <td>{{ s.commits }}</td>
-        <td>{{ s.edits }}</td>
-        <td>{{ s.errors }}</td>
-        <td>
-          <span class="tag {% if s.grade >= 0.7 %}tag-active{% elif s.grade >= 0.4 %}tag-medium{% endif %}">
-            {{ "%.2f"|format(s.grade) }}
-          </span>
-        </td>
-        <td>{% if s.category %}<span class="tag tag-category">{{ s.category }}</span>{% endif %}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</section>
-{% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Toggle collapsed rows in a table
+function toggleRows(btn, tableId) {
+  const table = document.getElementById(tableId);
+  const rows = table.querySelectorAll('.collapsed-row');
+  const showing = rows[0] && rows[0].style.display !== 'none';
+  rows.forEach(r => r.style.display = showing ? 'none' : '');
+  const total = table.querySelectorAll('tbody tr').length;
+  btn.textContent = showing ? 'Show all ' + total + ' items' : 'Show fewer';
+}
+
 // Guidance (lessons + skills) filtering
-const filterBtns = document.querySelectorAll('#guidance-filters .filter-btn');
+const filterChips = document.querySelectorAll('#guidance-filters .cat-chip');
 const sourceBtns = document.querySelectorAll('#source-filters .filter-btn');
 const guidanceRows = document.querySelectorAll('#guidance-table tbody tr');
 const searchBox = document.getElementById('guidance-search');
+const showMoreBtn = document.getElementById('guidance-show-more');
 
 let activeCategory = 'all';
 let activeSource = 'all';
 
 function applyFilters() {
-  const query = (searchBox.value || '').toLowerCase();
+  const query = (searchBox ? searchBox.value : '').toLowerCase();
+  const isFiltering = activeCategory !== 'all' || activeSource !== 'all' || query;
+
+  // When filtering, show all rows (override collapse)
+  if (showMoreBtn) {
+    showMoreBtn.style.display = isFiltering ? 'none' : '';
+  }
+
+  let idx = 0;
   guidanceRows.forEach(row => {
     const cat = row.dataset.category;
     const source = row.dataset.source;
@@ -381,15 +421,29 @@ function applyFilters() {
       (activeSource === '_local' && !source) ||
       source === activeSource;
     const searchMatch = !query || text.includes(query);
-    row.style.display = catMatch && sourceMatch && searchMatch ? '' : 'none';
+    const match = catMatch && sourceMatch && searchMatch;
+
+    if (isFiltering) {
+      row.style.display = match ? '' : 'none';
+      row.classList.remove('collapsed-row');
+    } else {
+      // Restore collapse state
+      idx++;
+      if (idx > 15) {
+        row.classList.add('collapsed-row');
+        row.style.display = 'none';
+      } else {
+        row.style.display = match ? '' : 'none';
+      }
+    }
   });
 }
 
-filterBtns.forEach(btn => {
-  btn.addEventListener('click', () => {
-    filterBtns.forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeCategory = btn.dataset.cat;
+filterChips.forEach(chip => {
+  chip.addEventListener('click', () => {
+    filterChips.forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    activeCategory = chip.dataset.cat;
     applyFilters();
   });
 });
@@ -427,28 +481,14 @@ async function initDynamic() {
 async function loadSessionStats() {
   try {
     const resp = await fetch('/api/sessions/stats');
-    if (!resp.ok) {
-      const section = document.getElementById('session-stats');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (!resp.ok) { hide('session-stats'); return; }
     const stats = await resp.json();
     const grid = document.getElementById('session-stats-grid');
-    if (!grid) {
-      const section = document.getElementById('session-stats');
-      if (section) section.style.display = 'none';
-      return;
-    }
-    if (stats.total === 0) {
-      const section = document.getElementById('session-stats');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (!grid || stats.total === 0) { hide('session-stats'); return; }
 
     const rate = stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : 'N/A';
     const dur = stats.duration != null && stats.duration.total_hours != null
-      ? stats.duration.total_hours.toFixed(1) + 'h'
-      : 'N/A';
+      ? stats.duration.total_hours.toFixed(1) + 'h' : 'N/A';
 
     grid.innerHTML = [
       card(stats.total, 'Sessions'),
@@ -457,47 +497,31 @@ async function loadSessionStats() {
       card(dur, 'Total Time'),
     ].join('');
 
-    // Model breakdown
     const models = stats.by_model;
     if (models && Object.keys(models).length > 0) {
       const el = document.getElementById('session-stats-models');
       let html = '<h3 style="font-size:1rem;margin:1rem 0 0.5rem">By Model</h3>';
       for (const [m, s] of Object.entries(models)) {
         const r = s.rate != null ? (s.rate * 100).toFixed(0) + '%' : '';
-        html += '<div class="cat-bar">';
-        html += '<span class="cat-name">' + esc(m) + '</span>';
-        html += '<div class="bar" style="width:' + (s.total / stats.total * 100).toFixed(1) + '%"></div>';
-        html += '<span class="count">' + s.total + ' (' + r + ')</span>';
-        html += '</div>';
+        html += '<div style="display:flex;align-items:center;margin-bottom:0.3rem">'
+          + '<span style="width:120px;font-size:0.85rem;color:var(--text-dim);text-align:right;padding-right:0.75rem">' + esc(m) + '</span>'
+          + '<div style="height:20px;background:var(--accent);border-radius:3px;min-width:2px;width:' + (s.total / stats.total * 100).toFixed(1) + '%"></div>'
+          + '<span style="font-size:0.8rem;color:var(--text-dim);padding-left:0.5rem">' + s.total + ' (' + r + ')</span>'
+          + '</div>';
       }
       el.innerHTML = html;
     }
-  } catch (e) {
-    const section = document.getElementById('session-stats');
-    if (section) section.style.display = 'none';
-  }
+  } catch (e) { hide('session-stats'); }
 }
 
 async function loadRecentSessions() {
   try {
     const resp = await fetch('/api/sessions?limit=20');
-    if (!resp.ok) {
-      const section = document.getElementById('recent-sessions');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (!resp.ok) { hide('recent-sessions'); return; }
     const sessions = await resp.json();
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      const section = document.getElementById('recent-sessions');
-      if (section) section.style.display = 'none';
-      return;
-    }
-    const tbody = document.querySelector('#sessions-table tbody');
-    if (!tbody) {
-      const section = document.getElementById('recent-sessions');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (!Array.isArray(sessions) || sessions.length === 0) { hide('recent-sessions'); return; }
+    const tbody = document.querySelector('#dynamic-sessions-table tbody');
+    if (!tbody) { hide('recent-sessions'); return; }
 
     tbody.innerHTML = sessions.map(s => {
       const time = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
@@ -512,33 +536,18 @@ async function loadRecentSessions() {
         + '<td>' + esc(dur) + '</td>'
         + '</tr>';
     }).join('');
-  } catch (e) {
-    const section = document.getElementById('recent-sessions');
-    if (section) section.style.display = 'none';
-  }
+  } catch (e) { hide('recent-sessions'); }
 }
 
 async function loadServices() {
   try {
     const resp = await fetch('/api/services');
-    if (!resp.ok) {
-      const section = document.getElementById('agent-services');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (!resp.ok) { hide('agent-services'); return; }
     const data = await resp.json();
     const services = data.services || [];
-    if (services.length === 0) {
-      const section = document.getElementById('agent-services');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (services.length === 0) { hide('agent-services'); return; }
     const tbody = document.querySelector('#services-table tbody');
-    if (!tbody) {
-      const section = document.getElementById('agent-services');
-      if (section) section.style.display = 'none';
-      return;
-    }
+    if (!tbody) { hide('agent-services'); return; }
     tbody.innerHTML = services.map(s => {
       const cls = s.active === 'active' ? 'tag-active' : 'tag-deprecated';
       return '<tr>'
@@ -547,22 +556,12 @@ async function loadServices() {
         + '<td>' + esc(s.description) + '</td>'
         + '</tr>';
     }).join('');
-  } catch (e) {
-    const section = document.getElementById('agent-services');
-    if (section) section.style.display = 'none';
-  }
+  } catch (e) { hide('agent-services'); }
 }
 
-function card(value, label) {
-  return '<div class="stat-card"><div class="number">' + value + '</div>'
-    + '<div class="label">' + label + '</div></div>';
-}
-
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
+function hide(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
+function card(v, l) { return '<div class="stat-card"><div class="number">' + v + '</div><div class="label">' + l + '</div></div>'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 document.addEventListener('DOMContentLoaded', initDynamic);
 </script>

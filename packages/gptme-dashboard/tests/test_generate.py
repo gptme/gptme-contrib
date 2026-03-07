@@ -9,6 +9,7 @@ import pytest
 
 from gptme_dashboard.generate import (
     _parse_toml,
+    _preprocess_markdown,
     collect_workspace_data,
     detect_github_url,
     detect_submodules,
@@ -472,9 +473,9 @@ def test_generate_full(workspace: Path, tmp_path: Path):
     # Unified section header
     assert "Lessons &amp; Skills" in html
 
-    # Stats: 4 guidance (3 lessons + 1 skill), 1 plugin, 1 package
-    assert 'class="number">4<' in html  # guidance count
-    assert 'class="number">1<' in html  # plugin / package count
+    # Stats: 3 lessons, 1 skill, 1 plugin, 1 package
+    assert 'class="number">3<' in html  # lessons count
+    assert 'class="number">1<' in html  # skill / plugin / package count
 
 
 def test_generate_with_submodules(workspace_with_submodules: Path, tmp_path: Path):
@@ -1495,3 +1496,25 @@ class TestScanRecentSessions:
         data = json.loads(json_str)
         assert len(data["sessions"]) == 1
         assert data["sessions"][0]["name"] == "2026-01-10-work"
+
+
+def test_preprocess_markdown_inserts_blank_before_list():
+    """Ensure _preprocess_markdown adds blank lines before list markers."""
+    md = "Some text:\n- item one\n- item two"
+    result = _preprocess_markdown(md)
+    assert result == "Some text:\n\n- item one\n- item two"
+
+
+def test_preprocess_markdown_no_double_blank():
+    """Don't add extra blank if one already exists."""
+    md = "Some text:\n\n- item one\n- item two"
+    result = _preprocess_markdown(md)
+    assert result == md
+
+
+def test_render_markdown_lists():
+    """Lists after a paragraph should render as <li> elements."""
+    md = "External resources:\n- LLM evaluation benchmarks\n- Agent evaluation research"
+    html = render_markdown_to_html(md)
+    assert "<li>" in html
+    assert "LLM evaluation benchmarks" in html

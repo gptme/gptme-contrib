@@ -26,11 +26,40 @@ import yaml  # type: ignore[import-untyped]
 from jinja2 import Environment, FileSystemLoader
 
 
+def _preprocess_markdown(md_text: str) -> str:
+    """Ensure blank lines before list blocks so the markdown library renders them.
+
+    Python's ``markdown`` library follows the original Markdown spec which requires
+    a blank line before a list.  Without it, ``- item`` after a paragraph is treated
+    as continuation text, not a list.  This preprocessor inserts blank lines where
+    needed.
+    """
+    lines = md_text.split("\n")
+    result: list[str] = []
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        is_list = stripped.startswith(("- ", "* ", "+ ")) or (
+            len(stripped) > 2 and stripped[0].isdigit() and ". " in stripped[:5]
+        )
+        if is_list and i > 0:
+            prev = lines[i - 1].strip()
+            # Insert blank line if previous line is non-empty and not itself a list item
+            if (
+                prev
+                and not prev.startswith(("- ", "* ", "+ "))
+                and not (len(prev) > 2 and prev[0].isdigit() and ". " in prev[:5])
+            ):
+                result.append("")
+        result.append(line)
+    return "\n".join(result)
+
+
 def render_markdown_to_html(md_text: str) -> str:
     """Render markdown text to HTML using the markdown library."""
+    preprocessed = _preprocess_markdown(md_text)
     return str(
         markdown.markdown(
-            md_text,
+            preprocessed,
             extensions=["fenced_code", "tables", "codehilite"],
             extension_configs={"codehilite": {"css_class": "code", "noclasses": True}},
         )
@@ -192,6 +221,10 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
     sessions: list[dict] = []
 
+    print("Scanning sessions...", end="", flush=True, file=sys.stderr)
+    gptme_count = 0
+    cc_count = 0
+
     # --- gptme sessions ---
     for session_dir in discover_gptme_sessions(start, end):
         config = parse_gptme_config(session_dir)
@@ -220,6 +253,10 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             date.fromisoformat(date_str)
         except ValueError:
             continue  # Directory name doesn't start with a valid ISO date — skip
+
+        gptme_count += 1
+        if gptme_count % 50 == 0:
+            print(f" {gptme_count} gptme", end="", flush=True, file=sys.stderr)
 
         sessions.append(
             {
@@ -257,6 +294,10 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
         except Exception:
             signals = {}
 
+        cc_count += 1
+        if cc_count % 50 == 0:
+            print(f" {cc_count} cc", end="", flush=True, file=sys.stderr)
+
         sessions.append(
             {
                 "name": jsonl.stem[:32],
@@ -269,6 +310,11 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
                 "category": signals.get("inferred_category", ""),
             }
         )
+
+    print(
+        f" done ({gptme_count} gptme + {cc_count} claude-code = {len(sessions)} matching)",
+        file=sys.stderr,
+    )
 
     sessions.sort(key=lambda s: s["date"], reverse=True)
     return sessions[:50]
