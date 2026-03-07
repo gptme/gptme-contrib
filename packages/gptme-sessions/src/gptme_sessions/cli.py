@@ -815,31 +815,36 @@ def judge(
         outcome = meta.get("outcome", "unknown")
         entry_date = entry.parent.name
 
+        result_row: dict = {
+            "session_id": sid,
+            "date": entry_date,
+            "category": cat,
+            "outcome": outcome,
+            "journal_path": str(entry),
+        }
+
         if dry_run:
-            click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
+            results.append(result_row)
+            if not as_json:
+                click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
             continue
 
         verdict = judge_session(text, category=cat, goals=effective_goals)
         score = verdict["score"] if verdict else None
         reason = verdict["reason"] if verdict else "N/A"
 
-        results.append(
-            {
-                "session_id": sid,
-                "date": entry_date,
-                "category": cat,
-                "outcome": outcome,
-                "llm_judge_score": score,
-                "llm_judge_reason": reason,
-                "journal_path": str(entry),
-            }
-        )
+        result_row["llm_judge_score"] = score
+        result_row["llm_judge_reason"] = reason
+        results.append(result_row)
 
         if not as_json and score is not None:
             click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {score:.2f}  {reason}")
 
     if dry_run:
-        click.echo(f"\n{len(entries)} session(s) (dry run)")
+        if as_json:
+            click.echo(json.dumps(results, indent=2))
+        else:
+            click.echo(f"\n{len(entries)} session(s) (dry run)")
         return
 
     # Write scores back to store if requested
@@ -872,6 +877,12 @@ def judge(
                 f"\nScored: {len(scored)}/{len(results)}  "
                 f"mean={sum(scores) / len(scores):.2f}  "
                 f"min={min(scores):.2f}  max={max(scores):.2f}"
+            )
+        else:
+            click.echo(
+                "\nNo sessions scored. Check that ANTHROPIC_API_KEY is set"
+                " and the anthropic package is installed.",
+                err=True,
             )
 
 

@@ -44,19 +44,13 @@ class TestJudgeSession:
         mock_response.content = [MagicMock(text='{"score": 0.75, "reason": "Good work"}')]
         mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
 
+        # patch.dict replaces sys.modules["anthropic"] so the `import anthropic`
+        # inside judge_session picks up the mock without needing a module reload.
         with (
             patch.dict("sys.modules", {"anthropic": mock_anthropic}),
             patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
         ):
-            # Force re-import to pick up the mocked anthropic
-            import importlib
-
-            import gptme_sessions.judge
-
-            importlib.reload(gptme_sessions.judge)
-            result = gptme_sessions.judge.judge_session("session text", category="code")
-            # Restore module
-            importlib.reload(gptme_sessions.judge)
+            result = judge_session("session text", category="code")
 
         assert result is not None
         assert result["score"] == 0.75
@@ -88,13 +82,7 @@ class TestJudgeSession:
             patch.dict("sys.modules", {"anthropic": mock_anthropic}),
             patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
         ):
-            import importlib
-
-            import gptme_sessions.judge
-
-            importlib.reload(gptme_sessions.judge)
-            result = gptme_sessions.judge.judge_session("session text")
-            importlib.reload(gptme_sessions.judge)
+            result = judge_session("session text")
 
         assert result is not None
         assert result["score"] == 1.0  # clamped from 1.5
@@ -105,13 +93,7 @@ class TestJudgeSession:
             patch.dict("sys.modules", {"anthropic": mock_anthropic}),
             patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
         ):
-            import importlib
-
-            import gptme_sessions.judge
-
-            importlib.reload(gptme_sessions.judge)
-            result = gptme_sessions.judge.judge_session("session text")
-            importlib.reload(gptme_sessions.judge)
+            result = judge_session("session text")
 
         assert result is not None
         assert result["score"] == 0.0  # clamped from -0.3
