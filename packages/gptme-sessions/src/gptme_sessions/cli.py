@@ -470,15 +470,12 @@ def annotate(
 
                 store.rewrite(records)
             finally:
-                # Unlink while still holding the lock (prevents TOCTOU: a concurrent
-                # opener would create a new inode rather than reusing this one).
-                lock_path.unlink(missing_ok=True)
                 if _has_fcntl:
                     _fcntl.flock(lock_file, _fcntl.LOCK_UN)
-    except Exception:
-        # Clean up if the inner finally didn't run (e.g. open() or flock() raised).
+    finally:
+        # Runs on every exit path (success, ClickException, open/flock error),
+        # ensuring no stale .lock files accumulate on disk.
         lock_path.unlink(missing_ok=True)
-        raise
 
     if as_json:
         click.echo(json.dumps(record.to_dict(), indent=2))
