@@ -335,7 +335,7 @@ def append(
 @click.option(
     "--outcome",
     default=None,
-    type=click.Choice(["productive", "noop", "failed"]),
+    type=click.Choice(["productive", "noop", "failed", "unknown"]),
     help="Override outcome",
 )
 @click.option(

@@ -3559,7 +3559,7 @@ def test_sync_no_sessions(tmp_path: Path, capsys, monkeypatch):
 # -- annotate ----------------------------------------------------------------
 
 
-def test_annotate_updates_fields(tmp_path: Path, capsys):
+def test_annotate_updates_fields(tmp_path: Path):
     """annotate amends specified fields on an existing record by session ID."""
     import sys
 
