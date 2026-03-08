@@ -228,6 +228,44 @@ def test_session_store_rewrite(tmp_path: Path):
     assert reloaded[0].category == "code"
 
 
+def test_store_rewrite_preserves_appended_records(tmp_path: Path):
+    """rewrite() keeps records appended after load_all() was called."""
+    store = SessionStore(sessions_dir=tmp_path)
+    rec1 = SessionRecord(model="opus", outcome="productive")
+    store.append(rec1)
+
+    records = store.load_all()  # snapshot with only rec1
+
+    # Simulate concurrent append between load and rewrite
+    rec2 = SessionRecord(model="sonnet", outcome="noop")
+    store.append(rec2)
+
+    # Rewrite with the original snapshot (should NOT drop rec2)
+    store.rewrite(records)
+
+    reloaded = store.load_all()
+    ids = {r.session_id for r in reloaded}
+    assert rec1.session_id in ids
+    assert rec2.session_id in ids
+
+
+def test_store_rewrite_preserves_malformed_lines(tmp_path: Path):
+    """rewrite() keeps malformed JSONL lines rather than silently dropping them."""
+    store = SessionStore(sessions_dir=tmp_path)
+    rec = SessionRecord(model="opus")
+    store.append(rec)
+
+    # Inject a malformed line directly
+    with open(store.path, "a") as f:
+        f.write("NOT VALID JSON\n")
+
+    records = store.load_all()  # malformed line is skipped
+    store.rewrite(records)  # should preserve the malformed line
+
+    raw_lines = [line.strip() for line in store.path.read_text().splitlines() if line.strip()]
+    assert any(line == "NOT VALID JSON" for line in raw_lines)
+
+
 def test_session_record_hour_24_fix():
     """Hour 24 timestamps are corrected to 23:59:59."""
     r = SessionRecord(timestamp="2026-03-04T24:00:00+00:00")
@@ -3554,3 +3592,515 @@ def test_sync_no_sessions(tmp_path: Path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     assert "No sessions found" in captured.out
+
+
+# -- annotate ----------------------------------------------------------------
+
+
+def test_annotate_updates_fields(tmp_path: Path):
+    """annotate amends specified fields on an existing record by session ID."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", model="unknown", outcome="unknown")
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid,
+        "--model",
+        "claude-opus-4-6",
+        "--outcome",
+        "productive",
+        "--category",
+        "code",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert len(records) == 1
+    r = records[0]
+    assert r.model == "claude-opus-4-6"
+    assert r.outcome == "productive"
+    assert r.category == "code"
+    assert r.harness == "gptme"  # unchanged
+
+
+def test_annotate_prefix_match(tmp_path: Path):
+    """annotate resolves session by ID prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", model="unknown")
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid[:4],  # prefix
+        "--outcome",
+        "noop",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].outcome == "noop"
+
+
+def test_annotate_unknown_id_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when session ID prefix has no match."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord())
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "zzzzzzzz",
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_empty_session_id_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when session_id is an empty string."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", outcome="unknown")
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "",  # empty string matches everything via startswith
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+    # Record must be unchanged
+    records = store.load_all()
+    assert records[0].outcome == "unknown"
+
+
+def test_annotate_ambiguous_prefix_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when prefix matches more than one record."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Force two records with the same prefix by controlling session_id
+    r1 = SessionRecord()
+    r1.session_id = "aabb1234"
+    r2 = SessionRecord()
+    r2.session_id = "aabb5678"
+    store.append(r1)
+    store.append(r2)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "aabb",
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_add_deliverable(tmp_path: Path):
+    """annotate --add-deliverable appends to existing deliverables list."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(deliverables=["existing-sha"])
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--add-deliverable",
+        "new-sha",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].deliverables == ["existing-sha", "new-sha"]
+
+
+def test_annotate_add_deliverable_deduplicates(tmp_path: Path):
+    """annotate --add-deliverable does not create duplicate entries."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(deliverables=["existing-sha"])
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--add-deliverable",
+        "existing-sha",  # already present
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].deliverables == ["existing-sha"]  # not duplicated
+
+
+def test_annotate_json_output(tmp_path: Path, capsys):
+    """annotate --json outputs the updated record as JSON."""
+    import sys
+    import json
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--model",
+        "claude-opus-4-6",
+        "--json",
+    ]
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["model"] == "claude-opus-4-6"
+    assert data["session_id"] == rec.session_id
+
+
+def test_annotate_noop_exits_nonzero(tmp_path: Path):
+    """annotate without any field option returns non-zero."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_selector_mode_trigger_token_count(tmp_path: Path):
+    """annotate updates selector_mode, trigger, and token_count fields."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid,
+        "--selector-mode",
+        "scored",
+        "--trigger",
+        "timer",
+        "--token-count",
+        "42000",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    r = records[0]
+    assert r.selector_mode == "scored"
+    assert r.trigger == "timer"
+    assert r.token_count == 42000
+
+
+def test_annotate_run_type_normalized(tmp_path: Path):
+    """annotate normalizes run_type using the same rules as SessionRecord.__post_init__."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", run_type="unknown"))
+
+    # Digit-only run_type should be normalized to "autonomous"
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--run-type",
+        "42",
+    ]
+    rc = main()
+    assert rc == 0
+    records = store.load_all()
+    assert records[0].run_type == "autonomous"
+
+    # autonomous-session prefix should also normalize
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--run-type",
+        "autonomous-session-3",
+    ]
+    rc = main()
+    assert rc == 0
+    records = store.load_all()
+    assert records[0].run_type == "autonomous"
+
+
+def test_annotate_lock_file_persists(tmp_path: Path):
+    """annotate leaves the .lock file on disk as a permanent sentinel."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--model",
+        "claude-sonnet-4-6",
+    ]
+    rc = main()
+    assert rc == 0
+
+    # Lock file must remain so all callers reuse the same inode (POSIX flock
+    # correctness depends on this — deleting it breaks mutual exclusion).
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
+
+
+def test_annotate_lock_file_persists_on_error(tmp_path: Path):
+    """annotate leaves the .lock file on disk even when a ClickException is raised."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    # Use a prefix that won't match — annotate will raise ClickException mid-operation
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "notfound",
+        "--model",
+        "claude-sonnet-4-6",
+    ]
+    rc = main()
+    assert rc != 0  # ClickException exits nonzero
+
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
+
+
+def test_annotate_trigger_rejects_invalid(tmp_path: Path):
+    """annotate --trigger rejects values outside the allowed set."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--trigger",
+        "timeer",  # typo — not a valid choice
+    ]
+    rc = main()
+    assert rc != 0  # click.Choice rejects invalid value
+
+    # Record must be unchanged
+    records = store.load_all()
+    assert records[0].trigger is None
+
+
+def test_annotate_duration_rejects_negative(tmp_path: Path):
+    """annotate --duration rejects negative values."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", duration_seconds=300))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--duration",
+        "-1",
+    ]
+    rc = main()
+    assert rc != 0  # click.IntRange(min=0) rejects negative value
+
+    # Record must be unchanged (still 300, not -1)
+    records = store.load_all()
+    assert records[0].duration_seconds == 300
+
+
+def test_annotate_token_count_rejects_negative(tmp_path: Path):
+    """annotate --token-count rejects negative values."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd5678", harness="gptme", token_count=1000))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd5678",
+        "--token-count",
+        "-1",
+    ]
+    rc = main()
+    assert rc != 0  # click.IntRange(min=0) rejects negative value
+
+    # Record must be unchanged (still 1000, not -1)
+    records = store.load_all()
+    assert records[0].token_count == 1000
+
+
+def test_annotate_empty_id_no_options_reports_id_error(tmp_path: Path):
+    """annotate with empty session_id and no field options gives session_id error, not no-op error.
+
+    Guard ordering: session_id is validated before the nothing_supplied check,
+    so the more precise error message is shown regardless of what options were passed.
+    """
+    import sys
+
+    sessions_dir = tmp_path / "sessions"
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "",  # empty session_id
+        # no field options supplied either
+    ]
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "annotate", ""],
+    )
+    assert result.exit_code != 0
+    assert "Session ID must not be empty" in result.output

@@ -9,6 +9,14 @@ from pathlib import Path
 
 import click
 
+# fcntl is POSIX-only; on Windows we skip locking.
+try:
+    import fcntl as _fcntl
+
+    _has_fcntl = True
+except ImportError:
+    _has_fcntl = False
+
 from .discovery import (
     discover_cc_sessions,
     discover_codex_sessions,
@@ -16,7 +24,7 @@ from .discovery import (
     discover_gptme_sessions,
 )
 from .post_session import post_session
-from .record import SessionRecord
+from .record import SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
     SessionStore,
@@ -297,7 +305,16 @@ def append(
     journal_path: str | None,
     deliverables: tuple[str, ...],
 ) -> None:
-    """Append a session record."""
+    """Append a session record.
+
+    Deprecated: use 'sync' to import sessions from trajectories, or 'annotate'
+    to correct metadata on an existing record.
+    """
+    click.echo(
+        "Warning: 'append' is deprecated. Use 'sync' to import sessions from trajectories "
+        "or 'annotate' to correct metadata on an existing record.",
+        err=True,
+    )
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     record = SessionRecord(
         harness=harness,
@@ -312,6 +329,186 @@ def append(
     )
     path = store.append(record)
     click.echo(f"Appended session {record.session_id} to {path}")
+
+
+# -- annotate ----------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("session_id")
+@click.option("--model", default=None, help="Override model name")
+@click.option("--harness", default=None, help="Override harness")
+@click.option("--run-type", default=None, help="Override run type")
+@click.option("--category", default=None, help="Override category")
+@click.option(
+    "--outcome",
+    default=None,
+    type=click.Choice(["productive", "noop", "failed", "unknown"]),
+    help="Override outcome",
+)
+@click.option(
+    "--duration",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Override duration in seconds (must be non-negative)",
+)
+@click.option("--journal-path", default=None, help="Override journal path")
+@click.option(
+    "--selector-mode",
+    default=None,
+    help="Override selector mode (e.g. scored, llm-context)",
+)
+@click.option(
+    "--trigger",
+    default=None,
+    type=click.Choice(["timer", "dispatch", "manual", "spawn"]),
+    help="Override trigger",
+)
+@click.option(
+    "--token-count", type=click.IntRange(min=0), default=None, help="Override token count"
+)
+@click.option(
+    "--recommended-category",
+    default=None,
+    help="Override recommended category (from Thompson sampling / CASCADE)",
+)
+@click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
+)
+@click.pass_context
+def annotate(
+    ctx: click.Context,
+    session_id: str,
+    model: str | None,
+    harness: str | None,
+    run_type: str | None,
+    category: str | None,
+    outcome: str | None,
+    duration: int | None,
+    journal_path: str | None,
+    selector_mode: str | None,
+    trigger: str | None,
+    token_count: int | None,
+    recommended_category: str | None,
+    add_deliverable: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """Amend an existing session record by session ID (prefix match supported).
+
+    Useful for manually correcting metadata extracted at sync time — for
+    example fixing a misidentified model, reclassifying the outcome, or
+    adding a journal path that wasn't set during the session.
+
+    Only fields explicitly supplied are updated; all other fields are left
+    unchanged.  To add deliverables without overwriting existing ones, use
+    ``--add-deliverable``.  There is currently no option to replace the whole
+    deliverables list; edit the session-records.jsonl file directly for that.
+    """
+    # Validate session_id first — its error message is more precise than the
+    # no-op guard, so diagnose it regardless of what other options were passed.
+    if not session_id:
+        raise click.UsageError("Session ID must not be empty.")
+
+    # Guard: if nothing was supplied, avoid a no-op rewrite (check before touching the store)
+    nothing_supplied = (
+        model is None
+        and harness is None
+        and run_type is None
+        and category is None
+        and outcome is None
+        and duration is None
+        and journal_path is None
+        and selector_mode is None
+        and trigger is None
+        and token_count is None
+        and recommended_category is None
+        and not add_deliverable
+    )
+    if nothing_supplied:
+        raise click.UsageError(
+            "No fields specified. Provide at least one option to update "
+            "(e.g. --model, --outcome, --add-deliverable)."
+        )
+
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    store.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    # Hold an exclusive lock to serialise concurrent annotate calls during the
+    # load → mutate → rewrite cycle (prevents annotate-vs-annotate clobber).
+    # Note: sync/post-session use store.append(), which does not acquire this
+    # lock. Fully protecting against annotate+sync races would require locking
+    # inside SessionStore itself — that is a future improvement.
+
+    # The lock file is a permanent sentinel — never deleted. This ensures all
+    # concurrent annotate calls operate on the same inode, so the flock queue
+    # works correctly. Deleting the file would allow a newly arriving process
+    # to acquire LOCK_EX on a fresh inode while a blocked waiter holds
+    # LOCK_EX on the old inode, breaking mutual exclusion.
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        if _has_fcntl:
+            _fcntl.flock(lock_file, _fcntl.LOCK_EX)
+        try:
+            records = store.load_all()
+
+            if not records:
+                raise click.ClickException("No session records found in store.")
+
+            # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
+            matches = [r for r in records if r.session_id.startswith(session_id)]
+            if not matches:
+                raise click.ClickException(
+                    f"No session found with ID prefix {session_id!r}. "
+                    "Run 'gptme-sessions query' to list available session IDs."
+                )
+            if len(matches) > 1:
+                ids = ", ".join(r.session_id for r in matches)
+                raise click.ClickException(
+                    f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
+                )
+
+            record = matches[0]
+
+            # Apply only the fields that were explicitly provided
+            if model is not None:
+                record.model = model
+            if harness is not None:
+                record.harness = harness
+            if run_type is not None:
+                record.run_type = normalize_run_type(run_type)
+            if category is not None:
+                record.category = category
+            if outcome is not None:
+                record.outcome = outcome
+            if duration is not None:
+                record.duration_seconds = duration
+            if journal_path is not None:
+                record.journal_path = journal_path
+            if selector_mode is not None:
+                record.selector_mode = selector_mode
+            if trigger is not None:
+                record.trigger = trigger
+            if token_count is not None:
+                record.token_count = token_count
+            if recommended_category is not None:
+                record.recommended_category = recommended_category
+            if add_deliverable:
+                existing = list(record.deliverables or [])
+                for d in add_deliverable:
+                    if d not in existing:
+                        existing.append(d)
+                record.deliverables = existing
+
+            store.rewrite(records)
+
+            if as_json:
+                click.echo(json.dumps(record.to_dict(), indent=2, default=str))
+            else:
+                click.echo(f"Updated session {record.session_id}.")
+        finally:
+            if _has_fcntl:
+                _fcntl.flock(lock_file, _fcntl.LOCK_UN)
 
 
 # -- discover ----------------------------------------------------------------
