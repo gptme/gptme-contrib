@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -32,6 +34,8 @@ from .store import (
     format_run_analytics,
     format_stats,
 )
+
+logger = logging.getLogger(__name__)
 
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
 
@@ -610,7 +614,20 @@ def discover(
 )
 @click.option("--grade", is_flag=True, help="Output grade only (float 0.0-1.0)")
 @click.option("--usage", is_flag=True, help="Output token usage breakdown")
-def signals(path: Path, as_json: bool, grade: bool, usage: bool) -> None:
+@click.option(
+    "--llm-judge", is_flag=True, help="Run LLM-as-judge scoring (requires anthropic package)"
+)
+@click.option("--goals", default=None, help="Agent goals for LLM judge (default: generic)")
+@click.option("--category", "judge_category", default=None, help="Category hint for LLM judge")
+def signals(
+    path: Path,
+    as_json: bool,
+    grade: bool,
+    usage: bool,
+    llm_judge: bool,
+    goals: str | None,
+    judge_category: str | None,
+) -> None:
     """Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)."""
     # Validate mutual exclusivity
     flags = sum([as_json, grade, usage])
@@ -630,6 +647,23 @@ def signals(path: Path, as_json: bool, grade: bool, usage: bool) -> None:
         raise click.ClickException(f"cannot read {path}: permission denied")
     except UnicodeDecodeError:
         raise click.ClickException(f"{path} contains non-UTF-8 content")
+
+    # Run LLM judge if requested (skip with --grade/--usage — result not displayed in those modes)
+    if llm_judge and not (grade or usage):
+        from .judge import judge_from_signals
+
+        judge_kwargs: dict = {}
+        if goals:
+            judge_kwargs["goals"] = goals
+        verdict = judge_from_signals(
+            result,
+            category=judge_category,
+            **judge_kwargs,
+        )
+        if verdict:
+            result["llm_judge"] = verdict
+        else:
+            click.echo("LLM judge: unavailable (missing API key or anthropic package)", err=True)
 
     if grade:
         click.echo(f"{result['grade']:.4f}")
@@ -695,6 +729,9 @@ def signals(path: Path, as_json: bool, grade: bool, usage: bool) -> None:
             secondary = u.get("rate_limit_secondary_pct")
             sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
             click.echo(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
+    if result.get("llm_judge"):
+        j = result["llm_judge"]
+        click.echo(f"LLM Judge: {j['score']:.2f} ({j['model']}) — {j['reason']}")
     if result["deliverables"]:
         click.echo("Deliverables:")
         for d in result["deliverables"][:10]:
@@ -890,6 +927,182 @@ def post_session_cmd(
             f"Recorded session {ps.record.session_id}: "
             f"outcome={ps.record.outcome} grade={grade_str} tokens={tok_str}"
         )
+
+
+# -- judge -------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--journal-dir",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Path to journal directory (default: ./journal)",
+)
+@click.option("--last", type=int, default=20, help="Score last N sessions (default: 20)")
+@click.option("--goals", default=None, help="Agent goals for LLM judge (default: generic)")
+@click.option(
+    "--update-store",
+    is_flag=True,
+    help="Write scores back to session-records.jsonl (matching by session_id)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--dry-run", is_flag=True, help="Show sessions without scoring")
+@click.pass_context
+def judge(
+    ctx: click.Context,
+    journal_dir: Path | None,
+    last: int,
+    goals: str | None,
+    update_store: bool,
+    as_json: bool,
+    dry_run: bool,
+) -> None:
+    """Score sessions with LLM-as-judge goal-alignment evaluation.
+
+    Reads autonomous session journal entries and evaluates each for strategic
+    value. Scores range 0.0-1.0 with a 1-sentence reason.
+
+    With --update-store, writes scores back to session-records.jsonl by matching
+    session IDs from journal filenames to stored records.
+    """
+    from .judge import DEFAULT_GOALS, judge_session
+
+    if dry_run and update_store:
+        raise click.UsageError("--dry-run and --update-store are mutually exclusive")
+
+    if journal_dir is None:
+        journal_dir = Path.cwd() / "journal"
+    if not journal_dir.is_dir():
+        raise click.BadParameter(f"{journal_dir} is not a directory", param_hint="'--journal-dir'")
+
+    # Discover autonomous session entries
+    entries: list[Path] = []
+    for day_dir in sorted(journal_dir.iterdir()):
+        if day_dir.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
+            entries.extend(sorted(day_dir.glob("autonomous-session-*.md")))
+    if last <= 0:
+        raise click.UsageError("--last must be a positive integer (got 0 or negative)")
+    entries = entries[-last:]
+
+    if not entries:
+        click.echo("No autonomous session journal entries found.", err=True)
+        return
+
+    click.echo(f"Found {len(entries)} session(s) to {'preview' if dry_run else 'score'}", err=True)
+
+    # Parse session ID from filename
+    def extract_sid(p: Path) -> str:
+        m = re.match(r"autonomous-session-(\w+)", p.stem)
+        return m.group(1) if m else p.stem
+
+    # Parse YAML-like metadata from journal code blocks
+    def parse_meta(text: str) -> dict[str, str]:
+        m = re.search(r"```ya?ml\s*\n(.*?)```", text, re.DOTALL)
+        if not m:
+            return {}
+        meta = {}
+        for line in m.group(1).strip().splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")
+                meta[k.strip()] = v.strip()
+        return meta
+
+    effective_goals = goals or DEFAULT_GOALS
+    results: list[dict] = []
+
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Skipping %s: %s", entry, e)
+            continue
+
+        try:
+            meta = parse_meta(text)
+            sid = extract_sid(entry)
+            cat = meta.get("category", "unknown")
+            outcome = meta.get("outcome", "unknown")
+            entry_date = entry.parent.name
+
+            result_row: dict = {
+                "session_id": sid,
+                "date": entry_date,
+                "category": cat,
+                "outcome": outcome,
+                "journal_path": str(entry),
+            }
+
+            if dry_run:
+                results.append(result_row)
+                if not as_json:
+                    click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
+                continue
+
+            verdict = judge_session(text, category=cat, goals=effective_goals)
+            score = verdict["score"] if verdict else None
+            reason = verdict["reason"] if verdict else None
+
+            result_row["llm_judge_score"] = score
+            result_row["llm_judge_reason"] = reason
+            result_row["llm_judge_model"] = verdict["model"] if verdict else None
+            results.append(result_row)
+
+            if not as_json and score is not None:
+                click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {score:.2f}  {reason}")
+        except Exception as e:
+            logger.warning("Error processing %s: %s", entry, e)
+            continue
+
+    if dry_run:
+        if as_json:
+            click.echo(json.dumps(results, indent=2))
+        else:
+            click.echo(f"\n{len(results)} session(s) (dry run)")
+        return
+
+    # Write scores back to store if requested
+    if update_store:
+        store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+        records = store.load_all()
+        score_map = {r["session_id"]: r for r in results if r["llm_judge_score"] is not None}
+        updated = 0
+        for rec in records:
+            if rec.session_id in score_map:
+                s = score_map[rec.session_id]
+                rec.llm_judge_score = s["llm_judge_score"]
+                rec.llm_judge_reason = s["llm_judge_reason"]
+                rec.llm_judge_model = s["llm_judge_model"]
+                updated += 1
+        if updated:
+            store.rewrite(records)
+            click.echo(f"\nUpdated {updated} record(s) in {store.path}", err=True)
+        elif not score_map:
+            click.echo(
+                "\nNo sessions were scored — check ANTHROPIC_API_KEY and the anthropic package.",
+                err=True,
+            )
+        else:
+            click.echo("\nNo matching records found in store to update.", err=True)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        # Summary stats
+        scored = [r for r in results if r["llm_judge_score"] is not None]
+        if scored:
+            scores = [r["llm_judge_score"] for r in scored]
+            click.echo(
+                f"\nScored: {len(scored)}/{len(results)}  "
+                f"mean={sum(scores) / len(scores):.2f}  "
+                f"min={min(scores):.2f}  max={max(scores):.2f}"
+            )
+        else:
+            click.echo(
+                "\nNo sessions scored. Check that ANTHROPIC_API_KEY is set"
+                " and the anthropic package is installed.",
+                err=True,
+            )
 
 
 def main() -> int:

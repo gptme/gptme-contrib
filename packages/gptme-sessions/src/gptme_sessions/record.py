@@ -120,6 +120,11 @@ class SessionRecord:
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
     journal_path: str | None = None
 
+    # LLM judge evaluation
+    llm_judge_score: float | None = None  # 0.0-1.0 goal-alignment score
+    llm_judge_reason: str | None = None  # 1-sentence explanation
+    llm_judge_model: str | None = None  # model used for judging (e.g. claude-haiku-4-5)
+
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = str(uuid.uuid4())[:8]
