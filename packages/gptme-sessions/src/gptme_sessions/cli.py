@@ -48,7 +48,10 @@ def _discover_all(
 ) -> list[dict]:
     """Collect discovered sessions across all harnesses.
 
-    Returns a list of dicts with keys ``harness``, ``path``, and ``model``.
+    Returns a list of dicts with keys ``harness`` and ``path``.
+    Dicts for ``gptme`` and ``claude-code`` harnesses also include ``model``
+    (may be ``None`` if extraction fails); ``codex`` and ``copilot`` entries
+    do not include ``model``.  Callers should use ``.get("model")`` accordingly.
     Used for fallback display and the ``sync`` command.
     """
     today = date.today()
@@ -889,7 +892,7 @@ def sync(
         n_would_update = len(updated_paths)
         n_would_import = len(discovered) - skipped - n_would_update
         click.echo(
-            f"\n{len(discovered)} found, {skipped} already in store, "
+            f"\n{len(discovered)} found, {skipped} unchanged, "
             f"{n_would_import} would be imported"
             + (f", {n_would_update} would be updated" if n_would_update else "")
         )
