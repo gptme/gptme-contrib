@@ -250,6 +250,12 @@ tr:hover { background: var(--accent-dim); }
     <div class="label">Tasks</div>
   </div>
   {% endif %}
+  {% if stats.total_summaries %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_summaries }}</div>
+    <div class="label">Summaries</div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Dynamic: Session Stats (shown when serve API is available) -->
