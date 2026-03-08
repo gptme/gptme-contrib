@@ -151,7 +151,7 @@ The template receives these variables:
 | `skills` | `list[dict]` | Skill entries only (`name`, `description`, `path`, `source`, `gh_url`) |
 | `plugins` | `list[dict]` | `name`, `description`, `path`, `enabled` |
 | `packages` | `list[dict]` | `name`, `version`, `description`, `path`, `gh_url` |
-| `sessions` | `list[dict]` | Recent sessions (populated when `--sessions` is passed) |
+| `sessions` | `list[dict]` | Recent sessions (populated when `--sessions` is passed); each has `name`, `date`, `harness`, `commits`, `edits`, `errors`, `grade`, `category` |
 | `journals` | `list[dict]` | Recent journal entries; each has `date`, `name`, `preview` |
 | `tasks` | `list[dict]` | Tasks from `tasks/`; each has `id`, `title`, `state`, `priority`, `tags`, `assigned_to`, `path`, `gh_url` (when GitHub remote detected) |
 | `stats` | `dict` | `total_lessons`, `total_skills`, `total_guidance`, `total_plugins`, `total_packages`, `total_sessions`, `total_journals`, `total_tasks`, `task_states` (`dict[str, int]` mapping state → count), `lesson_categories` |
