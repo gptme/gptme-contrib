@@ -3708,6 +3708,34 @@ def test_annotate_add_deliverable(tmp_path: Path):
     assert records[0].deliverables == ["existing-sha", "new-sha"]
 
 
+def test_annotate_add_deliverable_deduplicates(tmp_path: Path):
+    """annotate --add-deliverable does not create duplicate entries."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(deliverables=["existing-sha"])
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--add-deliverable",
+        "existing-sha",  # already present
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].deliverables == ["existing-sha"]  # not duplicated
+
+
 def test_annotate_json_output(tmp_path: Path, capsys):
     """annotate --json outputs the updated record as JSON."""
     import sys

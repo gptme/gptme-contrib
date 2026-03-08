@@ -485,7 +485,11 @@ def annotate(
             if token_count is not None:
                 record.token_count = token_count
             if add_deliverable:
-                record.deliverables = list(record.deliverables or []) + list(add_deliverable)
+                existing = list(record.deliverables or [])
+                for d in add_deliverable:
+                    if d not in existing:
+                        existing.append(d)
+                record.deliverables = existing
 
             store.rewrite(records)
         finally:
@@ -493,7 +497,7 @@ def annotate(
                 _fcntl.flock(lock_file, _fcntl.LOCK_UN)
 
     if as_json:
-        click.echo(json.dumps(record.to_dict(), indent=2))
+        click.echo(json.dumps(record.to_dict(), indent=2, default=str))
     else:
         click.echo(f"Updated session {record.session_id}.")
 
