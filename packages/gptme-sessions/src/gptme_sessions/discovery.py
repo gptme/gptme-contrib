@@ -72,7 +72,7 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
     Reads only until the first valid timestamp is found (fast).
     """
     try:
-        with open(jsonl_path) as f:
+        with open(jsonl_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -124,7 +124,7 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
     Scans up to 50 lines to find an assistant message with a model field.
     """
     try:
-        with open(jsonl_path) as f:
+        with open(jsonl_path, encoding="utf-8") as f:
             for i, line in enumerate(f):
                 if i >= 50:
                     break

@@ -876,7 +876,10 @@ def sync(
 
     if not dry_run:
         if updated_paths:
-            # Rewrite the store with updated records + new records
+            # Rewrite the store to persist in-place mutations on existing_records.
+            # NOTE: existing_records was loaded once at the start of sync; any records
+            # appended to the store by a concurrent process after that load may be lost
+            # here.  See store.rewrite() docstring for details on this known trade-off.
             store.rewrite(existing_records + new_records)
         else:
             for rec in new_records:

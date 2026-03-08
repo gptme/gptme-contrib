@@ -161,7 +161,10 @@ class SessionRecord:
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known_fields}
         # Migrate legacy records: journal_path that ends with .jsonl is actually
-        # a trajectory path (set by old sync command before trajectory_path was added)
+        # a trajectory path (set by old sync command before trajectory_path was added).
+        # NOTE: A human-written journal whose filename ends in .jsonl would also be
+        # migrated here (journal_path set to None). This is an acceptable false-positive
+        # risk; plain-text journal files are almost never named .jsonl in practice.
         if (
             filtered.get("trajectory_path") is None
             and isinstance(filtered.get("journal_path"), str)
