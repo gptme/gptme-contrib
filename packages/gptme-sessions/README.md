@@ -66,6 +66,14 @@ gptme-sessions sync --since 14d
 gptme-sessions sync --signals  # extract productivity signals (slower)
 gptme-sessions sync --dry-run  # preview what would be imported
 
+# Annotate an existing session record (amend fields after the fact)
+gptme-sessions annotate a1b2c3d4 --outcome productive --add-deliverable pr#42
+gptme-sessions annotate a1b2 --duration 3600 --token-count 50000
+
+# Score a session with an LLM judge (goal-alignment rating 1–5)
+gptme-sessions judge a1b2c3d4
+gptme-sessions judge a1b2c3d4 --model opus
+
 # Record a session at the end of an agent run (full pipeline)
 gptme-sessions post-session --harness gptme --model opus \
   --trajectory ~/.local/share/gptme/logs/2026-03-07-foo/conversation.jsonl
