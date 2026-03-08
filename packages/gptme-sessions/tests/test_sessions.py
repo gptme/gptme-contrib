@@ -4895,6 +4895,8 @@ def test_discover_json_unsynced_all_synced(tmp_path: Path, monkeypatch: pytest.M
     assert data["sessions"] == []
     # total_discovered > 0 tells consumers "all were synced, not missing"
     assert data["total_discovered"] == 1
+
+
 # -- show command tests -------------------------------------------------------
 
 
