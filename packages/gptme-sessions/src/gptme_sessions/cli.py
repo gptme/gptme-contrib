@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import sys
 from datetime import date, timedelta
@@ -378,28 +379,7 @@ def annotate(
     ``--add-deliverable``.  There is currently no option to replace the whole
     deliverables list; edit the session-records.jsonl file directly for that.
     """
-    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
-    records = store.load_all()
-
-    if not records:
-        raise click.ClickException("No session records found in store.")
-
-    # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
-    matches = [r for r in records if r.session_id.startswith(session_id)]
-    if not matches:
-        raise click.ClickException(
-            f"No session found with ID prefix {session_id!r}. "
-            "Run 'gptme-sessions query' to list available session IDs."
-        )
-    if len(matches) > 1:
-        ids = ", ".join(r.session_id for r in matches)
-        raise click.ClickException(
-            f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
-        )
-
-    record = matches[0]
-
-    # Guard: if nothing was supplied, avoid a no-op rewrite
+    # Guard: if nothing was supplied, avoid a no-op rewrite (check before touching the store)
     nothing_supplied = (
         model is None
         and harness is None
@@ -419,31 +399,69 @@ def annotate(
             "(e.g. --model, --outcome, --add-deliverable)."
         )
 
-    # Apply only the fields that were explicitly provided
-    if model is not None:
-        record.model = model
-    if harness is not None:
-        record.harness = harness
-    if run_type is not None:
-        record.run_type = run_type
-    if category is not None:
-        record.category = category
-    if outcome is not None:
-        record.outcome = outcome
-    if duration is not None:
-        record.duration_seconds = duration
-    if journal_path is not None:
-        record.journal_path = journal_path
-    if selector_mode is not None:
-        record.selector_mode = selector_mode
-    if trigger is not None:
-        record.trigger = trigger
-    if token_count is not None:
-        record.token_count = token_count
-    if add_deliverable:
-        record.deliverables = list(record.deliverables or []) + list(add_deliverable)
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    store.sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    store.rewrite(records)
+    # Hold an exclusive lock for the duration of load → mutate → rewrite so that
+    # concurrent writes (e.g. a 'sync' or 'post-session' running in a parallel
+    # pipeline) are not silently dropped.
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    with open(lock_path, "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            records = store.load_all()
+
+            if not records:
+                raise click.ClickException("No session records found in store.")
+
+            # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
+            matches = [r for r in records if r.session_id.startswith(session_id)]
+            if not matches:
+                raise click.ClickException(
+                    f"No session found with ID prefix {session_id!r}. "
+                    "Run 'gptme-sessions query' to list available session IDs."
+                )
+            if len(matches) > 1:
+                ids = ", ".join(r.session_id for r in matches)
+                raise click.ClickException(
+                    f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
+                )
+
+            record = matches[0]
+
+            # Apply only the fields that were explicitly provided
+            if model is not None:
+                record.model = model
+            if harness is not None:
+                record.harness = harness
+            if run_type is not None:
+                # Apply the same normalization as SessionRecord.__post_init__ to
+                # avoid storing values that bypass the digit/prefix guards.
+                if run_type.isdigit():
+                    run_type = "autonomous"
+                elif run_type.startswith("autonomous-session"):
+                    run_type = "autonomous"
+                record.run_type = run_type
+            if category is not None:
+                record.category = category
+            if outcome is not None:
+                record.outcome = outcome
+            if duration is not None:
+                record.duration_seconds = duration
+            if journal_path is not None:
+                record.journal_path = journal_path
+            if selector_mode is not None:
+                record.selector_mode = selector_mode
+            if trigger is not None:
+                record.trigger = trigger
+            if token_count is not None:
+                record.token_count = token_count
+            if add_deliverable:
+                record.deliverables = list(record.deliverables or []) + list(add_deliverable)
+
+            store.rewrite(records)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     if as_json:
         click.echo(json.dumps(record.to_dict(), indent=2))

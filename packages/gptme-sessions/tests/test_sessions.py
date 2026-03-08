@@ -3796,3 +3796,45 @@ def test_annotate_selector_mode_trigger_token_count(tmp_path: Path):
     assert r.selector_mode == "scored"
     assert r.trigger == "timer"
     assert r.token_count == 42000
+
+
+def test_annotate_run_type_normalized(tmp_path: Path):
+    """annotate normalizes run_type using the same rules as SessionRecord.__post_init__."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", run_type="unknown"))
+
+    # Digit-only run_type should be normalized to "autonomous"
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--run-type",
+        "42",
+    ]
+    rc = main()
+    assert rc == 0
+    records = store.load_all()
+    assert records[0].run_type == "autonomous"
+
+    # autonomous-session prefix should also normalize
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--run-type",
+        "autonomous-session-3",
+    ]
+    rc = main()
+    assert rc == 0
+    records = store.load_all()
+    assert records[0].run_type == "autonomous"
