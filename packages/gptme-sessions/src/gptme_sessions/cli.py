@@ -292,7 +292,11 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
     click.echo(f"  Run type: {record.run_type or 'unknown'}")
     click.echo(f"  Outcome:  {record.outcome}")
     if record.duration_seconds:
-        click.echo(f"  Duration: {record.duration_seconds // 60}m {record.duration_seconds % 60}s")
+        _s = record.duration_seconds
+        _h, _rem = divmod(_s, 3600)
+        _m, _sec = divmod(_rem, 60)
+        dur_str = f"{_h}h {_m}m {_sec}s" if _h else f"{_m}m {_sec}s"
+        click.echo(f"  Duration: {dur_str}")
     if record.category:
         click.echo(f"  Category: {record.category}")
     if record.trigger:

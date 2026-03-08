@@ -5019,3 +5019,32 @@ def test_show_json_output(tmp_path: Path, capsys, monkeypatch):
     assert data["harness"] == "gptme"
     assert data["outcome"] == "productive"
 
+
+def test_show_duration_hours_aware(tmp_path: Path, capsys, monkeypatch):
+    """show displays duration in hours for sessions >= 60 minutes."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            outcome="productive",
+            duration_seconds=5400,  # 1h 30m
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1h 30m 0s" in captured.out
+    assert "90m" not in captured.out
