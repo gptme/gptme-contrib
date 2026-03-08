@@ -437,7 +437,6 @@ def annotate(
     # works correctly. Deleting the file would allow a newly arriving process
     # to acquire LOCK_EX on a fresh inode while a blocked waiter holds
     # LOCK_EX on the old inode, breaking mutual exclusion.
-    record: SessionRecord  # assigned inside with-block on success; errors raise before use
     lock_path = store.path.with_name(store.path.name + ".lock")
     with open(lock_path, "a", encoding="utf-8") as lock_file:
         if _has_fcntl:
@@ -492,14 +491,14 @@ def annotate(
                 record.deliverables = existing
 
             store.rewrite(records)
+
+            if as_json:
+                click.echo(json.dumps(record.to_dict(), indent=2, default=str))
+            else:
+                click.echo(f"Updated session {record.session_id}.")
         finally:
             if _has_fcntl:
                 _fcntl.flock(lock_file, _fcntl.LOCK_UN)
-
-    if as_json:
-        click.echo(json.dumps(record.to_dict(), indent=2, default=str))
-    else:
-        click.echo(f"Updated session {record.session_id}.")
 
 
 # -- discover ----------------------------------------------------------------
