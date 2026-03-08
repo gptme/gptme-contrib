@@ -419,69 +419,70 @@ def annotate(
     except ImportError:
         _has_fcntl = False
 
+    # The lock file is a permanent sentinel — never deleted. This ensures all
+    # concurrent annotate calls operate on the same inode, so the flock queue
+    # works correctly. Deleting the file would allow a newly arriving process
+    # to acquire LOCK_EX on a fresh inode while a blocked waiter holds
+    # LOCK_EX on the old inode, breaking mutual exclusion.
     lock_path = store.path.with_name(store.path.name + ".lock")
-    try:
-        with open(lock_path, "a") as lock_file:
+    with open(lock_path, "a") as lock_file:
+        if _has_fcntl:
+            _fcntl.flock(lock_file, _fcntl.LOCK_EX)
+        try:
+            records = store.load_all()
+
+            if not records:
+                raise click.ClickException("No session records found in store.")
+
+            # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
+            matches = [r for r in records if r.session_id.startswith(session_id)]
+            if not matches:
+                raise click.ClickException(
+                    f"No session found with ID prefix {session_id!r}. "
+                    "Run 'gptme-sessions query' to list available session IDs."
+                )
+            if len(matches) > 1:
+                ids = ", ".join(r.session_id for r in matches)
+                raise click.ClickException(
+                    f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
+                )
+
+            record = matches[0]
+
+            # Apply only the fields that were explicitly provided
+            if model is not None:
+                record.model = model
+            if harness is not None:
+                record.harness = harness
+            if run_type is not None:
+                # Apply the same normalization as SessionRecord.__post_init__ to
+                # avoid storing values that bypass the digit/prefix guards.
+                if run_type.isdigit():
+                    run_type = "autonomous"
+                elif run_type.startswith("autonomous-session"):
+                    run_type = "autonomous"
+                record.run_type = run_type
+            if category is not None:
+                record.category = category
+            if outcome is not None:
+                record.outcome = outcome
+            if duration is not None:
+                record.duration_seconds = duration
+            if journal_path is not None:
+                record.journal_path = journal_path
+            if selector_mode is not None:
+                record.selector_mode = selector_mode
+            if trigger is not None:
+                record.trigger = trigger
+            if token_count is not None:
+                record.token_count = token_count
+            if add_deliverable:
+                record.deliverables = list(record.deliverables or []) + list(add_deliverable)
+
+            store.rewrite(records)
+        finally:
             if _has_fcntl:
-                _fcntl.flock(lock_file, _fcntl.LOCK_EX)
-            try:
-                records = store.load_all()
-
-                if not records:
-                    raise click.ClickException("No session records found in store.")
-
-                # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
-                matches = [r for r in records if r.session_id.startswith(session_id)]
-                if not matches:
-                    raise click.ClickException(
-                        f"No session found with ID prefix {session_id!r}. "
-                        "Run 'gptme-sessions query' to list available session IDs."
-                    )
-                if len(matches) > 1:
-                    ids = ", ".join(r.session_id for r in matches)
-                    raise click.ClickException(
-                        f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
-                    )
-
-                record = matches[0]
-
-                # Apply only the fields that were explicitly provided
-                if model is not None:
-                    record.model = model
-                if harness is not None:
-                    record.harness = harness
-                if run_type is not None:
-                    # Apply the same normalization as SessionRecord.__post_init__ to
-                    # avoid storing values that bypass the digit/prefix guards.
-                    if run_type.isdigit():
-                        run_type = "autonomous"
-                    elif run_type.startswith("autonomous-session"):
-                        run_type = "autonomous"
-                    record.run_type = run_type
-                if category is not None:
-                    record.category = category
-                if outcome is not None:
-                    record.outcome = outcome
-                if duration is not None:
-                    record.duration_seconds = duration
-                if journal_path is not None:
-                    record.journal_path = journal_path
-                if selector_mode is not None:
-                    record.selector_mode = selector_mode
-                if trigger is not None:
-                    record.trigger = trigger
-                if token_count is not None:
-                    record.token_count = token_count
-                if add_deliverable:
-                    record.deliverables = list(record.deliverables or []) + list(add_deliverable)
-
-                store.rewrite(records)
-            finally:
-                if _has_fcntl:
-                    _fcntl.flock(lock_file, _fcntl.LOCK_UN)
-    finally:
-        # Runs on every exit path (success, ClickException, open/flock error).
-        lock_path.unlink(missing_ok=True)
+                _fcntl.flock(lock_file, _fcntl.LOCK_UN)
 
     if as_json:
         click.echo(json.dumps(record.to_dict(), indent=2))

@@ -3840,8 +3840,8 @@ def test_annotate_run_type_normalized(tmp_path: Path):
     assert records[0].run_type == "autonomous"
 
 
-def test_annotate_cleans_up_lock_file(tmp_path: Path):
-    """annotate removes the .lock file after completing."""
+def test_annotate_lock_file_persists(tmp_path: Path):
+    """annotate leaves the .lock file on disk as a permanent sentinel."""
     import sys
 
     from gptme_sessions import SessionRecord, SessionStore
@@ -3863,12 +3863,14 @@ def test_annotate_cleans_up_lock_file(tmp_path: Path):
     rc = main()
     assert rc == 0
 
+    # Lock file must remain so all callers reuse the same inode (POSIX flock
+    # correctness depends on this — deleting it breaks mutual exclusion).
     lock_path = store.path.with_name(store.path.name + ".lock")
-    assert not lock_path.exists(), f"Lock file {lock_path} was not cleaned up"
+    assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
 
 
-def test_annotate_cleans_up_lock_file_on_error(tmp_path: Path):
-    """annotate removes the .lock file even when a ClickException is raised (unknown ID)."""
+def test_annotate_lock_file_persists_on_error(tmp_path: Path):
+    """annotate leaves the .lock file on disk even when a ClickException is raised."""
     import sys
 
     from gptme_sessions import SessionRecord, SessionStore
@@ -3892,4 +3894,4 @@ def test_annotate_cleans_up_lock_file_on_error(tmp_path: Path):
     assert rc != 0  # ClickException exits nonzero
 
     lock_path = store.path.with_name(store.path.name + ".lock")
-    assert not lock_path.exists(), f"Lock file {lock_path} leaked on error path"
+    assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
