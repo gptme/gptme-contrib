@@ -332,7 +332,12 @@ def append(
 @click.option("--harness", default=None, help="Override harness")
 @click.option("--run-type", default=None, help="Override run type")
 @click.option("--category", default=None, help="Override category")
-@click.option("--outcome", default=None, help="Override outcome (productive, noop, failed)")
+@click.option(
+    "--outcome",
+    default=None,
+    type=click.Choice(["productive", "noop", "failed"]),
+    help="Override outcome",
+)
 @click.option("--duration", type=int, default=None, help="Override duration in seconds")
 @click.option("--journal-path", default=None, help="Override journal path")
 @click.option(
@@ -470,12 +475,15 @@ def annotate(
 
                 store.rewrite(records)
             finally:
+                # Unlink while holding the lock so a concurrent opener gets a
+                # new inode rather than reusing this one (prevents TOCTOU).
+                lock_path.unlink(missing_ok=True)
                 if _has_fcntl:
                     _fcntl.flock(lock_file, _fcntl.LOCK_UN)
-    finally:
-        # Runs on every exit path (success, ClickException, open/flock error),
-        # ensuring no stale .lock files accumulate on disk.
+    except Exception:
+        # Safety net for failures in open() or flock() before inner finally ran.
         lock_path.unlink(missing_ok=True)
+        raise
 
     if as_json:
         click.echo(json.dumps(record.to_dict(), indent=2))
