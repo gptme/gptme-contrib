@@ -79,6 +79,17 @@ def skill_page_path(skill_dir: str) -> str:
     return (Path(skill_dir) / "index.html").as_posix()
 
 
+def journal_page_path(date: str, name: str) -> str:
+    """Convert a journal entry's date + name to its detail page URL path.
+
+    E.g. date='2026-03-07', name='session' -> 'journal/2026-03-07/session.html'
+    For flat-format entries where date==name: 'journal/2026-03-07.html'
+    """
+    if date == name:
+        return f"journal/{date}.html"
+    return f"journal/{date}/{name}.html"
+
+
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
     """Parse YAML frontmatter from a markdown file."""
     text = path.read_text(errors="replace")
@@ -326,8 +337,9 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
     - Subdirectory format: ``journal/YYYY-MM-DD/*.md``
     - Flat format: ``journal/YYYY-MM-DD.md``
 
-    Returns a list of dicts with ``date``, ``name``, and ``preview`` keys,
-    sorted by date descending (most recent first), capped at *limit* entries.
+    Returns a list of dicts with ``date``, ``name``, ``preview``, ``body``,
+    and ``page_url`` keys, sorted by date descending (most recent first),
+    capped at *limit* entries.
     """
     journal_dir = workspace / "journal"
     if not journal_dir.is_dir():
@@ -348,12 +360,12 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
             if len(entries) >= limit:
                 break
             try:
-                text = md_file.read_text(errors="replace")[:500]
+                body = md_file.read_text(errors="replace")
             except OSError:
-                text = ""
+                body = ""
             # Extract first non-empty, non-heading line as preview
             preview = ""
-            for line in text.splitlines():
+            for line in body.splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith(("#", "---", "```")):
                     preview = stripped[:120]
@@ -363,6 +375,8 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                     "date": day_dir.name,
                     "name": md_file.stem,
                     "preview": preview,
+                    "body": body,
+                    "page_url": journal_page_path(day_dir.name, md_file.stem),
                 }
             )
         if len(entries) >= limit:
@@ -379,11 +393,11 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
             except ValueError:
                 continue
             try:
-                text = md_file.read_text(errors="replace")[:500]
+                body = md_file.read_text(errors="replace")
             except OSError:
-                text = ""
+                body = ""
             preview = ""
-            for line in text.splitlines():
+            for line in body.splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith(("#", "---", "```")):
                     preview = stripped[:120]
@@ -393,6 +407,8 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                     "date": stem[:10],
                     "name": stem,
                     "preview": preview,
+                    "body": body,
+                    "page_url": journal_page_path(stem[:10], stem),
                 }
             )
 
@@ -907,6 +923,14 @@ def collect_workspace_data(
 
     # Scan recent journal entries
     journals = scan_journals(workspace, limit=30)
+    if gh_repo_url:
+        for journal in journals:
+            # Build GitHub URL: journal/YYYY-MM-DD/name.md or journal/YYYY-MM-DD.md
+            if journal["date"] == journal["name"]:
+                journal_path = f"journal/{journal['date']}.md"
+            else:
+                journal_path = f"journal/{journal['date']}/{journal['name']}.md"
+            journal["gh_url"] = github_blob_url(gh_repo_url, journal_path)
 
     # Scan tasks
     tasks = scan_tasks(workspace)
@@ -1022,14 +1046,33 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(skill_html)
 
+    # Generate per-journal detail pages
+    journal_template = env.get_template("journal.html")
+    for journal in data["journals"]:
+        # page_url is e.g. "journal/2026-03-07/session.html" (depth=2) → root_prefix="../../"
+        # or "journal/2026-03-07.html" (depth=1) → root_prefix="../"
+        depth = len(Path(journal["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        journal_html = journal_template.render(
+            workspace_name=data["workspace_name"],
+            journal=journal,
+            body_html=render_markdown_to_html(journal["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / journal["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(journal_html)
+
     stats = data["stats"]
+    journal_count = len(data["journals"])
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins, "
         f"{stats['total_packages']} packages, "
-        f"{stats['total_skills']} skills ({stats['total_skills']} detail pages)"
+        f"{stats['total_skills']} skills ({stats['total_skills']} detail pages), "
+        f"{journal_count} journals ({journal_count} detail pages)"
         f"{session_msg}"
     )
 
@@ -1071,6 +1114,10 @@ def generate_json(
         ],
         "guidance": [
             {k: v for k, v in item.items() if k not in _JSON_EXCLUDE} for item in data["guidance"]
+        ],
+        "journals": [
+            {k: v for k, v in journal.items() if k not in _JSON_EXCLUDE}
+            for journal in data["journals"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)
