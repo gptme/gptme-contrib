@@ -46,6 +46,10 @@ print(f"Success rate: {stats['success_rate']:.0%}")
 # Show stats (default — auto-falls back to discover if store is empty)
 gptme-sessions stats
 
+# Show details for a single session by ID (or prefix)
+gptme-sessions show a1b2c3d4
+gptme-sessions show a1b2 --json
+
 # Query with filters
 gptme-sessions query --model opus --since 7d
 gptme-sessions query --run-type autonomous --outcome productive --json

@@ -4895,3 +4895,127 @@ def test_discover_json_unsynced_all_synced(tmp_path: Path, monkeypatch: pytest.M
     assert data["sessions"] == []
     # total_discovered > 0 tells consumers "all were synced, not missing"
     assert data["total_discovered"] == 1
+# -- show command tests -------------------------------------------------------
+
+
+def test_show_displays_session_details(tmp_path: Path, capsys, monkeypatch):
+    """show prints human-readable details for a session matched by full ID."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    record = SessionRecord(
+        session_id="abcd1234",
+        harness="claude-code",
+        model="claude-opus-4-6",
+        run_type="autonomous",
+        outcome="productive",
+        duration_seconds=150,
+        category="code",
+        deliverables=["pr#42"],
+    )
+    store.append(record)
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "abcd1234" in captured.out
+    assert "claude-code" in captured.out
+    assert "productive" in captured.out
+    assert "pr#42" in captured.out
+
+
+def test_show_prefix_match(tmp_path: Path, capsys, monkeypatch):
+    """show resolves session by ID prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", outcome="noop"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "abcd1234" in captured.out
+
+
+def test_show_unknown_id_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+    """show exits non-zero when no session matches the given prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "zzz"]
+    )
+    rc = main()
+    assert rc != 0
+
+
+def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+    """show exits non-zero when prefix matches multiple sessions."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+    store.append(SessionRecord(session_id="abcd5678", harness="gptme"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd"]
+    )
+    rc = main()
+    assert rc != 0
+
+
+def test_show_json_output(tmp_path: Path, capsys, monkeypatch):
+    """show --json outputs valid JSON with all session fields."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            model="claude-opus-4-6",
+            outcome="productive",
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234", "--json"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["session_id"] == "abcd1234"
+    assert data["harness"] == "gptme"
+    assert data["outcome"] == "productive"
+

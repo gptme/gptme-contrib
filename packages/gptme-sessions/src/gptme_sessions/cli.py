@@ -257,6 +257,54 @@ def query(
         click.echo(f"\n{len(records)} records")
 
 
+# -- show --------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("session_id")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
+    """Show details for a single session record by ID prefix.
+
+    SESSION_ID is a full or prefix of a session ID (e.g. 'a1b2c3d4' or 'a1b2').
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    matches = [r for r in records if r.session_id.startswith(session_id)]
+    if not matches:
+        raise click.ClickException(f"No session found matching '{session_id}'")
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"Ambiguous prefix '{session_id}' matches {len(matches)} sessions: "
+            + ", ".join(r.session_id for r in matches)
+        )
+    record = matches[0]
+
+    if as_json:
+        click.echo(json.dumps(record.to_dict(), indent=2))
+        return
+
+    status = "+" if record.outcome == "productive" else "-"
+    click.echo(f"[{status}] {record.session_id}  {record.timestamp[:16]}")
+    click.echo(f"  Harness:  {record.harness or 'unknown'}")
+    click.echo(f"  Model:    {record.model or 'unknown'}")
+    click.echo(f"  Run type: {record.run_type or 'unknown'}")
+    click.echo(f"  Outcome:  {record.outcome}")
+    if record.duration_seconds:
+        click.echo(f"  Duration: {record.duration_seconds // 60}m {record.duration_seconds % 60}s")
+    if record.category:
+        click.echo(f"  Category: {record.category}")
+    if record.trigger:
+        click.echo(f"  Trigger:  {record.trigger}")
+    if record.journal_path:
+        click.echo(f"  Journal:  {record.journal_path}")
+    if record.deliverables:
+        click.echo("  Deliverables:")
+        for d in record.deliverables:
+            click.echo(f"    - {d}")
+
+
 # -- stats -------------------------------------------------------------------
 
 
