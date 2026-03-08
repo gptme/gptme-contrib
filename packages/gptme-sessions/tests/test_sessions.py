@@ -3895,3 +3895,59 @@ def test_annotate_lock_file_persists_on_error(tmp_path: Path):
 
     lock_path = store.path.with_name(store.path.name + ".lock")
     assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
+
+
+def test_annotate_trigger_rejects_invalid(tmp_path: Path):
+    """annotate --trigger rejects values outside the allowed set."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--trigger",
+        "timeer",  # typo — not a valid choice
+    ]
+    rc = main()
+    assert rc != 0  # click.Choice rejects invalid value
+
+    # Record must be unchanged
+    records = store.load_all()
+    assert records[0].trigger is None
+
+
+def test_annotate_duration_rejects_negative(tmp_path: Path):
+    """annotate --duration rejects negative values."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", duration_seconds=300))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--duration",
+        "-1",
+    ]
+    rc = main()
+    assert rc != 0  # click.IntRange(min=0) rejects negative value
+
+    # Record must be unchanged (still 300, not -1)
+    records = store.load_all()
+    assert records[0].duration_seconds == 300

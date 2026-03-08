@@ -338,7 +338,12 @@ def append(
     type=click.Choice(["productive", "noop", "failed"]),
     help="Override outcome",
 )
-@click.option("--duration", type=int, default=None, help="Override duration in seconds")
+@click.option(
+    "--duration",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Override duration in seconds (must be non-negative)",
+)
 @click.option("--journal-path", default=None, help="Override journal path")
 @click.option(
     "--selector-mode",
@@ -348,7 +353,8 @@ def append(
 @click.option(
     "--trigger",
     default=None,
-    help="Override trigger (timer, dispatch, manual, spawn)",
+    type=click.Choice(["timer", "dispatch", "manual", "spawn"]),
+    help="Override trigger",
 )
 @click.option("--token-count", type=int, default=None, help="Override token count")
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
