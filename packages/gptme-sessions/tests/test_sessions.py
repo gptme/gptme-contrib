@@ -5104,3 +5104,54 @@ def test_show_zero_token_count_displayed(tmp_path: Path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "Tokens:" in captured.out, "token_count=0 should be shown, not suppressed"
     assert "0" in captured.out
+
+
+def test_show_empty_id_exits_nonzero(tmp_path: Path):
+    """show rejects an empty session_id with a clear error message."""
+    from click.testing import CliRunner
+
+    from gptme_sessions.cli import cli
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "show", ""],
+    )
+    assert result.exit_code != 0
+    assert "Session ID must not be empty" in result.output
+
+
+def test_show_displays_llm_judge_fields(tmp_path: Path, capsys, monkeypatch):
+    """show renders llm_judge_score, llm_judge_reason, and llm_judge_model."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="judge1234",
+            harness="gptme",
+            llm_judge_score=0.85,
+            llm_judge_reason="Made good progress on task.",
+            llm_judge_model="claude-haiku-4-5",
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "judge1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Judge score:" in captured.out
+    assert "0.85" in captured.out
+    assert "Judge reason:" in captured.out
+    assert "Made good progress on task." in captured.out
+    assert "Judge model:" in captured.out
+    assert "claude-haiku-4-5" in captured.out

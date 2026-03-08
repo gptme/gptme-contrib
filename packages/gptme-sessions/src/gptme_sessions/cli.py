@@ -269,6 +269,8 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
 
     SESSION_ID is a full or prefix of a session ID (e.g. 'a1b2c3d4' or 'a1b2').
     """
+    if not session_id:
+        raise click.ClickException("Session ID must not be empty")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     records = store.load_all()
     matches = [r for r in records if r.session_id.startswith(session_id)]
@@ -305,6 +307,12 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
         click.echo(f"  Selector:    {record.selector_mode}")
     if record.token_count is not None:
         click.echo(f"  Tokens:      {record.token_count:,}")
+    if record.llm_judge_score is not None:
+        click.echo(f"  Judge score: {record.llm_judge_score:.2f}")
+    if record.llm_judge_reason:
+        click.echo(f"  Judge reason: {record.llm_judge_reason}")
+    if record.llm_judge_model:
+        click.echo(f"  Judge model: {record.llm_judge_model}")
     if record.trigger:
         click.echo(f"  Trigger:  {record.trigger}")
     if record.journal_path:
