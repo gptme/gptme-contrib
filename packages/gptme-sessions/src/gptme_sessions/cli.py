@@ -406,10 +406,12 @@ def annotate(
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     store.sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    # Hold an exclusive lock for the duration of load → mutate → rewrite so that
-    # concurrent writes (e.g. a 'sync' or 'post-session' running in a parallel
-    # pipeline) are not silently dropped.
-    # fcntl is POSIX-only; on Windows we skip locking (Windows has no parallel agents).
+    # Hold an exclusive lock to serialise concurrent annotate calls during the
+    # load → mutate → rewrite cycle (prevents annotate-vs-annotate clobber).
+    # Note: sync/post-session use store.append(), which does not acquire this
+    # lock. Fully protecting against annotate+sync races would require locking
+    # inside SessionStore itself — that is a future improvement.
+    # fcntl is POSIX-only; on Windows we skip locking.
     try:
         import fcntl as _fcntl
 
