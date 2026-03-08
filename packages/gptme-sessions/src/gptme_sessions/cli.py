@@ -825,7 +825,8 @@ def sync(
                         result = extract_from_path(traj_path)
                         existing.outcome = "productive" if result.get("productive") else "noop"
                         existing.duration_seconds = int(result.get("session_duration_s") or 0)
-                        existing.deliverables = result.get("deliverables", [])
+                        if not existing.deliverables:
+                            existing.deliverables = result.get("deliverables", [])
                         if result.get("inferred_category") and not existing.category:
                             existing.category = result["inferred_category"]
                         needs_update = True

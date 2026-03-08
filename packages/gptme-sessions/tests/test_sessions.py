@@ -4201,6 +4201,59 @@ def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeyp
     assert records[0].category == "code"
 
 
+def test_sync_signals_does_not_overwrite_existing_deliverables(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals preserves existing deliverables, consistent with category guard."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Manually set deliverables on the stored record (simulating prior post-session annotation)
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    records[0].deliverables = ["prior-deliverable"]
+    store.rewrite(records)
+
+    # Mock extract_from_path returning different deliverables
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 120,
+            "deliverables": ["new-deliverable"],
+            "inferred_category": "code",
+        },
+    )
+
+    # Backfill with --signals — deliverables should NOT be overwritten
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    main()
+
+    updated_records = store.load_all()
+    assert updated_records[0].deliverables == ["prior-deliverable"]
+
+
 def test_sync_dry_run_signals_skips_extraction(tmp_path: Path, capsys, monkeypatch):
     """sync --dry-run --signals does NOT call extract_from_path (just previews)."""
     import sys
