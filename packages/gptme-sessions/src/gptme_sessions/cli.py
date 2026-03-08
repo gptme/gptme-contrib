@@ -134,6 +134,7 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
             _show_discovery_fallback()
         else:
             format_stats(s)
+            click.echo("Tip: Run 'gptme-sessions sync' to keep the store up to date.")
 
 
 # -- Shared filter options for query/stats -----------------------------------
