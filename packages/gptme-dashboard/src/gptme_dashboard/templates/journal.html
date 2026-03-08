@@ -93,11 +93,11 @@ header h1 {
 <nav class="breadcrumb">
   <a href="{{ root_prefix }}index.html">{{ workspace_name }}</a>
   &rsaquo; <a href="{{ root_prefix }}index.html#journals">Journal</a>
-  &rsaquo; {{ journal.date }}{% if journal.date != journal.name %} / {{ journal.name }}{% endif %}
+  &rsaquo; {{ journal.date }}{% if journal.date != journal.name %} / {{ journal.name[11:] if journal.name.startswith(journal.date + '-') else journal.name }}{% endif %}
 </nav>
 
 <header>
-  <h1>{{ journal.date }}{% if journal.date != journal.name %} &mdash; {{ journal.name }}{% endif %}</h1>
+  <h1>{{ journal.date }}{% if journal.date != journal.name %} &mdash; {{ journal.name[11:] if journal.name.startswith(journal.date + '-') else journal.name }}{% endif %}</h1>
   <div class="meta">
     <span class="tag tag-category">journal</span>
     {% if journal.gh_url %}<a href="{{ journal.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
