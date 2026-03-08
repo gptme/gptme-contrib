@@ -4305,11 +4305,12 @@ def test_sync_signals_failure_does_not_double_count_skipped(tmp_path: Path, caps
     monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
     # Model extraction succeeds
     monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+
     # But signals extraction fails
-    monkeypatch.setattr(
-        "gptme_sessions.cli.extract_from_path",
-        lambda p: (_ for _ in ()).throw(RuntimeError("signals extraction error")),
-    )
+    def _raise_signals_error(p):
+        raise RuntimeError("signals extraction error")
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", _raise_signals_error)
 
     monkeypatch.setattr(
         sys,

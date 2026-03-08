@@ -140,7 +140,7 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
                     model = msg.get("model")
                     if model:
                         return str(model)
-    except (OSError, PermissionError, UnicodeDecodeError) as e:
+    except (OSError, UnicodeDecodeError) as e:
         logger.debug("Failed to read %s for model extraction: %s", jsonl_path, e)
     return None
 
