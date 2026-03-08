@@ -270,16 +270,20 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
     SESSION_ID is a full or prefix of a session ID (e.g. 'a1b2c3d4' or 'a1b2').
     """
     if not session_id:
-        raise click.ClickException("Session ID must not be empty")
+        raise click.UsageError("Session ID must not be empty.")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     records = store.load_all()
     matches = [r for r in records if r.session_id.startswith(session_id)]
     if not matches:
-        raise click.ClickException(f"No session found matching '{session_id}'")
+        raise click.ClickException(
+            f"No session found matching '{session_id}'. "
+            "Run 'gptme-sessions query' to list available session IDs."
+        )
     if len(matches) > 1:
         raise click.ClickException(
             f"Ambiguous prefix '{session_id}' matches {len(matches)} sessions: "
             + ", ".join(r.session_id for r in matches)
+            + ". Run 'gptme-sessions query' to list available session IDs."
         )
     record = matches[0]
 
@@ -289,34 +293,34 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
 
     status = "+" if record.outcome == "productive" else "-"
     click.echo(f"[{status}] {record.session_id}  {record.timestamp[:16]}")
-    click.echo(f"  Harness:  {record.harness or 'unknown'}")
-    click.echo(f"  Model:    {record.model or 'unknown'}")
-    click.echo(f"  Run type: {record.run_type or 'unknown'}")
-    click.echo(f"  Outcome:  {record.outcome}")
+    click.echo(f"  {'Harness:':<14}{record.harness or 'unknown'}")
+    click.echo(f"  {'Model:':<14}{record.model or 'unknown'}")
+    click.echo(f"  {'Run type:':<14}{record.run_type or 'unknown'}")
+    click.echo(f"  {'Outcome:':<14}{record.outcome}")
     if record.duration_seconds:
         _s = record.duration_seconds
         _h, _rem = divmod(_s, 3600)
         _m, _sec = divmod(_rem, 60)
         dur_str = f"{_h}h {_m}m {_sec}s" if _h else f"{_m}m {_sec}s"
-        click.echo(f"  Duration: {dur_str}")
+        click.echo(f"  {'Duration:':<14}{dur_str}")
     if record.category:
-        click.echo(f"  Category: {record.category}")
+        click.echo(f"  {'Category:':<14}{record.category}")
     if record.recommended_category:
-        click.echo(f"  Recommended: {record.recommended_category}")
+        click.echo(f"  {'Recommended:':<14}{record.recommended_category}")
     if record.selector_mode:
-        click.echo(f"  Selector:    {record.selector_mode}")
+        click.echo(f"  {'Selector:':<14}{record.selector_mode}")
     if record.token_count is not None:
-        click.echo(f"  Tokens:      {record.token_count:,}")
+        click.echo(f"  {'Tokens:':<14}{record.token_count:,}")
     if record.llm_judge_score is not None:
-        click.echo(f"  Judge score: {record.llm_judge_score:.2f}")
+        click.echo(f"  {'Judge score:':<14}{record.llm_judge_score:.2f}")
     if record.llm_judge_reason:
-        click.echo(f"  Judge reason: {record.llm_judge_reason}")
+        click.echo(f"  {'Judge reason:':<14}{record.llm_judge_reason}")
     if record.llm_judge_model:
-        click.echo(f"  Judge model: {record.llm_judge_model}")
+        click.echo(f"  {'Judge model:':<14}{record.llm_judge_model}")
     if record.trigger:
-        click.echo(f"  Trigger:  {record.trigger}")
+        click.echo(f"  {'Trigger:':<14}{record.trigger}")
     if record.journal_path:
-        click.echo(f"  Journal:  {record.journal_path}")
+        click.echo(f"  {'Journal:':<14}{record.journal_path}")
     if record.deliverables:
         click.echo("  Deliverables:")
         for d in record.deliverables:

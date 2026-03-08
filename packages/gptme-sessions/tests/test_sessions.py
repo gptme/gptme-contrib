@@ -4928,8 +4928,8 @@ def test_show_displays_session_details(tmp_path: Path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     assert "abcd1234" in captured.out
-    assert "Harness:  claude-code" in captured.out
-    assert "Outcome:  productive" in captured.out
+    assert "Harness:      claude-code" in captured.out
+    assert "Outcome:      productive" in captured.out
     assert "pr#42" in captured.out
 
 
@@ -5082,7 +5082,7 @@ def test_show_displays_selector_fields(tmp_path: Path, capsys, monkeypatch):
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
-    assert "Recommended: code" in captured.out  # recommended_category
+    assert "Recommended:  code" in captured.out  # recommended_category
     assert "scored" in captured.out  # selector_mode
     assert "42,000" in captured.out  # token_count formatted with commas
 
