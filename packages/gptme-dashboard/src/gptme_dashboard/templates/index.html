@@ -419,7 +419,7 @@ tr:hover { background: var(--accent-dim); }
     {% for j in journals %}
       <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
         <td>{{ j.date }}</td>
-        <td>{{ j.name }}</td>
+        <td><a href="{{ j.page_url }}">{{ j.name }}</a></td>
         <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j.preview }}</td>
       </tr>
     {% endfor %}

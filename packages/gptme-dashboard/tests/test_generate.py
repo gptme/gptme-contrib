@@ -18,6 +18,7 @@ from gptme_dashboard.generate import (
     generate_json,
     github_blob_url,
     github_tree_url,
+    journal_page_path,
     lesson_page_path,
     parse_frontmatter,
     read_agent_urls,
@@ -1572,6 +1573,187 @@ def test_generate_html_includes_journals(workspace: Path, tmp_path: Path):
     html = (output / "index.html").read_text()
     assert "Recent Journal Entries" in html
     assert "2026-03-07" in html
+
+
+def test_scan_journals_includes_body(tmp_path: Path):
+    """scan_journals includes full body text for detail page rendering."""
+    day_dir = tmp_path / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nFull content here.\n")
+
+    entries = scan_journals(tmp_path)
+    assert len(entries) == 1
+    assert "body" in entries[0]
+    assert "Full content here" in entries[0]["body"]
+
+
+def test_scan_journals_includes_page_url_subdirectory(tmp_path: Path):
+    """scan_journals includes page_url for subdirectory-format entries."""
+    day_dir = tmp_path / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    entries = scan_journals(tmp_path)
+    assert entries[0]["page_url"] == "journal/2026-03-07/session.html"
+
+
+def test_scan_journals_includes_page_url_flat(tmp_path: Path):
+    """scan_journals includes page_url for flat-format entries."""
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "2026-03-07.md").write_text("# March 7\n\nContent.\n")
+
+    entries = scan_journals(tmp_path)
+    assert entries[0]["page_url"] == "journal/2026-03-07.html"
+
+
+def test_scan_journals_includes_page_url_flat_compound(tmp_path: Path):
+    """scan_journals includes correct page_url for compound flat-format stems."""
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "2026-03-07-standup.md").write_text("# Standup\n\nNotes.\n")
+
+    entries = scan_journals(tmp_path)
+    assert entries[0]["page_url"] == "journal/2026-03-07-standup.html"
+    assert entries[0]["path"] == "journal/2026-03-07-standup.md"
+
+
+def test_scan_journals_includes_path_subdirectory(tmp_path: Path):
+    """scan_journals includes correct path for subdirectory-format entries."""
+    day_dir = tmp_path / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    entries = scan_journals(tmp_path)
+    assert entries[0]["path"] == "journal/2026-03-07/session.md"
+
+
+def test_journal_page_path_subdirectory():
+    """journal_page_path produces correct URL for subdirectory-format entries."""
+    assert journal_page_path("2026-03-07", "session") == "journal/2026-03-07/session.html"
+    assert journal_page_path("2026-03-07", "notes") == "journal/2026-03-07/notes.html"
+
+
+def test_journal_page_path_flat():
+    """journal_page_path produces correct URL when date equals name (flat format)."""
+    assert journal_page_path("2026-03-07", "2026-03-07") == "journal/2026-03-07.html"
+
+
+def test_journal_page_path_flat_compound():
+    """journal_page_path produces correct URL for compound flat-format stems."""
+    assert (
+        journal_page_path("2026-03-07", "2026-03-07-standup") == "journal/2026-03-07-standup.html"
+    )
+    assert (
+        journal_page_path("2026-03-07", "2026-03-07-notes-review")
+        == "journal/2026-03-07-notes-review.html"
+    )
+
+
+def test_generate_journal_detail_pages(workspace: Path, tmp_path: Path):
+    """generate() produces per-journal HTML detail pages."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nWorked on the dashboard.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    page = output / "journal" / "2026-03-07" / "session.html"
+    assert page.exists(), f"Expected detail page at {page}"
+    html = page.read_text()
+    assert "Worked on the dashboard" in html
+
+
+def test_generate_journal_detail_pages_flat_format(tmp_path: Path):
+    """generate() produces per-journal HTML for flat-format entries."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestAgent"\n')
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "2026-03-07.md").write_text("# March 7\n\nFlat format entry.\n")
+
+    output = tmp_path / "site"
+    generate(tmp_path, output)
+
+    page = output / "journal" / "2026-03-07.html"
+    assert page.exists(), f"Expected flat detail page at {page}"
+    html = page.read_text()
+    assert "Flat format entry" in html
+
+
+def test_generate_index_links_to_journals(workspace: Path, tmp_path: Path):
+    """Generated index.html links journal entries to their detail pages."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    index_html = (output / "index.html").read_text()
+    assert 'href="journal/2026-03-07/session.html"' in index_html
+
+
+def test_generate_json_excludes_journal_body(workspace: Path):
+    """generate_json excludes body from journal entries to avoid bloating data.json."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    json_str = generate_json(workspace)
+    data = json.loads(json_str)
+    assert len(data["journals"]) == 1
+    assert "body" not in data["journals"][0]
+    assert "page_url" in data["journals"][0]
+
+
+def test_journal_detail_breadcrumb(workspace: Path, tmp_path: Path):
+    """Journal detail page has breadcrumb linking back to index."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "journal" / "2026-03-07" / "session.html").read_text()
+    assert "../../index.html" in html
+    assert "#journals" in html
+
+
+def test_journal_detail_renders_markdown(workspace: Path, tmp_path: Path):
+    """Journal detail page renders markdown to HTML, not escaped text."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text(
+        "# Session\n\n**Bold text** and `inline code`.\n\n- item one\n- item two\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "journal" / "2026-03-07" / "session.html").read_text()
+    assert "<strong>Bold text</strong>" in html
+    assert "<code>inline code</code>" in html
+    assert "<li>" in html
+
+
+def test_journal_gh_url(workspace: Path, tmp_path: Path):
+    """Journal entries get GitHub URLs when gh_repo_url is detected."""
+    day_dir = workspace / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    with patch(
+        "gptme_dashboard.generate.detect_github_url",
+        return_value="https://github.com/owner/repo",
+    ):
+        data = collect_workspace_data(workspace)
+
+    assert len(data["journals"]) == 1
+    gh_url = data["journals"][0].get("gh_url", "")
+    assert "github.com/owner/repo" in gh_url
+    assert "journal/2026-03-07/session.md" in gh_url
 
 
 def test_render_markdown_lists():
