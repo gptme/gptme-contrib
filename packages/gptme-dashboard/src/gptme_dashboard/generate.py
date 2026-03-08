@@ -59,14 +59,14 @@ def strip_markdown_inline(text: str) -> str:
     Removes bold/italic markers (**, *, __, _) and inline code backticks.
     Does not process links or headings — just inline emphasis.
     """
+    # Remove inline code first to avoid mangling dunder names inside code spans (e.g. `__init__`)
+    text = re.sub(r"`(.+?)`", r"\1", text)
     # Remove bold/italic: **text**, *text*, __text__, _text_
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
-    text = re.sub(r"__(.+?)__", r"\1", text)
-    # Use word boundaries to avoid corrupting snake_case identifiers (e.g. gptme_hooks_plugin)
+    # Use word boundaries to avoid corrupting dunder names (e.g. __init__) and snake_case
+    text = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"\1", text)
     text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
-    # Remove inline code: `text`
-    text = re.sub(r"`(.+?)`", r"\1", text)
     return text
 
 

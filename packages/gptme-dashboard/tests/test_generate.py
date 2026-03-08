@@ -342,6 +342,13 @@ def test_strip_markdown_inline():
         strip_markdown_inline("A gptme_hooks_plugin description")
         == "A gptme_hooks_plugin description"
     )
+    # dunder names embedded in identifiers must not be corrupted by the __bold__ regex
+    assert (
+        strip_markdown_inline("calls gptme__magic__hook internally")
+        == "calls gptme__magic__hook internally"
+    )
+    # standalone __dunder__ formatting IS stripped (markdown bold syntax)
+    assert strip_markdown_inline("__bold__ text") == "bold text"
 
 
 def test_scan_packages(workspace: Path):
