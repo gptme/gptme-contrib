@@ -107,9 +107,9 @@ these links.
 - **Packages**: Name, version, and description from `pyproject.toml`
 - **Stats**: Counts and category distribution chart
 - **Tasks** (static, when `tasks/` exists): Task list with state, priority, and tags
-- **Journals** (static, when `journal/` exists): Recent journal entry previews
+- **Journals** (static + live): Baked-in entry previews when `journal/` exists; live `/api/journals` panel when served
 - **Sessions** (static, opt-in): Snapshot of recent agent sessions when `--sessions` is passed
-- **Session stats / Recent sessions / Services / Tasks** (live, when served): Real-time panels from the API
+- **Session stats / Recent sessions / Services / Tasks / Journals** (live, when served): Real-time panels from the API
 
 ### Submodule support
 
@@ -153,8 +153,8 @@ The template receives these variables:
 | `packages` | `list[dict]` | `name`, `version`, `description`, `path`, `gh_url` |
 | `sessions` | `list[dict]` | Recent sessions (populated when `--sessions` is passed) |
 | `journals` | `list[dict]` | Recent journal entries; each has `date`, `name`, `preview` |
-| `tasks` | `list[dict]` | Tasks from `tasks/`; each has `id`, `title`, `state`, `priority`, `tags`, `assigned_to`, `path` |
-| `stats` | `dict` | `total_lessons`, `total_skills`, `total_guidance`, `total_plugins`, `total_packages`, `total_sessions`, `total_journals`, `total_tasks`, `lesson_categories` |
+| `tasks` | `list[dict]` | Tasks from `tasks/`; each has `id`, `title`, `state`, `priority`, `tags`, `assigned_to`, `path`, `gh_url` (when GitHub remote detected) |
+| `stats` | `dict` | `total_lessons`, `total_skills`, `total_guidance`, `total_plugins`, `total_packages`, `total_sessions`, `total_journals`, `total_tasks`, `task_states` (`dict[str, int]` mapping state → count), `lesson_categories` |
 | `lesson_categories` | `dict[str, int]` | Category → count (same as `stats.lesson_categories`) |
 | `submodules` | `list[str]` | Names of detected submodules (for display/filtering) |
 | `sources` | `list[str]` | Unique source labels across all content (submodule names) |
