@@ -228,6 +228,44 @@ def test_session_store_rewrite(tmp_path: Path):
     assert reloaded[0].category == "code"
 
 
+def test_store_rewrite_preserves_appended_records(tmp_path: Path):
+    """rewrite() keeps records appended after load_all() was called."""
+    store = SessionStore(sessions_dir=tmp_path)
+    rec1 = SessionRecord(model="opus", outcome="productive")
+    store.append(rec1)
+
+    records = store.load_all()  # snapshot with only rec1
+
+    # Simulate concurrent append between load and rewrite
+    rec2 = SessionRecord(model="sonnet", outcome="noop")
+    store.append(rec2)
+
+    # Rewrite with the original snapshot (should NOT drop rec2)
+    store.rewrite(records)
+
+    reloaded = store.load_all()
+    ids = {r.session_id for r in reloaded}
+    assert rec1.session_id in ids
+    assert rec2.session_id in ids
+
+
+def test_store_rewrite_preserves_malformed_lines(tmp_path: Path):
+    """rewrite() keeps malformed JSONL lines rather than silently dropping them."""
+    store = SessionStore(sessions_dir=tmp_path)
+    rec = SessionRecord(model="opus")
+    store.append(rec)
+
+    # Inject a malformed line directly
+    with open(store.path, "a") as f:
+        f.write("NOT VALID JSON\n")
+
+    records = store.load_all()  # malformed line is skipped
+    store.rewrite(records)  # should preserve the malformed line
+
+    raw_lines = [line.strip() for line in store.path.read_text().splitlines() if line.strip()]
+    assert any(line == "NOT VALID JSON" for line in raw_lines)
+
+
 def test_session_record_hour_24_fix():
     """Hour 24 timestamps are corrected to 23:59:59."""
     r = SessionRecord(timestamp="2026-03-04T24:00:00+00:00")

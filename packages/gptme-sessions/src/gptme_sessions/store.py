@@ -54,12 +54,42 @@ class SessionStore:
         return records
 
     def rewrite(self, records: list[SessionRecord]) -> Path:
-        """Atomically rewrite the JSONL store with updated records."""
+        """Atomically rewrite the JSONL store with updated records.
+
+        Re-reads the current file before writing to:
+        - Preserve any records appended via ``append()`` between the caller's
+          ``load_all()`` and this call (append-vs-rewrite race).
+        - Preserve malformed JSONL lines rather than silently dropping them.
+
+        ``records`` takes precedence for any session_id present in both.
+        """
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+        known_ids = {r.session_id for r in records}
+        extra_records: list[SessionRecord] = []
+        malformed_lines: list[str] = []
+
+        if self.path.exists():
+            with open(self.path, encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = SessionRecord.from_dict(json.loads(raw))
+                        if rec.session_id not in known_ids:
+                            extra_records.append(rec)
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        malformed_lines.append(raw)
+
         tmp_path = self.path.with_name(self.path.name + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             for record in records:
                 f.write(record.to_json() + "\n")
+            for record in extra_records:
+                f.write(record.to_json() + "\n")
+            for line in malformed_lines:
+                f.write(line + "\n")
         tmp_path.replace(self.path)
         return self.path
 
