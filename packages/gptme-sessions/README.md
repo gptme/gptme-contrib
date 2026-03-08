@@ -70,9 +70,10 @@ gptme-sessions sync --dry-run  # preview what would be imported
 gptme-sessions annotate a1b2c3d4 --outcome productive --add-deliverable pr#42
 gptme-sessions annotate a1b2 --duration 3600 --token-count 50000
 
-# Score a session with an LLM judge (goal-alignment rating 1–5)
-gptme-sessions judge a1b2c3d4
-gptme-sessions judge a1b2c3d4 --model opus
+# Score recent sessions with an LLM judge (goal-alignment rating 1–5)
+gptme-sessions judge
+gptme-sessions judge --last 5
+gptme-sessions judge --update-store  # write scores back to the store
 
 # Record a session at the end of an agent run (full pipeline)
 gptme-sessions post-session --harness gptme --model opus \
