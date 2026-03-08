@@ -299,6 +299,12 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
         click.echo(f"  Duration: {dur_str}")
     if record.category:
         click.echo(f"  Category: {record.category}")
+    if record.recommended_category:
+        click.echo(f"  Recommended: {record.recommended_category}")
+    if record.selector_mode:
+        click.echo(f"  Selector:    {record.selector_mode}")
+    if record.token_count:
+        click.echo(f"  Tokens:      {record.token_count:,}")
     if record.trigger:
         click.echo(f"  Trigger:  {record.trigger}")
     if record.journal_path:
