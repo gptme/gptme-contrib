@@ -63,7 +63,8 @@ def strip_markdown_inline(text: str) -> str:
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
     text = re.sub(r"__(.+?)__", r"\1", text)
-    text = re.sub(r"_(.+?)_", r"\1", text)
+    # Use word boundaries to avoid corrupting snake_case identifiers (e.g. gptme_hooks_plugin)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
     # Remove inline code: `text`
     text = re.sub(r"`(.+?)`", r"\1", text)
     return text
@@ -677,7 +678,7 @@ def scan_plugins(
             for line in body.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    description = strip_markdown_inline(line[:200])
+                    description = strip_markdown_inline(line)[:200]
                     break
 
         # Derive the plugin module name: strip common prefix, convert hyphens

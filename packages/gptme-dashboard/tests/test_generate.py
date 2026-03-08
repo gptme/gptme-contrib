@@ -337,6 +337,11 @@ def test_strip_markdown_inline():
     assert strip_markdown_inline("`code` here") == "code here"
     assert strip_markdown_inline("**Purpose**: does _this_") == "Purpose: does this"
     assert strip_markdown_inline("plain text") == "plain text"
+    # snake_case identifiers must not be corrupted by the italic regex
+    assert (
+        strip_markdown_inline("A gptme_hooks_plugin description")
+        == "A gptme_hooks_plugin description"
+    )
 
 
 def test_scan_packages(workspace: Path):
