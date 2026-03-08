@@ -71,6 +71,17 @@ def normalize_model(raw: str | None) -> str | None:
     return raw
 
 
+def normalize_run_type(raw: str | None) -> str | None:
+    """Normalize a raw run_type string (reject numeric session numbers, clean prefixes)."""
+    if not raw:
+        return raw
+    if raw.isdigit():
+        return "autonomous"
+    if raw.startswith("autonomous-session"):
+        return "autonomous"
+    return raw
+
+
 @dataclass
 class SessionRecord:
     """Canonical per-session metadata record.
@@ -121,12 +132,8 @@ class SessionRecord:
         if self.duration_seconds is None:
             self.duration_seconds = 0
         # Model stored as-is (raw) — use model_normalized for display
-        # Normalize run_type — reject numeric values (session numbers)
-        if self.run_type and self.run_type.isdigit():
-            self.run_type = "autonomous"
-        # Clean run_type prefixes
-        if self.run_type and self.run_type.startswith("autonomous-session"):
-            self.run_type = "autonomous"
+        # Normalize run_type — reject numeric values (session numbers) and clean prefixes
+        self.run_type = normalize_run_type(self.run_type)
 
     @property
     def model_normalized(self) -> str | None:

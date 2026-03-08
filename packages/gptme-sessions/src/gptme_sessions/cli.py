@@ -16,7 +16,7 @@ from .discovery import (
     discover_gptme_sessions,
 )
 from .post_session import post_session
-from .record import SessionRecord
+from .record import SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
     SessionStore,
@@ -411,6 +411,9 @@ def annotate(
             "(e.g. --model, --outcome, --add-deliverable)."
         )
 
+    if not session_id:
+        raise click.UsageError("Session ID must not be empty.")
+
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     store.sessions_dir.mkdir(parents=True, exist_ok=True)
 
@@ -442,9 +445,6 @@ def annotate(
             if not records:
                 raise click.ClickException("No session records found in store.")
 
-            if not session_id:
-                raise click.ClickException("Session ID must not be empty.")
-
             # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
             matches = [r for r in records if r.session_id.startswith(session_id)]
             if not matches:
@@ -466,13 +466,7 @@ def annotate(
             if harness is not None:
                 record.harness = harness
             if run_type is not None:
-                # Apply the same normalization as SessionRecord.__post_init__ to
-                # avoid storing values that bypass the digit/prefix guards.
-                if run_type.isdigit():
-                    run_type = "autonomous"
-                elif run_type.startswith("autonomous-session"):
-                    run_type = "autonomous"
-                record.run_type = run_type
+                record.run_type = normalize_run_type(run_type)
             if category is not None:
                 record.category = category
             if outcome is not None:
