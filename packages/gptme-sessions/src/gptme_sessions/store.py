@@ -57,9 +57,13 @@ class SessionStore:
         """Atomically rewrite the JSONL store with updated records.
 
         Re-reads the current file before writing to:
-        - Preserve any records appended via ``append()`` between the caller's
-          ``load_all()`` and this call (append-vs-rewrite race).
         - Preserve malformed JSONL lines rather than silently dropping them.
+        - Reduce (but not eliminate) the append-vs-rewrite race: records
+          appended via ``append()`` between the caller's ``load_all()`` and
+          this re-read are picked up.  Any ``append()`` that lands *after* the
+          re-read completes but before the atomic replace will still be lost;
+          fully closing this window would require ``append()`` to participate
+          in the same flock, which is a future improvement.
 
         ``records`` takes precedence for any session_id present in both.
         """

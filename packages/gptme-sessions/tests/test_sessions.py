@@ -4074,3 +4074,33 @@ def test_annotate_token_count_rejects_negative(tmp_path: Path):
     # Record must be unchanged (still 1000, not -1)
     records = store.load_all()
     assert records[0].token_count == 1000
+
+
+def test_annotate_empty_id_no_options_reports_id_error(tmp_path: Path):
+    """annotate with empty session_id and no field options gives session_id error, not no-op error.
+
+    Guard ordering: session_id is validated before the nothing_supplied check,
+    so the more precise error message is shown regardless of what options were passed.
+    """
+    import sys
+
+    sessions_dir = tmp_path / "sessions"
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "",  # empty session_id
+        # no field options supplied either
+    ]
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "annotate", ""],
+    )
+    assert result.exit_code != 0
+    assert "Session ID must not be empty" in result.output

@@ -391,6 +391,11 @@ def annotate(
     ``--add-deliverable``.  There is currently no option to replace the whole
     deliverables list; edit the session-records.jsonl file directly for that.
     """
+    # Validate session_id first — its error message is more precise than the
+    # no-op guard, so diagnose it regardless of what other options were passed.
+    if not session_id:
+        raise click.UsageError("Session ID must not be empty.")
+
     # Guard: if nothing was supplied, avoid a no-op rewrite (check before touching the store)
     nothing_supplied = (
         model is None
@@ -410,9 +415,6 @@ def annotate(
             "No fields specified. Provide at least one option to update "
             "(e.g. --model, --outcome, --add-deliverable)."
         )
-
-    if not session_id:
-        raise click.UsageError("Session ID must not be empty.")
 
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     store.sessions_dir.mkdir(parents=True, exist_ok=True)
