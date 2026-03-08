@@ -4928,8 +4928,8 @@ def test_show_displays_session_details(tmp_path: Path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     assert "abcd1234" in captured.out
-    assert "claude-code" in captured.out
-    assert "productive" in captured.out
+    assert "Harness:  claude-code" in captured.out
+    assert "Outcome:  productive" in captured.out
     assert "pr#42" in captured.out
 
 
@@ -4953,7 +4953,7 @@ def test_show_prefix_match(tmp_path: Path, capsys, monkeypatch):
     assert "abcd1234" in captured.out
 
 
-def test_show_unknown_id_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+def test_show_unknown_id_exits_nonzero(tmp_path: Path, monkeypatch):
     """show exits non-zero when no session matches the given prefix."""
     import sys
 
@@ -4971,7 +4971,7 @@ def test_show_unknown_id_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
     assert rc != 0
 
 
-def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, monkeypatch):
     """show exits non-zero when prefix matches multiple sessions."""
     import sys
 
