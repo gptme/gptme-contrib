@@ -4953,7 +4953,7 @@ def test_show_prefix_match(tmp_path: Path, capsys, monkeypatch):
     assert "abcd1234" in captured.out
 
 
-def test_show_unknown_id_exits_nonzero(tmp_path: Path, monkeypatch):
+def test_show_unknown_id_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
     """show exits non-zero when no session matches the given prefix."""
     import sys
 
@@ -4969,9 +4969,11 @@ def test_show_unknown_id_exits_nonzero(tmp_path: Path, monkeypatch):
     )
     rc = main()
     assert rc != 0
+    captured = capsys.readouterr()
+    assert "No session found matching" in captured.err
 
 
-def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, monkeypatch):
+def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
     """show exits non-zero when prefix matches multiple sessions."""
     import sys
 
@@ -4988,6 +4990,8 @@ def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, monkeypatch):
     )
     rc = main()
     assert rc != 0
+    captured = capsys.readouterr()
+    assert "Ambiguous prefix" in captured.err
 
 
 def test_show_json_output(tmp_path: Path, capsys, monkeypatch):
@@ -5078,7 +5082,7 @@ def test_show_displays_selector_fields(tmp_path: Path, capsys, monkeypatch):
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
-    assert "code" in captured.out  # recommended_category
+    assert "Recommended: code" in captured.out  # recommended_category
     assert "scored" in captured.out  # selector_mode
     assert "42,000" in captured.out  # token_count formatted with commas
 
