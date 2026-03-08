@@ -122,7 +122,7 @@ def _parse_toml(path: Path) -> dict:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
             print(
-                "Warning: tomli is not installed; [agent.links], [agent.urls] and other TOML features unavailable"
+                "Warning: tomli is not installed; [agent.urls] and other TOML features unavailable"
                 " (install gptme-dashboard[tomli] or upgrade to Python 3.11+)",
                 file=sys.stderr,
             )
@@ -140,21 +140,17 @@ def _parse_toml(path: Path) -> dict:
 def read_agent_urls(workspace: Path) -> dict[str, str]:
     """Read agent links from gptme.toml.
 
-    Checks ``[agent.links]`` first (the canonical key), then falls back to
-    ``[agent.urls]`` for backwards compatibility.
+    Reads from ``[agent.urls]`` (the canonical key).
 
     Returns a dict of link name → URL, e.g. ``{"dashboard": "https://...", "repo": "..."}``.
     Returns an empty dict if the section is absent or gptme.toml is missing.
 
-    Note: ``[agent.links]`` / ``[agent.urls]`` are not yet part of gptme's ``AgentConfig``
+    Note: ``[agent.urls]`` is not yet part of gptme's ``AgentConfig``
     schema, so we parse gptme.toml directly rather than going through ``get_project_config``.
     """
     data = _parse_toml(workspace / "gptme.toml")
     agent = data.get("agent", {})
-    # Prefer [agent.links] (canonical); fall back to [agent.urls] for backwards compat.
-    # Use key-presence check (not `or`) so an empty [agent.links] section doesn't
-    # incorrectly fall through to [agent.urls].
-    links = agent["links"] if "links" in agent else agent.get("urls", {})
+    links = agent.get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}
         for key, value in links.items():
