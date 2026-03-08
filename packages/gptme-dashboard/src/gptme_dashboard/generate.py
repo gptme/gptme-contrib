@@ -84,9 +84,14 @@ def journal_page_path(date: str, name: str) -> str:
 
     E.g. date='2026-03-07', name='session' -> 'journal/2026-03-07/session.html'
     For flat-format entries where date==name: 'journal/2026-03-07.html'
+    For flat-format compound stems: date='2026-03-07', name='2026-03-07-standup' -> 'journal/2026-03-07-standup.html'
     """
     if date == name:
+        # Simple flat: journal/YYYY-MM-DD.md
         return f"journal/{date}.html"
+    if name.startswith(date + "-") and "/" not in name:
+        # Compound flat: journal/YYYY-MM-DD-foo.md (name is the full stem)
+        return f"journal/{name}.html"
     return f"journal/{date}/{name}.html"
 
 
@@ -370,19 +375,21 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                 if stripped and not stripped.startswith(("#", "---", "```")):
                     preview = stripped[:120]
                     break
+            page_url = journal_page_path(day_dir.name, md_file.stem)
             entries.append(
                 {
                     "date": day_dir.name,
                     "name": md_file.stem,
+                    "path": f"journal/{day_dir.name}/{md_file.name}",
                     "preview": preview,
                     "body": body,
-                    "page_url": journal_page_path(day_dir.name, md_file.stem),
+                    "page_url": page_url,
                 }
             )
         if len(entries) >= limit:
             break
 
-    # Flat format fallback: journal/YYYY-MM-DD.md
+    # Flat format fallback: journal/YYYY-MM-DD.md (and YYYY-MM-DD-foo.md)
     if not entries:
         for md_file in sorted(journal_dir.glob("*.md"), reverse=True):
             if len(entries) >= limit:
@@ -402,13 +409,15 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                 if stripped and not stripped.startswith(("#", "---", "```")):
                     preview = stripped[:120]
                     break
+            page_url = journal_page_path(stem[:10], stem)
             entries.append(
                 {
                     "date": stem[:10],
                     "name": stem,
+                    "path": f"journal/{md_file.name}",
                     "preview": preview,
                     "body": body,
-                    "page_url": journal_page_path(stem[:10], stem),
+                    "page_url": page_url,
                 }
             )
 
@@ -925,12 +934,7 @@ def collect_workspace_data(
     journals = scan_journals(workspace, limit=30)
     if gh_repo_url:
         for journal in journals:
-            # Build GitHub URL: journal/YYYY-MM-DD/name.md or journal/YYYY-MM-DD.md
-            if journal["date"] == journal["name"]:
-                journal_path = f"journal/{journal['date']}.md"
-            else:
-                journal_path = f"journal/{journal['date']}/{journal['name']}.md"
-            journal["gh_url"] = github_blob_url(gh_repo_url, journal_path)
+            journal["gh_url"] = github_blob_url(gh_repo_url, journal["path"])
 
     # Scan tasks
     tasks = scan_tasks(workspace)

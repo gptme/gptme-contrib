@@ -1607,6 +1607,27 @@ def test_scan_journals_includes_page_url_flat(tmp_path: Path):
     assert entries[0]["page_url"] == "journal/2026-03-07.html"
 
 
+def test_scan_journals_includes_page_url_flat_compound(tmp_path: Path):
+    """scan_journals includes correct page_url for compound flat-format stems."""
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "2026-03-07-standup.md").write_text("# Standup\n\nNotes.\n")
+
+    entries = scan_journals(tmp_path)
+    assert entries[0]["page_url"] == "journal/2026-03-07-standup.html"
+    assert entries[0]["path"] == "journal/2026-03-07-standup.md"
+
+
+def test_scan_journals_includes_path_subdirectory(tmp_path: Path):
+    """scan_journals includes correct path for subdirectory-format entries."""
+    day_dir = tmp_path / "journal" / "2026-03-07"
+    day_dir.mkdir(parents=True)
+    (day_dir / "session.md").write_text("# Session\n\nContent.\n")
+
+    entries = scan_journals(tmp_path)
+    assert entries[0]["path"] == "journal/2026-03-07/session.md"
+
+
 def test_journal_page_path_subdirectory():
     """journal_page_path produces correct URL for subdirectory-format entries."""
     assert journal_page_path("2026-03-07", "session") == "journal/2026-03-07/session.html"
@@ -1616,6 +1637,17 @@ def test_journal_page_path_subdirectory():
 def test_journal_page_path_flat():
     """journal_page_path produces correct URL when date equals name (flat format)."""
     assert journal_page_path("2026-03-07", "2026-03-07") == "journal/2026-03-07.html"
+
+
+def test_journal_page_path_flat_compound():
+    """journal_page_path produces correct URL for compound flat-format stems."""
+    assert (
+        journal_page_path("2026-03-07", "2026-03-07-standup") == "journal/2026-03-07-standup.html"
+    )
+    assert (
+        journal_page_path("2026-03-07", "2026-03-07-notes-review")
+        == "journal/2026-03-07-notes-review.html"
+    )
 
 
 def test_generate_journal_detail_pages(workspace: Path, tmp_path: Path):
