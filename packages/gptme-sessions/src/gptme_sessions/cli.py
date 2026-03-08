@@ -303,7 +303,7 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
         click.echo(f"  Recommended: {record.recommended_category}")
     if record.selector_mode:
         click.echo(f"  Selector:    {record.selector_mode}")
-    if record.token_count:
+    if record.token_count is not None:
         click.echo(f"  Tokens:      {record.token_count:,}")
     if record.trigger:
         click.echo(f"  Trigger:  {record.trigger}")

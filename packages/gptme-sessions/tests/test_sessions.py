@@ -5079,3 +5079,26 @@ def test_show_displays_selector_fields(tmp_path: Path, capsys, monkeypatch):
     assert "code" in captured.out  # recommended_category
     assert "scored" in captured.out  # selector_mode
     assert "42,000" in captured.out  # token_count formatted with commas
+
+
+def test_show_zero_token_count_displayed(tmp_path: Path, capsys, monkeypatch):
+    """show renders token_count=0 — truthiness check must not suppress it."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", token_count=0))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Tokens:" in captured.out, "token_count=0 should be shown, not suppressed"
+    assert "0" in captured.out
