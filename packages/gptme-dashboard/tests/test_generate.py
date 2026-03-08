@@ -348,7 +348,7 @@ def test_strip_markdown_inline():
         == "calls gptme__magic__hook internally"
     )
     # standalone __dunder__ formatting IS stripped (markdown bold syntax)
-    assert strip_markdown_inline("__bold__ text") == "bold text"
+    assert strip_markdown_inline("A __Ralph Loop__ plugin") == "A Ralph Loop plugin"
 
 
 def test_scan_packages(workspace: Path):
