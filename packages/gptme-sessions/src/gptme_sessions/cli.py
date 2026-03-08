@@ -356,7 +356,9 @@ def append(
     type=click.Choice(["timer", "dispatch", "manual", "spawn"]),
     help="Override trigger",
 )
-@click.option("--token-count", type=int, default=None, help="Override token count")
+@click.option(
+    "--token-count", type=click.IntRange(min=0), default=None, help="Override token count"
+)
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
 @click.option(
     "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"

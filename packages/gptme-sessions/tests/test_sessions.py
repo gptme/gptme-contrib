@@ -3951,3 +3951,31 @@ def test_annotate_duration_rejects_negative(tmp_path: Path):
     # Record must be unchanged (still 300, not -1)
     records = store.load_all()
     assert records[0].duration_seconds == 300
+
+
+def test_annotate_token_count_rejects_negative(tmp_path: Path):
+    """annotate --token-count rejects negative values."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd5678", harness="gptme", token_count=1000))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd5678",
+        "--token-count",
+        "-1",
+    ]
+    rc = main()
+    assert rc != 0  # click.IntRange(min=0) rejects negative value
+
+    # Record must be unchanged (still 1000, not -1)
+    records = store.load_all()
+    assert records[0].token_count == 1000
