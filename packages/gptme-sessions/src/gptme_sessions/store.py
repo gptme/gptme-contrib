@@ -58,8 +58,9 @@ class SessionStore:
 
         **Additive (upsert) semantics**: ``records`` is treated as an upsert
         set, *not* a full replacement.  Any record present in the on-disk file
-        but absent from ``records`` is silently preserved.  To delete a record,
-        the caller must pass a ``records`` list that explicitly excludes it.
+        but absent from ``records`` is silently preserved (re-read from disk
+        and appended to the output).  There is no way to delete a record via
+        this method; to remove records, edit the JSONL file directly.
 
         Re-reads the current file before writing to:
         - Preserve malformed JSONL lines rather than silently dropping them.

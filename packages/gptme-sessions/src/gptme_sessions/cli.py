@@ -9,6 +9,14 @@ from pathlib import Path
 
 import click
 
+# fcntl is POSIX-only; on Windows we skip locking.
+try:
+    import fcntl as _fcntl
+
+    _has_fcntl = True
+except ImportError:
+    _has_fcntl = False
+
 from .discovery import (
     discover_cc_sessions,
     discover_codex_sessions,
@@ -359,6 +367,11 @@ def append(
 @click.option(
     "--token-count", type=click.IntRange(min=0), default=None, help="Override token count"
 )
+@click.option(
+    "--recommended-category",
+    default=None,
+    help="Override recommended category (from Thompson sampling / CASCADE)",
+)
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
 @click.option(
     "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
@@ -377,6 +390,7 @@ def annotate(
     selector_mode: str | None,
     trigger: str | None,
     token_count: int | None,
+    recommended_category: str | None,
     add_deliverable: tuple[str, ...],
     as_json: bool,
 ) -> None:
@@ -408,6 +422,7 @@ def annotate(
         and selector_mode is None
         and trigger is None
         and token_count is None
+        and recommended_category is None
         and not add_deliverable
     )
     if nothing_supplied:
@@ -424,13 +439,6 @@ def annotate(
     # Note: sync/post-session use store.append(), which does not acquire this
     # lock. Fully protecting against annotate+sync races would require locking
     # inside SessionStore itself — that is a future improvement.
-    # fcntl is POSIX-only; on Windows we skip locking.
-    try:
-        import fcntl as _fcntl
-
-        _has_fcntl = True
-    except ImportError:
-        _has_fcntl = False
 
     # The lock file is a permanent sentinel — never deleted. This ensures all
     # concurrent annotate calls operate on the same inode, so the flock queue
@@ -483,6 +491,8 @@ def annotate(
                 record.trigger = trigger
             if token_count is not None:
                 record.token_count = token_count
+            if recommended_category is not None:
+                record.recommended_category = recommended_category
             if add_deliverable:
                 existing = list(record.deliverables or [])
                 for d in add_deliverable:
