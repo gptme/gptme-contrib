@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import sys
 from datetime import date, timedelta
@@ -405,9 +404,18 @@ def annotate(
     # Hold an exclusive lock for the duration of load → mutate → rewrite so that
     # concurrent writes (e.g. a 'sync' or 'post-session' running in a parallel
     # pipeline) are not silently dropped.
+    # fcntl is POSIX-only; on Windows we skip locking (Windows has no parallel agents).
+    try:
+        import fcntl as _fcntl
+
+        _has_fcntl = True
+    except ImportError:
+        _has_fcntl = False
+
     lock_path = store.path.with_name(store.path.name + ".lock")
     with open(lock_path, "a") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if _has_fcntl:
+            _fcntl.flock(lock_file, _fcntl.LOCK_EX)
         try:
             records = store.load_all()
 
@@ -461,7 +469,9 @@ def annotate(
 
             store.rewrite(records)
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            if _has_fcntl:
+                _fcntl.flock(lock_file, _fcntl.LOCK_UN)
+    lock_path.unlink(missing_ok=True)
 
     if as_json:
         click.echo(json.dumps(record.to_dict(), indent=2))
