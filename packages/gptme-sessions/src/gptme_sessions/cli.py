@@ -48,7 +48,7 @@ def _discover_all(
 ) -> list[dict]:
     """Collect discovered sessions across all harnesses.
 
-    Returns a list of dicts with keys ``harness`` and ``path``.
+    Returns a list of dicts with keys ``harness``, ``path``, and ``model``.
     Used for fallback display and the ``sync`` command.
     """
     today = date.today()
