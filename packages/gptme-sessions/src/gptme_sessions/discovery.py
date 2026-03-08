@@ -88,7 +88,7 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
                         return ts.date()
                     except (ValueError, TypeError):
                         continue
-    except (OSError, PermissionError) as e:
+    except (OSError, UnicodeDecodeError) as e:
         logger.debug("Failed to read %s: %s", jsonl_path, e)
     return None
 
