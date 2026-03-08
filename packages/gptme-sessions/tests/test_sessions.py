@@ -3865,3 +3865,31 @@ def test_annotate_cleans_up_lock_file(tmp_path: Path):
 
     lock_path = store.path.with_name(store.path.name + ".lock")
     assert not lock_path.exists(), f"Lock file {lock_path} was not cleaned up"
+
+
+def test_annotate_cleans_up_lock_file_on_error(tmp_path: Path):
+    """annotate removes the .lock file even when a ClickException is raised (unknown ID)."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    # Use a prefix that won't match — annotate will raise ClickException mid-operation
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "notfound",
+        "--model",
+        "claude-sonnet-4-6",
+    ]
+    rc = main()
+    assert rc != 0  # ClickException exits nonzero
+
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    assert not lock_path.exists(), f"Lock file {lock_path} leaked on error path"
