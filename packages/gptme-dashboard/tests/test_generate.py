@@ -29,6 +29,7 @@ from gptme_dashboard.generate import (
     scan_lessons,
     scan_packages,
     scan_plugins,
+    scan_readme,
     scan_recent_sessions,
     scan_skills,
     scan_tasks,
@@ -2204,3 +2205,97 @@ def test_scan_tasks_gptodo_path_includes_body(tmp_path: Path):
     assert "page_url" in tasks[0]
     assert tasks[0]["page_url"] == "tasks/my-task.html"
     assert "Do something" in tasks[0]["body"]
+
+
+# ---------------------------------------------------------------------------
+# scan_readme tests
+# ---------------------------------------------------------------------------
+
+
+def test_scan_readme_no_readme(tmp_path: Path):
+    """scan_readme returns empty dict when no README.md exists."""
+    result = scan_readme(tmp_path)
+    assert result == {}
+
+
+def test_scan_readme_basic(tmp_path: Path):
+    """scan_readme returns body and preview for a plain README."""
+    (tmp_path / "README.md").write_text(
+        "# My Project\n\nA handy library for doing things.\n\n## Install\n\n```\npip install it\n```\n"
+    )
+    result = scan_readme(tmp_path)
+    assert result["body"]
+    assert "My Project" in result["body"]
+    assert result["preview"] == "A handy library for doing things."
+
+
+def test_scan_readme_frontmatter_stripped(tmp_path: Path):
+    """scan_readme strips YAML frontmatter before returning body."""
+    (tmp_path / "README.md").write_text(
+        "---\ntitle: My Project\n---\n# My Project\n\nDescription here.\n"
+    )
+    result = scan_readme(tmp_path)
+    assert "title: My Project" not in result["body"]
+    assert "Description here." in result["body"]
+
+
+def test_scan_readme_preview_skips_headings(tmp_path: Path):
+    """scan_readme preview uses first non-heading paragraph."""
+    (tmp_path / "README.md").write_text(
+        "# Title\n\n## Subtitle\n\nThis is the first paragraph of real content.\n"
+    )
+    result = scan_readme(tmp_path)
+    assert result["preview"] == "This is the first paragraph of real content."
+
+
+def test_scan_readme_preview_truncated(tmp_path: Path):
+    """scan_readme truncates preview to 300 chars with ellipsis."""
+    long_text = "x" * 350
+    (tmp_path / "README.md").write_text(f"# Title\n\n{long_text}\n")
+    result = scan_readme(tmp_path)
+    assert len(result["preview"]) <= 301  # 300 chars + "…"
+    assert result["preview"].endswith("…")
+
+
+def test_scan_readme_empty_file(tmp_path: Path):
+    """scan_readme returns empty dict for an empty README."""
+    (tmp_path / "README.md").write_text("")
+    result = scan_readme(tmp_path)
+    assert result == {}
+
+
+def test_readme_in_workspace_data(tmp_path: Path):
+    """collect_workspace_data includes 'readme' key when README.md exists."""
+    (tmp_path / "README.md").write_text("# My Workspace\n\nA gptme workspace.\n")
+    data = collect_workspace_data(tmp_path)
+    assert "readme" in data
+    assert data["readme"]["preview"] == "A gptme workspace."
+
+
+def test_readme_absent_from_workspace_data(tmp_path: Path):
+    """collect_workspace_data returns empty readme dict when no README.md."""
+    data = collect_workspace_data(tmp_path)
+    assert data["readme"] == {}
+
+
+def test_generate_html_includes_about_section(workspace: Path, tmp_path: Path):
+    """Generated HTML includes About section when README.md exists."""
+    (workspace / "README.md").write_text(
+        "# Test Workspace\n\nThis is a great workspace for testing things.\n"
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert 'id="about"' in html
+    assert "This is a great workspace for testing things." in html
+
+
+def test_generate_html_no_about_section_without_readme(workspace: Path, tmp_path: Path):
+    """Generated HTML omits About section when no README.md is present."""
+    readme = workspace / "README.md"
+    if readme.exists():
+        readme.unlink()
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert 'id="about"' not in html

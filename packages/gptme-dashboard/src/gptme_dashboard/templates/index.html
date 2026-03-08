@@ -162,6 +162,19 @@ tr:hover { background: var(--accent-dim); }
 .search-box::placeholder { color: var(--text-dim); }
 .search-box:focus { outline: none; border-color: var(--accent); }
 
+/* Rendered markdown content (About/README section) */
+.content { line-height: 1.6; }
+.content h1, .content h2 { font-size: 1.1rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+.content h3 { font-size: 1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+.content p { margin: 0.5rem 0; }
+.content ul, .content ol { margin: 0.5rem 0; padding-left: 1.75rem; }
+.content li { margin: 0.2rem 0; }
+.content code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.88em; font-family: monospace; }
+.content pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; overflow-x: auto; margin: 0.5rem 0; }
+.content pre code { background: none; padding: 0; }
+.content a { color: var(--accent); }
+.content blockquote { border-left: 3px solid var(--accent); padding-left: 0.75rem; color: var(--text-dim); margin: 0.5rem 0; }
+
 /* GitHub source link */
 .gh-link {
   color: var(--text-dim);
@@ -251,6 +264,14 @@ tr:hover { background: var(--accent-dim); }
   </div>
   {% endif %}
 </div>
+
+{% if readme_html %}
+<!-- About (README) -->
+<section id="about">
+  <h2>About</h2>
+  <div class="content">{{ readme_html | safe }}</div>
+</section>
+{% endif %}
 
 <!-- Dynamic: Session Stats (shown when serve API is available) -->
 <section id="session-stats" class="dynamic-panel" style="display:none">

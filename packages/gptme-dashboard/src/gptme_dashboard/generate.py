@@ -774,6 +774,35 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
     return skills
 
 
+def scan_readme(workspace: Path) -> dict:
+    """Read the workspace README.md for display as an About section.
+
+    Returns a dict with ``body`` (raw markdown) and ``preview`` (first
+    non-heading paragraph, max 300 chars).  Returns an empty dict when
+    README.md is absent or empty.
+    """
+    readme_path = workspace / "README.md"
+    if not readme_path.exists():
+        return {}
+
+    _, body = parse_frontmatter(readme_path)
+    body = body.strip()
+    if not body:
+        return {}
+
+    # Extract first non-empty, non-heading paragraph as the preview.
+    preview = ""
+    for para in body.split("\n\n"):
+        para = para.strip()
+        if para and not para.startswith("#") and not para.startswith("!"):
+            preview = para[:300]
+            if len(para) > 300:
+                preview += "…"
+            break
+
+    return {"body": body, "preview": preview}
+
+
 def read_workspace_config(workspace: Path) -> dict:
     """Read gptme.toml for workspace metadata using inline TOML parsing."""
     try:
@@ -886,6 +915,7 @@ def collect_workspace_data(
     """
     config = read_workspace_config(workspace)
     agent_urls = read_agent_urls(workspace)
+    readme = scan_readme(workspace)
 
     lessons = scan_lessons(workspace)
     enabled_plugins = config.get("plugins_enabled")
@@ -1000,6 +1030,7 @@ def collect_workspace_data(
         "workspace_name": workspace_name,
         "gh_repo_url": gh_repo_url,
         "agent_urls": agent_urls,
+        "readme": readme,
         "lessons": lessons,
         "plugins": plugins,
         "packages": packages,
@@ -1040,7 +1071,8 @@ def generate(
     )
 
     template = env.get_template("index.html")
-    html = template.render(**data)
+    readme_html = render_markdown_to_html(data["readme"]["body"]) if data.get("readme") else ""
+    html = template.render(**data, readme_html=readme_html)
 
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(html)
