@@ -3536,7 +3536,7 @@ def test_sync_deduplicates_on_rerun(tmp_path: Path, capsys, monkeypatch):
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
-    assert "1 already in store" in captured.out
+    assert "1 unchanged" in captured.out
 
     # Only one record should exist
     store = SessionStore(sessions_dir=sessions_dir)
@@ -4300,6 +4300,50 @@ def test_sync_dry_run_signals_skips_extraction(tmp_path: Path, capsys, monkeypat
     assert extraction_called == [], "extract_from_path should not be called in dry-run mode"
     captured = capsys.readouterr()
     assert "would update" in captured.out
+
+
+def test_sync_dry_run_signals_skips_extraction_for_new_records(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run --signals does NOT call extract_from_path for new (unimported) records."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    # Store is EMPTY — session has never been imported.
+
+    extraction_called = []
+
+    def fake_extract(p):
+        extraction_called.append(p)
+        return {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": [],
+            "inferred_category": "code",
+        }
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", fake_extract)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    assert (
+        extraction_called == []
+    ), "extract_from_path should not be called for new records in dry-run mode"
+    captured = capsys.readouterr()
+    assert "would import" in captured.out
 
 
 def test_sync_backfills_model_for_unknown_records(tmp_path: Path, capsys, monkeypatch):

@@ -901,7 +901,7 @@ def sync(
         parts = [f"Imported {imported} session(s)"]
         if updated:
             parts.append(f"updated {updated}")
-        parts.append(f"{skipped} already in store.")
+        parts.append(f"{skipped} unchanged.")
         click.echo(", ".join(parts))
 
 
