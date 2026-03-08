@@ -3650,6 +3650,35 @@ def test_annotate_unknown_id_exits_nonzero(tmp_path: Path):
     assert rc != 0
 
 
+def test_annotate_empty_session_id_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when session_id is an empty string."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", outcome="unknown")
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "",  # empty string matches everything via startswith
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+    # Record must be unchanged
+    records = store.load_all()
+    assert records[0].outcome == "unknown"
+
+
 def test_annotate_ambiguous_prefix_exits_nonzero(tmp_path: Path):
     """annotate returns non-zero when prefix matches more than one record."""
     import sys

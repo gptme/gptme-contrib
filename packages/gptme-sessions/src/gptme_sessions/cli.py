@@ -442,6 +442,9 @@ def annotate(
             if not records:
                 raise click.ClickException("No session records found in store.")
 
+            if not session_id:
+                raise click.ClickException("Session ID must not be empty.")
+
             # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
             matches = [r for r in records if r.session_id.startswith(session_id)]
             if not matches:
