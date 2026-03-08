@@ -53,6 +53,22 @@ _STATE_ORDER = {
 }
 
 
+def strip_markdown_inline(text: str) -> str:
+    """Strip inline markdown formatting for use in plain-text contexts (table cells, etc.)
+
+    Removes bold/italic markers (**, *, __, _) and inline code backticks.
+    Does not process links or headings — just inline emphasis.
+    """
+    # Remove bold/italic: **text**, *text*, __text__, _text_
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+    # Remove inline code: `text`
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    return text
+
+
 def render_markdown_to_html(md_text: str) -> str:
     """Render markdown text to HTML using markdown-it-py (CommonMark compliant).
 
@@ -661,7 +677,7 @@ def scan_plugins(
             for line in body.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    description = line[:200]
+                    description = strip_markdown_inline(line[:200])
                     break
 
         # Derive the plugin module name: strip common prefix, convert hyphens
