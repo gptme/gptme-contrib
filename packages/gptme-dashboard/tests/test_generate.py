@@ -33,6 +33,7 @@ from gptme_dashboard.generate import (
     scan_skills,
     scan_tasks,
     skill_page_path,
+    task_page_path,
 )
 
 
@@ -2042,3 +2043,164 @@ def test_generate_no_plugin_page_when_no_readme(tmp_path: Path):
 
     plugin_page = output / "plugins" / "bare-plugin" / "index.html"
     assert not plugin_page.exists(), "No detail page should be generated for plugins without README"
+
+
+# --- Task detail page tests ---
+
+
+def test_task_page_path():
+    assert task_page_path("my-task") == "tasks/my-task.html"
+    assert task_page_path("fix-bug-123") == "tasks/fix-bug-123.html"
+
+
+def test_scan_tasks_includes_body(tmp_path: Path):
+    """scan_tasks includes body in each task entry."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2026-03-01
+        ---
+        # My Task
+
+        Do something useful with **markdown**.
+        """)
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert "body" in tasks[0]
+    assert "Do something useful" in tasks[0]["body"]
+
+
+def test_scan_tasks_includes_page_url(tmp_path: Path):
+    """scan_tasks includes page_url in each task entry."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "fix-bug.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# Fix Bug\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["page_url"] == "tasks/fix-bug.html"
+
+
+def test_generate_task_detail_pages(workspace: Path, tmp_path: Path):
+    """generate() produces per-task HTML detail pages."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        priority: high
+        tags: [feature]
+        created: 2026-03-01
+        ---
+        # My Task
+
+        Implementation details here.
+        """)
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    task_page = output / "tasks" / "my-task.html"
+    assert task_page.exists()
+    html = task_page.read_text()
+    assert "My Task" in html
+    assert "Implementation details here" in html
+    assert "active" in html
+
+
+def test_generate_index_links_to_tasks(workspace: Path, tmp_path: Path):
+    """index.html links task titles to their detail pages."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# My Task\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "index.html").read_text()
+    assert 'href="tasks/my-task.html"' in html
+
+
+def test_task_detail_renders_markdown(workspace: Path, tmp_path: Path):
+    """Task detail page renders markdown body to HTML."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "rich-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2026-03-01
+        ---
+        # Rich Task
+
+        ## Subtasks
+        - First item
+        - Second item
+
+        Do `something` in **bold**.
+        """)
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "tasks" / "rich-task.html").read_text()
+    assert "<li>" in html
+    assert "<strong>" in html
+    assert "<code>" in html
+
+
+def test_task_detail_breadcrumb(workspace: Path, tmp_path: Path):
+    """Task detail page has breadcrumb linking back to index #tasks."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# My Task\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "tasks" / "my-task.html").read_text()
+    assert "../index.html#tasks" in html
+
+
+def test_generate_json_excludes_task_body(workspace: Path):
+    """generate_json() excludes body field from task entries."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# My Task\n\nLong body.\n"
+    )
+
+    json_str = generate_json(workspace)
+    data = json.loads(json_str)
+    assert "tasks" in data
+    assert len(data["tasks"]) == 1
+    assert "body" not in data["tasks"][0]
+    assert "page_url" in data["tasks"][0]
+
+
+def test_scan_tasks_gptodo_path_includes_body(tmp_path: Path):
+    """scan_tasks gptodo code path includes body and page_url."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\npriority: high\ncreated: 2026-03-01\n---\n# My Task\n\nDo something.\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert "body" in tasks[0]
+    assert "page_url" in tasks[0]
+    assert tasks[0]["page_url"] == "tasks/my-task.html"
+    assert "Do something" in tasks[0]["body"]

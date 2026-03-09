@@ -87,6 +87,14 @@ def plugin_page_path(plugin_path: str) -> str:
     return (Path(plugin_path) / "index.html").as_posix()
 
 
+def task_page_path(task_id: str) -> str:
+    """Convert a task ID to its detail page URL path.
+
+    E.g. task_id='my-task' -> 'tasks/my-task.html'
+    """
+    return f"tasks/{task_id}.html"
+
+
 def journal_page_path(date: str, name: str) -> str:
     """Convert a journal entry's date + name to its detail page URL path.
 
@@ -457,6 +465,8 @@ def _task_to_dict(md_file: Path) -> dict | None:
         "tags": tags[:5],
         "assigned_to": assigned_to,
         "path": f"tasks/{md_file.name}",
+        "body": body,
+        "page_url": task_page_path(md_file.stem),
     }
 
 
@@ -468,8 +478,8 @@ def scan_tasks(workspace: Path) -> list[dict]:
     manual YAML parsing when gptodo is not installed.
 
     Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
-    ``tags``, ``assigned_to``, and ``path`` keys, sorted by state priority
-    then title.
+    ``tags``, ``assigned_to``, ``path``, ``body``, and ``page_url`` keys,
+    sorted by state priority then title.
     """
     tasks_dir = workspace / "tasks"
     if not tasks_dir.is_dir():
@@ -508,6 +518,8 @@ def scan_tasks(workspace: Path) -> list[dict]:
                     "tags": tags,
                     "assigned_to": t.assigned_to or "",
                     "path": f"tasks/{t.path.name}",
+                    "body": body,
+                    "page_url": task_page_path(t.name),
                 }
             )
     else:
@@ -1066,6 +1078,22 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(skill_html)
 
+    # Generate per-task detail pages
+    task_template = env.get_template("task.html")
+    for task in data["tasks"]:
+        # page_url is e.g. "tasks/my-task.html" (depth=1) → root_prefix="../"
+        depth = len(Path(task["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        task_html = task_template.render(
+            workspace_name=data["workspace_name"],
+            task=task,
+            body_html=render_markdown_to_html(task["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / task["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(task_html)
+
     # Generate per-journal detail pages
     journal_template = env.get_template("journal.html")
     for journal in data["journals"]:
@@ -1103,6 +1131,7 @@ def generate(
     stats = data["stats"]
     journal_count = len(data["journals"])
     plugin_page_count = len(plugins_with_pages)
+    task_count = len(data["tasks"])
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
@@ -1110,7 +1139,8 @@ def generate(
         f"{stats['total_plugins']} plugins ({plugin_page_count} detail pages), "
         f"{stats['total_packages']} packages, "
         f"{stats['total_skills']} skills ({stats['total_skills']} detail pages), "
-        f"{journal_count} journals ({journal_count} detail pages)"
+        f"{journal_count} journals ({journal_count} detail pages), "
+        f"{task_count} tasks ({task_count} detail pages)"
         f"{session_msg}"
     )
 
@@ -1160,6 +1190,9 @@ def generate_json(
         "plugins": [
             {k: v for k, v in plugin.items() if k not in _JSON_EXCLUDE}
             for plugin in data["plugins"]
+        ],
+        "tasks": [
+            {k: v for k, v in task.items() if k not in _JSON_EXCLUDE} for task in data["tasks"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)
