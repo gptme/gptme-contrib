@@ -2764,3 +2764,101 @@ def test_generate_no_sitemap_when_no_github_remote(tmp_path: Path):
     assert not (
         output / "sitemap.xml"
     ).exists(), "sitemap.xml should not be generated without a base URL"
+
+
+# --- Description normalisation tests ---
+
+
+def test_scan_skills_multiline_description_normalised(tmp_path: Path):
+    """Multiline YAML block-scalar descriptions should be collapsed to first line."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    skill_dir = tmp_path / "skills" / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        textwrap.dedent("""\
+        ---
+        name: My Skill
+        description: |
+          First line of the description.
+          Second line with more details.
+        ---
+        # My Skill
+
+        Body content here.
+        """)
+    )
+
+    skills = scan_skills(tmp_path)
+    assert len(skills) == 1
+    # description must be a single line — no embedded newlines
+    assert "\n" not in skills[0]["description"]
+    assert skills[0]["description"] == "First line of the description."
+
+
+def test_scan_skills_list_description_uses_non_list_line(tmp_path: Path):
+    """If the description starts with list items, skip to the first prose line."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    skill_dir = tmp_path / "skills" / "list-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        textwrap.dedent("""\
+        ---
+        name: List Skill
+        description: |
+          - item one
+          - item two
+          Prose summary line.
+        ---
+        # List Skill
+
+        Body.
+        """)
+    )
+
+    skills = scan_skills(tmp_path)
+    assert len(skills) == 1
+    assert skills[0]["description"] == "Prose summary line."
+
+
+def test_scan_plugins_skips_list_first_line(tmp_path: Path):
+    """Plugin descriptions should not start with a markdown list marker."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    plugin_dir = tmp_path / "plugins" / "list-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text(
+        "# List Plugin\n\n- First line is a list item\n- Second item\n\nProse description.\n"
+    )
+
+    plugins = scan_plugins(tmp_path)
+    assert len(plugins) == 1
+    desc = plugins[0]["description"]
+    assert not desc.startswith("-"), f"description should not start with '-': {desc!r}"
+    assert desc == "Prose description."
+
+
+def test_guidance_collapses_at_five_rows(workspace: Path, tmp_path: Path):
+    """The guidance table collapses after 5 rows by default."""
+    # Add enough skills to exceed the collapse threshold
+    for i in range(8):
+        skill_dir = workspace / "skills" / f"skill-{i}"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            name: Skill {i}
+            description: Skill number {i}
+            ---
+            # Skill {i}
+            Content.
+            """)
+        )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    # Rows beyond 5 should be collapsed (style="display:none")
+    assert 'class="collapsed-row"' in html
+    # Show-more button should reference the total count
+    assert "Browse all" in html

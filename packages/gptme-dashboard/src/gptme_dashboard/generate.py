@@ -764,7 +764,7 @@ def scan_plugins(
             _, body = parse_frontmatter(readme)
             for line in body.splitlines():
                 line = line.strip()
-                if line and not line.startswith("#"):
+                if line and not line.startswith("#") and not re.match(r"^[-*]\s", line):
                     description = strip_markdown_inline(line)[:200]
                     break
 
@@ -862,6 +862,18 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
         fm, body = parse_frontmatter(skill_md)
         name = fm.get("name", skill_md.parent.name.replace("-", " ").title())
         description = fm.get("description", "")
+        if description:
+            # Normalize multiline descriptions to a single short summary line.
+            # YAML block scalars (description: |) can span multiple lines and include
+            # list items, which render poorly in a table cell.  Use the first
+            # non-empty, non-list line so the index stays scannable.
+            for desc_line in description.splitlines():
+                stripped = desc_line.strip()
+                if stripped and not stripped.startswith(("-", "*", "#")):
+                    description = stripped[:200]
+                    break
+            else:
+                description = description.split("\n")[0].strip()[:200]
 
         if not description:
             description = extract_title(body, "")
