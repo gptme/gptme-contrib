@@ -21,6 +21,7 @@ from gptme_dashboard.generate import (
     journal_page_path,
     lesson_page_path,
     parse_frontmatter,
+    plugin_page_path,
     read_agent_urls,
     read_workspace_config,
     render_markdown_to_html,
@@ -1937,3 +1938,107 @@ def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     assert "Tasks" in html
     assert "Build Feature" in html
     assert "active" in html
+
+
+# --- Plugin detail page tests ---
+
+
+def test_plugin_page_path():
+    """Test plugin directory to URL conversion."""
+    assert plugin_page_path("plugins/gptme-consortium") == "plugins/gptme-consortium/index.html"
+    assert plugin_page_path("plugins/user-memories") == "plugins/user-memories/index.html"
+
+
+def test_scan_plugins_includes_body_and_page_url(workspace: Path):
+    """Test that scan_plugins includes body and page_url fields."""
+    plugins = scan_plugins(workspace)
+    assert len(plugins) == 1
+    plugin = plugins[0]
+    assert "body" in plugin
+    assert "page_url" in plugin
+    assert "A plugin for testing" in plugin["body"]
+    assert plugin["page_url"] == "plugins/gptme-test-plugin/index.html"
+
+
+def test_scan_plugins_empty_body_when_no_readme(tmp_path: Path):
+    """Test that plugins without README have empty body and still get page_url."""
+    plugin_dir = tmp_path / "plugins" / "no-readme-plugin"
+    plugin_dir.mkdir(parents=True)
+    # No README.md
+
+    plugins = scan_plugins(tmp_path)
+    assert len(plugins) == 1
+    assert plugins[0]["body"] == ""
+    assert plugins[0]["page_url"] == "plugins/no-readme-plugin/index.html"
+
+
+def test_generate_plugin_detail_pages(workspace: Path, tmp_path: Path):
+    """Test that per-plugin detail pages are generated for plugins with README."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    plugin_page = output / "plugins" / "gptme-test-plugin" / "index.html"
+    assert plugin_page.exists(), f"Expected {plugin_page} to exist"
+
+    html = plugin_page.read_text()
+    assert "gptme-test-plugin" in html
+    assert "A plugin for testing" in html
+
+
+def test_generate_index_links_to_plugins(workspace: Path, tmp_path: Path):
+    """Test that index.html plugin names link to detail pages."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    assert 'href="plugins/gptme-test-plugin/index.html"' in html
+
+
+def test_plugin_detail_breadcrumb(workspace: Path, tmp_path: Path):
+    """Test that plugin detail page breadcrumb uses correct relative root prefix."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # plugins/gptme-test-plugin/index.html is two levels deep → needs ../../
+    html = (output / "plugins" / "gptme-test-plugin" / "index.html").read_text()
+    assert 'href="../../index.html"' in html
+
+
+def test_plugin_detail_renders_markdown(workspace: Path, tmp_path: Path):
+    """Test that plugin README markdown is rendered as HTML."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "plugins" / "gptme-test-plugin" / "index.html").read_text()
+    assert "<h1>" in html or "<h2>" in html, "Headings should be rendered as HTML"
+    assert "&lt;h" not in html, "HTML tags must not be escaped"
+
+
+def test_generate_json_excludes_plugin_body(workspace: Path):
+    """Test that generate_json excludes body from plugins to keep data.json lean."""
+    data = collect_workspace_data(workspace)
+    json_str = generate_json(workspace, _data=data)
+    parsed = json.loads(json_str)
+
+    assert len(parsed["plugins"]) == 1
+    assert "body" not in parsed["plugins"][0]
+    assert "page_url" in parsed["plugins"][0]
+
+
+def test_generate_no_plugin_page_when_no_readme(tmp_path: Path):
+    """Test that plugins without README do not get a detail page."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    plugin_dir = tmp_path / "plugins" / "bare-plugin"
+    plugin_dir.mkdir(parents=True)
+    # No README.md — plugin has no body
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(tmp_path, output, template_dir)
+
+    plugin_page = output / "plugins" / "bare-plugin" / "index.html"
+    assert not plugin_page.exists(), "No detail page should be generated for plugins without README"
