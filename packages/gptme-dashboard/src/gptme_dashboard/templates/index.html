@@ -312,7 +312,7 @@ tr:hover { background: var(--accent-dim); }
     <tbody>
     {% for task in tasks %}
       <tr{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
-        <td><strong>{% if task.page_url %}<a href="{{ task.page_url }}">{{ task.title }}</a>{% else %}{{ task.title }}{% endif %}</strong></td>
+        <td><strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong></td>
         <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
         <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>
         <td>{% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}</td>
