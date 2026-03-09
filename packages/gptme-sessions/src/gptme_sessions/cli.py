@@ -646,16 +646,15 @@ def discover(
                 )
             else:
                 click.echo(f"[{sync_flag}]  {harness_str}  {path_str}")
-        unsynced_count = sum(1 for e in discovered if not e["synced"])
-        synced_count = len(discovered) - unsynced_count
-        click.echo(
-            f"\n{len(discovered)} session(s) found ({start} to {today})"
-            + (
+        if unsynced:
+            footer = (
                 f" ({total_discovered} total, {total_discovered - len(discovered)} already synced)"
-                if unsynced
-                else f", {synced_count} synced, {unsynced_count} pending"
             )
-        )
+        else:
+            unsynced_count = sum(1 for e in discovered if not e["synced"])
+            synced_count = len(discovered) - unsynced_count
+            footer = f", {synced_count} synced, {unsynced_count} pending"
+        click.echo(f"\n{len(discovered)} session(s) found ({start} to {today})" + footer)
 
 
 # -- signals -----------------------------------------------------------------

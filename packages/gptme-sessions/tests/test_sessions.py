@@ -3246,6 +3246,7 @@ def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
     assert len(sessions) == 1
     assert sessions[0]["harness"] == "codex"
     assert sessions[0]["path"] == str(fake_file)
+    assert sessions[0]["synced"] is False  # fake_file is not in any store
 
 
 def test_cli_discover_with_signals(tmp_path: Path, capsys, monkeypatch):
