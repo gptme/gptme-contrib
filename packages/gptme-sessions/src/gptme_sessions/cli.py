@@ -89,7 +89,9 @@ def _count_unsynced(
     caller has already loaded them (e.g. for ``store.stats()``).
 
     Uses the same path-matching logic as the ``sync`` command so the count
-    accurately reflects what ``sync`` would import.
+    accurately reflects what ``sync`` would import for the same *since_days*
+    window.  Note that ``sync --since`` accepts custom windows (e.g. 90d), so
+    running ``sync`` with a wider window may import sessions not counted here.
     """
     discovered = _discover_all(since_days=since_days)
     if not discovered:
