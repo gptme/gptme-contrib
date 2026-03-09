@@ -1871,6 +1871,20 @@ def test_collect_workspace_data_includes_summaries(workspace: Path):
     assert data["stats"]["total_summaries"] == 1
 
 
+def test_total_summaries_stat_reflects_actual_count_not_cap(workspace: Path):
+    """total_summaries in stats counts all files on disk, not just the capped list."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    # Create 25 daily summaries — more than the default limit of 20
+    for i in range(1, 26):
+        (daily_dir / f"2026-01-{i:02d}.md").write_text(f"# Day {i}\n\nContent.\n")
+
+    data = collect_workspace_data(workspace)
+    # The rendered list is capped at 20, but the stat should show the true count
+    assert len(data["summaries"]) == 20
+    assert data["stats"]["total_summaries"] == 25
+
+
 def test_generate_html_includes_summaries(workspace: Path, tmp_path: Path):
     """Generated HTML includes summaries section when entries exist."""
     daily_dir = workspace / "knowledge" / "summaries" / "daily"

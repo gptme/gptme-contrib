@@ -334,6 +334,12 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             limit = request.args.get("limit", 20, type=int)
             limit = max(1, min(limit, 100))
             period_type = request.args.get("type", "")
+            if period_type and period_type not in ("daily", "weekly", "monthly"):
+                return jsonify(
+                    {
+                        "error": f"Invalid type '{period_type}'. Must be one of: daily, weekly, monthly"
+                    }
+                ), 400
             entries = scan_summaries(ws, limit=limit, period_type=period_type)
             return jsonify(entries)
         except Exception as e:

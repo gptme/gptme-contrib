@@ -1047,6 +1047,12 @@ def collect_workspace_data(
 
     # Scan knowledge summaries (daily/weekly/monthly)
     summaries = scan_summaries(workspace, limit=20)
+    summaries_dir = workspace / "knowledge" / "summaries"
+    total_summaries_count = sum(
+        len(list((summaries_dir / pt).glob("*.md")))
+        for pt in ("daily", "weekly", "monthly")
+        if (summaries_dir / pt).is_dir()
+    )
 
     # Optionally scan recent sessions
     sessions: list[dict] = []
@@ -1069,7 +1075,7 @@ def collect_workspace_data(
         "total_journals": len(journals),
         "total_tasks": len(tasks),
         "task_states": task_states,
-        "total_summaries": len(summaries),
+        "total_summaries": total_summaries_count,
         "lesson_categories": lesson_categories,
     }
 

@@ -555,3 +555,20 @@ def test_api_summaries_type_filter(tmp_path: Path):
         data = resp.get_json()
         assert all(e["type"] == "daily" for e in data)
         assert len(data) == 1
+
+
+def test_api_summaries_invalid_type_returns_400(tmp_path: Path):
+    """Test /api/summaries?type= returns 400 for unknown period type."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/summaries?type=quarterly")
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert "error" in data
+        assert "quarterly" in data["error"]
