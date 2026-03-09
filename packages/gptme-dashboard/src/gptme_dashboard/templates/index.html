@@ -396,7 +396,7 @@ tr:hover { background: var(--accent-dim); }
       <tbody>
       {% for plugin in plugins %}
         <tr>
-          <td><strong>{{ plugin.name }}</strong></td>
+          <td><strong>{% if plugin.body %}<a href="{{ plugin.page_url }}">{{ plugin.name }}</a>{% else %}{{ plugin.name }}{% endif %}</strong></td>
           <td>{{ plugin.description }}</td>
           <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
           {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}

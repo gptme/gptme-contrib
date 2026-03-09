@@ -79,6 +79,14 @@ def skill_page_path(skill_dir: str) -> str:
     return (Path(skill_dir) / "index.html").as_posix()
 
 
+def plugin_page_path(plugin_path: str) -> str:
+    """Convert a plugin's directory path to its detail page URL path.
+
+    E.g. 'plugins/gptme-consortium' -> 'plugins/gptme-consortium/index.html'
+    """
+    return (Path(plugin_path) / "index.html").as_posix()
+
+
 def journal_page_path(date: str, name: str) -> str:
     """Convert a journal entry's date + name to its detail page URL path.
 
@@ -635,6 +643,7 @@ def scan_plugins(
 
         readme = d / "README.md"
         description = ""
+        body = ""
         if readme.exists():
             _, body = parse_frontmatter(readme)
             for line in body.splitlines():
@@ -647,10 +656,17 @@ def scan_plugins(
         # e.g. "gptme-consortium" -> "gptme_consortium", "user_memories" -> "user_memories"
         module_name = d.name.replace("-", "_")
 
+        rel_path = str(d.relative_to(workspace))
+        page_url = plugin_page_path(rel_path)
+        if source:
+            page_url = f"{source}/{page_url}"
+
         entry: dict = {
             "name": d.name,
             "description": description,
-            "path": str(d.relative_to(workspace)),
+            "body": body,
+            "path": rel_path,
+            "page_url": page_url,
         }
         if source:
             entry["source"] = source
@@ -1067,13 +1083,31 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(journal_html)
 
+    # Generate per-plugin detail pages (only for plugins with a README)
+    plugin_template = env.get_template("plugin.html")
+    plugins_with_pages = [p for p in data["plugins"] if p.get("body")]
+    for plugin in plugins_with_pages:
+        # page_url is e.g. "plugins/gptme-consortium/index.html" (depth=2) → root_prefix="../../"
+        depth = len(Path(plugin["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        plugin_html = plugin_template.render(
+            workspace_name=data["workspace_name"],
+            plugin=plugin,
+            body_html=render_markdown_to_html(plugin["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / plugin["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(plugin_html)
+
     stats = data["stats"]
     journal_count = len(data["journals"])
+    plugin_page_count = len(plugins_with_pages)
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
-        f"{stats['total_plugins']} plugins, "
+        f"{stats['total_plugins']} plugins ({plugin_page_count} detail pages), "
         f"{stats['total_packages']} packages, "
         f"{stats['total_skills']} skills ({stats['total_skills']} detail pages), "
         f"{journal_count} journals ({journal_count} detail pages)"
@@ -1122,6 +1156,10 @@ def generate_json(
         "journals": [
             {k: v for k, v in journal.items() if k not in _JSON_EXCLUDE}
             for journal in data["journals"]
+        ],
+        "plugins": [
+            {k: v for k, v in plugin.items() if k not in _JSON_EXCLUDE}
+            for plugin in data["plugins"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)
