@@ -4631,6 +4631,10 @@ def test_discover_unsynced_flag_filters_synced(tmp_path: Path, monkeypatch: pyte
     # Imported session should be absent; pending session should appear.
     assert "alpha-imported" not in result.output
     assert "beta-pending" in result.output
+    # Footer shows post-filter count with total and skipped breakdown.
+    assert "1 session(s) found" in result.output
+    assert "2 total" in result.output
+    assert "1 already synced" in result.output
 
 
 def test_discover_unsynced_flag_all_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

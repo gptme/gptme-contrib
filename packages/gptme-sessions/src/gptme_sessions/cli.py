@@ -611,7 +611,7 @@ def discover(
         # ``output["sessions"]`` without branching on the flag.
         # ``total_discovered`` lets callers distinguish "nothing found in
         # window" (total_discovered=0, sessions=[]) from "all already synced"
-        # (total_discovered>0, sessions=[]) without needing --unsynced.
+        # (total_discovered>0, sessions=[]) when --unsynced is active.
         click.echo(
             json.dumps({"sessions": discovered, "total_discovered": total_discovered}, indent=2)
         )
@@ -650,7 +650,11 @@ def discover(
         synced_count = len(discovered) - unsynced_count
         click.echo(
             f"\n{len(discovered)} session(s) found ({start} to {today})"
-            + (f", {synced_count} synced, {unsynced_count} pending" if not unsynced else "")
+            + (
+                f" ({total_discovered} total, {total_discovered - len(discovered)} already synced)"
+                if unsynced
+                else f", {synced_count} synced, {unsynced_count} pending"
+            )
         )
 
 
