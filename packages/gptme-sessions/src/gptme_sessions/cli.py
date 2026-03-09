@@ -78,6 +78,19 @@ def _discover_all(
     return discovered
 
 
+def _count_unsynced(store: SessionStore, since_days: int = 14) -> int:
+    """Count sessions discovered in the last *since_days* days not yet in the store.
+
+    Uses the same path-matching logic as the ``sync`` command so the count
+    accurately reflects what ``sync`` would import.
+    """
+    discovered = _discover_all(since_days=since_days)
+    if not discovered:
+        return 0
+    existing_paths = {r.journal_path for r in store.load_all() if r.journal_path}
+    return sum(1 for e in discovered if str(e["path"]) not in existing_paths)
+
+
 def _show_discovery_fallback(since_days: int = 30) -> None:
     """Show discovered sessions when the store has no records.
 
@@ -141,7 +154,14 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
             _show_discovery_fallback()
         else:
             format_stats(s)
-            click.echo("Tip: Run 'gptme-sessions sync' to keep the store up to date.")
+            unsynced = _count_unsynced(store)
+            if unsynced > 0:
+                click.echo(
+                    f"\nTip: {unsynced} new session(s) available in the last 14 days. "
+                    "Run 'gptme-sessions sync' to import."
+                )
+            else:
+                click.echo("\nTip: Run 'gptme-sessions sync' to keep the store up to date.")
 
 
 # -- Shared filter options for query/stats -----------------------------------
