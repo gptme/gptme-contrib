@@ -3536,7 +3536,7 @@ def test_sync_deduplicates_on_rerun(tmp_path: Path, capsys, monkeypatch):
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
-    assert "1 already in store" in captured.out
+    assert "1 unchanged" in captured.out
 
     # Only one record should exist
     store = SessionStore(sessions_dir=sessions_dir)
@@ -4104,3 +4104,418 @@ def test_annotate_empty_id_no_options_reports_id_error(tmp_path: Path):
     )
     assert result.exit_code != 0
     assert "Session ID must not be empty" in result.output
+
+
+# -- sync model extraction + signals backfill ---------------------------------
+
+
+def test_sync_captures_gptme_model_from_config(tmp_path: Path, capsys, monkeypatch):
+    """sync reads model from gptme session config.toml and stores it in the record."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    # Create a fake gptme session directory with a config.toml declaring the model
+    session_dir = tmp_path / "2026-03-07-test-session"
+    session_dir.mkdir()
+    jsonl = session_dir / "conversation.jsonl"
+    jsonl.touch()
+    (session_dir / "config.toml").write_text('[chat]\nmodel = "claude-sonnet-4-6"\n')
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [session_dir]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-sonnet-4-6"
+    assert records[0].model_normalized == "sonnet"
+
+
+def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals updates existing records that have outcome=unknown."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "unknown"
+
+    # Mock extract_from_path to return a productive result
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": ["abc123"],
+            "inferred_category": "code",
+        },
+    )
+
+    # Second sync with --signals — should update the existing record
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "updated 1" in captured.out
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "productive"
+    assert records[0].duration_seconds == 300
+    assert records[0].category == "code"
+
+
+def test_sync_signals_does_not_overwrite_existing_deliverables(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals preserves existing deliverables, consistent with category guard."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Manually set deliverables on the stored record (simulating prior post-session annotation)
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    records[0].deliverables = ["prior-deliverable"]
+    store.rewrite(records)
+
+    # Mock extract_from_path returning different deliverables
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 120,
+            "deliverables": ["new-deliverable"],
+            "inferred_category": "code",
+        },
+    )
+
+    # Backfill with --signals — deliverables should NOT be overwritten
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    main()
+
+    updated_records = store.load_all()
+    assert updated_records[0].deliverables == ["prior-deliverable"]
+
+
+def test_sync_dry_run_signals_skips_extraction(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run --signals does NOT call extract_from_path (just previews)."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    extraction_called = []
+
+    def fake_extract(p):
+        extraction_called.append(p)
+        return {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": [],
+            "inferred_category": "code",
+        }
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", fake_extract)
+
+    # dry-run --signals should preview update without calling extract_from_path
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    assert extraction_called == [], "extract_from_path should not be called in dry-run mode"
+    captured = capsys.readouterr()
+    assert "would update" in captured.out
+
+
+def test_sync_dry_run_signals_skips_extraction_for_new_records(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run --signals does NOT call extract_from_path for new (unimported) records."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    # Store is EMPTY — session has never been imported.
+
+    extraction_called = []
+
+    def fake_extract(p):
+        extraction_called.append(p)
+        return {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": [],
+            "inferred_category": "code",
+        }
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", fake_extract)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    assert (
+        extraction_called == []
+    ), "extract_from_path should not be called for new records in dry-run mode"
+    captured = capsys.readouterr()
+    assert "would import" in captured.out
+
+
+def test_sync_backfills_model_for_unknown_records(tmp_path: Path, capsys, monkeypatch):
+    """sync updates model field on existing records that still have model='unknown'."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Pre-populate store with a record that has model="unknown" and the session path
+    existing = SessionRecord(harness="claude-code", model="unknown", trajectory_path=str(fake_file))
+    store.append(existing)
+
+    # discover_cc_sessions returns the same file; extract_cc_model will find a real model
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-opus-4-6"
+
+
+def test_sync_signals_failure_does_not_double_count_skipped(tmp_path: Path, capsys, monkeypatch):
+    """When model update succeeds but signals extraction fails, session counts as updated not skipped."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Pre-populate with unknown model + unknown outcome → both updates attempted
+    existing = SessionRecord(harness="claude-code", model="unknown", trajectory_path=str(fake_file))
+    store.append(existing)
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+    # Model extraction succeeds
+    monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+
+    # But signals extraction fails
+    def _raise_signals_error(p):
+        raise RuntimeError("signals extraction error")
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", _raise_signals_error)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+
+    # Session should be counted as updated (model was fixed), not skipped
+    assert "updated 1" in captured.out
+
+    # Model should have been updated despite signals failure
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-opus-4-6"
+
+
+def test_from_dict_migrates_jsonl_journal_path_to_trajectory_path():
+    """Legacy records with .jsonl journal_path are migrated to trajectory_path."""
+    data = {"journal_path": "/home/user/.local/share/gptme/logs/session/conversation.jsonl"}
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/home/user/.local/share/gptme/logs/session/conversation.jsonl"
+    assert r.journal_path is None
+
+
+def test_from_dict_migrates_directory_journal_path_to_trajectory_path():
+    """Legacy gptme sessions without conversation.jsonl store a directory in journal_path.
+
+    These were synced before trajectory_path was introduced, so migration must
+    handle the directory case (no .jsonl suffix) to prevent duplicate imports
+    on the next sync run.
+    """
+    data = {"journal_path": "/home/user/.local/share/gptme/logs/2026-01-15-120000-session"}
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/home/user/.local/share/gptme/logs/2026-01-15-120000-session"
+    assert r.journal_path is None
+
+
+def test_from_dict_preserves_md_journal_path():
+    """Human-written .md journal entries are NOT migrated to trajectory_path."""
+    data = {"journal_path": "/home/user/bob/journal/2026-01-15/session.md"}
+    r = SessionRecord.from_dict(data)
+    assert r.journal_path == "/home/user/bob/journal/2026-01-15/session.md"
+    assert r.trajectory_path is None
+
+
+def test_from_dict_no_migration_when_trajectory_path_already_set():
+    """When trajectory_path is already present, journal_path is not touched."""
+    data = {
+        "trajectory_path": "/some/other.jsonl",
+        "journal_path": "/home/user/.local/share/gptme/logs/session",
+    }
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/some/other.jsonl"
+    assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
+
+
+def test_from_dict_no_migration_when_trajectory_path_is_null():
+    """A new-style record with trajectory_path=null is NOT migrated.
+
+    ``filtered.get("trajectory_path") is None`` would incorrectly fire for
+    records where trajectory_path was written as JSON ``null``.  The guard
+    should use ``"trajectory_path" not in filtered`` so that an intentionally-
+    absent field triggers migration while an explicit null is left alone.
+    """
+    data = {
+        "trajectory_path": None,
+        "journal_path": "/home/user/.local/share/gptme/logs/session",
+    }
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path is None
+    assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
+
+
+def test_sync_signals_warns_when_trajectory_missing(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals emits a warning when a stored record's trajectory file is gone."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Delete the trajectory file to simulate a moved/deleted session
+    fake_file.unlink()
+
+    # sync --signals should warn about the missing trajectory
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "trajectory not found" in captured.err

@@ -72,7 +72,7 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
     Reads only until the first valid timestamp is found (fast).
     """
     try:
-        with open(jsonl_path) as f:
+        with open(jsonl_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -81,6 +81,8 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(entry, dict):
+                    continue
                 ts_str = entry.get("timestamp")
                 if ts_str:
                     try:
@@ -88,7 +90,7 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
                         return ts.date()
                     except (ValueError, TypeError):
                         continue
-    except (OSError, PermissionError) as e:
+    except (OSError, UnicodeDecodeError) as e:
         logger.debug("Failed to read %s: %s", jsonl_path, e)
     return None
 
@@ -112,6 +114,39 @@ def decode_cc_project_path(encoded: str) -> str:
     if not encoded.startswith("-"):
         return encoded
     return encoded.replace("-", "/")
+
+
+def extract_cc_model(jsonl_path: Path) -> str | None:
+    """Extract the model from the first assistant message in a Claude Code JSONL file.
+
+    CC JSONL lines have the structure::
+
+        {"message": {"role": "assistant", "model": "claude-opus-4-6", ...}, ...}
+
+    Scans up to 50 lines to find an assistant message with a model field.
+    """
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= 50:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                msg = entry.get("message", {})
+                if isinstance(msg, dict) and msg.get("role") == "assistant":
+                    model = msg.get("model")
+                    if model:
+                        return str(model)
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug("Failed to read %s for model extraction: %s", jsonl_path, e)
+    return None
 
 
 def parse_gptme_config(session_dir: Path) -> dict:

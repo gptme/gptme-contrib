@@ -24,6 +24,8 @@ from .discovery import (
     discover_codex_sessions,
     discover_copilot_sessions,
     discover_gptme_sessions,
+    extract_cc_model,
+    parse_gptme_config,
 )
 from .post_session import post_session
 from .record import SessionRecord, normalize_run_type
@@ -47,6 +49,9 @@ def _discover_all(
     """Collect discovered sessions across all harnesses.
 
     Returns a list of dicts with keys ``harness`` and ``path``.
+    Dicts for ``gptme`` and ``claude-code`` harnesses also include ``model``
+    (may be ``None`` if extraction fails); ``codex`` and ``copilot`` entries
+    do not include ``model``.  Callers should use ``.get("model")`` accordingly.
     Used for fallback display and the ``sync`` command.
     """
     today = date.today()
@@ -57,10 +62,12 @@ def _discover_all(
         for p in discover_gptme_sessions(start, today):
             jsonl = p / "conversation.jsonl"
             resolved = jsonl if jsonl.exists() else p
-            discovered.append({"harness": "gptme", "path": resolved})
+            model = parse_gptme_config(p).get("model") or None
+            discovered.append({"harness": "gptme", "path": resolved, "model": model})
     if harness_filter in (None, "claude-code"):
         for p in discover_cc_sessions(start, today):
-            discovered.append({"harness": "claude-code", "path": p})
+            model = extract_cc_model(p)
+            discovered.append({"harness": "claude-code", "path": p, "model": model})
     if harness_filter in (None, "codex"):
         for p in discover_codex_sessions(start, today):
             discovered.append({"harness": "codex", "path": p})
@@ -776,7 +783,8 @@ def sync(
     records suitable for ``stats`` and ``runs`` analytics.
 
     Re-running ``sync`` is safe: sessions already in the store (matched by
-    trajectory path) are skipped.
+    trajectory path) are skipped.  With ``--signals``, existing records that
+    have ``outcome=unknown`` (no signals yet) will be updated in-place.
     """
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     since_days = _parse_since(since) or 14
@@ -786,53 +794,122 @@ def sync(
         click.echo(f"No sessions found in the last {since_days} day(s).")
         return
 
-    # Build a set of already-imported paths for deduplication.
-    # We use journal_path to store the trajectory path when syncing.
-    existing_paths = {r.journal_path for r in store.load_all() if r.journal_path}
+    # Build lookup structures for deduplication and in-place updates.
+    existing_records = store.load_all()
+    existing_by_path = {r.trajectory_path: r for r in existing_records if r.trajectory_path}
 
+    new_records: list[SessionRecord] = []
+    updated_paths: set[str] = set()
     imported = 0
+    updated = 0
     skipped = 0
+
     for entry in discovered:
         path_str = str(entry["path"])
+        traj_path = entry["path"]
 
-        if path_str in existing_paths:
-            skipped += 1
+        if path_str in existing_by_path:
+            existing = existing_by_path[path_str]
+            needs_update = False
+
+            # Update model if it was previously unknown and we now know it.
+            entry_model = entry.get("model")
+            if entry_model and (not existing.model or existing.model == "unknown"):
+                existing.model = entry_model
+                needs_update = True
+
+            # With --signals, backfill records that have no outcome yet.
+            if with_signals and existing.outcome == "unknown" and traj_path.is_file():
+                if not dry_run:
+                    try:
+                        result = extract_from_path(traj_path)
+                        existing.outcome = "productive" if result.get("productive") else "noop"
+                        existing.duration_seconds = int(result.get("session_duration_s") or 0)
+                        if not existing.deliverables:
+                            existing.deliverables = result.get("deliverables", [])
+                        if result.get("inferred_category") and not existing.category:
+                            existing.category = result["inferred_category"]
+                        needs_update = True
+                    except Exception as exc:
+                        click.echo(
+                            f"  warning: signals extraction failed for {path_str}: {exc}",
+                            err=True,
+                        )
+                        if not needs_update:  # don't double-count if model was already updated
+                            skipped += 1
+                else:
+                    needs_update = True  # mark for dry-run reporting
+            elif with_signals and existing.outcome == "unknown" and not traj_path.is_file():
+                click.echo(
+                    f"  warning: trajectory not found, cannot backfill signals for {path_str}",
+                    err=True,
+                )
+                if not needs_update:
+                    skipped += 1
+            elif not needs_update:
+                skipped += 1
+
+            if needs_update:
+                if dry_run:
+                    click.echo(f"  would update: {entry['harness']:14s}  {path_str}")
+                    updated_paths.add(path_str)
+                else:
+                    updated_paths.add(path_str)
+                    updated += 1
             continue
 
         record_kwargs: dict = {
             "harness": entry["harness"],
-            "journal_path": path_str,  # used for deduplication on re-sync
+            "trajectory_path": path_str,  # used for deduplication on re-sync
         }
+        if entry.get("model"):
+            record_kwargs["model"] = entry["model"]
 
-        if with_signals:
-            traj_path = entry["path"]
-            if traj_path.is_file():
-                try:
-                    result = extract_from_path(traj_path)
-                    record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
-                    record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
-                    record_kwargs["deliverables"] = result.get("deliverables", [])
-                    if result.get("inferred_category"):
-                        record_kwargs["category"] = result["inferred_category"]
-                except Exception as exc:
-                    click.echo(
-                        f"  warning: signals extraction failed for {path_str}: {exc}",
-                        err=True,
-                    )
+        if with_signals and traj_path.is_file() and not dry_run:
+            try:
+                result = extract_from_path(traj_path)
+                record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
+                record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
+                record_kwargs["deliverables"] = result.get("deliverables", [])
+                if result.get("inferred_category"):
+                    record_kwargs["category"] = result["inferred_category"]
+            except Exception as exc:
+                click.echo(
+                    f"  warning: signals extraction failed for {path_str}: {exc}",
+                    err=True,
+                )
 
         if dry_run:
             click.echo(f"  would import: {entry['harness']:14s}  {path_str}")
         else:
-            store.append(SessionRecord(**record_kwargs))
+            new_records.append(SessionRecord(**record_kwargs))
             imported += 1
 
+    if not dry_run:
+        if updated_paths:
+            # Rewrite the store to persist in-place mutations on existing_records.
+            # NOTE: existing_records was loaded once at the start of sync; any records
+            # appended to the store by a concurrent process after that load may be lost
+            # here.  See store.rewrite() docstring for details on this known trade-off.
+            store.rewrite(existing_records + new_records)
+        else:
+            for rec in new_records:
+                store.append(rec)
+
     if dry_run:
+        n_would_update = len(updated_paths)
+        n_would_import = len(discovered) - skipped - n_would_update
         click.echo(
-            f"\n{len(discovered)} found, {skipped} already in store, "
-            f"{len(discovered) - skipped} would be imported"
+            f"\n{len(discovered)} found, {skipped} unchanged, "
+            f"{n_would_import} would be imported"
+            + (f", {n_would_update} would be updated" if n_would_update else "")
         )
     else:
-        click.echo(f"Imported {imported} session(s), {skipped} already in store.")
+        parts = [f"Imported {imported} session(s)"]
+        if updated:
+            parts.append(f"updated {updated}")
+        parts.append(f"{skipped} unchanged.")
+        click.echo(", ".join(parts))
 
 
 # -- post-session ------------------------------------------------------------

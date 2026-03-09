@@ -118,7 +118,8 @@ class SessionRecord:
 
     # Artifacts
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
-    journal_path: str | None = None
+    trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
+    journal_path: str | None = None  # path to human-written journal entry
 
     # LLM judge evaluation
     llm_judge_score: float | None = None  # 0.0-1.0 goal-alignment score
@@ -151,9 +152,30 @@ class SessionRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> SessionRecord:
-        """Deserialize from dict, ignoring unknown fields."""
+        """Deserialize from dict, ignoring unknown fields.
+
+        Backward compat: old records stored the trajectory path (JSONL file or
+        session directory) in ``journal_path`` before ``trajectory_path`` was
+        added.  Migrate those by moving the value to ``trajectory_path`` when it
+        does **not** end with ``.md``.
+
+        Human-written journal entries are always Markdown files (``.md``).
+        Any ``journal_path`` value that isn't a ``.md`` file is therefore a
+        trajectory path stored by the old ``sync`` command and should be
+        migrated — whether it's a ``.jsonl`` file or a bare session directory
+        (the latter occurring for gptme sessions that lack ``conversation.jsonl``).
+        """
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known_fields}
+        # Migrate legacy records: journal_path that is not a .md file is
+        # actually a trajectory path (JSONL or session directory) set by the
+        # old sync command before trajectory_path was introduced.
+        if (
+            "trajectory_path" not in filtered
+            and isinstance(filtered.get("journal_path"), str)
+            and not filtered["journal_path"].endswith(".md")
+        ):
+            filtered["trajectory_path"] = filtered.pop("journal_path")
         return cls(**filtered)
 
     def to_json(self) -> str:
