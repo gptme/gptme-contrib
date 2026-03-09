@@ -19,6 +19,7 @@ from .discovery import (
     discover_copilot_sessions,
     discover_gptme_sessions,
     parse_gptme_config,
+    session_date_from_path,
 )
 from .post_session import PostSessionResult, post_session
 from .record import MODEL_ALIASES, SessionRecord, normalize_model
@@ -60,6 +61,7 @@ __all__ = [
     "discover_copilot_sessions",
     "parse_gptme_config",
     "decode_cc_project_path",
+    "session_date_from_path",
     "Bandit",
     "BanditArm",
     "BanditState",

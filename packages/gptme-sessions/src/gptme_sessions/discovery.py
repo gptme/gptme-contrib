@@ -289,6 +289,36 @@ def discover_codex_sessions(
     return [path for _, path in sorted(dated_sessions)]
 
 
+def session_date_from_path(harness: str, path: Path) -> date | None:
+    """Extract session date from a discovered session path.
+
+    Uses fast, no-I/O extraction where possible:
+
+    - **gptme**: parse from session directory name (``YYYY-MM-DD-…``)
+    - **codex**: parse from directory structure (``…/YYYY/MM/DD/file.jsonl``)
+    - **claude-code**, **copilot**: read first timestamp from the JSONL file
+
+    Returns ``None`` if the date cannot be determined.
+    """
+    if harness == "gptme":
+        # path is either the session dir or a .jsonl inside it
+        dir_name = path.parent.name if path.suffix == ".jsonl" else path.name
+        try:
+            return date.fromisoformat(dir_name[:10])
+        except (ValueError, AttributeError):
+            return None
+    elif harness == "codex":
+        # path is at …/YYYY/MM/DD/file.jsonl
+        try:
+            parts = path.parts
+            return date(int(parts[-4]), int(parts[-3]), int(parts[-2]))
+        except (ValueError, IndexError):
+            return None
+    else:
+        # claude-code, copilot: date is embedded in the JSONL file
+        return _quick_date_from_jsonl(path)
+
+
 def discover_copilot_sessions(
     start: date,
     end: date,
