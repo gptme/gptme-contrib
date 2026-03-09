@@ -421,6 +421,9 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                     preview = stripped[:120]
                     break
             page_url = journal_page_path(day_dir.name, md_file.stem)
+            mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             entries.append(
                 {
                     "date": day_dir.name,
@@ -429,6 +432,7 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                     "preview": preview,
                     "body": body,
                     "page_url": page_url,
+                    "mtime": mtime,
                 }
             )
         if len(entries) >= limit:
@@ -455,6 +459,9 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                     preview = stripped[:120]
                     break
             page_url = journal_page_path(stem[:10], stem)
+            mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             entries.append(
                 {
                     "date": stem[:10],
@@ -463,6 +470,7 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
                     "preview": preview,
                     "body": body,
                     "page_url": page_url,
+                    "mtime": mtime,
                 }
             )
 
@@ -1096,9 +1104,10 @@ def generate_atom_feed(data: dict, base_url: str, workspace_name: str) -> str:
 
     ``base_url`` must end with ``/`` (e.g. ``https://owner.github.io/repo/``).
 
-    Each journal entry becomes an ``<entry>`` with its date as ``<updated>``
-    and a ``<summary>`` from the preview text.  At most 20 entries are included
-    to keep the feed lean.
+    Each journal entry becomes an ``<entry>`` with its file modification time
+    as ``<updated>`` (falling back to ``date + "T00:00:00Z"`` when mtime is
+    absent) and a ``<summary>`` from the preview text.  At most 20 entries are
+    included to keep the feed lean.
 
     Returns the feed XML as a string.
     """
@@ -1109,7 +1118,7 @@ def generate_atom_feed(data: dict, base_url: str, workspace_name: str) -> str:
 
     if journals:
         # Journals are already sorted newest-first; derive feed <updated> from first
-        updated = journals[0]["date"] + "T00:00:00Z"
+        updated = journals[0].get("mtime") or journals[0]["date"] + "T00:00:00Z"
     else:
         updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1126,7 +1135,7 @@ def generate_atom_feed(data: dict, base_url: str, workspace_name: str) -> str:
 
     for journal in journals[:20]:
         entry_url = base_url + journal["page_url"]
-        entry_updated = journal["date"] + "T00:00:00Z"
+        entry_updated = journal.get("mtime") or journal["date"] + "T00:00:00Z"
         entry_title = html.escape(f"{journal['date']} — {journal['name']}")
         lines += [
             "  <entry>",

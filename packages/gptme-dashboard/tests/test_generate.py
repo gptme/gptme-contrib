@@ -2924,7 +2924,8 @@ def test_generate_atom_feed_empty_journals():
 
 
 def test_generate_atom_feed_caps_at_20():
-    """generate_atom_feed includes at most 20 entries."""
+    """generate_atom_feed includes at most 20 entries, keeping the newest first."""
+    # Journals sorted newest-first (as scan_journals returns them)
     journals = [
         {
             "date": f"2026-01-{i:02d}",
@@ -2933,12 +2934,17 @@ def test_generate_atom_feed_caps_at_20():
             "body": f"Day {i}",
             "page_url": f"journal/2026-01-{i:02d}/session.html",
         }
-        for i in range(1, 26)  # 25 entries
+        for i in range(25, 0, -1)  # 25 entries, newest (day 25) first
     ]
     data: dict = {"journals": journals}
     feed = generate_atom_feed(data, "https://bob.github.io/bob/", "bob")
 
     assert feed.count("<entry>") == 20
+    # Newest entries (days 25..6) are retained; oldest 5 (days 1..5) are dropped
+    assert "2026-01-25" in feed
+    assert "2026-01-06" in feed
+    assert "2026-01-05" not in feed
+    assert "2026-01-01" not in feed
 
 
 def test_generate_emits_feed_xml_with_base_url(tmp_path: Path, workspace: Path):
