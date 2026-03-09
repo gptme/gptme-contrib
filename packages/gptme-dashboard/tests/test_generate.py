@@ -3161,9 +3161,9 @@ def test_generate_task_state_filter_buttons(workspace: Path, tmp_path: Path):
 
     html = (output / "index.html").read_text()
     assert 'id="task-state-filters"' in html
-    assert 'data-state="all"' in html
-    assert 'data-state="active"' in html
-    assert 'data-state="waiting"' in html
+    assert 'class="filter-btn active" data-state="all"' in html
+    assert 'class="filter-btn" data-state="active"' in html
+    assert 'class="filter-btn" data-state="waiting"' in html
 
 
 def test_generate_task_rows_have_data_state(workspace: Path, tmp_path: Path):
