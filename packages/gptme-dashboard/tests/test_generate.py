@@ -222,6 +222,25 @@ def test_scan_packages(workspace: Path):
     assert "test package" in packages[0]["description"].lower()
 
 
+def test_scan_packages_supports_single_quoted_toml(tmp_path: Path):
+    """Test TOML parsing for literal single-quoted strings."""
+    pkg_dir = tmp_path / "packages" / "single-quoted"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text(
+        textwrap.dedent("""\
+        [project]
+        name = 'single-quoted'
+        version = '1.2.3'
+        description = 'Single quoted package'
+        """)
+    )
+
+    packages = scan_packages(tmp_path)
+    assert len(packages) == 1
+    assert packages[0]["version"] == "1.2.3"
+    assert packages[0]["description"] == "Single quoted package"
+
+
 def test_scan_skills(workspace: Path):
     """Test skill scanning."""
     skills = scan_skills(workspace)

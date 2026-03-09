@@ -117,6 +117,11 @@ def scan_plugins(workspace: Path) -> list[dict]:
     return plugins
 
 
+_TOML_STRING_RE = re.compile(
+    r"""(?P<key>description|version)\s*=\s*(?P<quote>["\'])(?P<value>.*?)(?P=quote)$"""
+)
+
+
 def scan_packages(workspace: Path) -> list[dict]:
     """Scan packages directory for Python packages."""
     packages_dir = workspace / "packages"
@@ -139,14 +144,14 @@ def scan_packages(workspace: Path) -> list[dict]:
                 if stripped.startswith("["):
                     in_project_section = stripped == "[project]"
                 elif in_project_section:
-                    if not description:
-                        m = re.match(r'description\s*=\s*"([^"]*)"', stripped)
-                        if m:
-                            description = m.group(1)
-                    if not version:
-                        m = re.match(r'version\s*=\s*"([^"]*)"', stripped)
-                        if m:
-                            version = m.group(1)
+                    m = _TOML_STRING_RE.match(stripped)
+                    if m:
+                        key = m.group("key")
+                        value = m.group("value")
+                        if key == "description" and not description:
+                            description = value
+                        elif key == "version" and not version:
+                            version = value
                     if description and version:
                         break
 
@@ -250,7 +255,12 @@ def collect_workspace_data(workspace: Path) -> dict:
     }
 
 
-def generate(workspace: Path, output: Path, template_dir: Path | None = None) -> None:
+def generate(
+    workspace: Path,
+    output: Path,
+    template_dir: Path | None = None,
+    data: dict | None = None,
+) -> None:
     """Generate static HTML dashboard from workspace."""
     if template_dir is None:
         template_dir = Path(__file__).parent / "templates"
@@ -260,7 +270,8 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
         autoescape=True,
     )
 
-    data = collect_workspace_data(workspace)
+    if data is None:
+        data = collect_workspace_data(workspace)
 
     template = env.get_template("index.html")
     html = template.render(**data)
@@ -278,13 +289,18 @@ def generate(workspace: Path, output: Path, template_dir: Path | None = None) ->
     )
 
 
-def generate_json(workspace: Path, output: Path | None = None) -> str:
+def generate_json(
+    workspace: Path,
+    output: Path | None = None,
+    data: dict | None = None,
+) -> str:
     """Generate JSON data dump from workspace.
 
     If output is provided, writes data.json to that directory.
     Returns the JSON string in all cases.
     """
-    data = collect_workspace_data(workspace)
+    if data is None:
+        data = collect_workspace_data(workspace)
     json_str = json.dumps(data, indent=2)
 
     if output is not None:

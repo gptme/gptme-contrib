@@ -70,6 +70,10 @@ frontend — React, Vue, plain JS — can consume `data.json` directly without r
 ## Customization
 
 Pass `--templates` pointing to a directory with your own `index.html` (Jinja2).
+
+**Note:** the Jinja2 environment uses `autoescape=True`. If your custom template intentionally
+renders raw HTML, use `| safe` explicitly (for example `{{ description | safe }}`).
+
 The template receives these variables:
 
 | Variable | Type | Description |

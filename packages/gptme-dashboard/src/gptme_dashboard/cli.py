@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from gptme_dashboard.generate import generate, generate_json
+from gptme_dashboard.generate import collect_workspace_data, generate, generate_json
 
 
 @click.command()
@@ -46,8 +46,9 @@ def main(workspace: str, output: str | None, templates: str | None, print_json: 
         return
 
     out = Path(output) if output is not None else Path("_site")
-    generate(ws, out, tmpl)
-    json_str = generate_json(ws, out)
+    data = collect_workspace_data(ws)
+    generate(ws, out, tmpl, data=data)
+    json_str = generate_json(ws, out, data=data)
 
     if print_json:
         sys.stdout.write(json_str + "\n")
