@@ -4613,6 +4613,9 @@ def test_discover_shows_sync_status_synced(tmp_path: Path, monkeypatch: pytest.M
     )
     assert result.exit_code == 0, result.output
     assert "[S]" in result.output
+    assert "[ ]" not in result.output  # synced session must not show empty bracket
+    assert "1 synced" in result.output
+    assert "0 pending" in result.output
 
 
 def test_discover_shows_sync_status_unsynced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -4640,6 +4643,8 @@ def test_discover_shows_sync_status_unsynced(tmp_path: Path, monkeypatch: pytest
     # Unsynced session shows "[ ]" (space between brackets, not "S").
     assert "[S]" not in result.output
     assert "[ ]" in result.output
+    assert "0 synced" in result.output
+    assert "1 pending" in result.output
 
 
 def test_discover_unsynced_flag_filters_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

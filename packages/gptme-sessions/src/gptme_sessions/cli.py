@@ -645,10 +645,13 @@ def discover(
                     f"[{sync_flag}][?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
                 )
             else:
-                click.echo(f"[{sync_flag}]  {harness_str}  {path_str}")
+                click.echo(f"[{sync_flag}]   {harness_str}  {path_str}")
         if unsynced:
+            synced_skipped = total_discovered - len(discovered)
             footer = (
-                f" ({total_discovered} total, {total_discovered - len(discovered)} already synced)"
+                f" ({total_discovered} total, {synced_skipped} already synced)"
+                if synced_skipped
+                else ""
             )
         else:
             unsynced_count = sum(1 for e in discovered if not e["synced"])
