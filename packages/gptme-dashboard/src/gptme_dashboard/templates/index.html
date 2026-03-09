@@ -328,9 +328,10 @@ tr:hover { background: var(--accent-dim); }
 <section id="tasks">
   <h2>Tasks <span class="count-badge">({{ stats.total_tasks }})</span></h2>
   {% if stats.task_states %}
-  <div class="cat-chart">
+  <div class="filter-row" id="task-state-filters">
+    <button class="filter-btn active" data-state="all">All <span class="chip-count">{{ stats.total_tasks }}</span></button>
     {% for state, count in stats.task_states.items() %}
-    <span class="cat-chip">{{ state }} <span class="chip-count">{{ count }}</span></span>
+    <button class="filter-btn" data-state="{{ state }}">{{ state }} <span class="chip-count">{{ count }}</span></button>
     {% endfor %}
   </div>
   {% endif %}
@@ -340,7 +341,7 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody>
     {% for task in tasks %}
-      <tr{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+      <tr data-state="{{ task.state }}"{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
         <td><strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong></td>
         <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
         <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>
@@ -352,7 +353,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if tasks | length > 15 %}
-  <button class="show-more-btn" data-noun="tasks" onclick="toggleRows(this, 'tasks-table')">Show all {{ tasks | length }} tasks</button>
+  <button class="show-more-btn" id="tasks-show-more" data-noun="tasks" onclick="toggleRows(this, 'tasks-table')">Show all {{ tasks | length }} tasks</button>
   {% endif %}
 </section>
 {% endif %}
@@ -636,6 +637,43 @@ if (sourceBtns.length > 0) {
 
 if (searchBox) {
   searchBox.addEventListener('input', applyFilters);
+}
+
+// Task state filtering
+const taskStateBtns = document.querySelectorAll('#task-state-filters .filter-btn');
+const tasksTable = document.getElementById('tasks-table');
+const tasksShowMoreBtn = document.getElementById('tasks-show-more');
+
+if (taskStateBtns.length > 0 && tasksTable) {
+  taskStateBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      taskStateBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const state = btn.dataset.state;
+      const isFiltering = state !== 'all';
+      const rows = tasksTable.querySelectorAll('tbody tr');
+
+      if (tasksShowMoreBtn) {
+        tasksShowMoreBtn.style.display = isFiltering ? 'none' : '';
+        if (!isFiltering) {
+          tasksShowMoreBtn.textContent = tasksShowMoreBtn.dataset.collapsedLabel || ('Show all ' + rows.length + ' tasks');
+        }
+      }
+
+      let idx = 0;
+      rows.forEach(row => {
+        const match = state === 'all' || row.dataset.state === state;
+        if (isFiltering) {
+          row.style.display = match ? '' : 'none';
+          row.classList.remove('collapsed-row');
+        } else {
+          idx++;
+          row.classList.toggle('collapsed-row', idx > 15);
+          row.style.display = (match && idx <= 15) ? '' : (idx > 15 ? 'none' : '');
+        }
+      });
+    });
+  });
 }
 
 // Dynamic dashboard — progressive enhancement

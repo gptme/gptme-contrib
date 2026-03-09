@@ -3140,3 +3140,42 @@ def test_generate_sitemap_includes_summaries(workspace: Path, tmp_path: Path):
 
     sitemap = (output / "sitemap.xml").read_text()
     assert "summaries/daily/2026-03-07.html" in sitemap
+
+
+# ── Task state filter ─────────────────────────────────────────────────────────
+
+
+def test_generate_task_state_filter_buttons(workspace: Path, tmp_path: Path):
+    """index.html renders task state filter buttons with data-state attributes."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "active-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# Active Task\n"
+    )
+    (tasks_dir / "waiting-task.md").write_text(
+        "---\nstate: waiting\ncreated: 2026-03-01\n---\n# Waiting Task\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "index.html").read_text()
+    assert 'id="task-state-filters"' in html
+    assert 'class="filter-btn active" data-state="all"' in html
+    assert 'class="filter-btn" data-state="active"' in html
+    assert 'class="filter-btn" data-state="waiting"' in html
+
+
+def test_generate_task_rows_have_data_state(workspace: Path, tmp_path: Path):
+    """Task rows in index.html carry data-state attributes for JS filtering."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-03-01\n---\n# My Task\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    html = (output / "index.html").read_text()
+    assert '<tr data-state="active"' in html
