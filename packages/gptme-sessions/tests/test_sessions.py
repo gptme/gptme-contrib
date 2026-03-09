@@ -3201,6 +3201,7 @@ def test_cli_discover_lists_paths(tmp_path: Path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     assert str(fake_file) in captured.out
+    assert "[ ]" in captured.out  # not yet synced — core visual change introduced by this PR
     assert "1 session(s) found" in captured.out
 
 
