@@ -154,21 +154,26 @@ class SessionRecord:
     def from_dict(cls, data: dict) -> SessionRecord:
         """Deserialize from dict, ignoring unknown fields.
 
-        Backward compat: old records stored the trajectory JSONL path in
-        ``journal_path``.  Migrate those by moving the value to
-        ``trajectory_path`` when it ends with ``.jsonl``.
+        Backward compat: old records stored the trajectory path (JSONL file or
+        session directory) in ``journal_path`` before ``trajectory_path`` was
+        added.  Migrate those by moving the value to ``trajectory_path`` when it
+        does **not** end with ``.md``.
+
+        Human-written journal entries are always Markdown files (``.md``).
+        Any ``journal_path`` value that isn't a ``.md`` file is therefore a
+        trajectory path stored by the old ``sync`` command and should be
+        migrated — whether it's a ``.jsonl`` file or a bare session directory
+        (the latter occurring for gptme sessions that lack ``conversation.jsonl``).
         """
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known_fields}
-        # Migrate legacy records: journal_path that ends with .jsonl is actually
-        # a trajectory path (set by old sync command before trajectory_path was added).
-        # NOTE: A human-written journal whose filename ends in .jsonl would also be
-        # migrated here (journal_path set to None). This is an acceptable false-positive
-        # risk; plain-text journal files are almost never named .jsonl in practice.
+        # Migrate legacy records: journal_path that is not a .md file is
+        # actually a trajectory path (JSONL or session directory) set by the
+        # old sync command before trajectory_path was introduced.
         if (
             filtered.get("trajectory_path") is None
             and isinstance(filtered.get("journal_path"), str)
-            and filtered["journal_path"].endswith(".jsonl")
+            and not filtered["journal_path"].endswith(".md")
         ):
             filtered["trajectory_path"] = filtered.pop("journal_path")
         return cls(**filtered)

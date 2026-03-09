@@ -4425,3 +4425,43 @@ def test_sync_signals_failure_does_not_double_count_skipped(tmp_path: Path, caps
     records = store.load_all()
     assert len(records) == 1
     assert records[0].model == "claude-opus-4-6"
+
+
+def test_from_dict_migrates_jsonl_journal_path_to_trajectory_path():
+    """Legacy records with .jsonl journal_path are migrated to trajectory_path."""
+    data = {"journal_path": "/home/user/.local/share/gptme/logs/session/conversation.jsonl"}
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/home/user/.local/share/gptme/logs/session/conversation.jsonl"
+    assert r.journal_path is None
+
+
+def test_from_dict_migrates_directory_journal_path_to_trajectory_path():
+    """Legacy gptme sessions without conversation.jsonl store a directory in journal_path.
+
+    These were synced before trajectory_path was introduced, so migration must
+    handle the directory case (no .jsonl suffix) to prevent duplicate imports
+    on the next sync run.
+    """
+    data = {"journal_path": "/home/user/.local/share/gptme/logs/2026-01-15-120000-session"}
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/home/user/.local/share/gptme/logs/2026-01-15-120000-session"
+    assert r.journal_path is None
+
+
+def test_from_dict_preserves_md_journal_path():
+    """Human-written .md journal entries are NOT migrated to trajectory_path."""
+    data = {"journal_path": "/home/user/bob/journal/2026-01-15/session.md"}
+    r = SessionRecord.from_dict(data)
+    assert r.journal_path == "/home/user/bob/journal/2026-01-15/session.md"
+    assert r.trajectory_path is None
+
+
+def test_from_dict_no_migration_when_trajectory_path_already_set():
+    """When trajectory_path is already present, journal_path is not touched."""
+    data = {
+        "trajectory_path": "/some/other.jsonl",
+        "journal_path": "/home/user/.local/share/gptme/logs/session",
+    }
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/some/other.jsonl"
+    assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
