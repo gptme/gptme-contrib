@@ -16,7 +16,9 @@ from gptme_dashboard.generate import (
     extract_title,
     generate,
     generate_json,
+    generate_sitemap,
     github_blob_url,
+    github_pages_url,
     github_tree_url,
     journal_page_path,
     lesson_page_path,
@@ -2411,3 +2413,127 @@ def test_generate_json_excludes_package_body(workspace: Path):
     assert len(parsed["packages"]) == 1
     assert "body" not in parsed["packages"][0]
     assert "page_url" in parsed["packages"][0]
+
+
+# --- Sitemap tests ---
+
+
+def test_github_pages_url_standard():
+    """Derive GitHub Pages URL from a github.com repository URL."""
+    assert (
+        github_pages_url("https://github.com/gptme/gptme-contrib")
+        == "https://gptme.github.io/gptme-contrib/"
+    )
+
+
+def test_github_pages_url_user_repo():
+    """Works for user repos too."""
+    assert (
+        github_pages_url("https://github.com/ErikBjare/bob") == "https://ErikBjare.github.io/bob/"
+    )
+
+
+def test_github_pages_url_empty():
+    """Returns empty string for non-github or empty input."""
+    assert github_pages_url("") == ""
+    assert github_pages_url("https://gitlab.com/owner/repo") == ""
+
+
+def test_generate_sitemap_structure():
+    """generate_sitemap returns valid XML with index and content entries."""
+    data: dict = {
+        "gh_repo_url": "https://github.com/gptme/gptme-contrib",
+        "lessons": [
+            {"page_url": "lessons/workflow/test.html", "source": ""},
+        ],
+        "skills": [
+            {"page_url": "skills/my-skill/index.html", "source": ""},
+        ],
+        "journals": [
+            {"page_url": "journal/2026-03-07/session.html", "date": "2026-03-07"},
+        ],
+        "plugins": [
+            {"page_url": "plugins/my-plugin/index.html", "body": "readme text", "source": ""},
+        ],
+    }
+    sitemap = generate_sitemap(data, "https://gptme.github.io/gptme-contrib/")
+
+    assert '<?xml version="1.0"' in sitemap
+    assert "<urlset" in sitemap
+    assert "https://gptme.github.io/gptme-contrib/" in sitemap
+    assert "lessons/workflow/test.html" in sitemap
+    assert "skills/my-skill/index.html" in sitemap
+    assert "journal/2026-03-07/session.html" in sitemap
+    assert "<lastmod>2026-03-07</lastmod>" in sitemap
+    assert "plugins/my-plugin/index.html" in sitemap
+
+
+def test_generate_sitemap_excludes_submodule_items():
+    """Items from submodules (source != '') are excluded from the sitemap."""
+    data: dict = {
+        "gh_repo_url": "https://github.com/gptme/gptme-contrib",
+        "lessons": [
+            {"page_url": "lessons/workflow/local.html", "source": ""},
+            {"page_url": "gptme-contrib/lessons/workflow/shared.html", "source": "gptme-contrib"},
+        ],
+        "skills": [],
+        "journals": [],
+        "plugins": [],
+    }
+    sitemap = generate_sitemap(data, "https://owner.github.io/repo/")
+    assert "lessons/workflow/local.html" in sitemap
+    assert "gptme-contrib/lessons/workflow/shared.html" not in sitemap
+
+
+def test_generate_sitemap_plugins_without_readme_excluded():
+    """Plugins without a body (no README) are not listed in the sitemap."""
+    data: dict = {
+        "gh_repo_url": "",
+        "lessons": [],
+        "skills": [],
+        "journals": [],
+        "plugins": [
+            {"page_url": "plugins/bare/index.html", "body": "", "source": ""},
+            {"page_url": "plugins/documented/index.html", "body": "readme", "source": ""},
+        ],
+    }
+    sitemap = generate_sitemap(data, "https://example.github.io/repo/")
+    assert "plugins/bare/index.html" not in sitemap
+    assert "plugins/documented/index.html" in sitemap
+
+
+def test_generate_writes_sitemap_with_explicit_base_url(workspace: Path, tmp_path: Path):
+    """generate() writes sitemap.xml when base_url is given explicitly."""
+    output = tmp_path / "site"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir, base_url="https://example.github.io/myrepo/")
+
+    sitemap = output / "sitemap.xml"
+    assert sitemap.exists(), "sitemap.xml should be generated when base_url is set"
+    content = sitemap.read_text()
+    assert "https://example.github.io/myrepo/" in content
+
+
+def test_generate_no_sitemap_when_suppressed(workspace: Path, tmp_path: Path):
+    """generate() skips sitemap.xml when base_url='-'."""
+    output = tmp_path / "site"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir, base_url="-")
+
+    assert not (
+        output / "sitemap.xml"
+    ).exists(), "sitemap.xml should be suppressed with base_url='-'"
+
+
+def test_generate_no_sitemap_when_no_github_remote(tmp_path: Path):
+    """generate() skips sitemap.xml when GitHub remote is not detected and no base_url given."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    output = tmp_path / "site"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+
+    with patch("gptme_dashboard.generate.detect_github_url", return_value=""):
+        generate(tmp_path, output, template_dir)
+
+    assert not (
+        output / "sitemap.xml"
+    ).exists(), "sitemap.xml should not be generated without a base URL"

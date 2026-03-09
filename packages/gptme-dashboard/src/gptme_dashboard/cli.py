@@ -70,6 +70,15 @@ def main() -> None:
     show_default=True,
     help="Number of days back to scan for sessions (used with --sessions).",
 )
+@click.option(
+    "--base-url",
+    default="",
+    help=(
+        "Base URL for sitemap.xml generation (e.g. https://owner.github.io/repo/). "
+        "Auto-detected from GitHub remote when omitted. "
+        "Pass '-' to suppress sitemap generation."
+    ),
+)
 def generate(
     workspace: str,
     output: str | None,
@@ -77,6 +86,7 @@ def generate(
     print_json: bool,
     sessions: bool,
     sessions_days: int,
+    base_url: str,
 ) -> None:
     """Generate a static dashboard and JSON data dump for a gptme workspace."""
     from gptme_dashboard.generate import generate as do_generate
@@ -91,7 +101,9 @@ def generate(
         return
 
     out = Path(output) if output is not None else ws / "_site"
-    data = do_generate(ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days)
+    data = do_generate(
+        ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days, base_url=base_url
+    )
     json_str = generate_json(ws, out, _data=data)
 
     if print_json:
