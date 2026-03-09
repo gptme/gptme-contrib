@@ -527,7 +527,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if guidance | length > 5 %}
-  <button class="show-more-btn" id="guidance-show-more" data-noun="items" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills &rarr;</button>
+  <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
   {% endif %}
 </section>
 {% endblock %}
@@ -542,7 +542,8 @@ function toggleRows(btn, tableId) {
   rows.forEach(r => r.style.display = showing ? 'none' : '');
   const total = table.querySelectorAll('tbody tr').length;
   const noun = btn.dataset.noun || 'items';
-  btn.textContent = showing ? 'Show all ' + total + ' ' + noun : 'Show fewer';
+  const collapsedLabel = btn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
+  btn.textContent = showing ? collapsedLabel : 'Show fewer';
 }
 
 // Guidance (lessons + skills) filtering
@@ -568,7 +569,7 @@ function applyFilters() {
       // Reset button text when collapse is restored after a filter cycle
       const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
       const noun = showMoreBtn.dataset.noun || 'items';
-      showMoreBtn.textContent = 'Show all ' + total + ' ' + noun;
+      showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
     }
   }
 
