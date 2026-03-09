@@ -4519,3 +4519,142 @@ def test_sync_signals_warns_when_trajectory_missing(tmp_path: Path, capsys, monk
     assert rc == 0
     captured = capsys.readouterr()
     assert "trajectory not found" in captured.err
+
+
+# -- discover sync-status tests ----------------------------------------------
+
+
+def _make_gptme_session_dir(base: Path, name: str) -> Path:
+    """Create a minimal fake gptme session directory with conversation.jsonl."""
+    session_dir = base / name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "conversation.jsonl").write_text("")
+    return session_dir
+
+
+def test_discover_shows_sync_status_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """discover marks sessions already in the store as [S]."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    session_dir = _make_gptme_session_dir(tmp_path, "session1")
+    traj_path = session_dir / "conversation.jsonl"
+    sessions_dir = tmp_path / "sessions"
+
+    # Pre-populate the store with a record whose journal_path matches the resolved trajectory.
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", journal_path=str(traj_path))
+    store.append(rec)
+
+    # discover_gptme_sessions returns directories; CLI resolves conversation.jsonl inside.
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "[S]" in result.output
+
+
+def test_discover_shows_sync_status_unsynced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """discover marks sessions not in the store with an empty sync indicator."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    session_dir = _make_gptme_session_dir(tmp_path, "session1")
+    sessions_dir = tmp_path / "sessions"
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme"],
+    )
+    assert result.exit_code == 0, result.output
+    # Unsynced session shows "[ ]" (space between brackets, not "S").
+    assert "[S]" not in result.output
+    assert "[ ]" in result.output
+
+
+def test_discover_unsynced_flag_filters_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--unsynced hides sessions already imported into the store."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    # Use distinctive names that won't appear in the pytest tmp path.
+    session_imported = _make_gptme_session_dir(tmp_path, "alpha-imported")
+    session_pending = _make_gptme_session_dir(tmp_path, "beta-pending")
+    sessions_dir = tmp_path / "sessions"
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", journal_path=str(session_imported / "conversation.jsonl"))
+    store.append(rec)
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_imported, session_pending],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme", "--unsynced"],
+    )
+    assert result.exit_code == 0, result.output
+    # Imported session should be absent; pending session should appear.
+    assert "alpha-imported" not in result.output
+    assert "beta-pending" in result.output
+
+
+def test_discover_unsynced_flag_all_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--unsynced prints an 'all synced' message when nothing is pending."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    session_dir = _make_gptme_session_dir(tmp_path, "session1")
+    traj_path = session_dir / "conversation.jsonl"
+    sessions_dir = tmp_path / "sessions"
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", journal_path=str(traj_path))
+    store.append(rec)
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme", "--unsynced"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "already synced" in result.output

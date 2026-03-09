@@ -537,14 +537,23 @@ def annotate(
 @click.option(
     "--signals", is_flag=True, help="Extract and display productivity signals for each session"
 )
+@click.option("--unsynced", is_flag=True, help="Show only sessions not yet imported into the store")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def discover(
+    ctx: click.Context,
     harness: str | None,
     since: str,
     signals: bool,
+    unsynced: bool,
     as_json: bool,
 ) -> None:
-    """Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses."""
+    """Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses.
+
+    Shows a sync-status indicator for each session:
+    [S] already imported into the store, [ ] not yet synced.
+    Use --unsynced to list only sessions pending import.
+    """
     since_days = _parse_since(since) or 7
     today = date.today()
     start = today - timedelta(days=since_days)
@@ -569,6 +578,17 @@ def discover(
         for p in discover_copilot_sessions(start, today):
             discovered.append({"harness": "copilot", "path": str(p)})
 
+    # Mark each entry as synced or not by cross-referencing the store.
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    existing_paths = {r.journal_path for r in records if r.journal_path}
+    for entry in discovered:
+        entry["synced"] = entry["path"] in existing_paths
+
+    # Apply --unsynced filter before signal extraction (avoid wasted work).
+    if unsynced:
+        discovered = [e for e in discovered if not e["synced"]]
+
     # Optionally enrich with signals
     if signals:
         for entry in discovered:
@@ -586,12 +606,16 @@ def discover(
         click.echo(json.dumps(discovered, indent=2))
     else:
         if not discovered:
-            click.echo(f"No sessions found in the last {since_days} day(s).")
+            if unsynced:
+                click.echo(f"All sessions in the last {since_days} day(s) are already synced.")
+            else:
+                click.echo(f"No sessions found in the last {since_days} day(s).")
             return
         harness_width = max(len(e["harness"]) for e in discovered)
         for entry in discovered:
             path_str = entry["path"]
             harness_str = entry["harness"].ljust(harness_width)
+            sync_flag = "S" if entry["synced"] else " "
             if signals and "grade" in entry:
                 grade = entry["grade"]
                 prod = "+" if entry["productive"] else "-"
@@ -599,17 +623,22 @@ def discover(
                 commits = entry["git_commits"]
                 errors = entry["error_count"]
                 click.echo(
-                    f"[{prod}] {harness_str}  grade={grade:.2f}"
+                    f"[{sync_flag}][{prod}] {harness_str}  grade={grade:.2f}"
                     f"  tools={tools} commits={commits} errors={errors}"
                     f"  {path_str}"
                 )
             elif "signals_error" in entry:
                 click.echo(
-                    f"[?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
+                    f"[{sync_flag}][?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
                 )
             else:
-                click.echo(f"    {harness_str}  {path_str}")
-        click.echo(f"\n{len(discovered)} session(s) found ({start} to {today})")
+                click.echo(f"[{sync_flag}]  {harness_str}  {path_str}")
+        unsynced_count = sum(1 for e in discovered if not e["synced"])
+        synced_count = len(discovered) - unsynced_count
+        click.echo(
+            f"\n{len(discovered)} session(s) found ({start} to {today})"
+            + (f", {synced_count} synced, {unsynced_count} pending" if not unsynced else "")
+        )
 
 
 # -- signals -----------------------------------------------------------------
