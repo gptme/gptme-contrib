@@ -4679,3 +4679,73 @@ def test_discover_unsynced_flag_no_sessions_found(tmp_path: Path, monkeypatch: p
     assert result.exit_code == 0, result.output
     assert "No sessions found" in result.output
     assert "already synced" not in result.output
+
+
+def test_discover_json_unsynced_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--json --unsynced with a pending session returns {sessions, total_discovered}."""
+    import json as _json
+
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    fake_file = tmp_path / "pending.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_codex_sessions", lambda start, end: [fake_file]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--unsynced", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    assert isinstance(data, dict)
+    assert data["total_discovered"] == 1
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["synced"] is False
+
+
+def test_discover_json_unsynced_all_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--json --unsynced with all sessions already synced: sessions=[], total_discovered>0.
+
+    This distinguishes 'all synced' from 'nothing found' for scripting consumers.
+    """
+    import json as _json
+
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    session_dir = _make_gptme_session_dir(tmp_path, "synced-session")
+    traj_path = session_dir / "conversation.jsonl"
+    sessions_dir = tmp_path / "sessions"
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", journal_path=str(traj_path)))
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--unsynced", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    assert isinstance(data, dict)
+    assert data["sessions"] == []
+    # total_discovered > 0 tells consumers "all were synced, not missing"
+    assert data["total_discovered"] == 1

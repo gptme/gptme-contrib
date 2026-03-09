@@ -606,7 +606,15 @@ def discover(
                 entry["signals_error"] = str(exc)
 
     if as_json:
-        click.echo(json.dumps(discovered, indent=2))
+        if unsynced:
+            # Wrap with total_discovered so consumers can distinguish
+            # "nothing found" (total_discovered=0) from "all already synced"
+            # (total_discovered>0, sessions=[]).
+            click.echo(
+                json.dumps({"sessions": discovered, "total_discovered": total_discovered}, indent=2)
+            )
+        else:
+            click.echo(json.dumps(discovered, indent=2))
     else:
         if not discovered:
             if unsynced and total_discovered > 0:
