@@ -478,8 +478,8 @@ def scan_tasks(workspace: Path) -> list[dict]:
     manual YAML parsing when gptodo is not installed.
 
     Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
-    ``tags``, ``assigned_to``, and ``path`` keys, sorted by state priority
-    then title.
+    ``tags``, ``assigned_to``, ``path``, ``body``, and ``page_url`` keys,
+    sorted by state priority then title.
     """
     tasks_dir = workspace / "tasks"
     if not tasks_dir.is_dir():
