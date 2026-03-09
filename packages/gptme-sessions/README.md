@@ -46,6 +46,10 @@ print(f"Success rate: {stats['success_rate']:.0%}")
 # Show stats (default — auto-falls back to discover if store is empty)
 gptme-sessions stats
 
+# Show details for a single session by ID (or prefix)
+gptme-sessions show a1b2c3d4
+gptme-sessions show a1b2 --json
+
 # Query with filters
 gptme-sessions query --model opus --since 7d
 gptme-sessions query --run-type autonomous --outcome productive --json
@@ -61,6 +65,15 @@ gptme-sessions discover --harness claude-code --signals
 gptme-sessions sync --since 14d
 gptme-sessions sync --signals  # extract productivity signals (slower)
 gptme-sessions sync --dry-run  # preview what would be imported
+
+# Annotate an existing session record (amend fields after the fact)
+gptme-sessions annotate a1b2c3d4 --outcome productive --add-deliverable pr#42
+gptme-sessions annotate a1b2 --duration 3600 --token-count 50000
+
+# Score recent sessions with an LLM judge (goal-alignment rating 1–5)
+gptme-sessions judge
+gptme-sessions judge --last 5
+gptme-sessions judge --update-store  # write scores back to the store
 
 # Record a session at the end of an agent run (full pipeline)
 gptme-sessions post-session --harness gptme --model opus \

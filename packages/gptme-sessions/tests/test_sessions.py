@@ -5058,3 +5058,267 @@ def test_discover_json_unsynced_all_synced(tmp_path: Path, monkeypatch: pytest.M
     assert data["sessions"] == []
     # total_discovered > 0 tells consumers "all were synced, not missing"
     assert data["total_discovered"] == 1
+
+
+# -- show command tests -------------------------------------------------------
+
+
+def test_show_displays_session_details(tmp_path: Path, capsys, monkeypatch):
+    """show prints human-readable details for a session matched by full ID."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    record = SessionRecord(
+        session_id="abcd1234",
+        harness="claude-code",
+        model="claude-opus-4-6",
+        run_type="autonomous",
+        outcome="productive",
+        duration_seconds=150,
+        category="code",
+        deliverables=["pr#42"],
+    )
+    store.append(record)
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "abcd1234" in captured.out
+    assert "Harness:      claude-code" in captured.out
+    assert "Outcome:      productive" in captured.out
+    assert "pr#42" in captured.out
+
+
+def test_show_prefix_match(tmp_path: Path, capsys, monkeypatch):
+    """show resolves session by ID prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", outcome="noop"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "abcd1234" in captured.out
+
+
+def test_show_unknown_id_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+    """show exits non-zero when no session matches the given prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "zzz"]
+    )
+    rc = main()
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "No session found matching" in captured.err
+
+
+def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+    """show exits non-zero when prefix matches multiple sessions."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+    store.append(SessionRecord(session_id="abcd5678", harness="gptme"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd"]
+    )
+    rc = main()
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "Ambiguous prefix" in captured.err
+
+
+def test_show_json_output(tmp_path: Path, capsys, monkeypatch):
+    """show --json outputs valid JSON with all session fields."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            model="claude-opus-4-6",
+            outcome="productive",
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234", "--json"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["session_id"] == "abcd1234"
+    assert data["harness"] == "gptme"
+    assert data["outcome"] == "productive"
+
+
+def test_show_duration_hours_aware(tmp_path: Path, capsys, monkeypatch):
+    """show displays duration in hours for sessions >= 60 minutes."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            outcome="productive",
+            duration_seconds=5400,  # 1h 30m
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1h 30m 0s" in captured.out
+    assert "90m" not in captured.out
+
+
+def test_show_displays_selector_fields(tmp_path: Path, capsys, monkeypatch):
+    """show includes recommended_category, selector_mode, and token_count in human-readable output."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            outcome="productive",
+            recommended_category="code",
+            selector_mode="scored",
+            token_count=42000,
+        )
+    )
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Recommended:  code" in captured.out  # recommended_category
+    assert "scored" in captured.out  # selector_mode
+    assert "42,000" in captured.out  # token_count formatted with commas
+
+
+def test_show_zero_token_count_displayed(tmp_path: Path, capsys, monkeypatch):
+    """show renders token_count=0 — truthiness check must not suppress it."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", token_count=0))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Tokens:" in captured.out, "token_count=0 should be shown, not suppressed"
+    assert "0" in captured.out
+
+
+def test_show_empty_id_exits_nonzero(tmp_path: Path):
+    """show rejects an empty session_id with a clear error message."""
+    from click.testing import CliRunner
+
+    from gptme_sessions.cli import cli
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "show", ""],
+    )
+    assert result.exit_code != 0
+    assert "Session ID must not be empty" in result.output
+
+
+def test_show_displays_llm_judge_fields(tmp_path: Path, capsys, monkeypatch):
+    """show renders llm_judge_score, llm_judge_reason, and llm_judge_model."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="judge1234",
+            harness="gptme",
+            llm_judge_score=0.85,
+            llm_judge_reason="Made good progress on task.",
+            llm_judge_model="claude-haiku-4-5",
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "judge1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Judge score:" in captured.out
+    assert "0.85" in captured.out
+    assert "Judge reason:" in captured.out
+    assert "Made good progress on task." in captured.out
+    assert "Judge model:" in captured.out
+    assert "claude-haiku-4-5" in captured.out
