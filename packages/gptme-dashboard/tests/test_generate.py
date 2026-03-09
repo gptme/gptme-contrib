@@ -15,6 +15,7 @@ from gptme_dashboard.generate import (
     detect_submodules,
     extract_title,
     generate,
+    generate_atom_feed,
     generate_json,
     generate_sitemap,
     github_blob_url,
@@ -2612,7 +2613,7 @@ def test_generate_json_excludes_package_body(workspace: Path):
     assert "page_url" in parsed["packages"][0]
 
 
-# --- Sitemap tests ---
+# --- Sitemap / Atom feed tests ---
 
 
 def test_github_pages_url_standard():
@@ -2862,3 +2863,142 @@ def test_guidance_collapses_at_five_rows(workspace: Path, tmp_path: Path):
     assert 'class="collapsed-row"' in html
     # Show-more button should reference the total count
     assert "Browse all" in html
+
+
+# --- Atom feed tests ---
+
+
+def test_generate_atom_feed_basic(tmp_path: Path):
+    """generate_atom_feed produces valid Atom XML with journal entries."""
+    data: dict = {
+        "journals": [
+            {
+                "date": "2026-03-09",
+                "name": "session",
+                "preview": "Working on the dashboard.",
+                "body": "# Session\n\nWorking on the dashboard.",
+                "page_url": "journal/2026-03-09/session.html",
+            }
+        ]
+    }
+    feed = generate_atom_feed(data, "https://bob.github.io/bob/", "bob")
+
+    assert '<?xml version="1.0" encoding="utf-8"?>' in feed
+    assert '<feed xmlns="http://www.w3.org/2005/Atom">' in feed
+    assert "<title>bob Journal</title>" in feed
+    assert 'href="https://bob.github.io/bob/"' in feed
+    assert 'href="https://bob.github.io/bob/feed.xml"' in feed
+    assert "<entry>" in feed
+    assert "2026-03-09" in feed
+    assert "Working on the dashboard." in feed
+
+
+def test_generate_atom_feed_escapes_special_chars(tmp_path: Path):
+    """generate_atom_feed XML-escapes special characters in titles and content."""
+    data: dict = {
+        "journals": [
+            {
+                "date": "2026-03-09",
+                "name": "session",
+                "preview": "Fix <bug> & deploy",
+                "body": "Fix <bug> & deploy",
+                "page_url": "journal/2026-03-09/session.html",
+            }
+        ]
+    }
+    feed = generate_atom_feed(data, "https://example.github.io/repo/", "example")
+
+    assert "&lt;bug&gt;" in feed
+    assert "&amp;" in feed
+    assert "<bug>" not in feed
+
+
+def test_generate_atom_feed_empty_journals():
+    """generate_atom_feed produces a valid feed even with no journal entries."""
+    data: dict = {"journals": []}
+    feed = generate_atom_feed(data, "https://bob.github.io/bob/", "bob")
+
+    assert '<feed xmlns="http://www.w3.org/2005/Atom">' in feed
+    assert "<entry>" not in feed
+    assert "</feed>" in feed
+
+
+def test_generate_atom_feed_caps_at_20():
+    """generate_atom_feed includes at most 20 entries, keeping the newest first."""
+    # Journals sorted newest-first (as scan_journals returns them)
+    journals = [
+        {
+            "date": f"2026-01-{i:02d}",
+            "name": "session",
+            "preview": f"Day {i}",
+            "body": f"Day {i}",
+            "page_url": f"journal/2026-01-{i:02d}/session.html",
+        }
+        for i in range(25, 0, -1)  # 25 entries, newest (day 25) first
+    ]
+    data: dict = {"journals": journals}
+    feed = generate_atom_feed(data, "https://bob.github.io/bob/", "bob")
+
+    assert feed.count("<entry>") == 20
+    # Newest entries (days 25..6) are retained; oldest 5 (days 1..5) are dropped
+    assert "2026-01-25" in feed
+    assert "2026-01-06" in feed
+    assert "2026-01-05" not in feed
+    assert "2026-01-01" not in feed
+
+
+def test_generate_emits_feed_xml_with_base_url(tmp_path: Path, workspace: Path):
+    """generate() writes feed.xml alongside index.html when base_url is given."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir, base_url="https://example.github.io/test/")
+
+    feed_path = output / "feed.xml"
+    assert feed_path.exists(), "feed.xml should be generated when base_url is given"
+    feed = feed_path.read_text()
+    assert '<feed xmlns="http://www.w3.org/2005/Atom">' in feed
+    assert "https://example.github.io/test/" in feed
+
+
+def test_generate_no_feed_without_base_url_or_github_remote(tmp_path: Path):
+    """generate() does not write feed.xml when base_url is absent and no GitHub remote."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "NoRemote"\n')
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    # Patch detect_github_url to return empty (no remote)
+    with patch("gptme_dashboard.generate.detect_github_url", return_value=""):
+        generate(tmp_path, output, template_dir)
+
+    assert not (output / "feed.xml").exists(), "feed.xml must not be generated without a base URL"
+
+
+def test_generate_no_feed_with_suppressed_base_url(tmp_path: Path, workspace: Path):
+    """generate() skips feed.xml when base_url='-'."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir, base_url="-")
+
+    assert not (output / "feed.xml").exists(), "feed.xml must be suppressed when base_url='-'"
+
+
+def test_generate_index_includes_feed_autodiscovery(tmp_path: Path, workspace: Path):
+    """index.html contains Atom feed autodiscovery link when feed_url is set."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir, base_url="https://example.github.io/test/")
+
+    index_html = (output / "index.html").read_text()
+    assert 'type="application/atom+xml"' in index_html
+    assert "feed.xml" in index_html
+
+
+def test_generate_index_no_feed_link_without_base_url(tmp_path: Path):
+    """index.html omits the feed link when no base_url is available."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "NoFeed"\n')
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    with patch("gptme_dashboard.generate.detect_github_url", return_value=""):
+        generate(tmp_path, output, template_dir)
+
+    index_html = (output / "index.html").read_text()
+    assert "application/atom+xml" not in index_html
