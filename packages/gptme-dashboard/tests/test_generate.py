@@ -1938,7 +1938,6 @@ def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     assert "Tasks" in html
     assert "Build Feature" in html
     assert "active" in html
-    assert "active" in html
 
 
 # --- Plugin detail page tests ---
