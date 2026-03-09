@@ -3369,6 +3369,169 @@ def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
     assert rc != 0
 
 
+# ---------------------------------------------------------------------------
+# session_date_from_path tests
+# ---------------------------------------------------------------------------
+
+
+def test_session_date_from_path_gptme(tmp_path: Path):
+    """gptme sessions: date extracted from session directory name."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    # Path is the conversation.jsonl inside a date-prefixed session dir
+    session_dir = tmp_path / "2026-03-07-my-session"
+    session_dir.mkdir()
+    jsonl = session_dir / "conversation.jsonl"
+    jsonl.touch()
+
+    result = session_date_from_path("gptme", jsonl)
+    assert result == date(2026, 3, 7)
+
+
+def test_session_date_from_path_gptme_dir(tmp_path: Path):
+    """gptme sessions: date extracted when path is the session directory itself."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    session_dir = tmp_path / "2026-03-08-another-session"
+    session_dir.mkdir()
+
+    result = session_date_from_path("gptme", session_dir)
+    assert result == date(2026, 3, 8)
+
+
+def test_session_date_from_path_codex(tmp_path: Path):
+    """codex sessions: date extracted from directory structure YYYY/MM/DD."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    codex_file = tmp_path / "2026" / "03" / "05" / "session.jsonl"
+    codex_file.parent.mkdir(parents=True)
+    codex_file.touch()
+
+    result = session_date_from_path("codex", codex_file)
+    assert result == date(2026, 3, 5)
+
+
+def test_session_date_from_path_cc(tmp_path: Path):
+    """claude-code sessions: date extracted from JSONL first line."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    jsonl = tmp_path / "session.jsonl"
+    jsonl.write_text(
+        json.dumps({"role": "user", "content": "hi", "timestamp": "2026-03-06T10:00:00+00:00"})
+        + "\n"
+    )
+
+    result = session_date_from_path("claude-code", jsonl)
+    assert result == date(2026, 3, 6)
+
+
+def test_session_date_from_path_unknown_returns_none(tmp_path: Path):
+    """session_date_from_path returns None for unreadable paths."""
+    from gptme_sessions.discovery import session_date_from_path
+
+    missing = tmp_path / "nonexistent.jsonl"
+    # Should return None, not raise
+    result = session_date_from_path("claude-code", missing)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-harness chronological ordering tests
+# ---------------------------------------------------------------------------
+
+
+def test_discover_chronological_ordering(tmp_path: Path, capsys, monkeypatch):
+    """discover output is sorted chronologically across harnesses."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    # Simulate a gptme session from 2026-03-09 and a codex session from 2026-03-05.
+    # After chronological sort the codex session (earlier) must appear first.
+
+    gptme_dir = tmp_path / "2026-03-09-test-session"
+    gptme_dir.mkdir()
+    gptme_jsonl = gptme_dir / "conversation.jsonl"
+    gptme_jsonl.touch()
+
+    codex_file = tmp_path / "2026" / "03" / "05" / "session.jsonl"
+    codex_file.parent.mkdir(parents=True)
+    codex_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [gptme_dir])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [codex_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "30d"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+
+    gptme_pos = captured.out.index(str(gptme_jsonl))
+    codex_pos = captured.out.index(str(codex_file))
+    # codex session (2026-03-05) must appear before gptme session (2026-03-09)
+    assert codex_pos < gptme_pos, "Sessions should be sorted oldest-first across harnesses"
+
+
+def test_discover_json_includes_session_date(tmp_path: Path, capsys, monkeypatch):
+    """discover --json includes session_date field for each entry."""
+    import json as _json
+    import sys
+
+    from gptme_sessions.cli import main
+
+    gptme_dir = tmp_path / "2026-03-07-test"
+    gptme_dir.mkdir()
+    (gptme_dir / "conversation.jsonl").touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [gptme_dir])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--harness", "gptme", "--json"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = _json.loads(captured.out)
+    assert data["total_discovered"] == 1
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["session_date"] == "2026-03-07"
+
+
+def test_discover_date_shown_in_output(tmp_path: Path, capsys, monkeypatch):
+    """discover human output includes the date for each session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    gptme_dir = tmp_path / "2026-03-07-test"
+    gptme_dir.mkdir()
+    (gptme_dir / "conversation.jsonl").touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [gptme_dir])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "discover", "--harness", "gptme", "--since", "30d"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "2026-03-07" in captured.out
+
+
 @pytest.mark.parametrize(
     "signals,expected",
     [

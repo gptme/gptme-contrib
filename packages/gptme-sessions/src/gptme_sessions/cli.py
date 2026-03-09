@@ -26,6 +26,7 @@ from .discovery import (
     discover_gptme_sessions,
     extract_cc_model,
     parse_gptme_config,
+    session_date_from_path,
 )
 from .post_session import post_session
 from .record import SessionRecord, normalize_run_type
@@ -46,12 +47,15 @@ def _discover_all(
     since_days: int = 30,
     harness_filter: str | None = None,
 ) -> list[dict]:
-    """Collect discovered sessions across all harnesses.
+    """Collect discovered sessions across all harnesses, sorted chronologically.
 
-    Returns a list of dicts with keys ``harness`` and ``path``.
+    Returns a list of dicts with keys ``harness``, ``path``, and
+    ``session_date`` (a :class:`datetime.date` or ``None``).
     Dicts for ``gptme`` and ``claude-code`` harnesses also include ``model``
     (may be ``None`` if extraction fails); ``codex`` and ``copilot`` entries
     do not include ``model``.  Callers should use ``.get("model")`` accordingly.
+    Results are sorted oldest-first across all harnesses so callers get a
+    unified chronological view rather than harness-grouped output.
     Used for fallback display and the ``sync`` command.
     """
     today = date.today()
@@ -63,18 +67,46 @@ def _discover_all(
             jsonl = p / "conversation.jsonl"
             resolved = jsonl if jsonl.exists() else p
             model = parse_gptme_config(p).get("model") or None
-            discovered.append({"harness": "gptme", "path": resolved, "model": model})
+            discovered.append(
+                {
+                    "harness": "gptme",
+                    "path": resolved,
+                    "model": model,
+                    "session_date": session_date_from_path("gptme", resolved),
+                }
+            )
     if harness_filter in (None, "claude-code"):
         for p in discover_cc_sessions(start, today):
             model = extract_cc_model(p)
-            discovered.append({"harness": "claude-code", "path": p, "model": model})
+            discovered.append(
+                {
+                    "harness": "claude-code",
+                    "path": p,
+                    "model": model,
+                    "session_date": session_date_from_path("claude-code", p),
+                }
+            )
     if harness_filter in (None, "codex"):
         for p in discover_codex_sessions(start, today):
-            discovered.append({"harness": "codex", "path": p})
+            discovered.append(
+                {
+                    "harness": "codex",
+                    "path": p,
+                    "session_date": session_date_from_path("codex", p),
+                }
+            )
     if harness_filter in (None, "copilot"):
         for p in discover_copilot_sessions(start, today):
-            discovered.append({"harness": "copilot", "path": p})
+            discovered.append(
+                {
+                    "harness": "copilot",
+                    "path": p,
+                    "session_date": session_date_from_path("copilot", p),
+                }
+            )
 
+    # Sort chronologically across harnesses; entries without a date sort last.
+    discovered.sort(key=lambda e: e.get("session_date") or date.max)
     return discovered
 
 
@@ -597,19 +629,46 @@ def discover(
         for p in discover_gptme_sessions(start, today):
             jsonl = p / "conversation.jsonl"
             resolved = jsonl if jsonl.exists() else p
-            discovered.append({"harness": "gptme", "path": str(resolved)})
+            discovered.append(
+                {
+                    "harness": "gptme",
+                    "path": str(resolved),
+                    "session_date": session_date_from_path("gptme", resolved),
+                }
+            )
 
     if harness in (None, "claude-code"):
         for p in discover_cc_sessions(start, today):
-            discovered.append({"harness": "claude-code", "path": str(p)})
+            discovered.append(
+                {
+                    "harness": "claude-code",
+                    "path": str(p),
+                    "session_date": session_date_from_path("claude-code", p),
+                }
+            )
 
     if harness in (None, "codex"):
         for p in discover_codex_sessions(start, today):
-            discovered.append({"harness": "codex", "path": str(p)})
+            discovered.append(
+                {
+                    "harness": "codex",
+                    "path": str(p),
+                    "session_date": session_date_from_path("codex", p),
+                }
+            )
 
     if harness in (None, "copilot"):
         for p in discover_copilot_sessions(start, today):
-            discovered.append({"harness": "copilot", "path": str(p)})
+            discovered.append(
+                {
+                    "harness": "copilot",
+                    "path": str(p),
+                    "session_date": session_date_from_path("copilot", p),
+                }
+            )
+
+    # Sort chronologically across all harnesses; entries without a date sort last.
+    discovered.sort(key=lambda e: e.get("session_date") or date.max)
 
     # Mark each entry as synced or not by cross-referencing the store.
     # Normalize paths so symlinks/relative paths don't cause false mismatches.
@@ -646,7 +705,11 @@ def discover(
         # window" (total_discovered=0, sessions=[]) from "all already synced"
         # (total_discovered>0, sessions=[]) when --unsynced is active.
         click.echo(
-            json.dumps({"sessions": discovered, "total_discovered": total_discovered}, indent=2)
+            json.dumps(
+                {"sessions": discovered, "total_discovered": total_discovered},
+                indent=2,
+                default=str,
+            )
         )
     else:
         if not discovered:
@@ -662,6 +725,7 @@ def discover(
             path_str = entry["path"]
             harness_str = entry["harness"].ljust(harness_width)
             sync_flag = "S" if entry["synced"] else " "
+            date_str = str(entry["session_date"]) if entry.get("session_date") else "????"
             if signals and "grade" in entry:
                 grade = entry["grade"]
                 prod = "+" if entry["productive"] else "-"
@@ -669,16 +733,17 @@ def discover(
                 commits = entry["git_commits"]
                 errors = entry["error_count"]
                 click.echo(
-                    f"[{sync_flag}][{prod}] {harness_str}  grade={grade:.2f}"
+                    f"[{sync_flag}][{prod}] {date_str}  {harness_str}  grade={grade:.2f}"
                     f"  tools={tools} commits={commits} errors={errors}"
                     f"  {path_str}"
                 )
             elif "signals_error" in entry:
                 click.echo(
-                    f"[{sync_flag}][?] {harness_str}  (signals error: {entry['signals_error']})  {path_str}"
+                    f"[{sync_flag}][?] {date_str}  {harness_str}"
+                    f"  (signals error: {entry['signals_error']})  {path_str}"
                 )
             else:
-                click.echo(f"[{sync_flag}]   {harness_str}  {path_str}")
+                click.echo(f"[{sync_flag}]   {date_str}  {harness_str}  {path_str}")
         if unsynced:
             synced_skipped = total_discovered - len(discovered)
             footer = (
