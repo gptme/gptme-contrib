@@ -2439,6 +2439,21 @@ def test_github_pages_url_empty():
     assert github_pages_url("https://gitlab.com/owner/repo") == ""
 
 
+def test_github_pages_url_user_org_site():
+    """User/org site repos (owner/owner.github.io) map to root URL, not a subpath."""
+    assert (
+        github_pages_url("https://github.com/gptme/gptme.github.io") == "https://gptme.github.io/"
+    )
+    assert (
+        github_pages_url("https://github.com/ErikBjare/ErikBjare.github.io")
+        == "https://ErikBjare.github.io/"
+    )
+    # case-insensitive repo vs owner comparison
+    assert (
+        github_pages_url("https://github.com/MyOrg/myorg.github.io") == "https://MyOrg.github.io/"
+    )
+
+
 def test_generate_sitemap_structure():
     """generate_sitemap returns valid XML with index and content entries."""
     data: dict = {
@@ -2483,6 +2498,21 @@ def test_generate_sitemap_excludes_submodule_items():
     sitemap = generate_sitemap(data, "https://owner.github.io/repo/")
     assert "lessons/workflow/local.html" in sitemap
     assert "gptme-contrib/lessons/workflow/shared.html" not in sitemap
+
+
+def test_generate_sitemap_xml_escaping():
+    """URL characters that are special in XML are escaped in <loc> values."""
+    data: dict = {
+        "gh_repo_url": "",
+        "lessons": [],
+        "skills": [],
+        "journals": [],
+        "plugins": [],
+    }
+    # & in a custom base_url would produce invalid XML without escaping
+    sitemap = generate_sitemap(data, "https://example.github.io/repo/?foo=1&bar=2")
+    assert "&amp;" in sitemap
+    assert "&bar" not in sitemap  # raw & must not appear inside <loc>
 
 
 def test_generate_sitemap_plugins_without_readme_excluded():

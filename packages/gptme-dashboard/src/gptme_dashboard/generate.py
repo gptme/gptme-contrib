@@ -12,6 +12,7 @@ Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 """
 
 import configparser
+import html
 import json
 import os
 import re
@@ -912,6 +913,7 @@ def github_pages_url(gh_repo_url: str) -> str:
     """Derive the GitHub Pages base URL from a github.com repository URL.
 
     Converts ``https://github.com/owner/repo`` to ``https://owner.github.io/repo/``.
+    For user/org site repos (``owner/owner.github.io``), returns ``https://owner.github.io/``.
     Returns empty string if the input is not a github.com URL.
     """
     if not gh_repo_url:
@@ -920,6 +922,9 @@ def github_pages_url(gh_repo_url: str) -> str:
     if not m:
         return ""
     owner, repo = m.group(1), m.group(2)
+    # User/org site repos (owner/owner.github.io) serve from the root, not a subpath.
+    if repo.lower() == f"{owner.lower()}.github.io":
+        return f"https://{owner}.github.io/"
     return f"https://{owner}.github.io/{repo}/"
 
 
@@ -940,7 +945,7 @@ def generate_sitemap(data: dict, base_url: str) -> str:
     ]
 
     def url_entry(loc: str, lastmod: str = "", priority: str = "0.8") -> str:
-        parts = ["  <url>", f"    <loc>{loc}</loc>"]
+        parts = ["  <url>", f"    <loc>{html.escape(loc)}</loc>"]
         if lastmod:
             parts.append(f"    <lastmod>{lastmod}</lastmod>")
         parts.append(f"    <priority>{priority}</priority>")
