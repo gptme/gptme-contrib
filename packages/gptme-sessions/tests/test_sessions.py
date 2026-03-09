@@ -4465,3 +4465,57 @@ def test_from_dict_no_migration_when_trajectory_path_already_set():
     r = SessionRecord.from_dict(data)
     assert r.trajectory_path == "/some/other.jsonl"
     assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
+
+
+def test_from_dict_no_migration_when_trajectory_path_is_null():
+    """A new-style record with trajectory_path=null is NOT migrated.
+
+    ``filtered.get("trajectory_path") is None`` would incorrectly fire for
+    records where trajectory_path was written as JSON ``null``.  The guard
+    should use ``"trajectory_path" not in filtered`` so that an intentionally-
+    absent field triggers migration while an explicit null is left alone.
+    """
+    data = {
+        "trajectory_path": None,
+        "journal_path": "/home/user/.local/share/gptme/logs/session",
+    }
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path is None
+    assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
+
+
+def test_sync_signals_warns_when_trajectory_missing(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals emits a warning when a stored record's trajectory file is gone."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Delete the trajectory file to simulate a moved/deleted session
+    fake_file.unlink()
+
+    # sync --signals should warn about the missing trajectory
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "trajectory not found" in captured.err

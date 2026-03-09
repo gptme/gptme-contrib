@@ -839,6 +839,13 @@ def sync(
                             skipped += 1
                 else:
                     needs_update = True  # mark for dry-run reporting
+            elif with_signals and existing.outcome == "unknown" and not traj_path.is_file():
+                click.echo(
+                    f"  warning: trajectory not found, cannot backfill signals for {path_str}",
+                    err=True,
+                )
+                if not needs_update:
+                    skipped += 1
             elif not needs_update:
                 skipped += 1
 

@@ -171,7 +171,7 @@ class SessionRecord:
         # actually a trajectory path (JSONL or session directory) set by the
         # old sync command before trajectory_path was introduced.
         if (
-            filtered.get("trajectory_path") is None
+            "trajectory_path" not in filtered
             and isinstance(filtered.get("journal_path"), str)
             and not filtered["journal_path"].endswith(".md")
         ):
