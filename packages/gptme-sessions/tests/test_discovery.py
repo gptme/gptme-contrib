@@ -80,6 +80,20 @@ def test_quick_date_from_jsonl_no_timestamp(tmp_path: Path) -> None:
     assert _quick_date_from_jsonl(jsonl) is None
 
 
+def test_quick_date_from_jsonl_non_dict_lines(tmp_path: Path) -> None:
+    """_quick_date_from_jsonl skips non-dict JSON values without crashing."""
+    jsonl = tmp_path / "non_dict.jsonl"
+    jsonl.write_text(
+        '["list", "value"]\n'
+        + "42\n"
+        + '"string"\n'
+        + "null\n"
+        + json.dumps({"timestamp": "2026-03-05T10:00:00Z"})
+        + "\n"
+    )
+    assert _quick_date_from_jsonl(jsonl) == date(2026, 3, 5)
+
+
 # --- parse_gptme_config ---
 
 
@@ -141,6 +155,20 @@ def test_extract_cc_model_non_utf8_file(tmp_path: Path) -> None:
     jsonl_file = tmp_path / "session.jsonl"
     jsonl_file.write_bytes(b"\xff\xfe invalid utf-8\n")
     assert extract_cc_model(jsonl_file) is None
+
+
+def test_extract_cc_model_non_dict_lines(tmp_path: Path) -> None:
+    """extract_cc_model skips non-dict JSON values without crashing."""
+    jsonl_file = tmp_path / "session.jsonl"
+    jsonl_file.write_text(
+        '["list", "value"]\n'
+        + "42\n"
+        + '"string"\n'
+        + "null\n"
+        + json.dumps({"message": {"role": "assistant", "model": "claude-opus-4-6", "content": []}})
+        + "\n"
+    )
+    assert extract_cc_model(jsonl_file) == "claude-opus-4-6"
 
 
 # --- discover_gptme_sessions ---

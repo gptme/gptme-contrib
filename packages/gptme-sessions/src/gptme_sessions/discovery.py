@@ -81,6 +81,8 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(entry, dict):
+                    continue
                 ts_str = entry.get("timestamp")
                 if ts_str:
                     try:
@@ -134,6 +136,8 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
                     continue
                 msg = entry.get("message", {})
                 if isinstance(msg, dict) and msg.get("role") == "assistant":
