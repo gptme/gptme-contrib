@@ -1103,7 +1103,7 @@ def test_generate_html_includes_github_links(tmp_path: Path):
 
 
 def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
-    """Submodule items should not get gh_url (they belong to a different repo)."""
+    """Submodule items without a git remote should not get gh_url."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
@@ -1118,13 +1118,14 @@ def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
     lessons_dir.mkdir(parents=True)
     (lessons_dir / "main.md").write_text("---\nstatus: active\n---\n# Main\n\nBody.")
 
-    # Fake submodule with a lesson
+    # Fake submodule with a lesson but NO git remote
     sub_path = tmp_path / "gptme-contrib"
     sub_lessons = sub_path / "lessons" / "workflow"
     sub_lessons.mkdir(parents=True)
     (sub_lessons / "sub.md").write_text("---\nstatus: active\n---\n# Sub\n\nBody.")
     (sub_path / "gptme.toml").write_text('[agent]\nname = "contrib"\n')
     subprocess.run(["git", "init"], cwd=sub_path, capture_output=True)
+    # No git remote added — detect_github_url returns ""
 
     # Register as submodule via .gitmodules
     gitmodules = tmp_path / ".gitmodules"
@@ -1143,7 +1144,59 @@ def test_collect_workspace_data_submodule_items_no_gh_url(tmp_path: Path):
     assert "gh_url" in main_lessons[0]  # main workspace items get gh_url
 
     assert len(sub_lessons_data) == 1
-    assert "gh_url" not in sub_lessons_data[0]  # submodule items must NOT get gh_url
+    assert "gh_url" not in sub_lessons_data[0]  # no remote → no gh_url
+
+
+def test_collect_workspace_data_submodule_items_get_gh_url(tmp_path: Path):
+    """Submodule items get gh_url from the submodule's own git remote."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:test/main-repo.git"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+
+    # Main workspace lesson
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "main.md").write_text("---\nstatus: active\n---\n# Main\n\nBody.")
+
+    # Submodule with its OWN git remote
+    sub_path = tmp_path / "gptme-contrib"
+    sub_lessons = sub_path / "lessons" / "workflow"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "sub.md").write_text("---\nstatus: active\n---\n# Sub\n\nBody.")
+    (sub_path / "gptme.toml").write_text('[agent]\nname = "contrib"\n')
+    subprocess.run(["git", "init"], cwd=sub_path, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:gptme/gptme-contrib.git"],
+        cwd=sub_path,
+        capture_output=True,
+    )
+
+    # Register as submodule via .gitmodules
+    (tmp_path / ".gitmodules").write_text(
+        '[submodule "gptme-contrib"]\n'
+        "    path = gptme-contrib\n"
+        "    url = git@github.com:gptme/gptme-contrib.git\n"
+    )
+
+    data = collect_workspace_data(tmp_path)
+
+    main_lessons = [le for le in data["lessons"] if not le.get("source")]
+    sub_lessons_data = [le for le in data["lessons"] if le.get("source")]
+
+    assert len(main_lessons) == 1
+    assert "gh_url" in main_lessons[0]
+    assert "main-repo" in main_lessons[0]["gh_url"]
+
+    assert len(sub_lessons_data) == 1
+    # Submodule lesson gets gh_url pointing to the submodule's repo, not main repo
+    assert "gh_url" in sub_lessons_data[0]
+    assert "gptme-contrib" in sub_lessons_data[0]["gh_url"]
+    assert "main-repo" not in sub_lessons_data[0]["gh_url"]
 
 
 # ── agent.urls ────────────────────────────────────────────────────────────────

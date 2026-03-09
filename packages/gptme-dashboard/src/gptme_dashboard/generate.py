@@ -1211,21 +1211,38 @@ def collect_workspace_data(
         sub_name: str = sub["name"]
         submodule_names.append(sub_name)
 
+        sub_gh_url = detect_github_url(sub_path)
+
         if sub["has_lessons"]:
-            lessons.extend(scan_lessons(sub_path, source=sub_name))
+            sub_lessons = scan_lessons(sub_path, source=sub_name)
+            if sub_gh_url:
+                for lesson in sub_lessons:
+                    lesson["gh_url"] = github_blob_url(sub_gh_url, lesson["path"], prefix="lessons")
+            lessons.extend(sub_lessons)
         if sub["has_skills"]:
-            skills.extend(scan_skills(sub_path, source=sub_name))
+            sub_skills = scan_skills(sub_path, source=sub_name)
+            if sub_gh_url:
+                for skill in sub_skills:
+                    skill["gh_url"] = github_tree_url(sub_gh_url, skill["path"])
+            skills.extend(sub_skills)
         if sub["has_packages"]:
-            packages.extend(scan_packages(sub_path, source=sub_name))
+            sub_packages = scan_packages(sub_path, source=sub_name)
+            if sub_gh_url:
+                for pkg in sub_packages:
+                    pkg["gh_url"] = github_tree_url(sub_gh_url, pkg["path"])
+            packages.extend(sub_packages)
         if sub["has_plugins"]:
-            plugins.extend(scan_plugins(sub_path, source=sub_name))
+            sub_plugins = scan_plugins(sub_path, source=sub_name)
+            if sub_gh_url:
+                for plugin in sub_plugins:
+                    plugin["gh_url"] = github_tree_url(sub_gh_url, plugin["path"])
+            plugins.extend(sub_plugins)
 
     # Detect GitHub repo URL for source links
     gh_repo_url = detect_github_url(workspace)
 
     # Add GitHub source links to main-workspace items only.
-    # Submodule items (source != "") belong to a different repository and would
-    # get incorrect URLs if we applied the main workspace's gh_repo_url to them.
+    # Submodule items (source != "") already have gh_url set from their own repo above.
     if gh_repo_url:
         for lesson in lessons:
             if not lesson.get("source"):
