@@ -1035,25 +1035,6 @@ def github_tree_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
     return f"{gh_repo_url}/tree/HEAD/{full_path}"
 
 
-def github_pages_url(gh_repo_url: str) -> str:
-    """Derive the GitHub Pages base URL from a github.com repository URL.
-
-    Converts ``https://github.com/owner/repo`` to ``https://owner.github.io/repo/``.
-    For user/org site repos (``owner/owner.github.io``), returns ``https://owner.github.io/``.
-    Returns empty string if the input is not a github.com URL.
-    """
-    if not gh_repo_url:
-        return ""
-    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", gh_repo_url)
-    if not m:
-        return ""
-    owner, repo = m.group(1), m.group(2)
-    # User/org site repos (owner/owner.github.io) serve from the root, not a subpath.
-    if repo.lower() == f"{owner.lower()}.github.io":
-        return f"https://{owner}.github.io/"
-    return f"https://{owner}.github.io/{repo}/"
-
-
 def generate_sitemap(data: dict, base_url: str) -> str:
     """Generate an XML sitemap for the dashboard.
 
@@ -1140,6 +1121,7 @@ def generate_atom_feed(data: dict, base_url: str, workspace_name: str) -> str:
         f'  <link href="{html.escape(feed_url)}" rel="self"/>',
         f"  <id>{html.escape(base_url)}</id>",
         f"  <updated>{updated}</updated>",
+        f"  <author><name>{html.escape(workspace_name)}</name></author>",
     ]
 
     for journal in journals[:20]:
