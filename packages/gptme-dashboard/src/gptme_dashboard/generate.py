@@ -12,6 +12,7 @@ Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 """
 
 import configparser
+import html
 import json
 import os
 import re
@@ -1003,6 +1004,81 @@ def github_tree_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
     return f"{gh_repo_url}/tree/HEAD/{full_path}"
 
 
+def github_pages_url(gh_repo_url: str) -> str:
+    """Derive the GitHub Pages base URL from a github.com repository URL.
+
+    Converts ``https://github.com/owner/repo`` to ``https://owner.github.io/repo/``.
+    For user/org site repos (``owner/owner.github.io``), returns ``https://owner.github.io/``.
+    Returns empty string if the input is not a github.com URL.
+    """
+    if not gh_repo_url:
+        return ""
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", gh_repo_url)
+    if not m:
+        return ""
+    owner, repo = m.group(1), m.group(2)
+    # User/org site repos (owner/owner.github.io) serve from the root, not a subpath.
+    if repo.lower() == f"{owner.lower()}.github.io":
+        return f"https://{owner}.github.io/"
+    return f"https://{owner}.github.io/{repo}/"
+
+
+def generate_sitemap(data: dict, base_url: str) -> str:
+    """Generate an XML sitemap for the dashboard.
+
+    ``base_url`` must end with ``/`` (e.g. ``https://owner.github.io/repo/``).
+
+    Includes the index page plus all detail pages for lessons, skills, journals,
+    and plugins.  Journal entries carry a ``<lastmod>`` derived from their date.
+    Returns the sitemap XML as a string.
+    """
+    base_url = base_url.rstrip("/") + "/"
+
+    lines: list[str] = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+
+    def url_entry(loc: str, lastmod: str = "", priority: str = "0.8") -> str:
+        parts = ["  <url>", f"    <loc>{html.escape(loc)}</loc>"]
+        if lastmod:
+            parts.append(f"    <lastmod>{lastmod}</lastmod>")
+        parts.append(f"    <priority>{priority}</priority>")
+        parts.append("  </url>")
+        return "\n".join(parts)
+
+    # Index page
+    lines.append(url_entry(base_url, priority="1.0"))
+
+    # Lesson detail pages
+    for lesson in data.get("lessons", []):
+        page_url = lesson.get("page_url")
+        if page_url and not lesson.get("source"):
+            lines.append(url_entry(base_url + page_url, priority="0.8"))
+
+    # Skill detail pages
+    for skill in data.get("skills", []):
+        page_url = skill.get("page_url")
+        if page_url and not skill.get("source"):
+            lines.append(url_entry(base_url + page_url, priority="0.8"))
+
+    # Journal detail pages (with lastmod from date)
+    for journal in data.get("journals", []):
+        page_url = journal.get("page_url")
+        if page_url:
+            lastmod = journal.get("date", "")
+            lines.append(url_entry(base_url + page_url, lastmod=lastmod, priority="0.6"))
+
+    # Plugin detail pages (only plugins with a body/README)
+    for plugin in data.get("plugins", []):
+        page_url = plugin.get("page_url")
+        if page_url and plugin.get("body") and not plugin.get("source"):
+            lines.append(url_entry(base_url + page_url, priority="0.7"))
+
+    lines.append("</urlset>")
+    return "\n".join(lines) + "\n"
+
+
 def collect_workspace_data(
     workspace: Path,
     include_sessions: bool = False,
@@ -1176,11 +1252,18 @@ def generate(
     template_dir: Path | None = None,
     include_sessions: bool = False,
     sessions_days: int = 30,
+    base_url: str = "",
 ) -> dict:
     """Generate static HTML dashboard from workspace.
 
     Returns the collected workspace data dict so callers can reuse it
     (e.g. for JSON export) without rescanning.
+
+    When *base_url* is provided (e.g. ``https://owner.github.io/repo/``), a
+    ``sitemap.xml`` is written alongside ``index.html``.  When omitted, the
+    function tries to auto-derive the URL from the detected GitHub remote using
+    the standard GitHub Pages pattern (``https://<owner>.github.io/<repo>/``).
+    Pass ``base_url="-"`` to suppress sitemap generation entirely.
     """
     if template_dir is None:
         template_dir = Path(__file__).parent / "templates"
@@ -1285,6 +1368,17 @@ def generate(
         page_path = output / pkg["page_url"]
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(pkg_html)
+
+    # Generate sitemap.xml when a base URL is available
+    effective_base_url = base_url
+    if effective_base_url != "-":
+        if not effective_base_url:
+            # Auto-derive from GitHub Pages pattern
+            effective_base_url = github_pages_url(data.get("gh_repo_url", ""))
+        if effective_base_url:
+            sitemap_xml = generate_sitemap(data, effective_base_url)
+            (output / "sitemap.xml").write_text(sitemap_xml)
+            print(f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})")
 
     stats = data["stats"]
     journal_count = len(data["journals"])
