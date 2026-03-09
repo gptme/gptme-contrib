@@ -95,6 +95,14 @@ def task_page_path(task_id: str) -> str:
     return f"tasks/{task_id}.html"
 
 
+def package_page_path(package_path: str) -> str:
+    """Convert a package's directory path to its detail page URL path.
+
+    E.g. 'packages/gptme-dashboard' -> 'packages/gptme-dashboard/index.html'
+    """
+    return (Path(package_path) / "index.html").as_posix()
+
+
 def journal_page_path(date: str, name: str) -> str:
     """Convert a journal entry's date + name to its detail page URL path.
 
@@ -723,11 +731,21 @@ def scan_packages(workspace: Path, source: str = "") -> list[dict]:
                     if description and version:
                         break
 
+        readme = d / "README.md"
+        body = readme.read_text(errors="replace") if readme.exists() else ""
+
+        rel_path = str(d.relative_to(workspace))
+        page_url = package_page_path(rel_path)
+        if source:
+            page_url = f"{source}/{page_url}"
+
         entry: dict = {
             "name": d.name,
             "description": description,
             "version": version,
-            "path": str(d.relative_to(workspace)),
+            "path": rel_path,
+            "body": body,
+            "page_url": page_url,
         }
         if source:
             entry["source"] = source
@@ -1160,16 +1178,34 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(plugin_html)
 
+    # Generate per-package detail pages (only for packages with a README)
+    package_template = env.get_template("package.html")
+    packages_with_pages = [p for p in data["packages"] if p.get("body")]
+    for pkg in packages_with_pages:
+        # page_url is e.g. "packages/gptme-dashboard/index.html" (depth=2) → root_prefix="../../"
+        depth = len(Path(pkg["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        pkg_html = package_template.render(
+            workspace_name=data["workspace_name"],
+            package=pkg,
+            body_html=render_markdown_to_html(pkg["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / pkg["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(pkg_html)
+
     stats = data["stats"]
     journal_count = len(data["journals"])
     plugin_page_count = len(plugins_with_pages)
     task_count = len(data["tasks"])
+    package_page_count = len(packages_with_pages)
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
         f"  {stats['total_lessons']} lessons ({stats['total_lessons']} detail pages), "
         f"{stats['total_plugins']} plugins ({plugin_page_count} detail pages), "
-        f"{stats['total_packages']} packages, "
+        f"{stats['total_packages']} packages ({package_page_count} detail pages), "
         f"{stats['total_skills']} skills ({stats['total_skills']} detail pages), "
         f"{journal_count} journals ({journal_count} detail pages), "
         f"{task_count} tasks ({task_count} detail pages)"
@@ -1225,6 +1261,9 @@ def generate_json(
         ],
         "tasks": [
             {k: v for k, v in task.items() if k not in _JSON_EXCLUDE} for task in data["tasks"]
+        ],
+        "packages": [
+            {k: v for k, v in pkg.items() if k not in _JSON_EXCLUDE} for pkg in data["packages"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)

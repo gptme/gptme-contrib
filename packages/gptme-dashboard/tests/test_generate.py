@@ -21,6 +21,7 @@ from gptme_dashboard.generate import (
     journal_page_path,
     lesson_page_path,
     parse_frontmatter,
+    package_page_path,
     plugin_page_path,
     read_agent_urls,
     read_workspace_config,
@@ -113,6 +114,7 @@ def workspace(tmp_path: Path) -> Path:
         description = "A test package"
         """)
     )
+    (pkg_dir / "README.md").write_text("# test-pkg\n\nA package for testing purposes.\n")
 
     # Skills
     skill_dir = tmp_path / "skills" / "test-skill"
@@ -2299,3 +2301,113 @@ def test_generate_html_no_about_section_without_readme(workspace: Path, tmp_path
     generate(workspace, output)
     html = (output / "index.html").read_text()
     assert 'id="about"' not in html
+
+
+# ── Per-package detail pages ────────────────────────────────────────────────
+
+
+def test_package_page_path():
+    """Test package directory to URL conversion."""
+    assert package_page_path("packages/gptme-dashboard") == "packages/gptme-dashboard/index.html"
+    assert package_page_path("packages/gptodo") == "packages/gptodo/index.html"
+
+
+def test_scan_packages_includes_body_and_page_url(workspace: Path):
+    """Test that scan_packages includes body and page_url fields."""
+    packages = scan_packages(workspace)
+    assert len(packages) == 1
+    pkg = packages[0]
+    assert "body" in pkg
+    assert "page_url" in pkg
+    assert "A package for testing purposes" in pkg["body"]
+    assert pkg["page_url"] == "packages/test-pkg/index.html"
+
+
+def test_scan_packages_empty_body_when_no_readme(tmp_path: Path):
+    """Test that packages without README have empty body and still get page_url."""
+    pkg_dir = tmp_path / "packages" / "no-readme-pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text(
+        '[project]\nname = "no-readme-pkg"\nversion = "0.1.0"\ndescription = ""\n'
+    )
+    # No README.md
+
+    packages = scan_packages(tmp_path)
+    assert len(packages) == 1
+    assert packages[0]["body"] == ""
+    assert packages[0]["page_url"] == "packages/no-readme-pkg/index.html"
+
+
+def test_generate_package_detail_pages(workspace: Path, tmp_path: Path):
+    """Test that per-package detail pages are generated for packages with README."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    pkg_page = output / "packages" / "test-pkg" / "index.html"
+    assert pkg_page.exists(), f"Expected {pkg_page} to exist"
+
+    html = pkg_page.read_text()
+    assert "test-pkg" in html
+    assert "A package for testing purposes" in html
+
+
+def test_generate_index_links_to_packages(workspace: Path, tmp_path: Path):
+    """Test that index.html package names link to detail pages when README exists."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+    assert 'href="packages/test-pkg/index.html"' in html
+
+
+def test_package_detail_breadcrumb(workspace: Path, tmp_path: Path):
+    """Test that package detail page breadcrumb uses correct relative root prefix."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    # packages/test-pkg/index.html is two levels deep → needs ../../
+    html = (output / "packages" / "test-pkg" / "index.html").read_text()
+    assert 'href="../../index.html"' in html
+
+
+def test_package_detail_renders_markdown(workspace: Path, tmp_path: Path):
+    """Test that package README markdown is rendered as HTML."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "packages" / "test-pkg" / "index.html").read_text()
+    assert "<h1>" in html or "<h2>" in html, "Headings should be rendered as HTML"
+    assert "&lt;h" not in html, "HTML tags must not be escaped"
+
+
+def test_generate_no_package_page_when_no_readme(tmp_path: Path):
+    """Test that packages without README do not get a detail page."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    pkg_dir = tmp_path / "packages" / "bare-pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text(
+        '[project]\nname = "bare-pkg"\nversion = "0.1.0"\ndescription = ""\n'
+    )
+    # No README.md — package has no body
+
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(tmp_path, output, template_dir)
+
+    pkg_page = output / "packages" / "bare-pkg" / "index.html"
+    assert not pkg_page.exists(), "No detail page should be generated for packages without README"
+
+
+def test_generate_json_excludes_package_body(workspace: Path):
+    """Test that generate_json excludes body from packages to keep data.json lean."""
+    data = collect_workspace_data(workspace)
+    json_str = generate_json(workspace, _data=data)
+    parsed = json.loads(json_str)
+
+    assert len(parsed["packages"]) == 1
+    assert "body" not in parsed["packages"][0]
+    assert "page_url" in parsed["packages"][0]
