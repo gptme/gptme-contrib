@@ -530,6 +530,23 @@ def test_generate_full(workspace: Path, tmp_path: Path):
     assert re.search(r'class="number">\s*1\s*</div>\s*<div[^>]*class="label">Packages</div>', html)
 
 
+def test_generate_kind_filter_buttons(workspace: Path, tmp_path: Path):
+    """Test that kind filter buttons (Lessons/Skills) appear in the guidance section."""
+    output = tmp_path / "output"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Kind filter row should be present
+    assert 'id="kind-filters"' in html
+
+    # All three kind values must appear (covers both filter buttons and tbody rows)
+    assert 'data-kind="all"' in html
+    assert 'data-kind="lesson"' in html
+    assert 'data-kind="skill"' in html
+
+
 def test_generate_with_submodules(workspace_with_submodules: Path, tmp_path: Path):
     """Test HTML generation includes submodule content and source tags."""
     output = tmp_path / "output"

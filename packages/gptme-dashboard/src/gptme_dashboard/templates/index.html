@@ -486,6 +486,12 @@ tr:hover { background: var(--accent-dim); }
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
   <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
+  <!-- Kind chips (Lessons / Skills) -->
+  <div class="filter-row" id="kind-filters">
+    <button class="filter-btn active" data-kind="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+    <button class="filter-btn" data-kind="lesson">Lessons <span class="chip-count">{{ stats.total_lessons }}</span></button>
+    <button class="filter-btn" data-kind="skill">Skills <span class="chip-count">{{ stats.total_skills }}</span></button>
+  </div>
   <!-- Category chips -->
   <div class="cat-chart" id="guidance-filters">
     <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
@@ -541,17 +547,19 @@ function toggleRows(btn, tableId) {
 
 // Guidance (lessons + skills) filtering
 const filterChips = document.querySelectorAll('#guidance-filters .cat-chip');
+const kindBtns = document.querySelectorAll('#kind-filters .filter-btn');
 const sourceBtns = document.querySelectorAll('#source-filters .filter-btn');
 const guidanceRows = document.querySelectorAll('#guidance-table tbody tr');
 const searchBox = document.getElementById('guidance-search');
 const showMoreBtn = document.getElementById('guidance-show-more');
 
 let activeCategory = 'all';
+let activeKind = 'all';
 let activeSource = 'all';
 
 function applyFilters() {
   const query = (searchBox ? searchBox.value : '').toLowerCase();
-  const isFiltering = activeCategory !== 'all' || activeSource !== 'all' || query;
+  const isFiltering = activeCategory !== 'all' || activeKind !== 'all' || activeSource !== 'all' || query;
 
   // When filtering, show all rows (override collapse)
   if (showMoreBtn) {
@@ -567,14 +575,16 @@ function applyFilters() {
   let idx = 0;
   guidanceRows.forEach(row => {
     const cat = row.dataset.category;
+    const kind = row.dataset.kind;
     const source = row.dataset.source;
     const text = row.textContent.toLowerCase();
     const catMatch = activeCategory === 'all' || cat === activeCategory;
+    const kindMatch = activeKind === 'all' || kind === activeKind;
     const sourceMatch = activeSource === 'all' ||
       (activeSource === '_local' && !source) ||
       source === activeSource;
     const searchMatch = !query || text.includes(query);
-    const match = catMatch && sourceMatch && searchMatch;
+    const match = catMatch && kindMatch && sourceMatch && searchMatch;
 
     if (isFiltering) {
       row.style.display = match ? '' : 'none';
@@ -597,6 +607,15 @@ filterChips.forEach(chip => {
     filterChips.forEach(c => c.classList.remove('active'));
     chip.classList.add('active');
     activeCategory = chip.dataset.cat;
+    applyFilters();
+  });
+});
+
+kindBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    kindBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeKind = btn.dataset.kind;
     applyFilters();
   });
 });
