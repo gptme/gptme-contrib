@@ -2731,6 +2731,31 @@ def test_generate_sitemap_plugins_without_readme_excluded():
     assert "plugins/documented/index.html" in sitemap
 
 
+def test_generate_sitemap_summary_lastmod_valid_dates():
+    """Summary lastmod values are valid W3C dates for all period types."""
+    data: dict = {
+        "gh_repo_url": "",
+        "lessons": [],
+        "skills": [],
+        "journals": [],
+        "plugins": [],
+        "summaries": [
+            {"page_url": "summaries/daily/2026-03-07.html", "period": "2026-03-07"},
+            {"page_url": "summaries/weekly/2026-W10.html", "period": "2026-W10"},
+            {"page_url": "summaries/monthly/2026-03.html", "period": "2026-03"},
+        ],
+    }
+    sitemap = generate_sitemap(data, "https://example.github.io/repo/")
+
+    # Daily: period is already a valid ISO date
+    assert "<lastmod>2026-03-07</lastmod>" in sitemap
+    # Weekly: must convert ISO week to the Monday of that week, not use raw "2026-W10"
+    assert "<lastmod>2026-W10</lastmod>" not in sitemap
+    assert "<lastmod>2026-03-02</lastmod>" in sitemap  # Monday of 2026-W10
+    # Monthly: convert "2026-03" to "2026-03-01"
+    assert "<lastmod>2026-03-01</lastmod>" in sitemap
+
+
 def test_generate_writes_sitemap_with_explicit_base_url(workspace: Path, tmp_path: Path):
     """generate() writes sitemap.xml when base_url is given explicitly."""
     output = tmp_path / "site"

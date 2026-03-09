@@ -1110,7 +1110,7 @@ def generate_sitemap(data: dict, base_url: str) -> str:
     for summary in data.get("summaries", []):
         page_url = summary.get("page_url")
         if page_url:
-            lastmod = summary.get("period", "")[:10]
+            lastmod = _period_sort_key(summary.get("period", ""))
             lines.append(url_entry(base_url + page_url, lastmod=lastmod, priority="0.5"))
 
     lines.append("</urlset>")
