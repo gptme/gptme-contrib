@@ -3159,7 +3159,12 @@ def test_cli_discover_no_sessions(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
     monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
 
-    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "7d"])
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "discover", "--since", "7d"],
+    )
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
@@ -3179,7 +3184,19 @@ def test_cli_discover_lists_paths(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file])
     monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
 
-    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--harness", "codex"])
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "discover",
+            "--harness",
+            "codex",
+        ],
+    )
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
@@ -3209,8 +3226,20 @@ def test_cli_discover_harness_filter(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
     monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
 
+    sessions_dir = tmp_path / "sessions"
     monkeypatch.setattr(
-        sys, "argv", ["gptme-sessions", "discover", "--harness", "codex", "--since", "7d"]
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "discover",
+            "--harness",
+            "codex",
+            "--since",
+            "7d",
+        ],
     )
     rc = main()
     assert rc == 0
@@ -3232,7 +3261,20 @@ def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file])
     monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
 
-    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--harness", "codex", "--json"])
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "discover",
+            "--harness",
+            "codex",
+            "--json",
+        ],
+    )
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
@@ -3246,7 +3288,7 @@ def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
     assert len(sessions) == 1
     assert sessions[0]["harness"] == "codex"
     assert sessions[0]["path"] == str(fake_file)
-    assert sessions[0]["synced"] is False  # fake_file is not in any store
+    assert sessions[0]["synced"] is False  # fake_file is not in the (empty) sessions_dir store
 
 
 def test_cli_discover_with_signals(tmp_path: Path, capsys, monkeypatch):
