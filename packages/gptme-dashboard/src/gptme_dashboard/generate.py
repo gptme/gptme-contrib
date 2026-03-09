@@ -1455,19 +1455,16 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(pkg_html)
 
-    # Generate sitemap.xml when a base URL is available
-    effective_base_url = base_url
-    if effective_base_url != "-":
-        if not effective_base_url:
-            # Auto-derive from GitHub Pages pattern
-            effective_base_url = github_pages_url(data.get("gh_repo_url", ""))
-        if effective_base_url:
-            sitemap_xml = generate_sitemap(data, effective_base_url)
-            (output / "sitemap.xml").write_text(sitemap_xml)
-            print(f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})")
-            feed_xml = generate_atom_feed(data, effective_base_url, data["workspace_name"])
-            (output / "feed.xml").write_text(feed_xml)
-            print(f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})")
+    # Generate sitemap.xml and Atom feed when a base URL is available.
+    # effective_base_url is already resolved above (handles base_url="-" suppression
+    # and auto-derivation from gh_repo_url), so reuse it here directly.
+    if effective_base_url:
+        sitemap_xml = generate_sitemap(data, effective_base_url)
+        (output / "sitemap.xml").write_text(sitemap_xml)
+        print(f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})")
+        feed_xml = generate_atom_feed(data, effective_base_url, data["workspace_name"])
+        (output / "feed.xml").write_text(feed_xml)
+        print(f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})")
 
     stats = data["stats"]
     journal_count = len(data["journals"])
