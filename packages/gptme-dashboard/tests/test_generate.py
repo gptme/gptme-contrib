@@ -33,6 +33,7 @@ from gptme_dashboard.generate import (
     scan_readme,
     scan_recent_sessions,
     scan_skills,
+    scan_summaries,
     scan_tasks,
     skill_page_path,
     task_page_path,
@@ -1759,6 +1760,145 @@ def test_journal_gh_url(workspace: Path, tmp_path: Path):
     gh_url = data["journals"][0].get("gh_url", "")
     assert "github.com/owner/repo" in gh_url
     assert "journal/2026-03-07/session.md" in gh_url
+
+
+def test_scan_summaries_all_types(tmp_path: Path):
+    """scan_summaries finds entries across daily/weekly/monthly subdirectories."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "monthly").mkdir(parents=True)
+    (summaries_dir / "daily" / "2026-03-07.md").write_text(
+        "# Daily Summary: 2026-03-07\n\n**Sessions**: 2 | **Commits**: 3\n"
+    )
+    (summaries_dir / "weekly" / "2026-W10.md").write_text(
+        "# Weekly Summary: 2026-W10\n\nGood week.\n"
+    )
+    (summaries_dir / "monthly" / "2026-03.md").write_text(
+        "# Monthly Summary: March 2026\n\nGreat month.\n"
+    )
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 3
+    types = {e["type"] for e in entries}
+    assert types == {"daily", "weekly", "monthly"}
+    periods = {e["period"] for e in entries}
+    assert "2026-03-07" in periods
+    assert "2026-W10" in periods
+    assert "2026-03" in periods
+
+
+def test_scan_summaries_empty_workspace(tmp_path: Path):
+    """scan_summaries returns empty list when knowledge/summaries is absent."""
+    assert scan_summaries(tmp_path) == []
+
+
+def test_scan_summaries_respects_limit(tmp_path: Path):
+    """scan_summaries caps results at the limit parameter."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    for i in range(1, 8):
+        (daily_dir / f"2026-03-{i:02d}.md").write_text(f"# Day {i}\n\nContent.\n")
+
+    entries = scan_summaries(tmp_path, limit=5)
+    assert len(entries) == 5
+    # Most recent first
+    assert entries[0]["period"] == "2026-03-07"
+
+
+def test_scan_summaries_preview_skips_headings(tmp_path: Path):
+    """scan_summaries preview skips heading/bold lines to get real content."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text(
+        "# Daily Summary: 2026-03-07\n\n**Sessions**: 1\n\nFocused on dashboard work.\n"
+    )
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 1
+    # Preview should skip heading and **bold** lines
+    assert entries[0]["preview"] == "Focused on dashboard work."
+
+
+def test_scan_summaries_period_type_filter(tmp_path: Path):
+    """period_type filter is applied before limit, not after."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    # 3 daily + 3 weekly entries
+    for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+        (summaries_dir / "daily" / f"{day}.md").write_text(f"# {day}\n\nContent.\n")
+    for week in ("2026-W01", "2026-W02", "2026-W03"):
+        (summaries_dir / "weekly" / f"{week}.md").write_text(f"# {week}\n\nContent.\n")
+
+    # With limit=3 and no filter: top-3 of 6 total entries (mixed types)
+    all_entries = scan_summaries(tmp_path, limit=3)
+    assert len(all_entries) == 3
+
+    # With period_type="daily" and limit=3: should return 3 daily entries,
+    # not first 3 overall (which may include weekly) then filter to fewer.
+    daily_entries = scan_summaries(tmp_path, limit=3, period_type="daily")
+    assert len(daily_entries) == 3
+    assert all(e["type"] == "daily" for e in daily_entries)
+
+
+def test_scan_summaries_sort_order_across_types(tmp_path: Path):
+    """Weekly ISO-week strings sort chronologically with daily/monthly entries."""
+    summaries_dir = tmp_path / "knowledge" / "summaries"
+    (summaries_dir / "daily").mkdir(parents=True)
+    (summaries_dir / "weekly").mkdir(parents=True)
+    (summaries_dir / "monthly").mkdir(parents=True)
+    # Week 2 of 2026 starts ~2026-01-05; day 2026-01-15 is later in the month;
+    # monthly 2026-01 represents 2026-01-01.
+    (summaries_dir / "daily" / "2026-01-15.md").write_text("# Mid-Jan\n\nDaily.\n")
+    (summaries_dir / "weekly" / "2026-W02.md").write_text("# Week 2\n\nWeekly.\n")
+    (summaries_dir / "monthly" / "2026-01.md").write_text("# January\n\nMonthly.\n")
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 3
+    periods = [e["period"] for e in entries]
+    # Descending: 2026-01-15 (Jan 15) > 2026-W02 (~Jan 5) > 2026-01 (Jan 1)
+    assert periods[0] == "2026-01-15", f"Expected daily first, got {periods}"
+    assert periods[1] == "2026-W02", f"Expected weekly second, got {periods}"
+    assert periods[2] == "2026-01", f"Expected monthly last, got {periods}"
+
+
+def test_collect_workspace_data_includes_summaries(workspace: Path):
+    """collect_workspace_data includes summaries when present."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid stuff.\n")
+
+    data = collect_workspace_data(workspace)
+    assert len(data["summaries"]) == 1
+    assert data["stats"]["total_summaries"] == 1
+
+
+def test_total_summaries_stat_reflects_actual_count_not_cap(workspace: Path):
+    """total_summaries in stats counts all files on disk, not just the capped list."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    # Create 25 daily summaries — more than the default limit of 20
+    for i in range(1, 26):
+        (daily_dir / f"2026-01-{i:02d}.md").write_text(f"# Day {i}\n\nContent.\n")
+
+    data = collect_workspace_data(workspace)
+    # The rendered list is capped at 20, but the stat should show the true count
+    assert len(data["summaries"]) == 20
+    assert data["stats"]["total_summaries"] == 25
+
+
+def test_generate_html_includes_summaries(workspace: Path, tmp_path: Path):
+    """Generated HTML includes summaries section when entries exist."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid stuff.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "Summaries" in html
+    assert "2026-03-07" in html
 
 
 def test_render_markdown_lists():

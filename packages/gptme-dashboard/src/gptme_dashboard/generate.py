@@ -543,6 +543,81 @@ def scan_tasks(workspace: Path) -> list[dict]:
     return tasks
 
 
+def _period_sort_key(period: str) -> str:
+    """Convert a period string to a sortable ISO date string.
+
+    Handles daily (2026-03-07), weekly (2026-W10), and monthly (2026-03) formats.
+    Without normalization, weekly strings (containing 'W') sort above daily/monthly
+    strings because 'W' > '0'-'9' in ASCII, breaking chronological order.
+    """
+    if "W" in period:
+        # ISO week: 2026-W10 → first day of that week
+        try:
+            year_str, week_str = period.split("-W")
+            d = date.fromisocalendar(int(year_str), int(week_str), 1)
+            return d.isoformat()
+        except (ValueError, AttributeError):
+            return period
+    elif re.match(r"^\d{4}-\d{2}$", period):
+        # Monthly: 2026-03 → 2026-03-01
+        return period + "-01"
+    else:
+        # Daily: already a sortable ISO date
+        return period
+
+
+def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> list[dict]:
+    """Scan knowledge/summaries for daily, weekly, and monthly summary files.
+
+    Looks for markdown files in ``knowledge/summaries/{daily,weekly,monthly}/``
+    and returns them sorted by date descending (most recent first), capped at
+    *limit* entries.
+
+    Each entry contains ``period`` (the filename stem), ``type`` (daily/weekly/monthly),
+    and ``preview`` (first content line).
+
+    Args:
+        workspace: Root directory of the workspace.
+        limit: Maximum number of entries to return.
+        period_type: If non-empty, only include entries of this type (daily/weekly/monthly).
+    """
+    summaries_dir = workspace / "knowledge" / "summaries"
+    if not summaries_dir.is_dir():
+        return []
+
+    entries: list[dict] = []
+
+    for pt in ("daily", "weekly", "monthly"):
+        if period_type and pt != period_type:
+            continue
+        type_dir = summaries_dir / pt
+        if not type_dir.is_dir():
+            continue
+        for md_file in type_dir.glob("*.md"):
+            try:
+                text = md_file.read_text(errors="replace")[:500]
+            except OSError:
+                text = ""
+            preview = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("#", "---", "```", "**")):
+                    preview = stripped[:120]
+                    break
+            entries.append(
+                {
+                    "period": md_file.stem,
+                    "type": pt,
+                    "preview": preview,
+                }
+            )
+
+    # Sort by period descending using a normalized sort key so that
+    # daily/weekly/monthly entries compare correctly across formats.
+    entries.sort(key=lambda e: _period_sort_key(e["period"]), reverse=True)
+    return entries[:limit]
+
+
 def detect_submodules(workspace: Path) -> list[dict]:
     """Detect git submodules with gptme-like structure.
 
@@ -1018,6 +1093,15 @@ def collect_workspace_data(
         for task in tasks:
             task["gh_url"] = github_blob_url(gh_repo_url, task["path"])
 
+    # Scan knowledge summaries (daily/weekly/monthly)
+    summaries = scan_summaries(workspace, limit=20)
+    summaries_dir = workspace / "knowledge" / "summaries"
+    total_summaries_count = sum(
+        len(list((summaries_dir / pt).glob("*.md")))
+        for pt in ("daily", "weekly", "monthly")
+        if (summaries_dir / pt).is_dir()
+    )
+
     # Optionally scan recent sessions
     sessions: list[dict] = []
     if include_sessions:
@@ -1039,6 +1123,7 @@ def collect_workspace_data(
         "total_journals": len(journals),
         "total_tasks": len(tasks),
         "task_states": task_states,
+        "total_summaries": total_summaries_count,
         "lesson_categories": lesson_categories,
     }
 
@@ -1057,6 +1142,7 @@ def collect_workspace_data(
         "sessions": sessions,
         "journals": journals,
         "tasks": tasks,
+        "summaries": summaries,
         "stats": stats,
         "lesson_categories": lesson_categories,
         "submodules": submodule_names,

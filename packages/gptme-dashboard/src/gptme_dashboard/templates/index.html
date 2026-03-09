@@ -263,6 +263,12 @@ tr:hover { background: var(--accent-dim); }
     <div class="label">Tasks</div>
   </div>
   {% endif %}
+  {% if stats.total_summaries %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_summaries }}</div>
+    <div class="label">Summaries</div>
+  </div>
+  {% endif %}
 </div>
 
 {% if readme_html %}
@@ -448,6 +454,30 @@ tr:hover { background: var(--accent-dim); }
   </table>
   {% if journals | length > 10 %}
   <button class="show-more-btn" data-noun="entries" onclick="toggleRows(this, 'journal-table')">Show all {{ journals | length }} entries</button>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if summaries %}
+<!-- Knowledge Summaries -->
+<section id="summaries">
+  <h2>Summaries <span class="count-badge">({{ summaries | length }})</span></h2>
+  <table id="summaries-table">
+    <thead>
+      <tr><th>Period</th><th>Type</th><th>Preview</th></tr>
+    </thead>
+    <tbody>
+    {% for s in summaries %}
+      <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{{ s.period }}</td>
+        <td><span class="tag tag-category">{{ s.type }}</span></td>
+        <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.preview }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if summaries | length > 10 %}
+  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }} summaries</button>
   {% endif %}
 </section>
 {% endif %}
