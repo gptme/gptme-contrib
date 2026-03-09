@@ -78,8 +78,15 @@ def _discover_all(
     return discovered
 
 
-def _count_unsynced(store: SessionStore, since_days: int = 14) -> int:
+def _count_unsynced(
+    store: SessionStore,
+    records: list[SessionRecord] | None = None,
+    since_days: int = 14,
+) -> int:
     """Count sessions discovered in the last *since_days* days not yet in the store.
+
+    Pass *records* to avoid a redundant ``store.load_all()`` call when the
+    caller has already loaded them (e.g. for ``store.stats()``).
 
     Uses the same path-matching logic as the ``sync`` command so the count
     accurately reflects what ``sync`` would import.
@@ -87,7 +94,9 @@ def _count_unsynced(store: SessionStore, since_days: int = 14) -> int:
     discovered = _discover_all(since_days=since_days)
     if not discovered:
         return 0
-    existing_paths = {r.journal_path for r in store.load_all() if r.journal_path}
+    if records is None:
+        records = store.load_all()
+    existing_paths = {r.journal_path for r in records if r.journal_path}
     return sum(1 for e in discovered if str(e["path"]) not in existing_paths)
 
 
@@ -148,16 +157,18 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
     ctx.ensure_object(dict)
     ctx.obj["sessions_dir"] = sessions_dir
     if ctx.invoked_subcommand is None:
+        _unsync_window = 14  # days to scan for unsynced sessions
         store = SessionStore(sessions_dir=sessions_dir)
-        s = store.stats()
+        records = store.load_all()
+        s = store.stats(records)
         if s.get("total", 0) == 0:
             _show_discovery_fallback()
         else:
             format_stats(s)
-            unsynced = _count_unsynced(store)
+            unsynced = _count_unsynced(store, records=records, since_days=_unsync_window)
             if unsynced > 0:
                 click.echo(
-                    f"\nTip: {unsynced} new session(s) available in the last 14 days. "
+                    f"\nTip: {unsynced} new session(s) available in the last {_unsync_window} days. "
                     "Run 'gptme-sessions sync' to import."
                 )
             else:
