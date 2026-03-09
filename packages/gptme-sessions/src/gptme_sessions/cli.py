@@ -606,15 +606,15 @@ def discover(
                 entry["signals_error"] = str(exc)
 
     if as_json:
-        if unsynced:
-            # Wrap with total_discovered so consumers can distinguish
-            # "nothing found" (total_discovered=0) from "all already synced"
-            # (total_discovered>0, sessions=[]).
-            click.echo(
-                json.dumps({"sessions": discovered, "total_discovered": total_discovered}, indent=2)
-            )
-        else:
-            click.echo(json.dumps(discovered, indent=2))
+        # Always emit a wrapper object so the schema is consistent regardless
+        # of whether --unsynced is used.  Consumers can always read
+        # ``output["sessions"]`` without branching on the flag.
+        # ``total_discovered`` lets callers distinguish "nothing found in
+        # window" (total_discovered=0, sessions=[]) from "all already synced"
+        # (total_discovered>0, sessions=[]) without needing --unsynced.
+        click.echo(
+            json.dumps({"sessions": discovered, "total_discovered": total_discovered}, indent=2)
+        )
     else:
         if not discovered:
             if unsynced and total_discovered > 0:

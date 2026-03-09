@@ -3219,7 +3219,7 @@ def test_cli_discover_harness_filter(tmp_path: Path, capsys, monkeypatch):
 
 
 def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
-    """discover --json outputs a valid JSON array."""
+    """discover --json outputs a consistent wrapper object {sessions, total_discovered}."""
     import json as _json
     import sys
 
@@ -3237,10 +3237,15 @@ def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     data = _json.loads(captured.out)
-    assert isinstance(data, list)
-    assert len(data) == 1
-    assert data[0]["harness"] == "codex"
-    assert data[0]["path"] == str(fake_file)
+    # Always a wrapper object — same schema whether or not --unsynced is used
+    assert isinstance(data, dict)
+    assert "sessions" in data
+    assert "total_discovered" in data
+    assert data["total_discovered"] == 1
+    sessions = data["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["harness"] == "codex"
+    assert sessions[0]["path"] == str(fake_file)
 
 
 def test_cli_discover_with_signals(tmp_path: Path, capsys, monkeypatch):
