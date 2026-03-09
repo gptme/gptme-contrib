@@ -4658,3 +4658,24 @@ def test_discover_unsynced_flag_all_synced(tmp_path: Path, monkeypatch: pytest.M
     )
     assert result.exit_code == 0, result.output
     assert "already synced" in result.output
+
+
+def test_discover_unsynced_flag_no_sessions_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--unsynced with no discovered sessions shows 'No sessions found', not 'already synced'."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--unsynced"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "No sessions found" in result.output
+    assert "already synced" not in result.output

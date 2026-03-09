@@ -579,11 +579,14 @@ def discover(
             discovered.append({"harness": "copilot", "path": str(p)})
 
     # Mark each entry as synced or not by cross-referencing the store.
+    # Normalize paths so symlinks/relative paths don't cause false mismatches.
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     records = store.load_all()
-    existing_paths = {r.journal_path for r in records if r.journal_path}
+    existing_paths = {str(Path(r.journal_path).resolve()) for r in records if r.journal_path}
     for entry in discovered:
-        entry["synced"] = entry["path"] in existing_paths
+        entry["synced"] = str(Path(entry["path"]).resolve()) in existing_paths
+
+    total_discovered = len(discovered)
 
     # Apply --unsynced filter before signal extraction (avoid wasted work).
     if unsynced:
@@ -606,8 +609,10 @@ def discover(
         click.echo(json.dumps(discovered, indent=2))
     else:
         if not discovered:
-            if unsynced:
-                click.echo(f"All sessions in the last {since_days} day(s) are already synced.")
+            if unsynced and total_discovered > 0:
+                click.echo(
+                    f"All {total_discovered} session(s) in the last {since_days} day(s) are already synced."
+                )
             else:
                 click.echo(f"No sessions found in the last {since_days} day(s).")
             return
