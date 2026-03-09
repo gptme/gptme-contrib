@@ -114,7 +114,7 @@ header h1 {
 <header>
   <h1>{{ task.title }}</h1>
   <div class="meta">
-    <span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span>
+    <span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span>
     {% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}
     {% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}
     {% if task.assigned_to %}<span class="tag">{{ task.assigned_to }}</span>{% endif %}
