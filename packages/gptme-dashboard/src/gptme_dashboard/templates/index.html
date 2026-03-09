@@ -400,7 +400,7 @@ tr:hover { background: var(--accent-dim); }
       <tbody>
       {% for pkg in packages %}
         <tr>
-          <td><strong>{{ pkg.name }}</strong></td>
+          <td><strong>{% if pkg.body %}<a href="{{ pkg.page_url }}">{{ pkg.name }}</a>{% else %}{{ pkg.name }}{% endif %}</strong></td>
           <td>{{ pkg.version }}</td>
           <td>{{ pkg.description }}</td>
           {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
