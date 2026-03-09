@@ -471,7 +471,7 @@ tr:hover { background: var(--accent-dim); }
     <tbody>
     {% for s in summaries %}
       <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
-        <td>{{ s.period }}</td>
+        <td><a href="{{ s.page_url }}">{{ s.period }}</a></td>
         <td><span class="tag tag-category">{{ s.type }}</span></td>
         <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.preview }}</td>
       </tr>

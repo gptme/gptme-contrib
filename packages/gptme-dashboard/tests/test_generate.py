@@ -40,6 +40,7 @@ from gptme_dashboard.generate import (
     scan_tasks,
     skill_page_path,
     strip_markdown_inline,
+    summary_page_path,
     task_page_path,
 )
 
@@ -3002,3 +3003,115 @@ def test_generate_index_no_feed_link_without_base_url(tmp_path: Path):
 
     index_html = (output / "index.html").read_text()
     assert "application/atom+xml" not in index_html
+
+
+# ---------------------------------------------------------------------------
+# Summary detail pages
+# ---------------------------------------------------------------------------
+
+
+def test_summary_page_path():
+    """summary_page_path converts type + period to the expected URL."""
+    assert summary_page_path("daily", "2026-03-07") == "summaries/daily/2026-03-07.html"
+    assert summary_page_path("weekly", "2026-W10") == "summaries/weekly/2026-W10.html"
+    assert summary_page_path("monthly", "2026-03") == "summaries/monthly/2026-03.html"
+
+
+def test_scan_summaries_includes_body_and_page_url(tmp_path: Path):
+    """scan_summaries includes body and page_url for each entry."""
+    daily_dir = tmp_path / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nDid great work.\n")
+
+    entries = scan_summaries(tmp_path)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert "body" in entry
+    assert "Did great work." in entry["body"]
+    assert entry["page_url"] == "summaries/daily/2026-03-07.html"
+    assert entry["path"] == "knowledge/summaries/daily/2026-03-07.md"
+
+
+def test_generate_summary_detail_pages(workspace: Path, tmp_path: Path):
+    """generate() produces per-summary HTML detail pages."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nWorked on the dashboard.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    page = output / "summaries" / "daily" / "2026-03-07.html"
+    assert page.exists(), f"Expected detail page at {page}"
+    html = page.read_text()
+    assert "Worked on the dashboard" in html
+
+
+def test_generate_index_links_to_summaries(workspace: Path, tmp_path: Path):
+    """Generated index.html links summary entries to their detail pages."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nContent.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    index_html = (output / "index.html").read_text()
+    assert 'href="summaries/daily/2026-03-07.html"' in index_html
+
+
+def test_summary_detail_breadcrumb(workspace: Path, tmp_path: Path):
+    """Summary detail page has breadcrumb linking back to index."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nContent.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    page = output / "summaries" / "daily" / "2026-03-07.html"
+    html = page.read_text()
+    assert "../../index.html" in html
+    assert "Summaries" in html
+
+
+def test_summary_detail_renders_markdown(workspace: Path, tmp_path: Path):
+    """Summary detail page renders markdown body as HTML."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text(
+        "# Daily Summary\n\n**Sessions**: 2 | **Commits**: 3\n\nGreat day.\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    page = output / "summaries" / "daily" / "2026-03-07.html"
+    html = page.read_text()
+    assert "<strong>Sessions</strong>" in html
+    assert "Great day." in html
+
+
+def test_generate_json_excludes_summary_body(workspace: Path):
+    """generate_json excludes body from summaries to avoid bloating data.json."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nContent.\n")
+
+    json_str = generate_json(workspace)
+    data = json.loads(json_str)
+    for s in data["summaries"]:
+        assert "body" not in s
+
+
+def test_generate_sitemap_includes_summaries(workspace: Path, tmp_path: Path):
+    """generate() includes summary detail pages in sitemap.xml when base_url given."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-03-07.md").write_text("# Daily Summary\n\nContent.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output, base_url="https://example.github.io/repo/")
+
+    sitemap = (output / "sitemap.xml").read_text()
+    assert "summaries/daily/2026-03-07.html" in sitemap

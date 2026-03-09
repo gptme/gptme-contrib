@@ -121,6 +121,14 @@ def package_page_path(package_path: str) -> str:
     return (Path(package_path) / "index.html").as_posix()
 
 
+def summary_page_path(period_type: str, period: str) -> str:
+    """Convert a knowledge summary's type and period to its detail page URL path.
+
+    E.g. period_type='daily', period='2026-03-07' -> 'summaries/daily/2026-03-07.html'
+    """
+    return f"summaries/{period_type}/{period}.html"
+
+
 def journal_page_path(date: str, name: str) -> str:
     """Convert a journal entry's date + name to its detail page URL path.
 
@@ -603,7 +611,7 @@ def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> l
     *limit* entries.
 
     Each entry contains ``period`` (the filename stem), ``type`` (daily/weekly/monthly),
-    and ``preview`` (first content line).
+    ``preview`` (first content line), ``body`` (full markdown), and ``page_url``.
 
     Args:
         workspace: Root directory of the workspace.
@@ -624,11 +632,11 @@ def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> l
             continue
         for md_file in type_dir.glob("*.md"):
             try:
-                text = md_file.read_text(errors="replace")[:500]
+                text = md_file.read_text(errors="replace")
             except OSError:
                 text = ""
             preview = ""
-            for line in text.splitlines():
+            for line in text[:500].splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith(("#", "---", "```", "**")):
                     preview = stripped[:120]
@@ -638,6 +646,9 @@ def scan_summaries(workspace: Path, limit: int = 20, period_type: str = "") -> l
                     "period": md_file.stem,
                     "type": pt,
                     "preview": preview,
+                    "body": text,
+                    "path": f"knowledge/summaries/{pt}/{md_file.name}",
+                    "page_url": summary_page_path(pt, md_file.stem),
                 }
             )
 
@@ -1095,6 +1106,13 @@ def generate_sitemap(data: dict, base_url: str) -> str:
         if page_url and plugin.get("body") and not plugin.get("source"):
             lines.append(url_entry(base_url + page_url, priority="0.7"))
 
+    # Summary detail pages (daily/weekly/monthly)
+    for summary in data.get("summaries", []):
+        page_url = summary.get("page_url")
+        if page_url:
+            lastmod = summary.get("period", "")[:10]
+            lines.append(url_entry(base_url + page_url, lastmod=lastmod, priority="0.5"))
+
     lines.append("</urlset>")
     return "\n".join(lines) + "\n"
 
@@ -1264,6 +1282,9 @@ def collect_workspace_data(
 
     # Scan knowledge summaries (daily/weekly/monthly)
     summaries = scan_summaries(workspace, limit=20)
+    if gh_repo_url:
+        for summary in summaries:
+            summary["gh_url"] = github_blob_url(gh_repo_url, summary["path"])
     summaries_dir = workspace / "knowledge" / "summaries"
     total_summaries_count = sum(
         len(list((summaries_dir / pt).glob("*.md")))
@@ -1455,6 +1476,22 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(pkg_html)
 
+    # Generate per-summary detail pages
+    summary_template = env.get_template("summary.html")
+    for summary in data["summaries"]:
+        # page_url is e.g. "summaries/daily/2026-03-07.html" (depth=2) → root_prefix="../../"
+        depth = len(Path(summary["page_url"]).parts) - 1
+        root_prefix = "../" * depth
+        summary_html = summary_template.render(
+            workspace_name=data["workspace_name"],
+            summary=summary,
+            body_html=render_markdown_to_html(summary["body"]),
+            root_prefix=root_prefix,
+        )
+        page_path = output / summary["page_url"]
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(summary_html)
+
     # Generate sitemap.xml and Atom feed when a base URL is available.
     # effective_base_url is already resolved above (handles base_url="-" suppression
     # and auto-derivation from gh_repo_url), so reuse it here directly.
@@ -1471,6 +1508,7 @@ def generate(
     plugin_page_count = len(plugins_with_pages)
     task_count = len(data["tasks"])
     package_page_count = len(packages_with_pages)
+    summary_count = len(data["summaries"])
     session_msg = f", {stats['total_sessions']} sessions" if include_sessions else ""
     print(f"Generated dashboard at {output / 'index.html'}")
     print(
@@ -1479,7 +1517,8 @@ def generate(
         f"{stats['total_packages']} packages ({package_page_count} detail pages), "
         f"{stats['total_skills']} skills ({stats['total_skills']} detail pages), "
         f"{journal_count} journals ({journal_count} detail pages), "
-        f"{task_count} tasks ({task_count} detail pages)"
+        f"{task_count} tasks ({task_count} detail pages), "
+        f"{summary_count} summaries ({summary_count} detail pages)"
         f"{session_msg}"
     )
 
@@ -1535,6 +1574,9 @@ def generate_json(
         ],
         "packages": [
             {k: v for k, v in pkg.items() if k not in _JSON_EXCLUDE} for pkg in data["packages"]
+        ],
+        "summaries": [
+            {k: v for k, v in s.items() if k not in _JSON_EXCLUDE} for s in data["summaries"]
         ],
     }
     json_str = json.dumps(export_data, indent=2)
