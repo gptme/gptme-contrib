@@ -514,7 +514,7 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody>
     {% for item in guidance %}
-      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}"{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
+      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}"{% if loop.index > 5 %} class="collapsed-row" style="display:none"{% endif %}>
         <td>{% if item.page_url %}<a href="{{ item.page_url }}">{{ item.title | default(item.name, true) }}</a>{% else %}{{ item.title | default(item.name, true) }}{% endif %}</td>
         <td><span class="tag tag-kind-{{ item.kind }}">{{ item.kind }}</span></td>
         <td><span class="tag tag-category">{{ item.category }}</span></td>
@@ -526,8 +526,8 @@ tr:hover { background: var(--accent-dim); }
     {% endfor %}
     </tbody>
   </table>
-  {% if guidance | length > 10 %}
-  <button class="show-more-btn" id="guidance-show-more" data-noun="items" onclick="toggleRows(this, 'guidance-table')">Show all {{ guidance | length }} items</button>
+  {% if guidance | length > 5 %}
+  <button class="show-more-btn" id="guidance-show-more" data-noun="items" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills &rarr;</button>
   {% endif %}
 </section>
 {% endblock %}
@@ -592,7 +592,7 @@ function applyFilters() {
     } else {
       // Restore collapse state
       idx++;
-      if (idx > 10) {
+      if (idx > 5) {
         row.classList.add('collapsed-row');
         row.style.display = 'none';
       } else {
@@ -692,9 +692,16 @@ async function loadRecentSessions() {
     const resp = await fetch('/api/sessions?limit=20');
     if (!resp.ok) { hide('recent-sessions'); return; }
     const sessions = await resp.json();
-    if (!Array.isArray(sessions) || sessions.length === 0) { hide('recent-sessions'); return; }
     const tbody = document.querySelector('#dynamic-sessions-table tbody');
     if (!tbody) { hide('recent-sessions'); return; }
+
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:1.5rem">'
+        + 'No sessions found for this workspace. '
+        + 'Run <code>gptme-dashboard generate --sessions</code> or use the session store to populate.'
+        + '</td></tr>';
+      return;
+    }
 
     tbody.innerHTML = sessions.map(s => {
       const time = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';

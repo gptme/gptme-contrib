@@ -41,14 +41,14 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     from . import generate as _gen_mod
     from .generate import generate, read_workspace_config, scan_journals, scan_summaries, scan_tasks
 
-    # Generate static site if needed
+    # Generate (or refresh) static site on every serve start.
+    # Regenerating ensures the site reflects the current workspace state —
+    # journals, tasks, lessons added since the last ``generate`` run are
+    # immediately visible.  Sessions are excluded so the live /api/sessions
+    # endpoint provides fresh data without a duplicate static panel.
     if site_dir is None:
         site_dir = workspace / "_site"
-    if not (site_dir / "index.html").exists():
-        # Don't bake sessions into the static HTML in serve mode — the live
-        # /api/sessions endpoint provides fresh session data.  Baking them in
-        # would create a duplicate sessions panel (static + dynamic).
-        generate(workspace, site_dir, include_sessions=False)
+    generate(workspace, site_dir, include_sessions=False)
 
     app = Flask(
         __name__,
