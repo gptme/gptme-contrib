@@ -497,12 +497,8 @@ def test_generate_kind_filter_buttons(workspace: Path, tmp_path: Path):
     # Kind filter row should be present
     assert 'id="kind-filters"' in html
 
-    # Lesson and Skill kind buttons
-    assert 'data-kind="lesson"' in html
-    assert 'data-kind="skill"' in html
+    # All three kind values must appear (covers both filter buttons and tbody rows)
     assert 'data-kind="all"' in html
-
-    # Rows should have data-kind attributes for JS filtering
     assert 'data-kind="lesson"' in html
     assert 'data-kind="skill"' in html
 
