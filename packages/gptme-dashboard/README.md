@@ -85,6 +85,19 @@ Static gh-pages deployments are unaffected — the dynamic panels only appear wh
 
 Requires `pip install "gptme-dashboard[serve]"`.
 
+### Sitemap generation
+
+A `sitemap.xml` is automatically written alongside `index.html` when a GitHub remote is
+detected (the GitHub Pages URL is auto-derived). Override or suppress with `--base-url`:
+
+```bash
+# Explicit base URL
+gptme-dashboard generate --workspace . --base-url https://owner.github.io/repo/
+
+# Suppress sitemap (e.g. for local preview only)
+gptme-dashboard generate --workspace . --base-url -
+```
+
 ## Configuration
 
 Add named links to your `gptme.toml` to expose them in the dashboard header:
