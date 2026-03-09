@@ -2,6 +2,8 @@
 
 {% block title %}{{ workspace_name }} - gptme workspace{% endblock %}
 
+{% block extra_head %}{% if feed_url %}<link rel="alternate" type="application/atom+xml" title="{{ workspace_name }} Journal" href="{{ feed_url }}">{% endif %}{% endblock %}
+
 {% block extra_style %}
 .container {
   max-width: 1200px;

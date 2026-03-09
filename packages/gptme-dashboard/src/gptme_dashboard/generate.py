@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -993,6 +993,25 @@ def detect_github_url(workspace: Path) -> str:
     return ""
 
 
+def github_pages_url(gh_repo_url: str) -> str:
+    """Derive the GitHub Pages base URL from a github.com repository URL.
+
+    Converts ``https://github.com/owner/repo`` to ``https://owner.github.io/repo/``.
+    For user/org site repos (``owner/owner.github.io``), returns ``https://owner.github.io/``.
+    Returns empty string if the input is not a github.com URL.
+    """
+    if not gh_repo_url:
+        return ""
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", gh_repo_url)
+    if not m:
+        return ""
+    owner, repo = m.group(1), m.group(2)
+    # User/org site repos (owner/owner.github.io) serve from the root, not a subpath.
+    if repo.lower() == f"{owner.lower()}.github.io":
+        return f"https://{owner}.github.io/"
+    return f"https://{owner}.github.io/{repo}/"
+
+
 def github_blob_url(gh_repo_url: str, path: str, prefix: str = "") -> str:
     """Build a GitHub blob URL for a file path.
 
@@ -1088,6 +1107,57 @@ def generate_sitemap(data: dict, base_url: str) -> str:
             lines.append(url_entry(base_url + page_url, priority="0.7"))
 
     lines.append("</urlset>")
+    return "\n".join(lines) + "\n"
+
+
+def generate_atom_feed(data: dict, base_url: str, workspace_name: str) -> str:
+    """Generate an Atom 1.0 feed for recent journal entries.
+
+    ``base_url`` must end with ``/`` (e.g. ``https://owner.github.io/repo/``).
+
+    Each journal entry becomes an ``<entry>`` with its date as ``<updated>``
+    and a ``<summary>`` from the preview text.  At most 20 entries are included
+    to keep the feed lean.
+
+    Returns the feed XML as a string.
+    """
+    base_url = base_url.rstrip("/") + "/"
+    feed_url = base_url + "feed.xml"
+
+    journals = [j for j in data.get("journals", []) if j.get("page_url")]
+
+    if journals:
+        # Journals are already sorted newest-first; derive feed <updated> from first
+        updated = journals[0]["date"] + "T00:00:00Z"
+    else:
+        updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    lines: list[str] = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<feed xmlns="http://www.w3.org/2005/Atom">',
+        f"  <title>{html.escape(workspace_name + ' Journal')}</title>",
+        f'  <link href="{html.escape(base_url)}" rel="alternate"/>',
+        f'  <link href="{html.escape(feed_url)}" rel="self"/>',
+        f"  <id>{html.escape(base_url)}</id>",
+        f"  <updated>{updated}</updated>",
+    ]
+
+    for journal in journals[:20]:
+        entry_url = base_url + journal["page_url"]
+        entry_updated = journal["date"] + "T00:00:00Z"
+        entry_title = html.escape(f"{journal['date']} — {journal['name']}")
+        lines += [
+            "  <entry>",
+            f"    <title>{entry_title}</title>",
+            f'    <link href="{html.escape(entry_url)}"/>',
+            f"    <id>{html.escape(entry_url)}</id>",
+            f"    <updated>{entry_updated}</updated>",
+        ]
+        if journal.get("preview"):
+            lines.append(f"    <summary>{html.escape(journal['preview'])}</summary>")
+        lines.append("  </entry>")
+
+    lines.append("</feed>")
     return "\n".join(lines) + "\n"
 
 
@@ -1272,10 +1342,10 @@ def generate(
     (e.g. for JSON export) without rescanning.
 
     When *base_url* is provided (e.g. ``https://owner.github.io/repo/``), a
-    ``sitemap.xml`` is written alongside ``index.html``.  When omitted, the
-    function tries to auto-derive the URL from the detected GitHub remote using
+    ``sitemap.xml`` and Atom ``feed.xml`` are written alongside ``index.html``.
+    When omitted, the URL is auto-derived from the detected GitHub remote using
     the standard GitHub Pages pattern (``https://<owner>.github.io/<repo>/``).
-    Pass ``base_url="-"`` to suppress sitemap generation entirely.
+    Pass ``base_url="-"`` to suppress sitemap/feed generation entirely.
     """
     if template_dir is None:
         template_dir = Path(__file__).parent / "templates"
@@ -1291,10 +1361,23 @@ def generate(
 
     template = env.get_template("index.html")
     readme_html = render_markdown_to_html(data["readme"]["body"]) if data.get("readme") else ""
-    html = template.render(**data, readme_html=readme_html)
+
+    # Resolve effective base URL for feed generation and autodiscovery link.
+    # base_url="-" suppresses feed generation entirely.
+    effective_base_url = ""
+    if base_url == "-":
+        pass  # suppressed
+    elif base_url:
+        effective_base_url = base_url
+    else:
+        effective_base_url = github_pages_url(data.get("gh_repo_url", ""))
+
+    feed_url = (effective_base_url.rstrip("/") + "/feed.xml") if effective_base_url else ""
+
+    index_html = template.render(**data, readme_html=readme_html, feed_url=feed_url)
 
     output.mkdir(parents=True, exist_ok=True)
-    (output / "index.html").write_text(html)
+    (output / "index.html").write_text(index_html)
 
     # Generate per-item detail pages for the unified guidance list (lessons + skills)
     guidance_template = env.get_template("guidance.html")
@@ -1391,6 +1474,9 @@ def generate(
             sitemap_xml = generate_sitemap(data, effective_base_url)
             (output / "sitemap.xml").write_text(sitemap_xml)
             print(f"Generated sitemap at {output / 'sitemap.xml'} ({effective_base_url})")
+            feed_xml = generate_atom_feed(data, effective_base_url, data["workspace_name"])
+            (output / "feed.xml").write_text(feed_xml)
+            print(f"Generated Atom feed at {output / 'feed.xml'} ({effective_base_url})")
 
     stats = data["stats"]
     journal_count = len(data["journals"])
