@@ -653,7 +653,12 @@ if (taskStateBtns.length > 0 && tasksTable) {
       const isFiltering = state !== 'all';
       const rows = tasksTable.querySelectorAll('tbody tr');
 
-      if (tasksShowMoreBtn) tasksShowMoreBtn.style.display = isFiltering ? 'none' : '';
+      if (tasksShowMoreBtn) {
+        tasksShowMoreBtn.style.display = isFiltering ? 'none' : '';
+        if (!isFiltering) {
+          tasksShowMoreBtn.textContent = tasksShowMoreBtn.dataset.collapsedLabel || ('Show all ' + rows.length + ' tasks');
+        }
+      }
 
       let idx = 0;
       rows.forEach(row => {

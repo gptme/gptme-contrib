@@ -3178,4 +3178,4 @@ def test_generate_task_rows_have_data_state(workspace: Path, tmp_path: Path):
     generate(workspace, output)
 
     html = (output / "index.html").read_text()
-    assert 'data-state="active"' in html
+    assert '<tr data-state="active"' in html
