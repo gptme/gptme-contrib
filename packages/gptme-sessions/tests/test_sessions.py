@@ -4155,6 +4155,94 @@ def test_annotate_empty_id_no_options_reports_id_error(tmp_path: Path):
     assert "Session ID must not be empty" in result.output
 
 
+# -- _count_unsynced and default view unsync hint ----------------------------
+
+
+def test_count_unsynced_returns_zero_when_all_synced(tmp_path: Path, monkeypatch):
+    """_count_unsynced returns 0 when all discovered sessions are already in the store."""
+    from gptme_sessions.cli import _count_unsynced
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    # Simulate an already-synced record (journal_path = trajectory path)
+    store.append(SessionRecord(harness="gptme", journal_path=str(fake_file)))
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    assert _count_unsynced(store) == 0
+
+
+def test_count_unsynced_returns_count_of_new_sessions(tmp_path: Path, monkeypatch):
+    """_count_unsynced counts discovered sessions not yet in the store."""
+    from gptme_sessions.cli import _count_unsynced
+
+    new_file = tmp_path / "new_session.jsonl"
+    new_file.touch()
+
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    # Store is empty — the discovered file has not been synced yet
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [new_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    assert _count_unsynced(store) == 1
+
+
+def test_default_view_shows_unsync_count_when_pending(tmp_path: Path, capsys, monkeypatch):
+    """Default gptme-sessions view shows unsync count when sessions are pending import."""
+    import sys
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", outcome="productive"))
+
+    new_file = tmp_path / "new_session.jsonl"
+    new_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [new_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir)])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1 new session(s) available" in captured.out
+    assert "gptme-sessions sync" in captured.out
+
+
+def test_default_view_shows_generic_hint_when_fully_synced(tmp_path: Path, capsys, monkeypatch):
+    """Default view shows generic sync hint when all discovered sessions are already in store."""
+    import sys
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", outcome="productive"))
+
+    # No new sessions discovered
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir)])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "new session(s) available" not in captured.out
+    assert "gptme-sessions sync" in captured.out
+
+
 # -- sync model extraction + signals backfill ---------------------------------
 
 
