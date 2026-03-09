@@ -36,6 +36,7 @@ from gptme_dashboard.generate import (
     scan_summaries,
     scan_tasks,
     skill_page_path,
+    strip_markdown_inline,
     task_page_path,
 )
 
@@ -313,6 +314,45 @@ def test_scan_plugins(workspace: Path):
     assert len(plugins) == 1
     assert plugins[0]["name"] == "gptme-test-plugin"
     assert "testing" in plugins[0]["description"].lower()
+
+
+def test_scan_plugins_strips_markdown_from_description(tmp_path: Path):
+    """Plugin descriptions from README.md should have inline markdown stripped."""
+    plugin_dir = tmp_path / "plugins" / "gptme-example"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text(
+        "# Example Plugin\n\n**Purpose**: Does something **useful** with `code`.\n"
+    )
+    plugins = scan_plugins(tmp_path)
+    assert len(plugins) == 1
+    desc = plugins[0]["description"]
+    assert "**" not in desc
+    assert "`" not in desc
+    assert "Purpose" in desc
+    assert "useful" in desc
+
+
+def test_strip_markdown_inline():
+    """strip_markdown_inline should remove bold, italic, and code markers."""
+    assert strip_markdown_inline("**bold** text") == "bold text"
+    assert strip_markdown_inline("*italic* text") == "italic text"
+    assert strip_markdown_inline("__bold__ text") == "bold text"
+    assert strip_markdown_inline("_italic_ text") == "italic text"
+    assert strip_markdown_inline("`code` here") == "code here"
+    assert strip_markdown_inline("**Purpose**: does _this_") == "Purpose: does this"
+    assert strip_markdown_inline("plain text") == "plain text"
+    # snake_case identifiers must not be corrupted by the italic regex
+    assert (
+        strip_markdown_inline("A gptme_hooks_plugin description")
+        == "A gptme_hooks_plugin description"
+    )
+    # dunder names embedded in identifiers must not be corrupted by the __bold__ regex
+    assert (
+        strip_markdown_inline("calls gptme__magic__hook internally")
+        == "calls gptme__magic__hook internally"
+    )
+    # standalone __dunder__ formatting IS stripped (markdown bold syntax)
+    assert strip_markdown_inline("A __Ralph Loop__ plugin") == "A Ralph Loop plugin"
 
 
 def test_scan_packages(workspace: Path):
