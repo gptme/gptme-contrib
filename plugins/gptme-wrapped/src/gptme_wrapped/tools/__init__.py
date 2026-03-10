@@ -66,10 +66,13 @@ def _analyze_conversation(conv_dir: Path) -> dict[str, Any]:
             if not metadata:
                 continue
 
-            stats["input_tokens"] += metadata.get("input_tokens", 0)
-            stats["output_tokens"] += metadata.get("output_tokens", 0)
-            stats["cache_read_tokens"] += metadata.get("cache_read_tokens", 0)
-            stats["cache_creation_tokens"] += metadata.get("cache_creation_tokens", 0)
+            # Support both nested format (usage sub-dict) and legacy flat format
+            # Select source dict once per message to avoid per-field falsy fallback issues
+            usage = metadata.get("usage") or metadata
+            stats["input_tokens"] += usage.get("input_tokens", 0)
+            stats["output_tokens"] += usage.get("output_tokens", 0)
+            stats["cache_read_tokens"] += usage.get("cache_read_tokens", 0)
+            stats["cache_creation_tokens"] += usage.get("cache_creation_tokens", 0)
             stats["cost"] += metadata.get("cost", 0) or 0
 
             model = metadata.get("model", "unknown")
