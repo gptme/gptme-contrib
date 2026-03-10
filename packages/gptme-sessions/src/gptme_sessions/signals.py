@@ -422,15 +422,12 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
             model = m
 
         # Support both nested format (usage sub-dict) and legacy flat format
-        usage = metadata.get("usage", {})
-        input_tokens += usage.get("input_tokens", 0) or metadata.get("input_tokens", 0)
-        output_tokens += usage.get("output_tokens", 0) or metadata.get("output_tokens", 0)
-        cache_read_tokens += usage.get("cache_read_tokens", 0) or metadata.get(
-            "cache_read_tokens", 0
-        )
-        cache_creation_tokens += usage.get("cache_creation_tokens", 0) or metadata.get(
-            "cache_creation_tokens", 0
-        )
+        # Select source dict once per message to avoid per-field falsy fallback issues
+        usage = metadata.get("usage") or metadata
+        input_tokens += usage.get("input_tokens", 0)
+        output_tokens += usage.get("output_tokens", 0)
+        cache_read_tokens += usage.get("cache_read_tokens", 0)
+        cache_creation_tokens += usage.get("cache_creation_tokens", 0)
         cost += metadata.get("cost", 0.0)
 
     total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
