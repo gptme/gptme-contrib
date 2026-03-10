@@ -850,3 +850,345 @@ def test_api_schedule_darwin_empty(client):
     data = resp.get_json()
     assert data["platform"] == "Darwin"
     assert data["timers"] == []
+
+
+# ── Service Health endpoint tests ──
+
+
+def test_api_health_structure(client):
+    """Test /api/services/health returns correct top-level structure."""
+    with unittest.mock.patch("platform.system", return_value="Linux"):
+        # Mock list-units returning no relevant services
+        mock_result = unittest.mock.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "[]"
+        with unittest.mock.patch("subprocess.run", return_value=mock_result):
+            resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "services" in data
+    assert "platform" in data
+    assert isinstance(data["services"], list)
+    assert data["platform"] == "Linux"
+
+
+def test_api_health_non_linux(client):
+    """Test /api/services/health returns empty on non-Linux."""
+    with unittest.mock.patch("platform.system", return_value="Darwin"):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["services"] == []
+    assert data["platform"] == "Darwin"
+
+
+def _make_subprocess_side_effect(
+    list_units_json: str,
+    show_output: str = "",
+    journal_output: str = "",
+):
+    """Build a side_effect for subprocess.run that handles multiple commands."""
+
+    def _side_effect(cmd, **_kwargs):
+        result = unittest.mock.MagicMock()
+        result.returncode = 0
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+
+        if "list-units" in cmd_str:
+            result.stdout = list_units_json
+        elif "systemctl" in cmd_str and "show" in cmd_str:
+            result.stdout = show_output
+        elif "journalctl" in cmd_str:
+            result.stdout = journal_output
+        else:
+            result.stdout = ""
+        return result
+
+    return _side_effect
+
+
+def test_api_health_healthy_service(client):
+    """Test /api/services/health classifies an active service with no errors as healthy."""
+
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API Server",
+                "active": "active",
+                "sub": "running",
+            }
+        ]
+    )
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=1234\nActiveEnterTimestamp=Mon 2024-01-15 10:00:00 UTC\nNRestarts=0\nMemoryCurrent=52428800\n",
+        journal_output="",  # no errors
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["services"]) == 1
+    svc = data["services"][0]
+    assert svc["name"] == "gptme-server.service"
+    assert svc["health"] == "healthy"
+    assert svc["active"] == "active"
+    assert svc["pid"] == 1234
+    assert svc["memory_bytes"] == 52428800
+    assert svc["restart_count"] == 0
+    assert svc["recent_errors"] == 0
+    assert svc["uptime_seconds"] > 0
+
+
+def test_api_health_degraded_service(client):
+    """Test /api/services/health classifies service with many errors as degraded."""
+
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API Server",
+                "active": "active",
+                "sub": "running",
+            }
+        ]
+    )
+    # 25 error lines
+    error_lines = "\n".join([f"Mar 10 10:0{i}:00 host unit[1]: Error {i}" for i in range(25)])
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=5678\nActiveEnterTimestamp=Mon 2024-01-15 12:00:00 UTC\nNRestarts=0\nMemoryCurrent=104857600\n",
+        journal_output=error_lines,
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    svc = resp.get_json()["services"][0]
+    assert svc["health"] == "degraded"
+    assert svc["recent_errors"] == 25
+
+
+def test_api_health_unhealthy_inactive_service(client):
+    """Test /api/services/health classifies inactive service as unhealthy."""
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API Server",
+                "active": "inactive",
+                "sub": "dead",
+            }
+        ]
+    )
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=0\nActiveEnterTimestamp=n/a\nNRestarts=0\nMemoryCurrent=[not set]\n",
+        journal_output="",
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    svc = resp.get_json()["services"][0]
+    assert svc["health"] == "unhealthy"
+    assert svc["active"] == "inactive"
+    assert svc["memory_bytes"] == 0
+
+
+def test_api_health_memory_uint64_max_sentinel(client):
+    """Test /api/services/health treats MemoryCurrent UINT64_MAX sentinel as no data."""
+    # systemd returns 18446744073709551615 (UINT64_MAX) when MemoryAccounting is
+    # disabled or the service is stopped. Must not be surfaced as ~17.2 EB.
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API Server",
+                "active": "active",
+                "sub": "running",
+            }
+        ]
+    )
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=1234\nActiveEnterTimestamp=Mon 2024-01-15 10:00:00 UTC\nNRestarts=0\nMemoryCurrent=18446744073709551615\n",
+        journal_output="",
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    svc = resp.get_json()["services"][0]
+    assert svc["memory_bytes"] == 0, "UINT64_MAX sentinel must be treated as no data"
+
+
+def test_api_health_warning_service(client):
+    """Test /api/services/health classifies service with few errors as warning."""
+
+    units_json = json.dumps(
+        [
+            {
+                "unit": "testbot-autonomous.service",
+                "description": "TestBot Autonomous",
+                "active": "active",
+                "sub": "running",
+            }
+        ]
+    )
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=9999\nActiveEnterTimestamp=Mon 2024-01-15 08:00:00 UTC\nNRestarts=1\nMemoryCurrent=33554432\n",
+        journal_output="Mar 10 10:00:00 host unit[1]: Warning line\n",
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    svc = resp.get_json()["services"][0]
+    assert svc["health"] == "warning"
+    assert svc["restart_count"] == 1
+    assert svc["recent_errors"] == 1
+
+
+def test_api_health_systemctl_failure(client):
+    """Test /api/services/health handles systemctl failure gracefully."""
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["services"] == []
+
+
+def test_api_health_subprocess_timeout(client):
+    """Test /api/services/health handles subprocess timeout."""
+    import subprocess
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("systemctl", 5)
+        ),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["services"] == []
+
+
+def test_api_health_caching(client):
+    """Test /api/services/health caches results for 60 seconds."""
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-test.service",
+                "description": "Test",
+                "active": "active",
+                "sub": "running",
+            }
+        ]
+    )
+
+    call_count = 0
+    original_side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=100\nActiveEnterTimestamp=n/a\nNRestarts=0\nMemoryCurrent=[not set]\n",
+        journal_output="",
+    )
+
+    def counting_side_effect(cmd, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_side_effect(cmd, **kwargs)
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=counting_side_effect),
+    ):
+        resp1 = client.get("/api/services/health")
+        first_count = call_count
+        resp2 = client.get("/api/services/health")
+        second_count = call_count
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    # Second call should use cache (no additional subprocess calls)
+    assert second_count == first_count
+
+
+def test_api_health_multiple_services(client):
+    """Test /api/services/health handles multiple services correctly."""
+
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API",
+                "active": "active",
+                "sub": "running",
+            },
+            {
+                "unit": "testbot-autonomous.service",
+                "description": "TestBot Auto",
+                "active": "inactive",
+                "sub": "dead",
+            },
+        ]
+    )
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=100\nActiveEnterTimestamp=n/a\nNRestarts=0\nMemoryCurrent=[not set]\n",
+        journal_output="",
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["services"]) == 2
+    names = [s["name"] for s in data["services"]]
+    assert "gptme-server.service" in names
+    assert "testbot-autonomous.service" in names
