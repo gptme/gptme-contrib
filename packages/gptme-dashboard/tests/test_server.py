@@ -645,3 +645,178 @@ def test_api_summaries_invalid_type_returns_400(tmp_path: Path):
         data = resp.get_json()
         assert "error" in data
         assert "quarterly" in data["error"]
+
+
+# --- Schedule (Phase 3) ---
+
+
+def test_api_schedule_structure(client):
+    """Test /api/schedule returns correct structure."""
+    resp = client.get("/api/schedule")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "timers" in data
+    assert "platform" in data
+    assert isinstance(data["timers"], list)
+    assert isinstance(data["platform"], str)
+
+
+def test_api_schedule_linux_detection(client):
+    """Test /api/schedule parses systemd timers matching agent name on Linux."""
+    systemctl_output = json.dumps(
+        [
+            {
+                "next": 1773150600000000,
+                "left": 1773150600000000,
+                "last": 1773150000046572,
+                "passed": 1830362162103,
+                "unit": "testbot-autonomous.timer",
+                "activates": "testbot-autonomous.service",
+            },
+            {
+                "next": 1773150900000000,
+                "left": 1773150900000000,
+                "last": 1773150300000000,
+                "passed": 1830662243774,
+                "unit": "gptme-server.timer",
+                "activates": "gptme-server.service",
+            },
+            {
+                "next": 0,
+                "left": 0,
+                "last": 0,
+                "passed": 0,
+                "unit": "unrelated.timer",
+                "activates": "unrelated.service",
+            },
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = systemctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/schedule")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["platform"] == "Linux"
+    # "testbot" matches agent name, "gptme" matches keyword; "unrelated" excluded
+    assert len(data["timers"]) == 2
+    names = {t["name"] for t in data["timers"]}
+    assert "testbot-autonomous.timer" in names
+    assert "gptme-server.timer" in names
+    assert "unrelated.timer" not in names
+
+
+def test_api_schedule_timestamp_conversion(client):
+    """Test /api/schedule converts microsecond timestamps to ISO format."""
+    systemctl_output = json.dumps(
+        [
+            {
+                "next": 1773150600000000,  # 2026-03-08T10:10:00 UTC
+                "left": 1773150600000000,
+                "last": 1773150000046572,
+                "passed": 1830362162103,
+                "unit": "gptme-test.timer",
+                "activates": "gptme-test.service",
+            },
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = systemctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/schedule")
+
+    data = resp.get_json()
+    timer = data["timers"][0]
+    assert timer["next"] is not None
+    assert timer["last"] is not None
+    # ISO format should contain 'T' separator
+    assert "T" in timer["next"]
+    assert "T" in timer["last"]
+    assert timer["activates"] == "gptme-test.service"
+
+
+def test_api_schedule_zero_timestamps(client):
+    """Test /api/schedule handles zero timestamps (never triggered) as None."""
+    systemctl_output = json.dumps(
+        [
+            {
+                "next": 0,
+                "left": 0,
+                "last": 0,
+                "passed": 0,
+                "unit": "gptme-inactive.timer",
+                "activates": "gptme-inactive.service",
+            },
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = systemctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/schedule")
+
+    data = resp.get_json()
+    assert len(data["timers"]) == 1
+    timer = data["timers"][0]
+    assert timer["next"] is None
+    assert timer["last"] is None
+
+
+def test_api_schedule_systemctl_failure(client):
+    """Test /api/schedule returns empty list when systemctl fails."""
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/schedule")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["timers"] == []
+
+
+def test_api_schedule_timeout_handled(client):
+    """Test /api/schedule handles subprocess timeout gracefully."""
+    import subprocess
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("systemctl", 5)
+        ),
+    ):
+        resp = client.get("/api/schedule")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["timers"] == []
+
+
+def test_api_schedule_darwin_empty(client):
+    """Test /api/schedule returns empty timers on macOS (not yet supported)."""
+    with unittest.mock.patch("platform.system", return_value="Darwin"):
+        resp = client.get("/api/schedule")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["platform"] == "Darwin"
+    assert data["timers"] == []

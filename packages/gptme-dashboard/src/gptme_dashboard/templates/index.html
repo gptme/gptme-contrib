@@ -352,6 +352,17 @@ tr:hover { background: var(--accent-dim); }
   </table>
 </section>
 
+<!-- Dynamic: Schedule (shown when serve API is available) -->
+<section id="agent-schedule" class="dynamic-panel" style="display:none">
+  <h2>Schedule</h2>
+  <table id="schedule-table">
+    <thead>
+      <tr><th>Timer</th><th>Activates</th><th>Last Trigger</th><th>Next Run</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
 <!-- Dynamic: Journals (shown when serve API is available and no static journals) -->
 {% if not journals %}
 <section id="dynamic-journals" class="dynamic-panel" style="display:none">
@@ -728,6 +739,7 @@ async function initDynamic() {
     loadSessionStats();
     loadRecentSessions();
     loadServices();
+    loadSchedule();
     if (document.getElementById('dynamic-journals')) loadJournals();
   } catch (e) {
     // No backend — stay in static mode
@@ -889,6 +901,50 @@ async function loadServices() {
         + '</tr>';
     }).join('');
   } catch (e) { hide('agent-services'); }
+}
+
+async function loadSchedule() {
+  try {
+    const resp = await fetch('/api/schedule');
+    if (!resp.ok) { hide('agent-schedule'); return; }
+    const data = await resp.json();
+    const timers = data.timers || [];
+    if (timers.length === 0) { hide('agent-schedule'); return; }
+    const tbody = document.querySelector('#schedule-table tbody');
+    if (!tbody) { hide('agent-schedule'); return; }
+
+    function fmtTime(iso) {
+      if (!iso) return '<span style="color:var(--text-dim)">—</span>';
+      const d = new Date(iso);
+      const now = new Date();
+      const diffMs = d - now;
+      const absDiff = Math.abs(diffMs);
+      let rel = '';
+      if (absDiff < 60000) rel = 'just now';
+      else if (absDiff < 3600000) rel = Math.round(absDiff / 60000) + 'min';
+      else if (absDiff < 86400000) rel = Math.round(absDiff / 3600000) + 'h';
+      else rel = Math.round(absDiff / 86400000) + 'd';
+      if (diffMs > 0) rel = 'in ' + rel;
+      else if (rel !== 'just now') rel = rel + ' ago';
+      return '<span title="' + esc(d.toLocaleString()) + '">' + esc(rel) + '</span>';
+    }
+
+    // Sort by next run time (soonest first)
+    timers.sort((a, b) => {
+      if (!a.next) return 1;
+      if (!b.next) return -1;
+      return new Date(a.next) - new Date(b.next);
+    });
+
+    tbody.innerHTML = timers.map(t => {
+      return '<tr>'
+        + '<td><strong>' + esc(t.name) + '</strong></td>'
+        + '<td>' + esc(t.activates || '') + '</td>'
+        + '<td>' + fmtTime(t.last) + '</td>'
+        + '<td>' + fmtTime(t.next) + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) { hide('agent-schedule'); }
 }
 
 async function loadJournals() {

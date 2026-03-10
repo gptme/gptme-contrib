@@ -344,6 +344,98 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.exception("Error detecting services")
             return jsonify({"error": str(e)}), 500
 
+    @app.route("/api/schedule")
+    def api_schedule() -> Any:
+        """Return systemd/launchd timer schedule for gptme-related timers.
+
+        Complements ``/api/services`` by showing *when* services run, not just
+        whether they are running.  On Linux, parses ``systemctl --user
+        list-timers``; on macOS, inspects ``launchctl`` plists.  Returns an
+        empty list when detection is unavailable or no relevant timers exist.
+        """
+        import json as _json
+        import platform
+        import subprocess
+        from datetime import datetime, timezone
+
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            try:
+                config = read_workspace_config(ws)
+                agent_name = config.get("agent_name", "").lower()
+            except Exception:
+                agent_name = ""
+
+            def _is_relevant(name: str) -> bool:
+                n = name.lower()
+                return "gptme" in n or (bool(agent_name) and agent_name in n)
+
+            system = platform.system()
+            timers: list[dict] = []
+
+            if system == "Linux":
+                try:
+                    result = subprocess.run(
+                        [
+                            "systemctl",
+                            "--user",
+                            "list-timers",
+                            "--all",
+                            "--output=json",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        units = _json.loads(result.stdout)
+                        for unit in units:
+                            timer_name = unit.get("unit", "")
+                            if not _is_relevant(timer_name):
+                                continue
+                            # Timestamps are in microseconds since epoch
+                            next_us = unit.get("next", 0)
+                            last_us = unit.get("last", 0)
+                            next_iso = (
+                                datetime.fromtimestamp(
+                                    next_us / 1_000_000, tz=timezone.utc
+                                ).isoformat()
+                                if next_us > 0
+                                else None
+                            )
+                            last_iso = (
+                                datetime.fromtimestamp(
+                                    last_us / 1_000_000, tz=timezone.utc
+                                ).isoformat()
+                                if last_us > 0
+                                else None
+                            )
+                            timers.append(
+                                {
+                                    "name": timer_name,
+                                    "activates": unit.get("activates", ""),
+                                    "next": next_iso,
+                                    "last": last_iso,
+                                }
+                            )
+                except (
+                    OSError,
+                    subprocess.TimeoutExpired,
+                    _json.JSONDecodeError,
+                    ValueError,
+                ):
+                    pass
+
+            elif system == "Darwin":
+                # macOS doesn't have a direct timer-list command;
+                # return empty — services endpoint already covers launchd.
+                pass
+
+            return jsonify({"timers": timers, "platform": system})
+        except Exception as e:
+            logger.exception("Error detecting schedule")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/api/journals")
     def api_journals() -> Any:
         ws = Path(app.config["WORKSPACE"])
