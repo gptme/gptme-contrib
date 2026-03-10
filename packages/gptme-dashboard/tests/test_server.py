@@ -1015,6 +1015,38 @@ def test_api_health_unhealthy_inactive_service(client):
     assert svc["memory_bytes"] == 0
 
 
+def test_api_health_memory_uint64_max_sentinel(client):
+    """Test /api/services/health treats MemoryCurrent UINT64_MAX sentinel as no data."""
+    # systemd returns 18446744073709551615 (UINT64_MAX) when MemoryAccounting is
+    # disabled or the service is stopped. Must not be surfaced as ~17.2 EB.
+    units_json = json.dumps(
+        [
+            {
+                "unit": "gptme-server.service",
+                "description": "gptme API Server",
+                "active": "active",
+                "sub": "running",
+            }
+        ]
+    )
+
+    side_effect = _make_subprocess_side_effect(
+        list_units_json=units_json,
+        show_output="MainPID=1234\nActiveEnterTimestamp=Mon 2024-01-15 10:00:00 UTC\nNRestarts=0\nMemoryCurrent=18446744073709551615\n",
+        journal_output="",
+    )
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=side_effect),
+    ):
+        resp = client.get("/api/services/health")
+
+    assert resp.status_code == 200
+    svc = resp.get_json()["services"][0]
+    assert svc["memory_bytes"] == 0, "UINT64_MAX sentinel must be treated as no data"
+
+
 def test_api_health_warning_service(client):
     """Test /api/services/health classifies service with few errors as warning."""
 

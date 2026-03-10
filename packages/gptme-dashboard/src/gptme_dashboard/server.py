@@ -9,6 +9,7 @@ and dynamic panels activate when the API is reachable.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -271,6 +272,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     # Cache for health endpoint (expensive journalctl calls); 60s TTL
     _HEALTH_CACHE_TTL = 60
     _health_cache: dict[str, Any] = {"data": None, "expires": 0.0}
+    _health_cache_lock = threading.Lock()
+    # UINT64_MAX: systemd returns this sentinel when MemoryAccounting is disabled
+    # or no cgroup data is available. Treat as "no data" rather than ~17.2 EB.
+    _UINT64_MAX = 18446744073709551615
 
     @app.route("/api/services")
     def api_services() -> Any:
@@ -461,16 +466,18 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         from datetime import datetime, timezone
 
         now = time.monotonic()
-        if _health_cache["data"] is not None and now < _health_cache["expires"]:
-            return jsonify(_health_cache["data"])
+        with _health_cache_lock:
+            if _health_cache["data"] is not None and now < _health_cache["expires"]:
+                return jsonify(_health_cache["data"])
 
         ws = Path(app.config["WORKSPACE"])
         system = platform.system()
 
         if system != "Linux":
             result: dict[str, Any] = {"services": [], "platform": system}
-            _health_cache["data"] = result
-            _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+            with _health_cache_lock:
+                _health_cache["data"] = result
+                _health_cache["expires"] = now + _HEALTH_CACHE_TTL
             return jsonify(result)
 
         try:
@@ -493,16 +500,18 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 )
                 if list_result.returncode != 0 or not list_result.stdout.strip():
                     result = {"services": [], "platform": system}
-                    _health_cache["data"] = result
-                    _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+                    with _health_cache_lock:
+                        _health_cache["data"] = result
+                        _health_cache["expires"] = now + _HEALTH_CACHE_TTL
                     return jsonify(result)
 
                 units = _json.loads(list_result.stdout)
                 relevant = [u for u in units if _is_relevant_service(u.get("unit", ""), agent_name)]
             except (OSError, subprocess.TimeoutExpired, _json.JSONDecodeError, ValueError):
                 result = {"services": [], "platform": system}
-                _health_cache["data"] = result
-                _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+                with _health_cache_lock:
+                    _health_cache["data"] = result
+                    _health_cache["expires"] = now + _HEALTH_CACHE_TTL
                 return jsonify(result)
 
             health_list: list[dict[str, Any]] = []
@@ -567,12 +576,15 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 except ValueError:
                     pass
 
-                # Parse memory (MemoryCurrent is in bytes, may be "[not set]")
+                # Parse memory (MemoryCurrent is in bytes, may be "[not set]" or
+                # UINT64_MAX when MemoryAccounting is disabled or service is stopped)
                 memory_bytes = 0
                 mem_str = props.get("MemoryCurrent", "")
                 if mem_str and mem_str not in ("[not set]", "infinity"):
                     try:
-                        memory_bytes = int(mem_str)
+                        parsed = int(mem_str)
+                        if parsed != _UINT64_MAX:
+                            memory_bytes = parsed
                     except (ValueError, OverflowError):
                         pass
 
@@ -635,15 +647,17 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 )
 
             result = {"services": health_list, "platform": system}
-            _health_cache["data"] = result
-            _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+            with _health_cache_lock:
+                _health_cache["data"] = result
+                _health_cache["expires"] = now + _HEALTH_CACHE_TTL
             return jsonify(result)
         except Exception as e:
             logger.exception("Error computing service health")
             # Cache error response briefly (10s) to avoid re-running expensive
             # subprocess calls on every request during a persistent failure.
-            _health_cache["data"] = {"services": [], "platform": "error"}
-            _health_cache["expires"] = now + 10.0
+            with _health_cache_lock:
+                _health_cache["data"] = {"services": [], "platform": system}
+                _health_cache["expires"] = now + 10.0
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/journals")
