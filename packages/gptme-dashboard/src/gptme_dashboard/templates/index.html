@@ -100,8 +100,8 @@ tr:hover { background: var(--accent-dim); }
 .tag-source { border-color: var(--orange); color: var(--orange); font-style: italic; }
 .tag-healthy { border-color: var(--green); color: var(--green); }
 .tag-warning { border-color: var(--orange); color: var(--orange); }
-.tag-degraded { border-color: #e74c3c; color: #e74c3c; }
-.tag-unhealthy { border-color: #e74c3c; color: #e74c3c; background: rgba(231, 76, 60, 0.1); }
+.tag-degraded { border-color: var(--red); color: var(--red); }
+.tag-unhealthy { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.1); }
 
 /* Category bar chart (compact) */
 .cat-chart {
@@ -977,9 +977,11 @@ function formatUptime(seconds) {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
   if (d > 0) return d + 'd ' + h + 'h';
   if (h > 0) return h + 'h ' + m + 'm';
-  return m + 'm';
+  if (m > 0) return m + 'm';
+  return s + 's';
 }
 
 function formatMemory(bytes) {

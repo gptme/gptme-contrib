@@ -925,7 +925,7 @@ def test_api_health_healthy_service(client):
 
     side_effect = _make_subprocess_side_effect(
         list_units_json=units_json,
-        show_output="MainPID=1234\nActiveEnterTimestamp=Mon 2026-03-10 10:00:00 UTC\nNRestarts=0\nMemoryCurrent=52428800\n",
+        show_output="MainPID=1234\nActiveEnterTimestamp=Mon 2024-01-15 10:00:00 UTC\nNRestarts=0\nMemoryCurrent=52428800\n",
         journal_output="",  # no errors
     )
 
@@ -967,7 +967,7 @@ def test_api_health_degraded_service(client):
 
     side_effect = _make_subprocess_side_effect(
         list_units_json=units_json,
-        show_output="MainPID=5678\nActiveEnterTimestamp=Mon 2026-03-10 12:00:00 UTC\nNRestarts=0\nMemoryCurrent=104857600\n",
+        show_output="MainPID=5678\nActiveEnterTimestamp=Mon 2024-01-15 12:00:00 UTC\nNRestarts=0\nMemoryCurrent=104857600\n",
         journal_output=error_lines,
     )
 
@@ -1031,7 +1031,7 @@ def test_api_health_warning_service(client):
 
     side_effect = _make_subprocess_side_effect(
         list_units_json=units_json,
-        show_output="MainPID=9999\nActiveEnterTimestamp=Mon 2026-03-10 08:00:00 UTC\nNRestarts=1\nMemoryCurrent=33554432\n",
+        show_output="MainPID=9999\nActiveEnterTimestamp=Mon 2024-01-15 08:00:00 UTC\nNRestarts=1\nMemoryCurrent=33554432\n",
         journal_output="Mar 10 10:00:00 host unit[1]: Warning line\n",
     )
 
