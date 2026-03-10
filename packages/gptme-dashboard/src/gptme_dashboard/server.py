@@ -254,6 +254,24 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.exception("Error loading sessions")
             return jsonify({"error": str(e)}), 500
 
+    def _get_agent_name(ws: Path) -> str:
+        """Read the agent name from workspace config, lowercased."""
+        try:
+            config = read_workspace_config(ws)
+            name: str = config.get("agent_name", "")
+            return name.lower()
+        except Exception:
+            return ""
+
+    def _is_relevant_service(name: str, agent_name: str) -> bool:
+        """Check if a service name is gptme/agent-related."""
+        n = name.lower()
+        return "gptme" in n or (bool(agent_name) and agent_name in n)
+
+    # Cache for health endpoint (expensive journalctl calls); 60s TTL
+    _HEALTH_CACHE_TTL = 60
+    _health_cache: dict[str, Any] = {"data": None, "expires": 0.0}
+
     @app.route("/api/services")
     def api_services() -> Any:
         """Return systemd/launchd service status for gptme-related services.
@@ -268,15 +286,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
         ws = Path(app.config["WORKSPACE"])
         try:
-            try:
-                config = read_workspace_config(ws)
-                agent_name = config.get("agent_name", "").lower()
-            except Exception:
-                agent_name = ""
-
-            def _is_relevant(name: str) -> bool:
-                n = name.lower()
-                return "gptme" in n or (bool(agent_name) and agent_name in n)
+            agent_name = _get_agent_name(ws)
 
             system = platform.system()
             services: list[dict] = []
@@ -300,7 +310,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         units = _json.loads(result.stdout)
                         for unit in units:
                             name = unit.get("unit", "")
-                            if _is_relevant(name):
+                            if _is_relevant_service(name, agent_name):
                                 services.append(
                                     {
                                         "name": name,
@@ -326,7 +336,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                             if len(parts) < 3:
                                 continue
                             pid, _status, label = parts
-                            if _is_relevant(label):
+                            if _is_relevant_service(label, agent_name):
                                 running = pid.strip() != "-"
                                 services.append(
                                     {
@@ -360,15 +370,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
         ws = Path(app.config["WORKSPACE"])
         try:
-            try:
-                config = read_workspace_config(ws)
-                agent_name = config.get("agent_name", "").lower()
-            except Exception:
-                agent_name = ""
-
-            def _is_relevant(name: str) -> bool:
-                n = name.lower()
-                return "gptme" in n or (bool(agent_name) and agent_name in n)
+            agent_name = _get_agent_name(ws)
 
             system = platform.system()
             timers: list[dict] = []
@@ -391,7 +393,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         units = _json.loads(result.stdout)
                         for unit in units:
                             timer_name = unit.get("unit", "")
-                            if not _is_relevant(timer_name):
+                            if not _is_relevant_service(timer_name, agent_name):
                                 continue
                             # Timestamps are in microseconds since epoch
                             next_us = unit.get("next", 0)
@@ -435,6 +437,203 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             return jsonify({"timers": timers, "platform": system})
         except Exception as e:
             logger.exception("Error detecting schedule")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/services/health")
+    def api_services_health() -> Any:
+        """Return detailed health metrics for gptme-related services.
+
+        For each relevant service, returns:
+        - status: active/inactive/failed state
+        - health: healthy/degraded/unhealthy classification
+        - uptime_seconds: time since service started
+        - memory_bytes: cgroups-based memory accounting (requires MemoryAccounting=yes in unit)
+        - restart_count: NRestarts from systemd
+        - recent_errors: count of error/warning lines in last hour
+        - pid: main process ID (if running)
+
+        Uses a 60-second cache since journalctl queries are expensive.
+        Linux (systemd --user) only; returns empty on other platforms.
+        """
+        import json as _json
+        import platform
+        import subprocess
+        from datetime import datetime, timezone
+
+        now = time.monotonic()
+        if _health_cache["data"] is not None and now < _health_cache["expires"]:
+            return jsonify(_health_cache["data"])
+
+        ws = Path(app.config["WORKSPACE"])
+        system = platform.system()
+
+        if system != "Linux":
+            result: dict[str, Any] = {"services": [], "platform": system}
+            _health_cache["data"] = result
+            _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+            return jsonify(result)
+
+        try:
+            agent_name = _get_agent_name(ws)
+
+            # Get list of relevant services
+            try:
+                list_result = subprocess.run(
+                    [
+                        "systemctl",
+                        "--user",
+                        "list-units",
+                        "--all",
+                        "--type=service",
+                        "--output=json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if list_result.returncode != 0 or not list_result.stdout.strip():
+                    result = {"services": [], "platform": system}
+                    _health_cache["data"] = result
+                    _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+                    return jsonify(result)
+
+                units = _json.loads(list_result.stdout)
+                relevant = [u for u in units if _is_relevant_service(u.get("unit", ""), agent_name)]
+            except (OSError, subprocess.TimeoutExpired, _json.JSONDecodeError, ValueError):
+                result = {"services": [], "platform": system}
+                _health_cache["data"] = result
+                _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+                return jsonify(result)
+
+            health_list: list[dict[str, Any]] = []
+            utcnow = datetime.now(timezone.utc)
+
+            for unit in relevant:
+                name = unit.get("unit", "")
+                active = unit.get("active", "unknown")
+                sub = unit.get("sub", "unknown")
+
+                # Get detailed properties via systemctl show
+                props: dict[str, str] = {}
+                try:
+                    show_result = subprocess.run(
+                        [
+                            "systemctl",
+                            "--user",
+                            "show",
+                            name,
+                            "--property=MainPID,ActiveEnterTimestamp,NRestarts,MemoryCurrent",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if show_result.returncode == 0:
+                        for line in show_result.stdout.strip().splitlines():
+                            if "=" in line:
+                                k, v = line.split("=", 1)
+                                props[k.strip()] = v.strip()
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+                # Parse uptime using Python datetime (avoids subprocess per service)
+                uptime_seconds = 0
+                active_since = props.get("ActiveEnterTimestamp", "")
+                if active_since and active_since != "n/a":
+                    try:
+                        # systemd timestamps: "Mon 2026-03-10 10:00:00 UTC"
+                        # Strip the weekday prefix and parse date+time directly
+                        parts = active_since.split()
+                        if len(parts) >= 3:
+                            dt_str = parts[1] + " " + parts[2]
+                            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(
+                                tzinfo=timezone.utc
+                            )
+                            uptime_seconds = max(0, int((utcnow - dt).total_seconds()))
+                    except (ValueError, IndexError):
+                        pass
+
+                # Parse PID
+                pid = 0
+                try:
+                    pid = int(props.get("MainPID", "0"))
+                except ValueError:
+                    pass
+
+                # Parse memory (MemoryCurrent is in bytes, may be "[not set]")
+                memory_bytes = 0
+                mem_str = props.get("MemoryCurrent", "")
+                if mem_str and mem_str not in ("[not set]", "infinity"):
+                    try:
+                        memory_bytes = int(mem_str)
+                    except (ValueError, OverflowError):
+                        pass
+
+                # Parse restart count
+                restart_count = 0
+                try:
+                    restart_count = int(props.get("NRestarts", "0"))
+                except ValueError:
+                    pass
+
+                # Count recent errors from journal (last 1 hour)
+                recent_errors = 0
+                try:
+                    journal_result = subprocess.run(
+                        [
+                            "journalctl",
+                            "--user",
+                            "-u",
+                            name,
+                            "--since",
+                            "1 hour ago",
+                            "--priority=warning",
+                            "--no-pager",
+                            "-q",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if journal_result.returncode == 0:
+                        lines = journal_result.stdout.strip().splitlines()
+                        recent_errors = len(lines) if lines and lines[0] else 0
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+                # Classify health
+                # Treat transient systemd states (reloading/activating/deactivating)
+                # as non-unhealthy — they are normal lifecycle transitions, not failures.
+                _active_states = frozenset({"active", "reloading", "activating", "deactivating"})
+                if active not in _active_states:
+                    health = "unhealthy"
+                elif recent_errors > 20 or restart_count > 5:
+                    health = "degraded"
+                elif recent_errors > 0 or restart_count > 0:
+                    health = "warning"
+                else:
+                    health = "healthy"
+
+                health_list.append(
+                    {
+                        "name": name,
+                        "active": active,
+                        "sub": sub,
+                        "health": health,
+                        "uptime_seconds": uptime_seconds,
+                        "memory_bytes": memory_bytes,
+                        "restart_count": restart_count,
+                        "recent_errors": recent_errors,
+                        "pid": pid,
+                    }
+                )
+
+            result = {"services": health_list, "platform": system}
+            _health_cache["data"] = result
+            _health_cache["expires"] = now + _HEALTH_CACHE_TTL
+            return jsonify(result)
+        except Exception as e:
+            logger.exception("Error computing service health")
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/journals")

@@ -98,6 +98,10 @@ tr:hover { background: var(--accent-dim); }
 .tag-kind-lesson { border-color: var(--accent); color: var(--accent); }
 .tag-kind-skill { border-color: var(--cyan); color: var(--cyan); }
 .tag-source { border-color: var(--orange); color: var(--orange); font-style: italic; }
+.tag-healthy { border-color: var(--green); color: var(--green); }
+.tag-warning { border-color: var(--orange); color: var(--orange); }
+.tag-degraded { border-color: #e74c3c; color: #e74c3c; }
+.tag-unhealthy { border-color: #e74c3c; color: #e74c3c; background: rgba(231, 76, 60, 0.1); }
 
 /* Category bar chart (compact) */
 .cat-chart {
@@ -358,6 +362,17 @@ tr:hover { background: var(--accent-dim); }
   <table id="schedule-table">
     <thead>
       <tr><th>Timer</th><th>Activates</th><th>Last Trigger</th><th>Next Run</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Dynamic: Service Health (shown when serve API returns health data) -->
+<section id="service-health" class="dynamic-panel" style="display:none">
+  <h2>Service Health <span class="count-badge" id="health-summary"></span></h2>
+  <table id="health-table">
+    <thead>
+      <tr><th>Service</th><th>Health</th><th>Status</th><th>Uptime</th><th>Restarts</th><th>Memory</th><th>Errors (1h)</th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -740,6 +755,14 @@ async function initDynamic() {
     loadRecentSessions();
     loadServices();
     loadSchedule();
+    loadServiceHealth();
+    // Auto-refresh health every 30 seconds (only when backend is available)
+    setInterval(() => {
+      if (document.getElementById('service-health') &&
+          document.getElementById('service-health').style.display !== 'none') {
+        loadServiceHealth();
+      }
+    }, 30000);
     if (document.getElementById('dynamic-journals')) loadJournals();
   } catch (e) {
     // No backend — stay in static mode
@@ -947,6 +970,65 @@ async function loadSchedule() {
         + '</tr>';
     }).join('');
   } catch (e) { hide('agent-schedule'); }
+}
+
+function formatUptime(seconds) {
+  if (seconds <= 0) return '-';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function formatMemory(bytes) {
+  if (!bytes || bytes <= 0) return '-';
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return bytes + ' B';
+}
+
+async function loadServiceHealth() {
+  try {
+    const resp = await fetch('/api/services/health');
+    if (!resp.ok) { hide('service-health'); return; }
+    const data = await resp.json();
+    const services = data.services || [];
+    if (services.length === 0) { hide('service-health'); return; }
+    const tbody = document.querySelector('#health-table tbody');
+    if (!tbody) { hide('service-health'); return; }
+
+    // Summary counts
+    const counts = {healthy: 0, warning: 0, degraded: 0, unhealthy: 0};
+    services.forEach(s => { counts[s.health] = (counts[s.health] || 0) + 1; });
+    const summaryEl = document.getElementById('health-summary');
+    if (summaryEl) {
+      const parts = [];
+      if (counts.healthy) parts.push(counts.healthy + ' healthy');
+      if (counts.warning) parts.push(counts.warning + ' warning');
+      if (counts.degraded) parts.push(counts.degraded + ' degraded');
+      if (counts.unhealthy) parts.push(counts.unhealthy + ' unhealthy');
+      summaryEl.textContent = '(' + parts.join(', ') + ')';
+    }
+
+    tbody.innerHTML = services.map(s => {
+      const healthCls = 'tag-' + s.health;
+      const statusCls = s.active === 'active' ? 'tag-active' : 'tag-deprecated';
+      return '<tr>'
+        + '<td><strong>' + esc(s.name) + '</strong></td>'
+        + '<td><span class="tag ' + healthCls + '">' + esc(s.health) + '</span></td>'
+        + '<td><span class="tag ' + statusCls + '">' + esc(s.sub || s.active) + '</span></td>'
+        + '<td>' + formatUptime(s.uptime_seconds) + '</td>'
+        + '<td>' + (s.restart_count || 0) + '</td>'
+        + '<td>' + formatMemory(s.memory_bytes) + '</td>'
+        + '<td>' + (s.recent_errors || 0) + '</td>'
+        + '</tr>';
+    }).join('');
+
+    document.getElementById('service-health').style.display = '';
+  } catch (e) { hide('service-health'); }
 }
 
 async function loadJournals() {
