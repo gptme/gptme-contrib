@@ -805,9 +805,11 @@ async function loadRecentSessions(offset) {
     if (countEl) countEl.textContent = '(' + _sessionsTotal + ')';
 
     if (sessions.length === 0 && _sessionsOffset === 0) {
+      const hasFilter = harness || model || outcome;
       tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:1.5rem">'
-        + 'No sessions found. '
-        + 'Run <code>gptme-dashboard generate --sessions</code> or use the session store to populate.'
+        + (hasFilter
+          ? 'No sessions match the selected filters.'
+          : 'No sessions found. Run <code>gptme-dashboard generate --sessions</code> or use the session store to populate.')
         + '</td></tr>';
       document.getElementById('sessions-pagination').style.display = 'none';
       return;
@@ -842,10 +844,10 @@ async function loadRecentSessions(offset) {
 
     // Populate filter dropdowns once from stats
     if (!_filtersPopulated) {
-      _filtersPopulated = true;
       try {
         const statsResp = await fetch('/api/sessions/stats');
         if (statsResp.ok) {
+          _filtersPopulated = true;
           const stats = await statsResp.json();
           const harnessSelect = document.getElementById('session-filter-harness');
           const modelSelect = document.getElementById('session-filter-model');
