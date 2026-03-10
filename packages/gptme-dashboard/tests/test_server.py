@@ -811,6 +811,36 @@ def test_api_schedule_timeout_handled(client):
     assert data["timers"] == []
 
 
+def test_api_schedule_overflow_timestamps(client):
+    """Test /api/schedule handles very large sentinel timestamps (UINT64_MAX)."""
+    systemctl_output = json.dumps(
+        [
+            {
+                "next": 18446744073709551615,  # UINT64_MAX sentinel
+                "left": 18446744073709551615,
+                "last": 1773150000046572,
+                "passed": 1830362162103,
+                "unit": "gptme-overflow.timer",
+                "activates": "gptme-overflow.service",
+            },
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = systemctl_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/schedule")
+
+    # Should not 500 — graceful fallback
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data["timers"], list)
+
+
 def test_api_schedule_darwin_empty(client):
     """Test /api/schedule returns empty timers on macOS (not yet supported)."""
     with unittest.mock.patch("platform.system", return_value="Darwin"):

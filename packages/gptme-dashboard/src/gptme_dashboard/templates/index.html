@@ -924,8 +924,10 @@ async function loadSchedule() {
       else if (absDiff < 3600000) rel = Math.round(absDiff / 60000) + 'min';
       else if (absDiff < 86400000) rel = Math.round(absDiff / 3600000) + 'h';
       else rel = Math.round(absDiff / 86400000) + 'd';
-      if (diffMs > 0) rel = 'in ' + rel;
-      else if (rel !== 'just now') rel = rel + ' ago';
+      if (rel !== 'just now') {
+        if (diffMs > 0) rel = 'in ' + rel;
+        else rel = rel + ' ago';
+      }
       return '<span title="' + esc(d.toLocaleString()) + '">' + esc(rel) + '</span>';
     }
 

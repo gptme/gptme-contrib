@@ -346,12 +346,12 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
     @app.route("/api/schedule")
     def api_schedule() -> Any:
-        """Return systemd/launchd timer schedule for gptme-related timers.
+        """Return systemd timer schedule for gptme-related timers.
 
         Complements ``/api/services`` by showing *when* services run, not just
         whether they are running.  On Linux, parses ``systemctl --user
-        list-timers``; on macOS, inspects ``launchctl`` plists.  Returns an
-        empty list when detection is unavailable or no relevant timers exist.
+        list-timers``.  Returns an empty list on macOS (not yet supported),
+        when detection is unavailable, or when no relevant timers exist.
         """
         import json as _json
         import platform
@@ -423,6 +423,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                     subprocess.TimeoutExpired,
                     _json.JSONDecodeError,
                     ValueError,
+                    OverflowError,
                 ):
                     pass
 
