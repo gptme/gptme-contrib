@@ -888,7 +888,6 @@ def _make_subprocess_side_effect(
     list_units_json: str,
     show_output: str = "",
     journal_output: str = "",
-    date_epoch: str = "0",
 ):
     """Build a side_effect for subprocess.run that handles multiple commands."""
 
@@ -903,8 +902,6 @@ def _make_subprocess_side_effect(
             result.stdout = show_output
         elif "journalctl" in cmd_str:
             result.stdout = journal_output
-        elif "date" in cmd_str:
-            result.stdout = date_epoch + "\n"
         else:
             result.stdout = ""
         return result
@@ -914,7 +911,6 @@ def _make_subprocess_side_effect(
 
 def test_api_health_healthy_service(client):
     """Test /api/services/health classifies an active service with no errors as healthy."""
-    import time as _time
 
     units_json = json.dumps(
         [
@@ -926,13 +922,11 @@ def test_api_health_healthy_service(client):
             }
         ]
     )
-    epoch_str = str(int(_time.time()) - 3600)  # started 1h ago
 
     side_effect = _make_subprocess_side_effect(
         list_units_json=units_json,
         show_output="MainPID=1234\nActiveEnterTimestamp=Mon 2026-03-10 10:00:00 UTC\nNRestarts=0\nMemoryCurrent=52428800\n",
         journal_output="",  # no errors
-        date_epoch=epoch_str,
     )
 
     with (
@@ -957,7 +951,6 @@ def test_api_health_healthy_service(client):
 
 def test_api_health_degraded_service(client):
     """Test /api/services/health classifies service with many errors as degraded."""
-    import time as _time
 
     units_json = json.dumps(
         [
@@ -969,7 +962,6 @@ def test_api_health_degraded_service(client):
             }
         ]
     )
-    epoch_str = str(int(_time.time()) - 600)
     # 25 error lines
     error_lines = "\n".join([f"Mar 10 10:0{i}:00 host unit[1]: Error {i}" for i in range(25)])
 
@@ -977,7 +969,6 @@ def test_api_health_degraded_service(client):
         list_units_json=units_json,
         show_output="MainPID=5678\nActiveEnterTimestamp=Mon 2026-03-10 12:00:00 UTC\nNRestarts=0\nMemoryCurrent=104857600\n",
         journal_output=error_lines,
-        date_epoch=epoch_str,
     )
 
     with (
@@ -1009,7 +1000,6 @@ def test_api_health_unhealthy_inactive_service(client):
         list_units_json=units_json,
         show_output="MainPID=0\nActiveEnterTimestamp=n/a\nNRestarts=0\nMemoryCurrent=[not set]\n",
         journal_output="",
-        date_epoch="0",
     )
 
     with (
@@ -1027,7 +1017,6 @@ def test_api_health_unhealthy_inactive_service(client):
 
 def test_api_health_warning_service(client):
     """Test /api/services/health classifies service with few errors as warning."""
-    import time as _time
 
     units_json = json.dumps(
         [
@@ -1039,13 +1028,11 @@ def test_api_health_warning_service(client):
             }
         ]
     )
-    epoch_str = str(int(_time.time()) - 7200)
 
     side_effect = _make_subprocess_side_effect(
         list_units_json=units_json,
         show_output="MainPID=9999\nActiveEnterTimestamp=Mon 2026-03-10 08:00:00 UTC\nNRestarts=1\nMemoryCurrent=33554432\n",
         journal_output="Mar 10 10:00:00 host unit[1]: Warning line\n",
-        date_epoch=epoch_str,
     )
 
     with (
@@ -1113,7 +1100,6 @@ def test_api_health_caching(client):
         list_units_json=units_json,
         show_output="MainPID=100\nActiveEnterTimestamp=n/a\nNRestarts=0\nMemoryCurrent=[not set]\n",
         journal_output="",
-        date_epoch="0",
     )
 
     def counting_side_effect(cmd, **kwargs):
@@ -1138,7 +1124,6 @@ def test_api_health_caching(client):
 
 def test_api_health_multiple_services(client):
     """Test /api/services/health handles multiple services correctly."""
-    import time as _time
 
     units_json = json.dumps(
         [
@@ -1156,13 +1141,11 @@ def test_api_health_multiple_services(client):
             },
         ]
     )
-    epoch_str = str(int(_time.time()) - 1800)
 
     side_effect = _make_subprocess_side_effect(
         list_units_json=units_json,
         show_output="MainPID=100\nActiveEnterTimestamp=n/a\nNRestarts=0\nMemoryCurrent=[not set]\n",
         journal_output="",
-        date_epoch=epoch_str,
     )
 
     with (

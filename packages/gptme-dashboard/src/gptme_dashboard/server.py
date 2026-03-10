@@ -507,6 +507,8 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
             health_list: list[dict[str, Any]] = []
             utcnow = datetime.now(timezone.utc)
+            # Hoist out of loop — same frozenset every iteration
+            _active_states = frozenset({"active", "reloading", "activating", "deactivating"})
 
             for unit in relevant:
                 name = unit.get("unit", "")
@@ -542,13 +544,18 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 if active_since and active_since != "n/a":
                     try:
                         # systemd timestamps: "Mon 2026-03-10 10:00:00 UTC"
-                        # Strip the weekday prefix and parse date+time directly
+                        # Strip the weekday prefix; use timezone abbreviation if present.
                         parts = active_since.split()
                         if len(parts) >= 3:
                             dt_str = parts[1] + " " + parts[2]
-                            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(
-                                tzinfo=timezone.utc
-                            )
+                            tz_abbrev = parts[3] if len(parts) >= 4 else "UTC"
+                            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                            if tz_abbrev in ("UTC", "GMT"):
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            else:
+                                # systemd reports in local time; use system offset
+                                local_tz = datetime.now().astimezone().tzinfo
+                                dt = dt.replace(tzinfo=local_tz)
                             uptime_seconds = max(0, int((utcnow - dt).total_seconds()))
                     except (ValueError, IndexError):
                         pass
@@ -604,7 +611,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 # Classify health
                 # Treat transient systemd states (reloading/activating/deactivating)
                 # as non-unhealthy — they are normal lifecycle transitions, not failures.
-                _active_states = frozenset({"active", "reloading", "activating", "deactivating"})
                 if active not in _active_states:
                     health = "unhealthy"
                 elif recent_errors > 20 or restart_count > 5:
@@ -634,6 +640,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             return jsonify(result)
         except Exception as e:
             logger.exception("Error computing service health")
+            # Cache error response briefly (10s) to avoid re-running expensive
+            # subprocess calls on every request during a persistent failure.
+            _health_cache["data"] = {"services": [], "platform": "error"}
+            _health_cache["expires"] = now + 10.0
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/journals")
