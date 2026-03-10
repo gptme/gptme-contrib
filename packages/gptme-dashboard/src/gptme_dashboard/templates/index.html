@@ -102,6 +102,7 @@ tr:hover { background: var(--accent-dim); }
 .tag-warning { border-color: var(--orange); color: var(--orange); }
 .tag-degraded { border-color: var(--red); color: var(--red); }
 .tag-unhealthy { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.1); }
+.tag-failed { border-color: var(--red); color: var(--red); }
 
 /* Category bar chart (compact) */
 .cat-chart {
@@ -756,13 +757,8 @@ async function initDynamic() {
     loadServices();
     loadSchedule();
     loadServiceHealth();
-    // Auto-refresh health every 30 seconds (only when backend is available)
-    setInterval(() => {
-      if (document.getElementById('service-health') &&
-          document.getElementById('service-health').style.display !== 'none') {
-        loadServiceHealth();
-      }
-    }, 30000);
+    // Auto-refresh health every 30 seconds — always retry to recover from transient errors
+    setInterval(loadServiceHealth, 30000);
     if (document.getElementById('dynamic-journals')) loadJournals();
   } catch (e) {
     // No backend — stay in static mode
@@ -1017,7 +1013,7 @@ async function loadServiceHealth() {
 
     tbody.innerHTML = services.map(s => {
       const healthCls = 'tag-' + s.health;
-      const statusCls = s.active === 'active' ? 'tag-active' : 'tag-deprecated';
+      const statusCls = s.active === 'active' ? 'tag-active' : s.active === 'failed' ? 'tag-failed' : 'tag-deprecated';
       return '<tr>'
         + '<td><strong>' + esc(s.name) + '</strong></td>'
         + '<td><span class="tag ' + healthCls + '">' + esc(s.health) + '</span></td>'
