@@ -994,8 +994,12 @@ async function loadServiceHealth() {
     if (!resp.ok) { hide('service-health'); return; }
     const data = await resp.json();
     const services = data.services || [];
-    if (services.length === 0) { hide('service-health'); return; }
     const tbody = document.querySelector('#health-table tbody');
+    if (services.length === 0) {
+      if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="opacity:0.6">No gptme services found</td></tr>';
+      document.getElementById('service-health').style.display = '';
+      return;
+    }
     if (!tbody) { hide('service-health'); return; }
 
     // Summary counts

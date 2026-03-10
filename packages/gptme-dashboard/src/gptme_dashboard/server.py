@@ -467,8 +467,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
         now = time.monotonic()
         with _health_cache_lock:
-            if _health_cache["data"] is not None and now < _health_cache["expires"]:
-                return jsonify(_health_cache["data"])
+            cached = _health_cache["data"]
+            if cached is not None and now < _health_cache["expires"]:
+                status = 500 if "error" in cached else 200
+                return jsonify(cached), status
 
         ws = Path(app.config["WORKSPACE"])
         system = platform.system()
@@ -616,7 +618,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                     )
                     if journal_result.returncode == 0:
                         lines = journal_result.stdout.strip().splitlines()
-                        recent_errors = len(lines) if lines and lines[0] else 0
+                        recent_errors = len(lines)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
 
@@ -655,8 +657,9 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.exception("Error computing service health")
             # Cache error response briefly (10s) to avoid re-running expensive
             # subprocess calls on every request during a persistent failure.
+            # Store error key so cache-hit path can replay the 500 status.
             with _health_cache_lock:
-                _health_cache["data"] = {"services": [], "platform": system}
+                _health_cache["data"] = {"error": str(e), "platform": system}
                 _health_cache["expires"] = now + 10.0
             return jsonify({"error": str(e)}), 500
 
