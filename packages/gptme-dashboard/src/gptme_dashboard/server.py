@@ -797,6 +797,153 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         except OSError as e:
             return jsonify({"service": name, "error": str(e), "status": "error"}), 500
 
+    # Cache for logs endpoint (per-service, 30s TTL)
+    _LOGS_CACHE_TTL = 30
+    _logs_cache: dict[str, Any] = {}
+    _logs_cache_lock = threading.Lock()
+
+    # Syslog priority names (RFC 5424)
+    _PRIORITY_NAMES = {
+        "0": "emerg",
+        "1": "alert",
+        "2": "crit",
+        "3": "err",
+        "4": "warning",
+        "5": "notice",
+        "6": "info",
+        "7": "debug",
+    }
+
+    @app.route("/api/services/logs")
+    def api_services_logs() -> Any:
+        """Return recent log entries for a specific gptme-related service.
+
+        Query parameters:
+        - service (required): service unit name (e.g. "bob-autonomous.service")
+        - since: time window (default "1h", supports "1h", "6h", "24h", "7d")
+        - lines: max lines to return (default 100, max 500)
+        - priority: minimum priority filter ("err", "warning", "info", "debug")
+
+        Uses a 30-second per-service cache to avoid expensive journalctl calls.
+        Linux (systemd --user) only; returns empty on other platforms.
+        """
+        import json as _json
+        import platform
+        import subprocess
+
+        service = request.args.get("service", "").strip()
+        if not service:
+            return jsonify({"error": "Missing required 'service' parameter"}), 400
+
+        since = request.args.get("since", "1h").strip()
+        valid_since = {
+            "1h": "1 hour ago",
+            "6h": "6 hours ago",
+            "24h": "24 hours ago",
+            "7d": "7 days ago",
+        }
+        if since not in valid_since:
+            return (
+                jsonify(
+                    {
+                        "error": f"Invalid 'since' value '{since}'. Must be one of: {', '.join(valid_since)}"
+                    }
+                ),
+                400,
+            )
+
+        lines = request.args.get("lines", 100, type=int)
+        lines = max(1, min(lines, 500))
+
+        priority_filter = request.args.get("priority", "").strip()
+        valid_priorities = {"err": "3", "warning": "4", "notice": "5", "info": "6", "debug": "7"}
+        if priority_filter and priority_filter not in valid_priorities:
+            return (
+                jsonify(
+                    {
+                        "error": f"Invalid 'priority' value '{priority_filter}'. Must be one of: {', '.join(valid_priorities)}"
+                    }
+                ),
+                400,
+            )
+
+        system = platform.system()
+        if system != "Linux":
+            return jsonify({"logs": [], "service": service, "platform": system})
+
+        # Validate service name is gptme/agent-related (security: prevent arbitrary unit queries)
+        ws = Path(app.config["WORKSPACE"])
+        agent_name = _get_agent_name(ws)
+        if not _is_relevant_service(service, agent_name):
+            return jsonify(
+                {"error": f"Service '{service}' is not a recognized gptme/agent service"}
+            ), 403
+
+        # Check cache
+        now = time.monotonic()
+        cache_key = f"{service}:{since}:{lines}:{priority_filter}"
+        with _logs_cache_lock:
+            cached = _logs_cache.get(cache_key)
+            if cached is not None and now < cached["expires"]:
+                return jsonify(cached["data"])
+
+        try:
+            cmd = [
+                "journalctl",
+                "--user",
+                "-u",
+                service,
+                "--since",
+                valid_since[since],
+                "-n",
+                str(lines),
+                "--no-pager",
+                "--output=json",
+            ]
+            if priority_filter:
+                cmd.extend(["--priority", valid_priorities[priority_filter]])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+            log_entries: list[dict[str, Any]] = []
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().splitlines():
+                    try:
+                        entry = _json.loads(line)
+                        # Extract fields from systemd journal JSON
+                        ts_us = int(entry.get("__REALTIME_TIMESTAMP", "0"))
+                        prio = str(entry.get("PRIORITY", "6"))
+                        message = entry.get("MESSAGE", "")
+                        log_entries.append(
+                            {
+                                "timestamp": ts_us / 1_000_000,  # epoch seconds (float)
+                                "priority": _PRIORITY_NAMES.get(prio, prio),
+                                "message": message,
+                            }
+                        )
+                    except (_json.JSONDecodeError, ValueError):
+                        continue
+
+            response_data: dict[str, Any] = {
+                "logs": log_entries,
+                "service": service,
+                "total": len(log_entries),
+                "since": since,
+                "platform": system,
+            }
+
+            with _logs_cache_lock:
+                _logs_cache[cache_key] = {"data": response_data, "expires": now + _LOGS_CACHE_TTL}
+
+            return jsonify(response_data)
+        except subprocess.TimeoutExpired:
+            return jsonify(
+                {"logs": [], "service": service, "total": 0, "since": since, "platform": system}
+            )
+        except Exception as e:
+            logger.exception("Error fetching service logs")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/api/journals")
     def api_journals() -> Any:
         ws = Path(app.config["WORKSPACE"])

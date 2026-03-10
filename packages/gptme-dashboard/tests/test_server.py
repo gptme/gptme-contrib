@@ -1373,3 +1373,283 @@ def test_restart_subprocess_timeout(client):
     data = resp.get_json()
     assert data["status"] == "error"
     assert "timed out" in data["error"].lower()
+
+
+# ── Service Logs endpoint tests ──
+
+
+def test_api_logs_missing_service(client):
+    """Test /api/services/logs returns 400 when service param is missing."""
+    resp = client.get("/api/services/logs")
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "error" in data
+    assert "service" in data["error"].lower()
+
+
+def test_api_logs_invalid_since(client):
+    """Test /api/services/logs returns 400 for invalid since param."""
+    resp = client.get("/api/services/logs?service=gptme-test.service&since=2w")
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "since" in data["error"].lower()
+
+
+def test_api_logs_invalid_priority(client):
+    """Test /api/services/logs returns 400 for invalid priority param."""
+    resp = client.get("/api/services/logs?service=gptme-test.service&priority=critical")
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "priority" in data["error"].lower()
+
+
+def test_api_logs_non_relevant_service(client):
+    """Test /api/services/logs returns 403 for non-gptme service."""
+    with unittest.mock.patch("platform.system", return_value="Linux"):
+        resp = client.get("/api/services/logs?service=nginx.service")
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert "error" in data
+
+
+def test_api_logs_non_linux(client):
+    """Test /api/services/logs returns empty on non-Linux."""
+    with unittest.mock.patch("platform.system", return_value="Darwin"):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["logs"] == []
+    assert data["platform"] == "Darwin"
+
+
+def test_api_logs_structure(client):
+    """Test /api/services/logs returns correct structure with journalctl JSON output."""
+    journal_lines = "\n".join(
+        [
+            json.dumps(
+                {
+                    "__REALTIME_TIMESTAMP": "1710072000000000",
+                    "PRIORITY": "6",
+                    "MESSAGE": "Service started successfully",
+                }
+            ),
+            json.dumps(
+                {
+                    "__REALTIME_TIMESTAMP": "1710072060000000",
+                    "PRIORITY": "4",
+                    "MESSAGE": "Connection timeout warning",
+                }
+            ),
+            json.dumps(
+                {
+                    "__REALTIME_TIMESTAMP": "1710072120000000",
+                    "PRIORITY": "3",
+                    "MESSAGE": "Failed to connect to database",
+                }
+            ),
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = journal_lines
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["service"] == "gptme-test.service"
+    assert data["total"] == 3
+    assert data["since"] == "1h"
+    assert data["platform"] == "Linux"
+    assert len(data["logs"]) == 3
+
+    # Check entry structure
+    entry = data["logs"][0]
+    assert "timestamp" in entry
+    assert "priority" in entry
+    assert "message" in entry
+    assert entry["priority"] == "info"
+    assert entry["message"] == "Service started successfully"
+
+    # Check priority names
+    assert data["logs"][1]["priority"] == "warning"
+    assert data["logs"][2]["priority"] == "err"
+
+
+def test_api_logs_empty_output(client):
+    """Test /api/services/logs handles empty journalctl output."""
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["logs"] == []
+    assert data["total"] == 0
+
+
+def test_api_logs_timeout_handled(client):
+    """Test /api/services/logs handles subprocess timeout gracefully."""
+    import subprocess
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("journalctl", 10)
+        ),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["logs"] == []
+    assert data["total"] == 0
+
+
+def test_api_logs_with_since_param(client):
+    """Test /api/services/logs passes since parameter to journalctl."""
+    calls = []
+
+    def capture_calls(cmd, **kwargs):
+        calls.append(cmd)
+        result = unittest.mock.MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=capture_calls),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service&since=24h")
+
+    assert resp.status_code == 200
+    # Verify journalctl was called with correct --since
+    assert len(calls) == 1
+    assert "--since" in calls[0]
+    since_idx = calls[0].index("--since")
+    assert calls[0][since_idx + 1] == "24 hours ago"
+
+
+def test_api_logs_with_priority_filter(client):
+    """Test /api/services/logs passes priority filter to journalctl."""
+    calls = []
+
+    def capture_calls(cmd, **kwargs):
+        calls.append(cmd)
+        result = unittest.mock.MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=capture_calls),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service&priority=err")
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert "--priority" in calls[0]
+    prio_idx = calls[0].index("--priority")
+    assert calls[0][prio_idx + 1] == "3"  # err = priority 3
+
+
+def test_api_logs_caching(client):
+    """Test /api/services/logs caches results for 30 seconds."""
+    journal_output = json.dumps(
+        {
+            "__REALTIME_TIMESTAMP": "1710072000000000",
+            "PRIORITY": "6",
+            "MESSAGE": "Test message",
+        }
+    )
+    call_count = 0
+
+    def counting_side_effect(cmd, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        result = unittest.mock.MagicMock()
+        result.returncode = 0
+        result.stdout = journal_output
+        return result
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=counting_side_effect),
+    ):
+        resp1 = client.get("/api/services/logs?service=gptme-test.service")
+        first_count = call_count
+        resp2 = client.get("/api/services/logs?service=gptme-test.service")
+        second_count = call_count
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    # Second call should use cache (no additional subprocess calls)
+    assert second_count == first_count
+
+
+def test_api_logs_agent_name_service(client):
+    """Test /api/services/logs allows services matching agent name."""
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        # Agent name is "TestBot" (from fixture), so "testbot-*" should be allowed
+        resp = client.get("/api/services/logs?service=testbot-autonomous.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["service"] == "testbot-autonomous.service"
+
+
+def test_api_logs_malformed_json_lines(client):
+    """Test /api/services/logs skips malformed JSON lines gracefully."""
+    journal_output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "__REALTIME_TIMESTAMP": "1710072000000000",
+                    "PRIORITY": "6",
+                    "MESSAGE": "Good line",
+                }
+            ),
+            "this is not json",
+            json.dumps(
+                {
+                    "__REALTIME_TIMESTAMP": "1710072060000000",
+                    "PRIORITY": "4",
+                    "MESSAGE": "Another good line",
+                }
+            ),
+        ]
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = journal_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2  # malformed line skipped
+    assert data["logs"][0]["message"] == "Good line"
+    assert data["logs"][1]["message"] == "Another good line"

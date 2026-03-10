@@ -115,6 +115,19 @@ tr:hover { background: var(--accent-dim); }
 }
 .restart-btn:hover { background: var(--surface); }
 .restart-btn-disabled { opacity: 0.3; cursor: not-allowed; font-size: 1rem; }
+.tag-err { border-color: var(--red); color: var(--red); }
+.tag-crit { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.1); }
+.tag-emerg { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.2); }
+.tag-alert { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.15); }
+.tag-notice { border-color: var(--cyan); color: var(--cyan); }
+.tag-info { border-color: var(--text-dim); color: var(--text-dim); }
+.tag-debug { border-color: var(--border); color: var(--border); }
+
+/* Log table */
+#logs-table td { font-family: monospace; font-size: 0.82rem; }
+#logs-table td:last-child { white-space: pre-wrap; word-break: break-all; }
+.logs-link { color: var(--accent); cursor: pointer; font-size: 0.8rem; text-decoration: none; }
+.logs-link:hover { text-decoration: underline; }
 
 /* Category bar chart (compact) */
 .cat-chart {
@@ -389,6 +402,34 @@ tr:hover { background: var(--accent-dim); }
     </thead>
     <tbody></tbody>
   </table>
+</section>
+
+<!-- Dynamic: Service Logs (shown when a service is selected from health table) -->
+<section id="service-logs" class="dynamic-panel" style="display:none">
+  <h2>Service Logs <span class="count-badge" id="logs-service-name"></span></h2>
+  <div class="filter-row">
+    <select id="logs-since" onchange="loadServiceLogs()">
+      <option value="1h">Last 1 hour</option>
+      <option value="6h">Last 6 hours</option>
+      <option value="24h">Last 24 hours</option>
+      <option value="7d">Last 7 days</option>
+    </select>
+    <select id="logs-priority" onchange="loadServiceLogs()">
+      <option value="">All priorities</option>
+      <option value="err">Errors only</option>
+      <option value="warning">Warning+</option>
+      <option value="info">Info+</option>
+      <option value="debug">Debug+</option>
+    </select>
+    <button class="filter-btn" id="logs-close" onclick="hideServiceLogs()">Close</button>
+  </div>
+  <table id="logs-table">
+    <thead>
+      <tr><th style="width:160px">Time</th><th style="width:80px">Priority</th><th>Message</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="logs-status" style="text-align:center;padding:0.5rem;color:var(--text-dim);font-size:0.85rem"></div>
 </section>
 
 <!-- Dynamic: Journals (shown when serve API is available and no static journals) -->
@@ -1108,7 +1149,7 @@ async function loadServiceHealth() {
         + '<td>' + (s.restart_count || 0) + '</td>'
         + '<td>' + formatMemory(s.memory_bytes) + '</td>'
         + '<td>' + (s.recent_errors || 0) + '</td>'
-        + '<td>' + restartBtn + '</td>'
+        + '<td><a class="logs-link" onclick="showServiceLogs(\'' + esc(s.name).replace(/'/g, "\\'") + '\')">logs</a> ' + restartBtn + '</td>'
         + '</tr>';
     }).join('');
 
@@ -1137,6 +1178,70 @@ async function loadJournals() {
 function hide(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
 function card(v, l) { return '<div class="stat-card"><div class="number">' + v + '</div><div class="label">' + l + '</div></div>'; }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Service log viewer
+let _logsService = '';
+
+function showServiceLogs(serviceName) {
+  _logsService = serviceName;
+  document.getElementById('logs-service-name').textContent = '(' + serviceName + ')';
+  document.getElementById('service-logs').style.display = '';
+  document.getElementById('service-logs').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  loadServiceLogs();
+}
+
+function hideServiceLogs() {
+  _logsService = '';
+  document.getElementById('service-logs').style.display = 'none';
+}
+
+async function loadServiceLogs() {
+  if (!_logsService) return;
+  const since = document.getElementById('logs-since').value;
+  const priority = document.getElementById('logs-priority').value;
+  const tbody = document.querySelector('#logs-table tbody');
+  const statusEl = document.getElementById('logs-status');
+  if (!tbody) return;
+
+  statusEl.textContent = 'Loading...';
+  tbody.innerHTML = '';
+
+  try {
+    let url = '/api/services/logs?service=' + encodeURIComponent(_logsService)
+      + '&since=' + encodeURIComponent(since)
+      + '&lines=200';
+    if (priority) url += '&priority=' + encodeURIComponent(priority);
+
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      statusEl.textContent = err.error || 'Failed to load logs';
+      return;
+    }
+    const data = await resp.json();
+    const logs = data.logs || [];
+
+    if (logs.length === 0) {
+      statusEl.textContent = 'No log entries found for this time range.';
+      return;
+    }
+
+    statusEl.textContent = logs.length + ' entries (last ' + since + ')';
+
+    tbody.innerHTML = logs.map(entry => {
+      const ts = entry.timestamp ? new Date(entry.timestamp * 1000).toLocaleString() : '';
+      const prio = entry.priority || 'info';
+      const prioCls = 'tag-' + prio;
+      return '<tr>'
+        + '<td>' + esc(ts) + '</td>'
+        + '<td><span class="tag ' + prioCls + '">' + esc(prio) + '</span></td>'
+        + '<td>' + esc(entry.message || '') + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) {
+    statusEl.textContent = 'Error loading logs: ' + e.message;
+  }
+}
 
 document.addEventListener('DOMContentLoaded', initDynamic);
 </script>
