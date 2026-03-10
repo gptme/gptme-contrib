@@ -176,26 +176,60 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.exception("Error computing session stats")
             return jsonify({"error": str(e)}), 500
 
+    def _filter_records(
+        records: list[dict[str, Any]],
+        model: str | None,
+        harness: str | None,
+        outcome: str | None,
+    ) -> list[dict[str, Any]]:
+        """Apply model/harness/outcome filters to session dicts."""
+        if model:
+            records = [r for r in records if r.get("model", "").lower() == model.lower()]
+        if harness:
+            records = [r for r in records if r.get("harness", "").lower() == harness.lower()]
+        if outcome:
+            records = [r for r in records if r.get("outcome", "").lower() == outcome.lower()]
+        return records
+
     @app.route("/api/sessions")
     def api_sessions() -> Any:
         ws = Path(app.config["WORKSPACE"])
         try:
             limit = request.args.get("limit", 50, type=int)
             limit = max(1, min(limit, 200))
+            offset = request.args.get("offset", 0, type=int)
+            offset = max(0, offset)
             days = request.args.get("days", type=int)
+
+            # Filter parameters
+            model_filter = request.args.get("model")
+            harness_filter = request.args.get("harness")
+            outcome_filter = request.args.get("outcome")
 
             # Try SessionStore first
             store_result = _load_sessions_from_store(ws, days)
             if store_result is not None:
                 records, _store = store_result
-                records = sorted(records, key=lambda r: r.timestamp, reverse=True)[:limit]
-                return jsonify([r.to_dict() for r in records])
+                records = sorted(records, key=lambda r: r.timestamp, reverse=True)
+                # Convert to dicts for uniform filtering
+                all_dicts = [r.to_dict() for r in records]
+                all_dicts = _filter_records(all_dicts, model_filter, harness_filter, outcome_filter)
+                total = len(all_dicts)
+                page = all_dicts[offset : offset + limit]
+                return jsonify(
+                    {
+                        "sessions": page,
+                        "total": total,
+                        "offset": offset,
+                        "has_more": offset + limit < total,
+                    }
+                )
 
             # Fallback: scan actual session logs
-            scanned = _get_scanned_sessions(ws, days if days and days > 0 else 30)[:limit]
-            result = []
+            scanned = _get_scanned_sessions(ws, days if days and days > 0 else 30)
+            all_dicts = []
             for s in scanned:
-                result.append(
+                all_dicts.append(
                     {
                         "timestamp": s.get("date", ""),
                         "harness": s.get("harness", ""),
@@ -205,7 +239,17 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         "duration_seconds": 0,
                     }
                 )
-            return jsonify(result)
+            all_dicts = _filter_records(all_dicts, model_filter, harness_filter, outcome_filter)
+            total = len(all_dicts)
+            page = all_dicts[offset : offset + limit]
+            return jsonify(
+                {
+                    "sessions": page,
+                    "total": total,
+                    "offset": offset,
+                    "has_more": offset + limit < total,
+                }
+            )
         except Exception as e:
             logger.exception("Error loading sessions")
             return jsonify({"error": str(e)}), 500

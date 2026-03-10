@@ -128,15 +128,21 @@ def test_api_sessions_stats_days_zero(client):
 
 
 def test_api_sessions_list(client):
-    """Test /api/sessions returns recent sessions."""
+    """Test /api/sessions returns recent sessions with pagination metadata."""
     resp = client.get("/api/sessions")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert isinstance(data, list)
-    assert len(data) == 3
+    assert "sessions" in data
+    assert "total" in data
+    assert "offset" in data
+    assert "has_more" in data
+    assert len(data["sessions"]) == 3
+    assert data["total"] == 3
+    assert data["offset"] == 0
+    assert data["has_more"] is False
     # Most recent first
-    assert data[0]["session_id"] == "abc3"
-    assert data[0]["outcome"] == "productive"
+    assert data["sessions"][0]["session_id"] == "abc3"
+    assert data["sessions"][0]["outcome"] == "productive"
 
 
 def test_api_sessions_limit(client):
@@ -144,16 +150,28 @@ def test_api_sessions_limit(client):
     resp = client.get("/api/sessions?limit=2")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert len(data) == 2
+    assert len(data["sessions"]) == 2
+    assert data["total"] == 3
+    assert data["has_more"] is True
+
+
+def test_api_sessions_offset(client):
+    """Test /api/sessions supports offset-based pagination."""
+    resp = client.get("/api/sessions?limit=2&offset=2")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sessions"]) == 1  # only 1 remaining after offset 2
+    assert data["total"] == 3
+    assert data["offset"] == 2
+    assert data["has_more"] is False
 
 
 def test_api_sessions_limit_capped(client):
     """Test /api/sessions caps limit at 200."""
     resp = client.get("/api/sessions?limit=999")
     assert resp.status_code == 200
-    # Should not error, just cap at 200
     data = resp.get_json()
-    assert isinstance(data, list)
+    assert isinstance(data["sessions"], list)
 
 
 def test_api_sessions_limit_negative(client):
@@ -161,8 +179,8 @@ def test_api_sessions_limit_negative(client):
     resp = client.get("/api/sessions?limit=-1")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert isinstance(data, list)
-    assert len(data) == 1  # clamped to 1, not all-but-last
+    assert isinstance(data["sessions"], list)
+    assert len(data["sessions"]) == 1  # clamped to 1
 
 
 def test_api_sessions_with_days(client):
@@ -170,9 +188,62 @@ def test_api_sessions_with_days(client):
     resp = client.get("/api/sessions?days=3650")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert isinstance(data, list)
-    # days=3650 (10 years) should include test sessions regardless of when the test runs
-    assert len(data) == 3
+    assert isinstance(data["sessions"], list)
+    assert len(data["sessions"]) == 3
+
+
+def test_api_sessions_filter_by_harness(client):
+    """Test /api/sessions?harness=X filters by harness."""
+    resp = client.get("/api/sessions?harness=gptme")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["harness"] == "gptme"
+    assert data["total"] == 1
+
+
+def test_api_sessions_filter_by_model(client):
+    """Test /api/sessions?model=X filters by model."""
+    resp = client.get("/api/sessions?model=claude-opus-4-6")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sessions"]) == 2
+    assert all(s["model"] == "claude-opus-4-6" for s in data["sessions"])
+    assert data["total"] == 2
+
+
+def test_api_sessions_filter_by_outcome(client):
+    """Test /api/sessions?outcome=X filters by outcome."""
+    resp = client.get("/api/sessions?outcome=productive")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sessions"]) == 2
+    assert all(s["outcome"] == "productive" for s in data["sessions"])
+
+    resp = client.get("/api/sessions?outcome=noop")
+    data = resp.get_json()
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["outcome"] == "noop"
+
+
+def test_api_sessions_combined_filters(client):
+    """Test /api/sessions with multiple filters applied simultaneously."""
+    resp = client.get("/api/sessions?harness=claude-code&outcome=productive")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sessions"]) == 2
+    assert all(
+        s["harness"] == "claude-code" and s["outcome"] == "productive" for s in data["sessions"]
+    )
+
+
+def test_api_sessions_filter_no_match(client):
+    """Test /api/sessions with filter that matches nothing."""
+    resp = client.get("/api/sessions?model=nonexistent-model")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["sessions"]) == 0
+    assert data["total"] == 0
 
 
 def test_api_services_structure(client):
@@ -338,7 +409,9 @@ def test_workspace_no_sessions(tmp_path: Path):
 
         resp = c.get("/api/sessions")
         assert resp.status_code == 200
-        assert resp.get_json() == []
+        data = resp.get_json()
+        assert data["sessions"] == []
+        assert data["total"] == 0
 
 
 def test_api_journals_empty(client):

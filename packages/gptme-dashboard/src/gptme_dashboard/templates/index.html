@@ -149,6 +149,30 @@ tr:hover { background: var(--accent-dim); }
   color: var(--accent);
 }
 
+.filter-row select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.filter-row select:focus { border-color: var(--accent); color: var(--accent); outline: none; }
+
+/* Pagination */
+#sessions-pagination button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+#sessions-pagination button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+#sessions-pagination button:disabled { opacity: 0.4; cursor: default; }
+
 /* Search */
 .search-box {
   width: 100%;
@@ -290,13 +314,31 @@ tr:hover { background: var(--accent-dim); }
 
 <!-- Dynamic: Recent Sessions (shown when serve API is available) -->
 <section id="recent-sessions" class="dynamic-panel" style="display:none">
-  <h2>Recent Sessions</h2>
+  <h2>Recent Sessions <span class="count-badge" id="sessions-count"></span></h2>
+  <div class="filter-row" id="session-filters">
+    <select id="session-filter-harness" onchange="loadRecentSessions(0)">
+      <option value="">All harnesses</option>
+    </select>
+    <select id="session-filter-model" onchange="loadRecentSessions(0)">
+      <option value="">All models</option>
+    </select>
+    <select id="session-filter-outcome" onchange="loadRecentSessions(0)">
+      <option value="">All outcomes</option>
+      <option value="productive">productive</option>
+      <option value="noop">noop</option>
+    </select>
+  </div>
   <table id="dynamic-sessions-table">
     <thead>
       <tr><th>Time</th><th>Harness</th><th>Model</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
     </thead>
     <tbody></tbody>
   </table>
+  <div id="sessions-pagination" style="display:none;text-align:center;padding:0.5rem;gap:0.5rem;align-items:center;justify-content:center">
+    <button id="sessions-prev" onclick="sessionsPagePrev()" disabled>&#8592; Prev</button>
+    <span id="sessions-page-info" style="margin:0 0.5rem"></span>
+    <button id="sessions-next" onclick="sessionsPageNext()">Next &#8594;</button>
+  </div>
 </section>
 
 <!-- Dynamic: Services (shown when serve API is available) -->
@@ -728,19 +770,46 @@ async function loadSessionStats() {
   } catch (e) { hide('session-stats'); }
 }
 
-async function loadRecentSessions() {
+// Session pagination state
+let _sessionsOffset = 0;
+const _sessionsLimit = 20;
+let _sessionsTotal = 0;
+let _filtersPopulated = false;
+
+function sessionsPagePrev() { loadRecentSessions(Math.max(0, _sessionsOffset - _sessionsLimit)); }
+function sessionsPageNext() { loadRecentSessions(_sessionsOffset + _sessionsLimit); }
+
+async function loadRecentSessions(offset) {
+  if (offset !== undefined) _sessionsOffset = offset;
   try {
-    const resp = await fetch('/api/sessions?limit=20');
+    let url = '/api/sessions?limit=' + _sessionsLimit + '&offset=' + _sessionsOffset;
+    const harness = document.getElementById('session-filter-harness')?.value;
+    const model = document.getElementById('session-filter-model')?.value;
+    const outcome = document.getElementById('session-filter-outcome')?.value;
+    if (harness) url += '&harness=' + encodeURIComponent(harness);
+    if (model) url += '&model=' + encodeURIComponent(model);
+    if (outcome) url += '&outcome=' + encodeURIComponent(outcome);
+
+    const resp = await fetch(url);
     if (!resp.ok) { hide('recent-sessions'); return; }
-    const sessions = await resp.json();
+    const data = await resp.json();
+    const sessions = data.sessions || [];
+    _sessionsTotal = data.total || 0;
+    _sessionsOffset = data.offset || 0;
+
     const tbody = document.querySelector('#dynamic-sessions-table tbody');
     if (!tbody) { hide('recent-sessions'); return; }
 
-    if (!Array.isArray(sessions) || sessions.length === 0) {
+    // Update count badge
+    const countEl = document.getElementById('sessions-count');
+    if (countEl) countEl.textContent = '(' + _sessionsTotal + ')';
+
+    if (sessions.length === 0 && _sessionsOffset === 0) {
       tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:1.5rem">'
-        + 'No sessions found for this workspace. '
+        + 'No sessions found. '
         + 'Run <code>gptme-dashboard generate --sessions</code> or use the session store to populate.'
         + '</td></tr>';
+      document.getElementById('sessions-pagination').style.display = 'none';
       return;
     }
 
@@ -757,6 +826,46 @@ async function loadRecentSessions() {
         + '<td>' + esc(dur) + '</td>'
         + '</tr>';
     }).join('');
+
+    // Update pagination
+    const pagDiv = document.getElementById('sessions-pagination');
+    if (_sessionsTotal > _sessionsLimit) {
+      pagDiv.style.display = 'flex';
+      const page = Math.floor(_sessionsOffset / _sessionsLimit) + 1;
+      const pages = Math.ceil(_sessionsTotal / _sessionsLimit);
+      document.getElementById('sessions-page-info').textContent = 'Page ' + page + ' of ' + pages;
+      document.getElementById('sessions-prev').disabled = _sessionsOffset === 0;
+      document.getElementById('sessions-next').disabled = !data.has_more;
+    } else {
+      pagDiv.style.display = 'none';
+    }
+
+    // Populate filter dropdowns once from stats
+    if (!_filtersPopulated) {
+      _filtersPopulated = true;
+      try {
+        const statsResp = await fetch('/api/sessions/stats');
+        if (statsResp.ok) {
+          const stats = await statsResp.json();
+          const harnessSelect = document.getElementById('session-filter-harness');
+          const modelSelect = document.getElementById('session-filter-model');
+          if (stats.by_harness) {
+            for (const h of Object.keys(stats.by_harness).sort()) {
+              const opt = document.createElement('option');
+              opt.value = h; opt.textContent = h;
+              harnessSelect.appendChild(opt);
+            }
+          }
+          if (stats.by_model) {
+            for (const m of Object.keys(stats.by_model).sort()) {
+              const opt = document.createElement('option');
+              opt.value = m; opt.textContent = m;
+              modelSelect.appendChild(opt);
+            }
+          }
+        }
+      } catch (_e) { /* stats not critical */ }
+    }
   } catch (e) { hide('recent-sessions'); }
 }
 
