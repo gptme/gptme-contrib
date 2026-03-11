@@ -138,22 +138,39 @@ def generate(
     default=None,
     help="Static site directory (default: <workspace>/_site).",
 )
-def serve(workspace: str, port: int, host: str, output: str | None) -> None:
+@click.option(
+    "--org",
+    "org_config",
+    type=click.Path(exists=True),
+    default=None,
+    help=(
+        "Path to org TOML config listing remote agent API endpoints. "
+        "Enables /api/org aggregation endpoint and /org view page. "
+        "Example: ~/.config/gptme/org.toml"
+    ),
+)
+def serve(workspace: str, port: int, host: str, output: str | None, org_config: str | None) -> None:
     """Serve the dashboard with live API endpoints.
 
     Generates the static site and serves it alongside API endpoints
     for session stats and agent status. Requires Flask:
     ``pip install gptme-dashboard[serve]``
+
+    Pass --org <org.toml> to also enable the org view (agent grid) at /org.
     """
     from gptme_dashboard.server import create_app
 
     ws = Path(workspace)
     site = Path(output) if output else None
+    org = Path(org_config) if org_config else None
 
-    app = create_app(ws, site_dir=site)
+    app = create_app(ws, site_dir=site, org_config=org)
     click.echo(f"Serving dashboard at http://{host}:{port}")
     click.echo(f"  Workspace: {ws.resolve()}")
     click.echo(f"  API: http://{host}:{port}/api/status")
+    if org:
+        click.echo(f"  Org view: http://{host}:{port}/org")
+        click.echo(f"  Org API:  http://{host}:{port}/api/org")
     app.run(host=host, port=port, debug=False)
 
 

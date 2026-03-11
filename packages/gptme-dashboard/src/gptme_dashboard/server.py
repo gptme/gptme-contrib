@@ -9,25 +9,155 @@ and dynamic panels activate when the API is reachable.
 from __future__ import annotations
 
 import ipaddress
-import json as _json
+import json
 import logging
 import platform
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Block all HTTP redirects to prevent SSRF via open redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise urllib.error.URLError(f"redirect not allowed: {newurl}")
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _fetch_json(url: str, timeout: int = 5) -> "dict[str, Any] | list[Any] | None":
+    """Fetch JSON from *url* without following HTTP redirects.
+
+    Returns ``None`` on any error (connection refused, timeout, redirect, …).
+    Redirects are blocked to prevent SSRF via a compromised agent API.
+    """
+    try:
+        with _no_redirect_opener.open(url, timeout=timeout) as resp:  # noqa: S310
+            result: dict[str, Any] | list[Any] = json.loads(resp.read(64 * 1024))
+            return result
+    except Exception:
+        return None
+
+
+def load_org_config(org_config: Path) -> list[dict[str, str]]:
+    """Load org config from a TOML file listing known agents.
+
+    Expected format::
+
+        [[agents]]
+        name = "bob"
+        api  = "https://bob.example.com:8042"
+
+        [[agents]]
+        name = "alice"
+        api  = "https://alice.example.com:8042"
+
+    Returns a list of agent dicts with ``name`` and ``api`` keys.
+    Raises ``ValueError`` for invalid entries (missing name/api, bad URL scheme).
+    """
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ImportError:
+            raise ImportError(
+                "tomli is required for org config on Python < 3.11: " "pip install tomli"
+            )
+
+    with open(org_config, "rb") as f:
+        data = tomllib.load(f)
+
+    agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        raise ValueError(
+            f"'agents' must be an array-of-tables ([[agents]]), got: {type(agents).__name__}"
+        )
+    result = []
+    for i, agent in enumerate(agents):
+        if "name" not in agent:
+            raise ValueError(f"agents[{i}] missing 'name' field")
+        if "api" not in agent:
+            raise ValueError(f"agents[{i}] missing 'api' field")
+        api = agent["api"].rstrip("/")
+        if not api.startswith(("http://", "https://")):
+            raise ValueError(f"agents[{i}].api must start with http:// or https://, got: {api!r}")
+        result.append({"name": agent["name"], "api": api})
+    return result
+
+
+def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
+    """Fetch all data for a single agent — status then tasks/services/sessions in parallel."""
+    api = agent["api"]
+    card: dict[str, Any] = {"name": agent["name"], "api": api}
+
+    status = _fetch_json(f"{api}/api/status")
+    if status is None:
+        card["error"] = "unreachable"
+        return card
+
+    if not isinstance(status, dict):
+        card["error"] = "invalid status response"
+        return card
+
+    card["status"] = status
+
+    # Fetch remaining endpoints in parallel using a single shared pool
+    with ThreadPoolExecutor(max_workers=3) as sub_ex:
+        fut_tasks = sub_ex.submit(_fetch_json, f"{api}/api/tasks?state=active")
+        fut_services = sub_ex.submit(_fetch_json, f"{api}/api/services")
+        fut_sessions = sub_ex.submit(_fetch_json, f"{api}/api/sessions?limit=1")
+        tasks_data = fut_tasks.result()
+        services_data = fut_services.result()
+        sessions_data = fut_sessions.result()
+
+    if isinstance(tasks_data, list):
+        card["active_tasks"] = len(tasks_data)
+    elif isinstance(tasks_data, dict) and isinstance(tasks_data.get("tasks"), list):
+        card["active_tasks"] = len(tasks_data["tasks"])
+    else:
+        card["active_tasks"] = None
+
+    if isinstance(services_data, dict):
+        svcs = services_data.get("services") or []
+        card["running_services"] = [
+            s["name"] for s in svcs if isinstance(s, dict) and s.get("active") and "name" in s
+        ]
+    else:
+        card["running_services"] = None
+
+    if isinstance(sessions_data, dict):
+        sessions = sessions_data.get("sessions")
+        sessions = sessions if isinstance(sessions, list) else []
+        first = sessions[0] if sessions else None
+        card["last_session"] = first.get("date") if isinstance(first, dict) else None
+    else:
+        card["last_session"] = None
+
+    return card
+
+
+def create_app(
+    workspace: Path, site_dir: Path | None = None, org_config: Path | None = None
+) -> Any:
     """Create Flask app serving static dashboard + API.
 
     Args:
         workspace: Path to the gptme workspace root.
         site_dir: Directory containing the generated static site.
             If None, generates into ``<workspace>/_site``.
+        org_config: Optional path to an org TOML config listing remote agents.
+            When provided, enables the ``/api/org`` aggregation endpoint and
+            serves ``/org`` as the org view page.
 
     Returns:
         A Flask application instance.
@@ -69,6 +199,16 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         static_url_path="",
     )
     app.config["WORKSPACE"] = str(workspace.resolve())
+
+    # Load org config if provided
+    _org_agents: list[dict[str, str]] = []
+    if org_config is not None:
+        try:
+            _org_agents = load_org_config(org_config)
+            logger.info("Org config loaded: %d agents", len(_org_agents))
+        except Exception as e:
+            logger.error("Failed to load org config %s: %s", org_config, e)
+            raise
 
     @app.route("/")
     def index() -> Any:
@@ -373,7 +513,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         timeout=5,
                     )
                     if result.returncode == 0 and result.stdout.strip():
-                        units = _json.loads(result.stdout)
+                        units = json.loads(result.stdout)
                         for unit in units:
                             name = unit.get("unit", "")
                             if _is_relevant_service(name, agent_name):
@@ -385,7 +525,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                                         "sub": unit.get("sub", ""),
                                     }
                                 )
-                except (OSError, subprocess.TimeoutExpired, _json.JSONDecodeError, ValueError):
+                except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
                     pass
 
             elif system == "Darwin":
@@ -453,7 +593,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         timeout=5,
                     )
                     if result.returncode == 0 and result.stdout.strip():
-                        units = _json.loads(result.stdout)
+                        units = json.loads(result.stdout)
                         for unit in units:
                             timer_name = unit.get("unit", "")
                             if not _is_relevant_service(timer_name, agent_name):
@@ -486,7 +626,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 except (
                     OSError,
                     subprocess.TimeoutExpired,
-                    _json.JSONDecodeError,
+                    json.JSONDecodeError,
                     ValueError,
                     OverflowError,
                 ):
@@ -562,9 +702,9 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         _health_cache["expires"] = now + _HEALTH_CACHE_TTL
                     return jsonify(result)
 
-                units = _json.loads(list_result.stdout)
+                units = json.loads(list_result.stdout)
                 relevant = [u for u in units if _is_relevant_service(u.get("unit", ""), agent_name)]
-            except (OSError, subprocess.TimeoutExpired, _json.JSONDecodeError, ValueError):
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
                 result = {"services": [], "platform": system}
                 with _health_cache_lock:
                     _health_cache["data"] = result
@@ -915,7 +1055,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().splitlines():
                     try:
-                        entry = _json.loads(line)
+                        entry = json.loads(line)
                         # Extract fields from systemd journal JSON
                         ts_us = int(entry.get("__REALTIME_TIMESTAMP", "0"))
                         prio = str(entry.get("PRIORITY", "6"))
@@ -932,7 +1072,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                                 "message": message,
                             }
                         )
-                    except (_json.JSONDecodeError, ValueError, TypeError):
+                    except (json.JSONDecodeError, ValueError, TypeError):
                         continue
 
             response_data: dict[str, Any] = {
@@ -1043,5 +1183,128 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         except Exception as e:
             logger.exception("Error scanning summaries")
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/org")
+    def api_org() -> Any:
+        """Aggregate status from all known agents in the org.
+
+        Returns a list of agent cards, each containing:
+        - ``name``: agent name from org.toml
+        - ``api``: base API URL
+        - ``status``: agent name/workspace from /api/status (or null on error)
+        - ``tasks``: active task count from /api/tasks?state=active (or null)
+        - ``services``: running service names from /api/services (or null)
+        - ``sessions``: most recent session timestamp from /api/sessions (or null)
+        - ``error``: error message if the agent API was unreachable
+
+        Returns 404 if no org config was loaded.
+        """
+        if not _org_agents:
+            msg = (
+                f"Org config loaded from {org_config} but contains no agents"
+                if org_config is not None
+                else "No org config loaded. Start server with --org <org.toml>"
+            )
+            return jsonify({"error": msg}), 404
+
+        # Fetch all agents in parallel
+        cards: list[dict[str, Any]] = [None] * len(_org_agents)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=min(10, len(_org_agents))) as ex:
+            futures = {ex.submit(_fetch_agent_card, a): i for i, a in enumerate(_org_agents)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    cards[idx] = fut.result()
+                except Exception as e:
+                    agent = _org_agents[idx]
+                    logger.warning("Agent card fetch failed for %s: %s", agent["name"], e)
+                    cards[idx] = {"name": agent["name"], "api": agent["api"], "error": str(e)}
+
+        return jsonify({"agents": cards, "count": len(cards)})
+
+    # Org page template — defined once at create_app scope, not per-request
+    _ORG_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Org View</title>
+  <style>
+    :root { --bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text-dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:2rem; }
+    h1 { font-size:1.5rem; margin-bottom:1.5rem; }
+    h1 span { color:var(--text-dim); font-weight:400; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:1rem; }
+    .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:1.25rem; }
+    .card h2 { font-size:1.1rem; margin-bottom:0.75rem; }
+    .card h2 a { color:var(--accent); text-decoration:none; }
+    .status { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+    .status.active { background:var(--green); }
+    .status.unreachable { background:var(--red); }
+    .row { display:flex; justify-content:space-between; font-size:0.875rem; margin-top:0.5rem; color:var(--text-dim); }
+    .row span:last-child { color:var(--text); }
+    .error { color:var(--red); font-size:0.875rem; margin-top:0.5rem; }
+    #status-bar { margin-bottom:1.5rem; font-size:0.875rem; color:var(--text-dim); }
+    #status-bar strong { color:var(--text); }
+  </style>
+</head>
+<body>
+  <h1>Org View <span id="org-summary"></span></h1>
+  <div id="status-bar">Loading agents...</div>
+  <div class="grid" id="agent-grid"></div>
+  <script>
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    async function loadOrg() {
+      try {
+        const resp = await fetch('/api/org');
+        if (!resp.ok) { document.getElementById('status-bar').textContent = 'Failed to load org data'; return; }
+        const data = await resp.json();
+        const agents = data.agents || [];
+        const active = agents.filter(a => !a.error).length;
+        document.getElementById('org-summary').textContent = '(' + agents.length + ' agents)';
+        document.getElementById('status-bar').innerHTML = '<strong>' + active + '</strong> reachable, <strong>' + (agents.length - active) + '</strong> unreachable';
+        const grid = document.getElementById('agent-grid');
+        grid.innerHTML = agents.map(a => {
+          const reachable = !a.error;
+          const name = esc(a.status ? (a.status.agent || a.name) : a.name);
+          const apiLink = '<a href="' + esc(a.api) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>';
+          const dot = '<span class="status ' + (reachable ? 'active' : 'unreachable') + '"></span>';
+          let body = '';
+          if (!reachable) {
+            body = '<div class="error">Unreachable</div>';
+          } else {
+            if (a.active_tasks !== null) body += '<div class="row"><span>Active tasks</span><span>' + a.active_tasks + '</span></div>';
+            if (a.running_services !== null) body += '<div class="row"><span>Running services</span><span>' + (a.running_services.length ? a.running_services.map(esc).join(', ') : 'none') + '</span></div>';
+            if (a.last_session) body += '<div class="row"><span>Last session</span><span>' + esc(a.last_session) + '</span></div>';
+          }
+          return '<div class="card"><h2>' + dot + apiLink + '</h2>' + body + '</div>';
+        }).join('');
+      } catch(e) {
+        document.getElementById('status-bar').textContent = 'Error: ' + e.message;
+      }
+    }
+    loadOrg();
+    setInterval(loadOrg, 30000);
+  </script>
+</body>
+</html>"""
+
+    @app.route("/org")
+    @app.route("/org.html")
+    def org_view() -> Any:
+        """Serve the org view page (agent grid)."""
+        if not _org_agents:
+            if org_config is not None:
+                msg = f"Org config {org_config} contains no agents"
+            else:
+                msg = "No org config loaded. Start the server with --org &lt;org.toml&gt;"
+            return (
+                f"<html><body><h1>No org config</h1><p>{msg}</p></body></html>",
+                404,
+            )
+        return _ORG_PAGE
 
     return app

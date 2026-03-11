@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from gptme_dashboard.server import create_app
+from gptme_dashboard.server import create_app, load_org_config
 
 
 @pytest.fixture
@@ -1790,3 +1790,412 @@ def test_api_logs_exception_path_caches_result(client):
     assert call_count == 1
     data2 = resp2.get_json()
     assert data2["logs"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 6a: Org view tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def org_toml(tmp_path: Path) -> Path:
+    """Create a minimal org.toml for testing."""
+    p = tmp_path / "org.toml"
+    p.write_text(
+        textwrap.dedent("""\
+        [[agents]]
+        name = "bob"
+        api  = "http://bob.example.com:8042"
+
+        [[agents]]
+        name = "alice"
+        api  = "http://alice.example.com:8042"
+        """)
+    )
+    return p
+
+
+def test_load_org_config(org_toml: Path) -> None:
+    """Test load_org_config parses agent list correctly."""
+    from gptme_dashboard.server import load_org_config
+
+    agents = load_org_config(org_toml)
+    assert len(agents) == 2
+    assert agents[0] == {"name": "bob", "api": "http://bob.example.com:8042"}
+    assert agents[1] == {"name": "alice", "api": "http://alice.example.com:8042"}
+
+
+def test_load_org_config_missing_name(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError when agent is missing 'name'."""
+    from gptme_dashboard.server import load_org_config
+
+    p = tmp_path / "bad.toml"
+    p.write_text('[[agents]]\napi = "http://example.com:8042"\n')
+    with pytest.raises(ValueError, match="missing 'name'"):
+        load_org_config(p)
+
+
+def test_load_org_config_missing_api(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError when agent is missing 'api'."""
+    from gptme_dashboard.server import load_org_config
+
+    p = tmp_path / "bad.toml"
+    p.write_text('[[agents]]\nname = "bob"\n')
+    with pytest.raises(ValueError, match="missing 'api'"):
+        load_org_config(p)
+
+
+def test_load_org_config_bad_url_scheme(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError for non-http(s) API URLs."""
+    from gptme_dashboard.server import load_org_config
+
+    p = tmp_path / "bad.toml"
+    p.write_text('[[agents]]\nname = "bob"\napi = "ftp://example.com"\n')
+    with pytest.raises(ValueError, match="must start with http"):
+        load_org_config(p)
+
+
+def test_api_org_no_config(workspace: Path, tmp_path: Path) -> None:
+    """Test /api/org returns 404 when no org config is loaded."""
+    app = create_app(workspace)
+    with app.test_client() as c:
+        resp = c.get("/api/org")
+    assert resp.status_code == 404
+    assert "error" in resp.get_json()
+
+
+def test_api_org_aggregates_agents(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org calls each agent's API and returns agent cards."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        """Return parsed JSON dict/list, agent-aware via URL hostname."""
+        agent_name = "alice" if "alice.example.com" in url else "bob"
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": agent_name, "workspace": agent_name}
+        elif "/api/tasks" in url:
+            return [{"id": "task-1", "title": "Do something", "state": "active"}]
+        elif "/api/services" in url:
+            return {"services": [{"name": "gptme.service", "active": True}]}
+        elif "/api/sessions" in url:
+            return {"sessions": [{"date": "2026-03-11"}], "total": 1}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 2
+    agents = data["agents"]
+    # First agent (bob) should be reachable with data
+    bob = agents[0]
+    assert bob["name"] == "bob"
+    assert "error" not in bob
+    assert bob["active_tasks"] == 1
+    assert bob["running_services"] == ["gptme.service"]
+    assert bob["last_session"] == "2026-03-11"
+    # Second agent (alice) should also be reachable with correct identity
+    alice = agents[1]
+    assert alice["name"] == "alice"
+    assert "error" not in alice
+    assert alice["status"]["agent"] == "alice"
+    assert alice["active_tasks"] == 1
+    assert alice["running_services"] == ["gptme.service"]
+    assert alice["last_session"] == "2026-03-11"
+
+
+def test_api_org_handles_unreachable_agent(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org marks unreachable agents with error field."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        return None  # simulate unreachable agent
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 2
+    for agent in data["agents"]:
+        assert agent["error"] == "unreachable"
+
+
+def test_org_view_no_config(workspace: Path) -> None:
+    """Test /org returns 404 when no org config is loaded."""
+    app = create_app(workspace)
+    with app.test_client() as c:
+        resp = c.get("/org")
+    assert resp.status_code == 404
+
+
+def test_org_view_with_config(workspace: Path, org_toml: Path) -> None:
+    """Test /org returns an HTML page when org config is loaded."""
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        resp = c.get("/org")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "Org View" in html
+    assert "/api/org" in html
+
+
+def test_org_view_xss_escaping(workspace: Path, org_toml: Path) -> None:
+    """Test /org page includes esc() for XSS prevention."""
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        resp = c.get("/org")
+    html = resp.data.decode()
+    # The page must define an esc() helper for HTML escaping
+    assert "function esc(" in html
+    # All dynamic text insertions should route through esc()
+    assert "esc(a.api)" in html
+    assert "esc(" in html
+
+
+def test_create_app_raises_on_bad_org_config(workspace: Path, tmp_path: Path) -> None:
+    """Test create_app raises when org_config is malformed."""
+    bad_config = tmp_path / "bad.toml"
+    bad_config.write_text('[[agents]]\napi = "http://example.com:8042"\n')  # missing name
+    with pytest.raises(ValueError, match="missing 'name'"):
+        create_app(workspace, org_config=bad_config)
+
+
+def test_fetch_json_blocks_redirects() -> None:
+    """_fetch_json must return None on HTTP redirects (SSRF prevention)."""
+    from unittest.mock import MagicMock
+
+    import urllib.error
+
+    from gptme_dashboard.server import _NoRedirectHandler
+
+    handler = _NoRedirectHandler()
+    req = MagicMock()
+    fp = MagicMock()
+    headers: dict = {}
+
+    # redirect_request must raise URLError, not follow the redirect
+    with pytest.raises(urllib.error.URLError, match="redirect not allowed"):
+        handler.redirect_request(req, fp, 302, "Found", headers, "http://169.254.169.254/")
+
+
+def test_api_org_service_missing_name(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles service entries without a 'name' field gracefully (no KeyError)."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            # One malformed entry (no 'name') mixed with a valid one
+            return {
+                "services": [
+                    {"active": True},  # missing 'name' — must not raise KeyError
+                    {"name": "gptme.service", "active": True},
+                ]
+            }
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    agents = resp.get_json()["agents"]
+    bob = next(a for a in agents if a["name"] == "bob")
+    # Malformed entry silently skipped; only the named service is returned
+    assert bob["running_services"] == ["gptme.service"]
+
+
+def test_api_org_tasks_null(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles tasks=null (non-list) without raising TypeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            # Remote agent returns {"tasks": null} — must not raise TypeError on len()
+            return {"tasks": None}
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["active_tasks"] is None  # non-list tasks → None, not TypeError
+
+
+def test_api_org_card_exception_isolated(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org isolates per-agent failures — one bad agent doesn't crash all cards."""
+    call_count = 0
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        nonlocal call_count
+        call_count += 1
+        if "alice.example.com" in url and "/api/status" in url:
+            raise RuntimeError("alice is on fire")
+        agent_name = "alice" if "alice.example.com" in url else "bob"
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": agent_name, "workspace": agent_name}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    # Endpoint must not 500 even though alice raised an exception
+    assert resp.status_code == 200
+    agents = resp.get_json()["agents"]
+    assert len(agents) == 2
+    bob = next(a for a in agents if a["name"] == "bob")
+    alice = next(a for a in agents if a["name"] == "alice")
+    assert "error" not in bob  # bob succeeded
+    assert "error" in alice  # alice's failure is isolated to her card
+
+
+def test_api_org_services_null(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles services=null (explicit null) without TypeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            # Remote agent returns {"services": null} — .get("services", []) returns None
+            return {"services": None}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["running_services"] == []  # null services → empty list, not TypeError
+
+
+def test_api_org_session_non_dict(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles sessions[0]=null without AttributeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            # Remote agent returns a non-dict first session entry
+            return {"sessions": [None], "total": 1}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["last_session"] is None  # non-dict session → None, not AttributeError
+
+
+def test_api_org_sessions_non_list(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles sessions=<non-list> without TypeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            # Remote agent returns a non-list sessions value
+            return {"sessions": 42}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["last_session"] is None  # non-list sessions → None, not TypeError
+
+
+def test_api_org_service_entry_non_dict(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles non-dict entries in services list without AttributeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            # Remote agent returns a null entry inside services list
+            return {"services": [None, {"name": "gptme", "active": True}]}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    # non-dict entry skipped; valid dict entry included
+    assert bob["running_services"] == ["gptme"]
+
+
+def test_load_org_config_agents_not_list(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError if agents is not a list."""
+    toml_path = tmp_path / "org.toml"
+    toml_path.write_bytes(b'agents = "not-a-list"\n')
+    with pytest.raises(ValueError, match="must be an array-of-tables"):
+        load_org_config(toml_path)
