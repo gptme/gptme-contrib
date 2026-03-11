@@ -1,7 +1,7 @@
 """
 gptme-retrieval - Automatic context retrieval plugin for gptme.
 
-Provides a STEP_PRE hook that retrieves relevant context before each LLM step
+Provides a TURN_PRE hook that retrieves relevant context once per user turn
 using backends like qmd or gptme-rag for semantic/keyword search.
 
 Configuration via gptme.toml:
@@ -379,7 +379,7 @@ def register_hooks() -> None:
 _instructions = """
 ## Retrieval Context
 
-This plugin automatically retrieves relevant context before each LLM step.
+This plugin automatically retrieves relevant context once per user turn (TURN_PRE hook).
 
 Configuration example in gptme.toml:
 ```toml
