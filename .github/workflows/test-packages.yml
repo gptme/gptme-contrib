@@ -149,19 +149,23 @@ jobs:
               uv run --with pytest --with pytest-cov --with pytest-timeout pytest "$pkg/tests" \
                 --cov="$pkg/src" \
                 --cov-append \
-                --cov-report=xml \
+                --cov-report=term-missing \
                 -m "not slow" \
                 --timeout=30 \
                 -q || true
             fi
           done
+          # Generate combined XML report once after all packages
+          uv run --with coverage coverage xml || true
 
       - name: Upload coverage to Codecov
+        if: hashFiles('coverage.xml') != ''
         uses: codecov/codecov-action@v5
         with:
           file: ./coverage.xml
           flags: packages
           name: codecov-packages
+          fail_ci_if_error: false
 
   # Typecheck all packages (single job, not parallelized per-package)
   typecheck:
