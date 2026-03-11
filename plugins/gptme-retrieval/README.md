@@ -2,7 +2,7 @@
 
 Automatic context retrieval plugin for gptme.
 
-This plugin adds a STEP_PRE hook that automatically retrieves relevant context before each LLM step, using backends like [qmd](https://github.com/ErikBjare/qmd) for semantic and keyword search.
+This plugin adds a TURN_PRE hook that automatically retrieves relevant context once per user turn, using backends like [qmd](https://github.com/ErikBjare/qmd) for semantic and keyword search.
 
 ## Installation
 
@@ -31,9 +31,12 @@ inject_as = "system"     # "system" for visible, "hidden" for background context
 
 ## How It Works
 
-1. **STEP_PRE Hook**: Before each LLM generation step, the plugin extracts the last user message
+1. **TURN_PRE Hook**: Once per user turn (before the first LLM step), the plugin extracts the last user message
 2. **Retrieval**: Queries the configured backend with the user's message text
-3. **Injection**: Adds retrieved context as a system message
+3. **Injection**: Adds retrieved context as a system message that persists for the entire turn
+
+Using TURN_PRE rather than STEP_PRE ensures retrieval runs exactly once per user message, avoiding
+duplicate context injection across the multiple LLM steps that can occur within a single turn.
 
 ## Backends
 

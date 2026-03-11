@@ -1,7 +1,7 @@
 """
 gptme-retrieval - Automatic context retrieval plugin for gptme.
 
-Provides a STEP_PRE hook that retrieves relevant context before each LLM step
+Provides a TURN_PRE hook that retrieves relevant context once per user turn
 using backends like qmd or gptme-rag for semantic/keyword search.
 
 Configuration via gptme.toml:
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["plugin", "get_retrieval_config", "retrieve_context"]
+__all__ = ["plugin", "get_retrieval_config", "retrieve_context", "turn_pre_hook"]
 
 
 # Default configuration
@@ -303,13 +303,15 @@ def _format_retrieval_results(results: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def step_pre_hook(
+def turn_pre_hook(
     manager: "LogManager",
 ) -> Generator[Message, None, None]:
-    """Hook that retrieves relevant context before each LLM step.
+    """Hook that retrieves relevant context once per turn.
 
-    This hook fires before each step in a turn. It extracts the last
-    user message and retrieves relevant context using the configured backend.
+    This hook fires before a turn begins (once per user message). It extracts
+    the last user message and retrieves relevant context using the configured
+    backend. Using TURN_PRE instead of STEP_PRE avoids re-running retrieval
+    (and re-injecting duplicate context) on every step within a turn.
     """
     config = get_retrieval_config()
 
@@ -364,9 +366,9 @@ def register_hooks() -> None:
         return
 
     register_hook(
-        name="gptme_retrieval.step_pre",
-        hook_type=HookType.STEP_PRE,
-        func=step_pre_hook,
+        name="gptme_retrieval.turn_pre",
+        hook_type=HookType.TURN_PRE,
+        func=turn_pre_hook,
         priority=100,  # High priority - run early
     )
 
@@ -377,7 +379,7 @@ def register_hooks() -> None:
 _instructions = """
 ## Retrieval Context
 
-This plugin automatically retrieves relevant context before each LLM step.
+This plugin automatically retrieves relevant context once per user turn (TURN_PRE hook).
 
 Configuration example in gptme.toml:
 ```toml

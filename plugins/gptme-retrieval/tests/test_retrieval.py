@@ -2,7 +2,13 @@
 
 from unittest.mock import MagicMock, patch
 
-from gptme_retrieval import DEFAULT_CONFIG, get_retrieval_config, retrieve_context
+from gptme.message import Message
+from gptme_retrieval import (
+    DEFAULT_CONFIG,
+    get_retrieval_config,
+    retrieve_context,
+    turn_pre_hook,
+)
 
 
 def test_get_retrieval_config_defaults():
@@ -44,3 +50,47 @@ def test_retrieve_context_threshold_filtering():
         results = retrieve_context("test", backend="qmd", threshold=0.5)
         assert len(results) == 1
         assert results[0]["content"] == "high"
+
+
+def test_turn_pre_hook_no_user_message():
+    """Test that turn_pre_hook does nothing when no user message exists."""
+    manager = MagicMock()
+    manager.log.messages = []
+
+    with patch("gptme_retrieval.get_retrieval_config", return_value=DEFAULT_CONFIG):
+        messages = list(turn_pre_hook(manager))
+    assert messages == []
+
+
+def test_turn_pre_hook_yields_context():
+    """Test that turn_pre_hook injects retrieved context as a system message."""
+    manager = MagicMock()
+    manager.log.messages = [Message(role="user", content="explain Thompson sampling")]
+
+    mock_qmd_result = MagicMock()
+    mock_qmd_result.returncode = 0
+    mock_qmd_result.stdout = '[{"content": "Thompson sampling is a Bayesian approach", "path": "lessons/ts.md", "score": 0.9}]'
+
+    config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
+
+    with (
+        patch("gptme_retrieval.get_retrieval_config", return_value=config),
+        patch("subprocess.run", return_value=mock_qmd_result),
+    ):
+        messages = list(turn_pre_hook(manager))
+
+    assert len(messages) == 1
+    assert messages[0].role == "system"
+    assert "Thompson sampling" in messages[0].content
+
+
+def test_turn_pre_hook_disabled():
+    """Test that turn_pre_hook does nothing when disabled in config."""
+    manager = MagicMock()
+    manager.log.messages = [Message(role="user", content="test")]
+
+    config = {**DEFAULT_CONFIG, "enabled": False}
+
+    with patch("gptme_retrieval.get_retrieval_config", return_value=config):
+        messages = list(turn_pre_hook(manager))
+    assert messages == []
