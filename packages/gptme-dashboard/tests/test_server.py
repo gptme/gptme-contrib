@@ -1192,3 +1192,184 @@ def test_api_health_multiple_services(client):
     names = [s["name"] for s in data["services"]]
     assert "gptme-server.service" in names
     assert "testbot-autonomous.service" in names
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b: Service restart endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def _get_restart_token(client) -> str:
+    """Fetch the auto-generated restart token from the restart-enabled endpoint."""
+    resp = client.get("/api/services/restart-enabled")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["enabled"] is True
+    assert data["token"]
+    return data["token"]
+
+
+def test_restart_enabled_localhost(client):
+    """Test /api/services/restart-enabled returns token for localhost."""
+    resp = client.get("/api/services/restart-enabled")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["enabled"] is True
+    assert isinstance(data["token"], str)
+    assert len(data["token"]) >= 32  # at least 32 hex chars
+
+
+def test_restart_enabled_non_localhost(client):
+    """Test /api/services/restart-enabled rejects non-localhost requests."""
+    resp = client.get("/api/services/restart-enabled", environ_base={"REMOTE_ADDR": "1.2.3.4"})
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert data["enabled"] is False
+    assert data["token"] is None
+
+
+def test_restart_success(client):
+    """Test /api/services/<name>/restart restarts a whitelisted service."""
+    token = _get_restart_token(client)
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run",
+            return_value=unittest.mock.MagicMock(returncode=0, stderr="", stdout=""),
+        ),
+    ):
+        resp = client.post(
+            "/api/services/gptme-server.service/restart",
+            headers={"X-Restart-Token": token},
+        )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"
+    assert data["service"] == "gptme-server.service"
+    assert data["action"] == "restart"
+
+
+def test_restart_no_token(client):
+    """Test /api/services/<name>/restart rejects requests with no token."""
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run"),
+    ):
+        resp = client.post("/api/services/gptme-server.service/restart")
+
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert data["status"] == "forbidden"
+
+
+def test_restart_wrong_token(client):
+    """Test /api/services/<name>/restart rejects requests with wrong token."""
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run"),
+    ):
+        resp = client.post(
+            "/api/services/gptme-server.service/restart",
+            headers={"X-Restart-Token": "wrong-token"},
+        )
+
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert data["status"] == "forbidden"
+
+
+def test_restart_non_localhost(client):
+    """Test /api/services/<name>/restart rejects non-localhost requests."""
+    token = _get_restart_token(client)
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run"),
+    ):
+        resp = client.post(
+            "/api/services/gptme-server.service/restart",
+            headers={"X-Restart-Token": token},
+            environ_base={"REMOTE_ADDR": "1.2.3.4"},
+        )
+
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert data["status"] == "forbidden"
+
+
+def test_restart_service_not_whitelisted(client):
+    """Test /api/services/<name>/restart rejects non-whitelisted service names."""
+    token = _get_restart_token(client)
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run"),
+    ):
+        resp = client.post(
+            "/api/services/sshd.service/restart",
+            headers={"X-Restart-Token": token},
+        )
+
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert data["status"] == "forbidden"
+    assert data["service"] == "sshd.service"
+
+
+def test_restart_non_linux(client):
+    """Test /api/services/<name>/restart returns 501 on non-Linux platforms."""
+    token = _get_restart_token(client)
+    with unittest.mock.patch("platform.system", return_value="Darwin"):
+        resp = client.post(
+            "/api/services/gptme-server.service/restart",
+            headers={"X-Restart-Token": token},
+        )
+
+    assert resp.status_code == 501
+    data = resp.get_json()
+    assert data["status"] == "unsupported"
+
+
+def test_restart_systemctl_failure(client):
+    """Test /api/services/<name>/restart handles systemctl failure."""
+    token = _get_restart_token(client)
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run",
+            return_value=unittest.mock.MagicMock(
+                returncode=1, stderr="Failed to restart unit", stdout=""
+            ),
+        ),
+    ):
+        resp = client.post(
+            "/api/services/gptme-server.service/restart",
+            headers={"X-Restart-Token": token},
+        )
+
+    assert resp.status_code == 500
+    data = resp.get_json()
+    assert data["status"] == "error"
+    assert "Failed to restart unit" in data["error"]
+
+
+def test_restart_subprocess_timeout(client):
+    """Test /api/services/<name>/restart handles subprocess timeout gracefully."""
+    import subprocess
+
+    token = _get_restart_token(client)
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("systemctl", 15)
+        ),
+    ):
+        resp = client.post(
+            "/api/services/gptme-server.service/restart",
+            headers={"X-Restart-Token": token},
+        )
+
+    assert resp.status_code == 500
+    data = resp.get_json()
+    assert data["status"] == "error"
+    assert "timed out" in data["error"].lower()

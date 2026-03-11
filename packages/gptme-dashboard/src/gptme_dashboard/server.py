@@ -8,7 +8,10 @@ and dynamic panels activate when the API is reachable.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import platform
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -277,6 +280,55 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     # or no cgroup data is available. Treat as "no data" rather than ~17.2 EB.
     _UINT64_MAX = 18446744073709551615
 
+    # Restart token — read from env → gptme.toml [dashboard] → auto-generate.
+    # Printed at startup so the user can find it in the server log.
+    import os as _os
+    import secrets as _secrets
+
+    _MIN_TOKEN_LEN = 32
+    _restart_token = _os.environ.get("GPTME_DASHBOARD_RESTART_TOKEN", "")
+    if _restart_token and len(_restart_token) < _MIN_TOKEN_LEN:
+        logger.warning(
+            "GPTME_DASHBOARD_RESTART_TOKEN is too short (%d chars, minimum %d); "
+            "falling back to auto-generated token",
+            len(_restart_token),
+            _MIN_TOKEN_LEN,
+        )
+        _restart_token = ""
+    if not _restart_token:
+        try:
+            import tomllib as _tomllib
+
+            _toml_path = workspace / "gptme.toml"
+            if _toml_path.exists():
+                with open(_toml_path, "rb") as _f:
+                    _toml_cfg = _tomllib.load(_f)
+                _restart_token = _toml_cfg.get("dashboard", {}).get("restart_token", "")
+                if _restart_token and len(_restart_token) < _MIN_TOKEN_LEN:
+                    logger.warning(
+                        "gptme.toml [dashboard] restart_token is too short (%d chars, minimum %d); "
+                        "falling back to auto-generated token",
+                        len(_restart_token),
+                        _MIN_TOKEN_LEN,
+                    )
+                    _restart_token = ""
+        except ModuleNotFoundError:
+            logger.debug("tomllib not available (Python < 3.11); skipping gptme.toml restart_token")
+        except Exception as _e:
+            logger.warning("Failed to read restart_token from gptme.toml: %s", _e)
+    if not _restart_token:
+        _restart_token = _secrets.token_hex(32)
+        # NOTE: _restart_token is per-process. In multi-worker deployments (Gunicorn,
+        # uWSGI), each worker generates its own token independently, causing 403s when
+        # the browser POSTs to a different worker than it fetched from. This is a
+        # known limitation of the current single-process dev-server use case. If a
+        # multi-worker deployment is ever needed, set GPTME_DASHBOARD_RESTART_TOKEN
+        # from an external source so all workers share the same token.
+        logger.info(
+            "Dashboard restart token (auto-generated): %s",
+            _restart_token,
+        )
+
     @app.route("/api/services")
     def api_services() -> Any:
         """Return systemd/launchd service status for gptme-related services.
@@ -286,8 +338,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Returns an empty list gracefully when detection is unavailable.
         """
         import json as _json
-        import platform
-        import subprocess
 
         ws = Path(app.config["WORKSPACE"])
         try:
@@ -369,8 +419,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         when detection is unavailable, or when no relevant timers exist.
         """
         import json as _json
-        import platform
-        import subprocess
         from datetime import datetime, timezone
 
         ws = Path(app.config["WORKSPACE"])
@@ -461,8 +509,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Linux (systemd --user) only; returns empty on other platforms.
         """
         import json as _json
-        import platform
-        import subprocess
         from datetime import datetime, timezone
 
         now = time.monotonic()
@@ -662,6 +708,94 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 _health_cache["data"] = {"error": str(e), "platform": system}
                 _health_cache["expires"] = now + 10.0
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/services/restart-enabled")
+    def api_services_restart_enabled() -> Any:
+        """Return whether restart actions are enabled and the session token.
+
+        Only responds to localhost requests. Cross-origin JS cannot read this
+        response (CORS blocked by browsers), so returning the token here is
+        safe — it follows the standard CSRF token pattern.
+        """
+        try:
+            _is_loopback = ipaddress.ip_address(request.remote_addr or "").is_loopback
+        except ValueError:
+            _is_loopback = False
+        if not _is_loopback:
+            return jsonify({"enabled": False, "token": None}), 403
+        resp = jsonify({"enabled": True, "token": _restart_token})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.route("/api/services/<name>/restart", methods=["POST"])
+    def api_service_restart(name: str) -> Any:
+        """Restart a managed systemd service.
+
+        Security model (defense in depth):
+        1. Loopback-only: reject non-localhost requests.
+        2. Token check: ``X-Restart-Token`` header must match server token.
+        3. Whitelist: service name must pass ``_is_relevant_service()``.
+        4. Execute: ``systemctl --user restart <name>``.
+        """
+        # 1. Loopback check
+        try:
+            _is_loopback = ipaddress.ip_address(request.remote_addr or "").is_loopback
+        except ValueError:
+            _is_loopback = False
+        if not _is_loopback:
+            return jsonify(
+                {"error": "Restart only allowed from localhost", "status": "forbidden"}
+            ), 403
+
+        # 2. Token check (constant-time comparison to avoid timing attacks)
+        token = request.headers.get("X-Restart-Token", "")
+        if not _secrets.compare_digest(token.encode(), _restart_token.encode()):
+            return jsonify({"error": "Invalid restart token", "status": "forbidden"}), 403
+
+        # 3. Whitelist check
+        ws = Path(app.config["WORKSPACE"])
+        agent_name = _get_agent_name(ws)
+        if not _is_relevant_service(name, agent_name):
+            return (
+                jsonify({"error": "Service not allowed", "status": "forbidden", "service": name}),
+                403,
+            )
+
+        # 4. Linux/systemd only
+        if platform.system() != "Linux":
+            return (
+                jsonify(
+                    {"error": "Restart only supported on Linux/systemd", "status": "unsupported"}
+                ),
+                501,
+            )
+
+        # 5. Execute restart
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "restart", name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                logger.info("Restarted service %s via dashboard", name)
+                return jsonify(
+                    {
+                        "service": name,
+                        "action": "restart",
+                        "status": "ok",
+                        "message": "Service restart triggered",
+                    }
+                )
+            else:
+                err = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                logger.warning("Failed to restart %s: %s", name, err)
+                return jsonify({"service": name, "error": err, "status": "error"}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"service": name, "error": "Restart timed out", "status": "error"}), 500
+        except OSError as e:
+            return jsonify({"service": name, "error": str(e), "status": "error"}), 500
 
     @app.route("/api/journals")
     def api_journals() -> Any:
