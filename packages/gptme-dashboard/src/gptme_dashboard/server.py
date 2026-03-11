@@ -44,7 +44,15 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         )
 
     from . import generate as _gen_mod
-    from .generate import generate, read_workspace_config, scan_journals, scan_summaries, scan_tasks
+    from .generate import (
+        _parse_toml,
+        generate,
+        read_agent_urls,
+        read_workspace_config,
+        scan_journals,
+        scan_summaries,
+        scan_tasks,
+    )
 
     # Generate (or refresh) static site on every serve start.
     # Regenerating ensures the site reflects the current workspace state —
@@ -70,12 +78,16 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     def api_status() -> Any:
         ws = Path(app.config["WORKSPACE"])
         try:
-            config = read_workspace_config(ws)
+            # Parse gptme.toml once and share the data to avoid double reads.
+            toml_data = _parse_toml(ws / "gptme.toml")
+            config = read_workspace_config(ws, _data=toml_data)
+            urls = read_agent_urls(ws, _data=toml_data)
             return jsonify(
                 {
                     "mode": "dynamic",
                     "agent": config.get("agent_name", ws.name),
                     "workspace": ws.name,
+                    "urls": urls,
                 }
             )
         except Exception as e:

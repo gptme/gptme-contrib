@@ -210,7 +210,7 @@ Remote `gptme-dashboard serve` instances need authentication. Proposed:
 | 4 | Service health monitoring | ✅ merged |
 | 5a | Service log viewer | 🔄 PR #450 |
 | 5b | Service restart actions with auth | ✅ merged |
-| 6a | Org view: standalone `--org` aggregator | 📋 planned |
+| 6a | Org view: standalone `--org` aggregator | 🔄 PR #462 |
 | 6b | gptme-webui "Org" tab integration | 📋 planned |
 
 ---

@@ -94,6 +94,55 @@ def test_api_status(client):
     assert data["mode"] == "dynamic"
     assert data["agent"] == "TestBot"
     assert "workspace" in data
+    assert data["urls"] == {}  # no [agent.urls] in fixture workspace
+
+
+def test_api_status_with_agent_urls(tmp_path: Path):
+    """Test /api/status includes agent_urls when [agent.urls] is set in gptme.toml."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "LinkBot"
+
+        [agent.urls]
+        dashboard = "https://linkbot.example.com/"
+        repo = "https://github.com/example/linkbot"
+        """)
+    )
+    (tmp_path / "lessons").mkdir()
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        resp = c.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["agent"] == "LinkBot"
+        assert data["urls"]["dashboard"] == "https://linkbot.example.com/"
+        assert data["urls"]["repo"] == "https://github.com/example/linkbot"
+
+
+def test_api_status_url_filtering(tmp_path: Path):
+    """Non-http/https URLs in [agent.urls] must be filtered from /api/status response."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "FilterBot"
+
+        [agent.urls]
+        valid = "https://example.com/"
+        file_url = "file:///etc/passwd"
+        bare_host = "example.com"
+        """)
+    )
+    (tmp_path / "lessons").mkdir()
+    app = create_app(tmp_path, site_dir=tmp_path / "site")
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        data = c.get("/api/status").get_json()
+    assert "valid" in data["urls"]
+    assert "file_url" not in data["urls"]
+    assert "bare_host" not in data["urls"]
 
 
 def test_api_sessions_stats(client):
