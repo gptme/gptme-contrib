@@ -867,17 +867,18 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 400,
             )
 
-        system = platform.system()
-        if system != "Linux":
-            return jsonify({"logs": [], "service": service, "platform": system})
-
         # Validate service name is gptme/agent-related (security: prevent arbitrary unit queries)
+        # Must happen before the platform check so non-Linux hosts also reject disallowed services.
         ws = Path(app.config["WORKSPACE"])
         agent_name = _get_agent_name(ws)
         if not _is_relevant_service(service, agent_name):
             return jsonify(
                 {"error": f"Service '{service}' is not a recognized gptme/agent service"}
             ), 403
+
+        system = platform.system()
+        if system != "Linux":
+            return jsonify({"logs": [], "service": service, "platform": system})
 
         # Check cache
         now = time.monotonic()
@@ -933,6 +934,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             }
 
             with _logs_cache_lock:
+                # Evict expired entries to prevent unbounded growth
+                expired_keys = [k for k, v in _logs_cache.items() if now >= v["expires"]]
+                for k in expired_keys:
+                    del _logs_cache[k]
                 _logs_cache[cache_key] = {"data": response_data, "expires": now + _LOGS_CACHE_TTL}
 
             return jsonify(response_data)

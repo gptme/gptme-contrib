@@ -1149,7 +1149,7 @@ async function loadServiceHealth() {
         + '<td>' + (s.restart_count || 0) + '</td>'
         + '<td>' + formatMemory(s.memory_bytes) + '</td>'
         + '<td>' + (s.recent_errors || 0) + '</td>'
-        + '<td><a class="logs-link" onclick="showServiceLogs(\'' + esc(s.name).replace(/'/g, "\\'") + '\')">logs</a> ' + restartBtn + '</td>'
+        + '<td><a class="logs-link" data-service="' + esc(s.name) + '" href="#">logs</a> ' + restartBtn + '</td>'
         + '</tr>';
     }).join('');
 
@@ -1244,5 +1244,13 @@ async function loadServiceLogs() {
 }
 
 document.addEventListener('DOMContentLoaded', initDynamic);
+
+// Delegated handler for dynamically-rendered logs links (avoids fragile inline onclick).
+document.addEventListener('click', function(e) {
+  const link = e.target.closest('a.logs-link[data-service]');
+  if (!link) return;
+  e.preventDefault();
+  showServiceLogs(link.dataset.service);
+});
 </script>
 {% endblock %}

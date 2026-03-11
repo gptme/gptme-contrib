@@ -1413,13 +1413,26 @@ def test_api_logs_non_relevant_service(client):
 
 
 def test_api_logs_non_linux(client):
-    """Test /api/services/logs returns empty on non-Linux."""
+    """Test /api/services/logs returns empty on non-Linux for gptme services."""
     with unittest.mock.patch("platform.system", return_value="Darwin"):
         resp = client.get("/api/services/logs?service=gptme-test.service")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["logs"] == []
     assert data["platform"] == "Darwin"
+
+
+def test_api_logs_non_linux_non_relevant_service(client):
+    """Test /api/services/logs returns 403 for non-gptme service even on non-Linux.
+
+    Security check must happen before the platform guard so non-Linux hosts
+    cannot be used to probe arbitrary service names.
+    """
+    with unittest.mock.patch("platform.system", return_value="Darwin"):
+        resp = client.get("/api/services/logs?service=nginx.service")
+    assert resp.status_code == 403
+    data = resp.get_json()
+    assert "error" in data
 
 
 def test_api_logs_structure(client):
