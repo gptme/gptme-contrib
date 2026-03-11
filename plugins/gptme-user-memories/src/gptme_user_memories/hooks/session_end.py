@@ -11,6 +11,7 @@ from gptme.hooks import HookType, register_hook
 from gptme.message import Message
 
 from ..extractor import (
+    SENTINEL_FILENAME,
     USER_MEMORIES_FILE,
     extract_facts,
     get_user_messages,
@@ -55,14 +56,18 @@ def session_end_user_memories_hook(
         logger.debug("user_memories: skipping autonomous session")
         return
 
+    sentinel = logdir / SENTINEL_FILENAME
+
     text = get_user_messages(conv_file)
     if len(text) < 50:
         logger.debug("user_memories: conversation too short, skipping")
+        sentinel.touch()
         return
 
     facts = extract_facts(text)
     if not facts:
         logger.debug("user_memories: no new facts extracted")
+        sentinel.touch()
         return
 
     existing = load_existing_memories(USER_MEMORIES_FILE)
@@ -76,6 +81,8 @@ def session_end_user_memories_hook(
         )
     else:
         logger.debug("user_memories: all extracted facts were duplicates")
+
+    sentinel.touch()
 
     if False:
         yield Message("system", "")

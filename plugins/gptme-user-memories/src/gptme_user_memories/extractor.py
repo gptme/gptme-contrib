@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # type: ignore[no-redef]
 
 LOGS_DIR = Path.home() / ".local/share/gptme/logs"
 CC_LOGS_DIR = Path.home() / ".claude/projects"
@@ -271,7 +275,10 @@ def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
 
 
 def process_logdir(
-    logdir: Path, force: bool = False, dry_run: bool = False
+    logdir: Path,
+    force: bool = False,
+    dry_run: bool = False,
+    model: str = "claude-haiku-4-5-20251001",
 ) -> list[str]:
     """Extract facts from a single gptme conversation log directory.
 
@@ -296,7 +303,7 @@ def process_logdir(
             sentinel.touch()
         return []
 
-    facts = extract_facts(text)
+    facts = extract_facts(text, model=model)
 
     if not dry_run:
         sentinel.touch()
@@ -364,8 +371,10 @@ def run_batch(
             for jsonl_file in sorted(
                 proj_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
             ):
-                if jsonl_file.stat().st_mtime < cutoff_ts or processed >= limit:
-                    continue
+                if processed >= limit:
+                    break
+                if jsonl_file.stat().st_mtime < cutoff_ts:
+                    break  # files sorted newest-first; remaining are all stale
                 sentinel = jsonl_file.with_suffix(".memories-extracted")
                 if not force and sentinel.exists():
                     continue
