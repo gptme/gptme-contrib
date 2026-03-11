@@ -1283,7 +1283,7 @@ def create_app(
         tag_text = " ".join(item.get("tags", [])).lower()
         category = item.get("category", "").lower()
 
-        title_words = set(title.split())
+        title_words = set(re.sub(r"[^\w\s]", " ", title).split())
         kw_words = set(kw_text.split())
         tag_words = set(tag_text.split())
         category_words = set(category.split())
@@ -1358,7 +1358,8 @@ def create_app(
                         _search_cache["data"] = _build_search_index(ws)
                         _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
 
-            items: list[dict[str, Any]] = _search_cache["data"]
+            with _search_cache_lock:
+                items: list[dict[str, Any]] = _search_cache["data"]
             if type_filter:
                 items = [i for i in items if i["type"] == type_filter]
 
