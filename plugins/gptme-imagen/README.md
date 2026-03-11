@@ -20,8 +20,11 @@ The image generation plugin provides a unified interface for generating images f
 - **Prompt enhancement**: Automatic quality and composition improvements (enhance parameter) **[Phase 2]**
 - **Progress indicators**: Visual feedback during multi-image generation **[Phase 2]**
 - **Cost tracking**: Automatic tracking and reporting of generation costs **[Phase 3]**
+- **Standalone CLI**: Use from the terminal without gptme installed **[Phase 4]**
 
 ## Installation
+
+### As gptme plugin
 
 Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
 
@@ -31,13 +34,50 @@ paths = ["path/to/plugins"]
 enabled = ["gptme_imagen"]  # Optional: limit which plugins load
 ```
 
+### As standalone CLI
+
+```bash
+# Install with CLI support and your preferred provider
+pip install 'gptme-imagen[cli,gemini]'
+pip install 'gptme-imagen[cli,dalle]'
+pip install 'gptme-imagen[cli,gemini,dalle]'
+
+# Or install everything
+pip install 'gptme-imagen[all]'
+```
+
 Set up API keys:
 ```bash
 export GOOGLE_API_KEY="your-key"  # For Gemini
 export OPENAI_API_KEY="your-key"  # For DALL-E
 ```
 
-## Usage
+## CLI Usage
+
+The `gptme-imagen` command works standalone, without the full gptme runtime:
+
+```bash
+# Generate an image
+gptme-imagen generate "a sunset over mountains"
+
+# Choose provider and style
+gptme-imagen generate "tech logo" --provider dalle --style flat-design --quality hd
+
+# Generate multiple images
+gptme-imagen generate "logo variations" --count 3 --output logos/option.png
+
+# Use reference images (Gemini only)
+gptme-imagen generate "change background to beach" --images photo.png
+
+# View costs and history
+gptme-imagen cost
+gptme-imagen history --limit 20
+
+# List available styles
+gptme-imagen styles
+```
+
+## Plugin Usage
 
 ### Basic Generation
 

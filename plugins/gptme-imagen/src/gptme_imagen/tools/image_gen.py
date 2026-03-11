@@ -10,9 +10,14 @@ import base64
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from gptme.tools.base import ToolSpec
+try:
+    from gptme.tools.base import ToolSpec
+
+    _HAS_GPTME = True
+except ImportError:
+    _HAS_GPTME = False
 
 from .cost_tracker import get_cost_tracker
 
@@ -658,10 +663,18 @@ def generate_variation(
 
     # Handle view parameter
     if view:
-        from gptme.tools.vision import view_image
+        try:
+            from gptme.tools.vision import view_image
 
-        for result in results:
-            view_image(result.image_path)
+            for result in results:
+                view_image(result.image_path)
+        except ImportError:
+            import sys
+
+            print(
+                "Warning: view=True requested but gptme is not installed; skipping display.",
+                file=sys.stderr,
+            )
 
     return results[0] if count == 1 else results
 
@@ -727,11 +740,14 @@ def batch_generate(
 
     if view:
         # Display all images to LLM after generation
-        from gptme.tools.vision import view_image
+        try:
+            from gptme.tools.vision import view_image
 
-        print(f"\n✓ Displaying {total} generated images to assistant")
-        for result in results:
-            view_image(result.image_path)
+            print(f"\n✓ Displaying {total} generated images to assistant")
+            for result in results:
+                view_image(result.image_path)
+        except ImportError:
+            pass
 
     return results
 
@@ -797,12 +813,15 @@ def compare_providers(
 
     if view and results:
         # Display all images to LLM for comparison
-        from gptme.tools.vision import view_image
+        try:
+            from gptme.tools.vision import view_image
 
-        print(f"\n✓ Displaying {len(results)} images for comparison")
-        for prov, result in results.items():
-            print(f"\n--- {prov.upper()} ---")
-            view_image(result.image_path)
+            print(f"\n✓ Displaying {len(results)} images for comparison")
+            for prov, result in results.items():
+                print(f"\n--- {prov.upper()} ---")
+                view_image(result.image_path)
+        except ImportError:
+            pass
 
     return results
 
@@ -880,11 +899,14 @@ def get_generation_history(
     return tracker.get_generation_history(limit, provider)
 
 
-# Tool specification
-image_gen_tool = ToolSpec(
-    name="image_gen",
-    desc="Multi-provider image generation",
-    instructions="""Use this tool to generate images from text descriptions.
+# Tool specification (only available when gptme is installed)
+def _make_tool_spec() -> Any:
+    if not _HAS_GPTME:
+        return None
+    return ToolSpec(
+        name="image_gen",
+        desc="Multi-provider image generation",
+        instructions="""Use this tool to generate images from text descriptions.
 
 Supports multiple providers:
 - gemini: Google's Imagen 3 (fast, high quality)
@@ -924,7 +946,7 @@ Phase 2 Features:
 - Progress indicators: Automatic progress tracking for multi-image generation
 - Enhanced error messages: Clear, actionable error messages with recovery suggestions
     """,
-    examples="""
+        examples="""
 ### Generate architecture diagram with Gemini
 
 > User: Create a diagram showing microservices architecture
@@ -1144,11 +1166,14 @@ generate_image(
 > System: 🎨 Generating with gemini (using 1 reference image)...
 > ✅ Image saved: portrait_with_accessories.png
     """,
-    functions=[
-        generate_image,
-        generate_variation,
-        batch_generate,
-        compare_providers,
-    ],
-    block_types=["image_gen"],
-)
+        functions=[
+            generate_image,
+            generate_variation,
+            batch_generate,
+            compare_providers,
+        ],
+        block_types=["image_gen"],
+    )
+
+
+image_gen_tool = _make_tool_spec()

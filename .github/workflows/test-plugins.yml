@@ -107,7 +107,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip install pytest pytest-cov pytest-timeout
-          pip install -e plugins/${{ matrix.plugin }}
+          pip install -e "plugins/${{ matrix.plugin }}[test]"
 
       - name: Run unit tests for ${{ matrix.plugin }}
         run: |
