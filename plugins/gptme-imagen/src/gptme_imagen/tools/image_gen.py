@@ -10,7 +10,7 @@ import base64
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 try:
     from gptme.tools.base import ToolSpec
@@ -669,8 +669,12 @@ def generate_variation(
             for result in results:
                 view_image(result.image_path)
         except ImportError:
-            # Vision tool not available without gptme, skip
-            pass
+            import sys
+
+            print(
+                "Warning: view=True requested but gptme is not installed; skipping display.",
+                file=sys.stderr,
+            )
 
     return results[0] if count == 1 else results
 
@@ -896,7 +900,7 @@ def get_generation_history(
 
 
 # Tool specification (only available when gptme is installed)
-def _make_tool_spec() -> ToolSpec | None:
+def _make_tool_spec() -> Any:
     if not _HAS_GPTME:
         return None
     return ToolSpec(

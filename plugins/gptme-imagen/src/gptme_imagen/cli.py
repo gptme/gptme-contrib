@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 
 import click
@@ -78,6 +79,14 @@ def generate(
     open_file: bool,
 ) -> None:
     """Generate image(s) from a text prompt."""
+    if count > 1 and output:
+        _, ext = os.path.splitext(output)
+        if ext:
+            raise click.UsageError(
+                f"--output '{output}' looks like a single file path, but --count {count} "
+                f"would generate multiple images. Pass a directory path instead (e.g. --output ./out/)."
+            )
+
     image_list: list[str] | None = list(images) if images else None
 
     try:
@@ -119,6 +128,8 @@ def cost(provider: str | None, since: str | None, until: str | None) -> None:
 
     total = get_total_cost(provider=provider, start_date=since, end_date=until)
     breakdown = get_cost_breakdown(start_date=since, end_date=until)
+    if provider:
+        breakdown = {k: v for k, v in breakdown.items() if k == provider}
 
     if not breakdown:
         click.echo("No generation records found.")
