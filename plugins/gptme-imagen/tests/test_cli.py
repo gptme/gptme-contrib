@@ -83,7 +83,7 @@ def test_cli_generate_with_options(mock_gen):
             "--quality",
             "hd",
             "--count",
-            "2",
+            "1",
             "--enhance",
             "--output",
             "/tmp/logo.png",
@@ -94,9 +94,20 @@ def test_cli_generate_with_options(mock_gen):
     assert call_kwargs["provider"] == "dalle"
     assert call_kwargs["style"] == "flat-design"
     assert call_kwargs["quality"] == "hd"
-    assert call_kwargs["count"] == 2
+    assert call_kwargs["count"] == 1
     assert call_kwargs["enhance"] is True
     assert call_kwargs["output_path"] == "/tmp/logo.png"
+
+
+def test_cli_generate_count_with_file_output_error():
+    """Count > 1 with file-extension output raises UsageError."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["generate", "tech logo", "--count", "2", "--output", "/tmp/logo.png"],
+    )
+    assert result.exit_code == 2
+    assert "directory" in result.output.lower()
 
 
 @patch("gptme_imagen.cli.generate_image")
