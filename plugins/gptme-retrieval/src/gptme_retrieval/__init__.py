@@ -42,6 +42,7 @@ __all__ = [
     "step_pre_hook",
     "turn_pre_hook",
     "_MAX_TRACKED_CONVS",
+    "_injected_per_conv",
 ]
 
 
@@ -383,20 +384,25 @@ def step_pre_hook(
         # Evict oldest entries when over the cap (FIFO)
         while len(_injected_per_conv) > _MAX_TRACKED_CONVS:
             _injected_per_conv.popitem(last=False)
+    else:
+        # Refresh position so active conversations are never evicted mid-session
+        _injected_per_conv.move_to_end(conv_name)
     injected = _injected_per_conv[conv_name]
 
-    new_results = [r for r in results if _doc_key(r) not in injected]
+    # Compute doc keys once to avoid redundant SHA-256 hashing
+    result_keys = [(r, _doc_key(r)) for r in results]
+    new_results = [(r, key) for r, key in result_keys if key not in injected]
 
     if not new_results:
         return
 
     # Format and inject only new results
-    formatted = _format_retrieval_results(new_results)
+    formatted = _format_retrieval_results([r for r, _ in new_results])
 
     if formatted:
         # Mark these docs as injected before yielding
-        for r in new_results:
-            injected.add(_doc_key(r))
+        for _, key in new_results:
+            injected.add(key)
 
         inject_as = config.get("inject_as", "system")
         hide = inject_as == "hidden"

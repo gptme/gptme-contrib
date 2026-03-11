@@ -193,8 +193,8 @@ def test_step_pre_hook_disabled():
     assert messages == []
 
 
-def test_step_pre_hook_none_name_isolated():
-    """Test that nameless conversations (log.name=None) don't share dedup state."""
+def test_step_pre_hook_none_name_shared_default_bucket():
+    """Test that nameless conversations (log.name=None) share the "default" dedup bucket."""
     config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
     mock_result = MagicMock()
     mock_result.returncode = 0
