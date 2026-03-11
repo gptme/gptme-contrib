@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
 
 # Per-conversation deduplication state: maps conversation name -> set of injected doc keys.
 # A doc key is "source#content_hash" — stable across multiple retrievals of the same document.
-# Capped at _MAX_TRACKED_CONVS entries (FIFO eviction) to avoid unbounded growth in long-running
+# Capped at _MAX_TRACKED_CONVS entries (LRU eviction) to avoid unbounded growth in long-running
 # processes (daemons, servers) that handle many conversations over their lifetime.
 _MAX_TRACKED_CONVS = 500
 _injected_per_conv: OrderedDict[str, set[str]] = OrderedDict()
@@ -381,7 +381,7 @@ def step_pre_hook(
     conv_name = getattr(manager.log, "name", None) or "default"
     if conv_name not in _injected_per_conv:
         _injected_per_conv[conv_name] = set()
-        # Evict oldest entries when over the cap (FIFO)
+        # Evict least-recently-used entries when over the cap (LRU)
         while len(_injected_per_conv) > _MAX_TRACKED_CONVS:
             _injected_per_conv.popitem(last=False)
     else:

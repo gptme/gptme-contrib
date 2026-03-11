@@ -86,24 +86,25 @@ def test_step_pre_hook_yields_context():
     manager.log.messages = [Message(role="user", content="explain Thompson sampling")]
     manager.log.name = "test-conv-yields"
 
-    # Clear any state from previous test runs
-    _injected_per_conv.pop("test-conv-yields", None)
-
     mock_qmd_result = MagicMock()
     mock_qmd_result.returncode = 0
     mock_qmd_result.stdout = '[{"content": "Thompson sampling is a Bayesian approach", "path": "lessons/ts.md", "score": 0.9}]'
 
     config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
 
-    with (
-        patch("gptme_retrieval.get_retrieval_config", return_value=config),
-        patch("subprocess.run", return_value=mock_qmd_result),
-    ):
-        messages = list(step_pre_hook(manager))
+    _injected_per_conv.pop("test-conv-yields", None)
+    try:
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=mock_qmd_result),
+        ):
+            messages = list(step_pre_hook(manager))
 
-    assert len(messages) == 1
-    assert messages[0].role == "system"
-    assert "Thompson sampling" in messages[0].content
+        assert len(messages) == 1
+        assert messages[0].role == "system"
+        assert "Thompson sampling" in messages[0].content
+    finally:
+        _injected_per_conv.pop("test-conv-yields", None)
 
 
 def test_step_pre_hook_deduplicates():
@@ -112,35 +113,33 @@ def test_step_pre_hook_deduplicates():
     manager.log.messages = [Message(role="user", content="explain Thompson sampling")]
     manager.log.name = "test-conv-dedup"
 
-    # Clear state
-    _injected_per_conv.pop("test-conv-dedup", None)
-
     mock_qmd_result = MagicMock()
     mock_qmd_result.returncode = 0
     mock_qmd_result.stdout = '[{"content": "Thompson sampling is a Bayesian approach", "path": "lessons/ts.md", "score": 0.9}]'
 
     config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
 
-    with (
-        patch("gptme_retrieval.get_retrieval_config", return_value=config),
-        patch("subprocess.run", return_value=mock_qmd_result),
-    ):
-        # First call injects the document
-        messages1 = list(step_pre_hook(manager))
-        assert len(messages1) == 1
+    _injected_per_conv.pop("test-conv-dedup", None)
+    try:
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=mock_qmd_result),
+        ):
+            # First call injects the document
+            messages1 = list(step_pre_hook(manager))
+            assert len(messages1) == 1
 
-        # Second call with same results — should inject nothing (already seen)
-        messages2 = list(step_pre_hook(manager))
-        assert len(messages2) == 0
+            # Second call with same results — should inject nothing (already seen)
+            messages2 = list(step_pre_hook(manager))
+            assert len(messages2) == 0
+    finally:
+        _injected_per_conv.pop("test-conv-dedup", None)
 
 
 def test_step_pre_hook_injects_new_doc_on_topic_change():
     """Test that step_pre_hook injects new documents when topic changes."""
     manager = MagicMock()
     manager.log.name = "test-conv-topic-change"
-
-    # Clear state
-    _injected_per_conv.pop("test-conv-topic-change", None)
 
     config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
 
@@ -156,28 +155,32 @@ def test_step_pre_hook_injects_new_doc_on_topic_change():
         '[{"content": "Bayesian optimization doc", "path": "bo.md", "score": 0.9}]'
     )
 
-    manager.log.messages = [Message(role="user", content="Thompson sampling")]
-    with (
-        patch("gptme_retrieval.get_retrieval_config", return_value=config),
-        patch("subprocess.run", return_value=first_result),
-    ):
-        msgs1 = list(step_pre_hook(manager))
-    assert len(msgs1) == 1
-    assert "Thompson" in msgs1[0].content
+    _injected_per_conv.pop("test-conv-topic-change", None)
+    try:
+        manager.log.messages = [Message(role="user", content="Thompson sampling")]
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=first_result),
+        ):
+            msgs1 = list(step_pre_hook(manager))
+        assert len(msgs1) == 1
+        assert "Thompson" in msgs1[0].content
 
-    # Topic changes — new user message, new retrieval results
-    manager.log.messages = [
-        Message(role="user", content="Thompson sampling"),
-        Message(role="assistant", content="..."),
-        Message(role="user", content="Now explain Bayesian optimization"),
-    ]
-    with (
-        patch("gptme_retrieval.get_retrieval_config", return_value=config),
-        patch("subprocess.run", return_value=second_result),
-    ):
-        msgs2 = list(step_pre_hook(manager))
-    assert len(msgs2) == 1
-    assert "Bayesian" in msgs2[0].content
+        # Topic changes — new user message, new retrieval results
+        manager.log.messages = [
+            Message(role="user", content="Thompson sampling"),
+            Message(role="assistant", content="..."),
+            Message(role="user", content="Now explain Bayesian optimization"),
+        ]
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=second_result),
+        ):
+            msgs2 = list(step_pre_hook(manager))
+        assert len(msgs2) == 1
+        assert "Bayesian" in msgs2[0].content
+    finally:
+        _injected_per_conv.pop("test-conv-topic-change", None)
 
 
 def test_step_pre_hook_disabled():
@@ -200,9 +203,6 @@ def test_step_pre_hook_none_name_shared_default_bucket():
     mock_result.returncode = 0
     mock_result.stdout = '[{"content": "doc content", "path": "doc.md", "score": 0.9}]'
 
-    # Remove any existing "default" entry so both managers start fresh
-    _injected_per_conv.pop("default", None)
-
     # Two separate managers both with log.name = None
     manager1 = MagicMock()
     manager1.log.messages = [Message(role="user", content="query")]
@@ -212,21 +212,26 @@ def test_step_pre_hook_none_name_shared_default_bucket():
     manager2.log.messages = [Message(role="user", content="query")]
     manager2.log.name = None
 
-    with (
-        patch("gptme_retrieval.get_retrieval_config", return_value=config),
-        patch("subprocess.run", return_value=mock_result),
-    ):
-        # First nameless conversation injects the doc
-        msgs1 = list(step_pre_hook(manager1))
-        assert len(msgs1) == 1, "First nameless conv should inject doc"
+    # Remove any existing "default" entry so both managers start fresh
+    _injected_per_conv.pop("default", None)
+    try:
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=mock_result),
+        ):
+            # First nameless conversation injects the doc
+            msgs1 = list(step_pre_hook(manager1))
+            assert len(msgs1) == 1, "First nameless conv should inject doc"
 
-        # Second call to same-named "default" key sees it already injected (expected)
-        # — both are bucketed under "default", so the second is a no-op.
-        # This is acceptable: nameless convs share a bucket, not unrelated named convs.
-        msgs2 = list(step_pre_hook(manager2))
-        assert (
-            len(msgs2) == 0
-        ), "Same bucket (both None->default) deduplicates correctly"
+            # Second call to same-named "default" key sees it already injected (expected)
+            # — both are bucketed under "default", so the second is a no-op.
+            # This is acceptable: nameless convs share a bucket, not unrelated named convs.
+            msgs2 = list(step_pre_hook(manager2))
+            assert (
+                len(msgs2) == 0
+            ), "Same bucket (both None->default) deduplicates correctly"
+    finally:
+        _injected_per_conv.pop("default", None)
 
 
 def test_injected_per_conv_max_size():
