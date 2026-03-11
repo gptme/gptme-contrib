@@ -2267,6 +2267,12 @@ def test_api_search_finds_task(tmp_path: Path):
         assert data["total"] >= 1
         titles = [r["title"] for r in data["results"]]
         assert any("Git" in t for t in titles)
+        # Verify task URL has correct format: /tasks/<id>.html (not doubled /tasks/tasks/…)
+        task_results = [r for r in data["results"] if r["type"] == "task"]
+        assert task_results, "Expected at least one task result"
+        task_url = task_results[0]["url"]
+        assert task_url.startswith("/tasks/"), f"Task URL should start with /tasks/: {task_url}"
+        assert "/tasks/tasks/" not in task_url, f"Doubled URL prefix in task URL: {task_url}"
 
 
 def test_api_search_type_filter(tmp_path: Path):
@@ -2299,6 +2305,10 @@ def test_api_search_type_filter_lesson(tmp_path: Path):
         assert data["type_filter"] == "lesson"
         for result in data["results"]:
             assert result["type"] == "lesson"
+            # Verify URL has no doubled prefix: /lessons/lessons/… is wrong
+            url = result["url"]
+            assert url.startswith("/lessons/"), f"Lesson URL should start with /lessons/: {url}"
+            assert "/lessons/lessons/" not in url, f"Doubled URL prefix in lesson URL: {url}"
 
 
 def test_api_search_limit(tmp_path: Path):

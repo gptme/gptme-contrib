@@ -1207,7 +1207,7 @@ def create_app(
                     "keywords": lesson.get("all_keywords", []),
                     "tags": [],
                     "excerpt": lesson.get("body", "")[:600],
-                    "url": "/lessons/" + lesson.get("page_url", ""),
+                    "url": "/" + lesson.get("page_url", ""),
                     "path": lesson.get("path", ""),
                 }
             )
@@ -1222,7 +1222,7 @@ def create_app(
                     "keywords": [],
                     "tags": [],
                     "excerpt": skill.get("description", "") + " " + skill.get("body", "")[:400],
-                    "url": "/skills/" + skill.get("page_url", ""),
+                    "url": "/" + skill.get("page_url", ""),
                     "path": skill.get("path", ""),
                 }
             )
@@ -1237,7 +1237,7 @@ def create_app(
                     "keywords": [],
                     "tags": task.get("tags", []),
                     "excerpt": task.get("body", "")[:600],
-                    "url": "/tasks/" + task.get("page_url", ""),
+                    "url": "/" + task.get("page_url", ""),
                     "path": task.get("path", ""),
                 }
             )
@@ -1252,7 +1252,7 @@ def create_app(
                     "keywords": [],
                     "tags": [],
                     "excerpt": journal.get("preview", ""),
-                    "url": "/journals/" + journal.get("page_url", ""),
+                    "url": "/" + journal.get("page_url", ""),
                     "path": journal.get("path", ""),
                 }
             )
@@ -1267,7 +1267,7 @@ def create_app(
                     "keywords": [],
                     "tags": [],
                     "excerpt": summary.get("body", "")[:600],
-                    "url": "/summaries/" + summary.get("page_url", ""),
+                    "url": "/" + summary.get("page_url", ""),
                     "path": summary.get("path", ""),
                 }
             )
