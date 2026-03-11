@@ -369,6 +369,39 @@ tr:hover { background: var(--accent-dim); }
   table { font-size: 0.8rem; }
   th, td { padding: 0.4rem 0.5rem; }
 }
+
+/* Activity heatmap */
+.heatmap-wrap { overflow-x: auto; }
+.heatmap-month-labels {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 3px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.heatmap-month-label { width: 12px; flex-shrink: 0; white-space: nowrap; overflow: visible; }
+.heatmap-grid { display: flex; gap: 3px; }
+.heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+.heatmap-cell {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--border);
+  flex-shrink: 0;
+  cursor: default;
+}
+.heatmap-cell[data-level="1"] { background: #0e4429; }
+.heatmap-cell[data-level="2"] { background: #006d32; }
+.heatmap-cell[data-level="3"] { background: #26a641; }
+.heatmap-cell[data-level="4"] { background: #39d353; }
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
 {% endblock %}
 
 {% block content %}
@@ -466,6 +499,24 @@ tr:hover { background: var(--accent-dim); }
   <h2>Session Stats</h2>
   <div class="stats" id="session-stats-grid"></div>
   <div id="session-stats-models"></div>
+</section>
+
+<!-- Dynamic: Activity Heatmap (shown when serve API is available) -->
+<section id="activity-heatmap" class="dynamic-panel" style="display:none">
+  <h2>Activity</h2>
+  <div class="heatmap-wrap">
+    <div class="heatmap-month-labels" id="heatmap-months"></div>
+    <div class="heatmap-grid" id="heatmap-grid"></div>
+  </div>
+  <div class="heatmap-legend">
+    <span>Less</span>
+    <span class="heatmap-cell"></span>
+    <span class="heatmap-cell" data-level="1"></span>
+    <span class="heatmap-cell" data-level="2"></span>
+    <span class="heatmap-cell" data-level="3"></span>
+    <span class="heatmap-cell" data-level="4"></span>
+    <span>More</span>
+  </div>
 </section>
 
 <!-- Dynamic: Recent Sessions (shown when serve API is available) -->
@@ -932,6 +983,7 @@ async function initDynamic() {
     if (!resp.ok) return;
     document.querySelectorAll('.dynamic-panel').forEach(el => el.style.display = '');
     loadSessionStats();
+    loadActivityHeatmap();
     loadRecentSessions();
     loadServices();
     loadSchedule();
@@ -1373,6 +1425,74 @@ async function loadServiceLogs() {
 }
 
 document.addEventListener('DOMContentLoaded', initDynamic);
+
+async function loadActivityHeatmap() {
+  try {
+    const resp = await fetch('/api/activity?days=365');
+    if (!resp.ok) { hide('activity-heatmap'); return; }
+    const data = await resp.json();
+    if (data.error || !data.days || !data.days.length) { hide('activity-heatmap'); return; }
+
+    const days = data.days;
+    const maxCount = Math.max(...days.map(d => d.count), 1);
+
+    function level(count) {
+      if (count === 0) return 0;
+      if (count <= Math.ceil(maxCount * 0.25)) return 1;
+      if (count <= Math.ceil(maxCount * 0.5))  return 2;
+      if (count <= Math.ceil(maxCount * 0.75)) return 3;
+      return 4;
+    }
+
+    // Pad front so first cell aligns with its day-of-week (Sun=0)
+    const firstDate = new Date(days[0].date + 'T00:00:00');
+    const pad = firstDate.getDay();
+    const padded = Array(pad).fill(null).concat(days);
+
+    // Group into columns of 7 (one per week)
+    const cols = [];
+    for (let i = 0; i < padded.length; i += 7) cols.push(padded.slice(i, i + 7));
+
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthsEl = document.getElementById('heatmap-months');
+    const gridEl   = document.getElementById('heatmap-grid');
+    if (!monthsEl || !gridEl) return;
+    monthsEl.innerHTML = '';
+    gridEl.innerHTML   = '';
+
+    let lastMonth = -1;
+    cols.forEach(col => {
+      // Month label: show on the first week of each new month
+      const firstDay = col.find(d => d !== null);
+      const labelEl  = document.createElement('span');
+      labelEl.className = 'heatmap-month-label';
+      if (firstDay) {
+        const m = new Date(firstDay.date + 'T00:00:00').getMonth();
+        if (m !== lastMonth) { labelEl.textContent = monthNames[m]; lastMonth = m; }
+      }
+      monthsEl.appendChild(labelEl);
+
+      const colEl = document.createElement('div');
+      colEl.className = 'heatmap-col';
+      col.forEach(day => {
+        const cell = document.createElement('span');
+        cell.className = 'heatmap-cell';
+        if (day) {
+          cell.dataset.level = level(day.count);
+          cell.title = day.count > 0
+            ? `${day.date}: ${day.count} session${day.count !== 1 ? 's' : ''}`
+            : day.date;
+        } else {
+          cell.style.background = 'transparent';
+        }
+        colEl.appendChild(cell);
+      });
+      gridEl.appendChild(colEl);
+    });
+
+    show('activity-heatmap');
+  } catch (e) { hide('activity-heatmap'); }
+}
 
 // Delegated handler for dynamically-rendered logs links (avoids fragile inline onclick).
 document.addEventListener('click', function(e) {

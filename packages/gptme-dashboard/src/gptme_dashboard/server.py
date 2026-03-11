@@ -1414,6 +1414,67 @@ def create_app(
             logger.exception("Error searching workspace")
             return jsonify({"error": str(e)}), 500
 
+    @app.route("/api/activity")
+    def api_activity() -> Any:
+        """Return daily session counts for the last N days.
+
+        Uses SessionStore records if available; falls back to journal
+        subdirectory scanning (counts ``.md`` files per ``YYYY-MM-DD`` dir).
+
+        Query params:
+          - days: int (7–730, default 365)
+
+        Returns::
+
+            {"days": [{"date": "YYYY-MM-DD", "count": N}, ...]}
+
+        Ordered oldest → newest.
+        """
+        import re
+        from collections import defaultdict
+        from datetime import date, timedelta
+
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            days = request.args.get("days", 365, type=int)
+            days = max(7, min(days, 730))
+
+            daily: dict[str, int] = defaultdict(int)
+
+            # Try SessionStore first (fast, structured)
+            store_result = _load_sessions_from_store(ws, days)
+            if store_result is not None:
+                records, _store = store_result
+                for r in records:
+                    ts = r.timestamp if hasattr(r, "timestamp") else r.get("timestamp", "")
+                    if ts and len(ts) >= 10:
+                        daily[ts[:10]] += 1
+            else:
+                # Fallback: scan journal subdirectories
+                journal_dir = ws / "journal"
+                if journal_dir.exists():
+                    date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+                    for d in journal_dir.iterdir():
+                        if d.is_dir() and date_pat.match(d.name):
+                            count = sum(1 for f in d.iterdir() if f.suffix == ".md")
+                            if count > 0:
+                                daily[d.name] = count
+
+            today = date.today()
+            result = [
+                {
+                    "date": (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d"),
+                    "count": daily.get(
+                        (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d"), 0
+                    ),
+                }
+                for i in range(days)
+            ]
+            return jsonify({"days": result})
+        except Exception as e:
+            logger.exception("Error computing activity data")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/api/org")
     def api_org() -> Any:
         """Aggregate status from all known agents in the org.

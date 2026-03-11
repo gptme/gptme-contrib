@@ -696,6 +696,97 @@ def test_api_summaries_invalid_type_returns_400(tmp_path: Path):
         assert "quarterly" in data["error"]
 
 
+# --- Activity Heatmap (Phase 6c) ---
+
+
+def test_api_activity_uses_session_store(client):
+    """Test /api/activity uses SessionStore records when available."""
+    resp = client.get("/api/activity?days=30")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "days" in data
+    assert isinstance(data["days"], list)
+    assert len(data["days"]) == 30
+    # Each entry has 'date' and 'count'
+    for entry in data["days"]:
+        assert "date" in entry
+        assert "count" in entry
+        assert isinstance(entry["count"], int)
+    # Fixture has 3 sessions on 2026-03-06
+    counts = {e["date"]: e["count"] for e in data["days"]}
+    assert counts.get("2026-03-06", 0) == 3
+
+
+def test_api_activity_ordered_oldest_first(client):
+    """Test /api/activity returns days ordered oldest → newest."""
+    resp = client.get("/api/activity?days=7")
+    assert resp.status_code == 200
+    dates = [e["date"] for e in resp.get_json()["days"]]
+    assert dates == sorted(dates)
+
+
+def test_api_activity_default_365_days(client):
+    """Test /api/activity defaults to 365 days."""
+    resp = client.get("/api/activity")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["days"]) == 365
+
+
+def test_api_activity_days_clamped(client):
+    """Test /api/activity clamps days to [7, 730]."""
+    resp = client.get("/api/activity?days=9999")
+    assert resp.status_code == 200
+    assert len(resp.get_json()["days"]) == 730
+
+    resp2 = client.get("/api/activity?days=1")
+    assert resp2.status_code == 200
+    assert len(resp2.get_json()["days"]) == 7
+
+
+def test_api_activity_journal_fallback(tmp_path: Path):
+    """Test /api/activity falls back to journal directory when no SessionStore."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+    # Create journal entries: 3 .md files on one day, 1 on another
+    j1 = tmp_path / "journal" / "2026-02-10"
+    j1.mkdir(parents=True)
+    (j1 / "session-a.md").write_text("# a")
+    (j1 / "session-b.md").write_text("# b")
+    (j1 / "session-c.md").write_text("# c")
+    j2 = tmp_path / "journal" / "2026-02-11"
+    j2.mkdir(parents=True)
+    (j2 / "session-d.md").write_text("# d")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/activity?days=365")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        counts = {e["date"]: e["count"] for e in data["days"]}
+        assert counts.get("2026-02-10", 0) == 3
+        assert counts.get("2026-02-11", 0) == 1
+
+
+def test_api_activity_empty_workspace(tmp_path: Path):
+    """Test /api/activity returns zeros when no sessions or journal."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/activity?days=7")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert all(e["count"] == 0 for e in data["days"])
+
+
 # --- Schedule (Phase 3) ---
 
 
