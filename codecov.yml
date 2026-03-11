@@ -1,0 +1,15 @@
+coverage:
+  status:
+    project:
+      default:
+        # Informational only — don't block PRs on coverage regressions
+        # This is a contrib repo with lenient standards
+        informational: true
+    patch:
+      default:
+        # Don't require coverage for new code in PRs
+        informational: true
+
+comment:
+  layout: "reach,diff,flags"
+  behavior: default
