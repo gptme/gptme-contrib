@@ -951,10 +951,14 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 "since": since,
                 "platform": system,
             }
+            now_timeout = time.monotonic()
             with _logs_cache_lock:
+                expired_keys = [k for k, v in _logs_cache.items() if now_timeout >= v["expires"]]
+                for k in expired_keys:
+                    del _logs_cache[k]
                 _logs_cache[cache_key] = {
                     "data": timeout_data,
-                    "expires": time.monotonic() + _LOGS_CACHE_TTL,
+                    "expires": now_timeout + _LOGS_CACHE_TTL,
                 }
             return jsonify(timeout_data)
         except Exception as e:
