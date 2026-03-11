@@ -1457,7 +1457,11 @@ def create_app(
             today = date.today()
             start_date_str = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
 
-            # Try SessionStore first (fast, structured)
+            # Try SessionStore first (fast, structured).
+            # Only fall back to journal scanning when the store directory does not
+            # exist at all — if the store exists but has no records in this window
+            # we should return zeros, not mix in stale journal counts.
+            store_dir = ws / "state" / "sessions"
             store_result = _load_sessions_from_store(ws, days)
             if store_result is not None:
                 records, _store = store_result
@@ -1466,8 +1470,8 @@ def create_app(
                     if ts:
                         ts_str = str(ts)[:10]  # handles both str and datetime objects
                         daily[ts_str] += 1
-            else:
-                # Fallback: scan journal subdirectories (skip dirs outside window)
+            elif not store_dir.exists():
+                # No SessionStore at all — fall back to journal subdirectory scan.
                 journal_dir = ws / "journal"
                 if journal_dir.exists():
                     date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")

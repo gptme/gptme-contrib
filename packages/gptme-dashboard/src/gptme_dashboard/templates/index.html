@@ -1491,7 +1491,7 @@ async function loadActivityHeatmap() {
       gridEl.appendChild(colEl);
     });
 
-    show('activity-heatmap');
+    // Panel already visible via initDynamic; nothing more to do on success.
   } catch (e) { hide('activity-heatmap'); }
 }
 
