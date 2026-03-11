@@ -1,0 +1,22 @@
+[project]
+name = "gptme-user-memories"
+version = "0.1.0"
+description = "User memory extraction plugin for gptme — mines past conversations to personalize future sessions"
+requires-python = ">=3.11"
+dependencies = [
+    "gptme>=0.29.0",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_user_memories"]
