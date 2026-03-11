@@ -131,9 +131,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get install -y portaudio19-dev libportaudio2
+
       - name: Install dependencies
         run: |
-          uv sync --all-packages
+          uv sync --all-packages --all-extras
 
       - name: Run coverage for all packages
         run: |
@@ -146,8 +150,6 @@ jobs:
             # Only packages with both tests/ and src/
             if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ] && [ -f "$pkg/Makefile" ]; then
               echo "=== Coverage for $name ==="
-              # Install test extras (e.g. flask for gptme-dashboard[test] -> [serve])
-              uv pip install -e "$pkg[test]" --quiet 2>/dev/null || true
               uv run --with pytest --with pytest-cov --with pytest-timeout pytest "$pkg/tests" \
                 --cov="$pkg/src" \
                 --cov-append \
