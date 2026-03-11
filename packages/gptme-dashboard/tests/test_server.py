@@ -1693,3 +1693,51 @@ def test_api_logs_binary_message(client):
     data = resp.get_json()
     assert data["total"] == 1
     assert data["logs"][0]["message"] == "Hello\x00World"
+
+
+def test_api_logs_nonzero_returncode_warning(client):
+    """Test /api/services/logs includes warning field when journalctl exits non-zero."""
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "Unit gptme-test.service not found."
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 0
+    assert data["logs"] == []
+    assert "warning" in data
+    assert "1" in data["warning"]  # returncode in message
+    assert "not found" in data["warning"]  # stderr snippet included
+
+
+def test_api_logs_exception_path_caches_result(client):
+    """Test /api/services/logs caches on persistent exception to prevent subprocess spam."""
+    call_count = 0
+
+    def raising_run(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise FileNotFoundError("journalctl not found")
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", side_effect=raising_run),
+    ):
+        resp1 = client.get("/api/services/logs?service=gptme-test.service")
+        resp2 = client.get("/api/services/logs?service=gptme-test.service")
+
+    # First call returns 500; subprocess was called once
+    assert resp1.status_code == 500
+    assert call_count == 1
+    # Second identical request hits the cache — subprocess NOT called again
+    assert resp2.status_code == 200
+    assert call_count == 1
+    data2 = resp2.get_json()
+    assert data2["logs"] == []

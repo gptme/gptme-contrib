@@ -930,6 +930,13 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 "since": since,
                 "platform": system,
             }
+            # Non-zero exit means journalctl failed (unit not found, no access, etc.)
+            # Include a warning so callers can distinguish from "no recent logs".
+            if result.returncode != 0:
+                stderr_snippet = result.stderr.strip()[:200] if result.stderr else ""
+                response_data["warning"] = f"journalctl exited with code {result.returncode}" + (
+                    f": {stderr_snippet}" if stderr_snippet else ""
+                )
 
             now_after = time.monotonic()  # fresh snapshot after subprocess to avoid stale TTL
             with _logs_cache_lock:
@@ -963,6 +970,20 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             return jsonify(timeout_data)
         except Exception as e:
             logger.exception("Error fetching service logs")
+            # Cache the empty result so persistent errors (e.g. journalctl not found)
+            # don't spawn a new subprocess on every request.
+            error_data: dict[str, Any] = {
+                "logs": [],
+                "service": service,
+                "total": 0,
+                "since": since,
+                "platform": system,
+            }
+            with _logs_cache_lock:
+                _logs_cache[cache_key] = {
+                    "data": error_data,
+                    "expires": time.monotonic() + _LOGS_CACHE_TTL,
+                }
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/journals")
