@@ -9,6 +9,7 @@ and dynamic panels activate when the API is reachable.
 from __future__ import annotations
 
 import ipaddress
+import json as _json
 import logging
 import platform
 import subprocess
@@ -337,8 +338,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         gptme.toml.  Works on Linux (systemd --user) and macOS (launchctl).
         Returns an empty list gracefully when detection is unavailable.
         """
-        import json as _json
-
         ws = Path(app.config["WORKSPACE"])
         try:
             agent_name = _get_agent_name(ws)
@@ -418,7 +417,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         list-timers``.  Returns an empty list on macOS (not yet supported),
         when detection is unavailable, or when no relevant timers exist.
         """
-        import json as _json
         from datetime import datetime, timezone
 
         ws = Path(app.config["WORKSPACE"])
@@ -508,7 +506,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Uses a 60-second cache since journalctl queries are expensive.
         Linux (systemd --user) only; returns empty on other platforms.
         """
-        import json as _json
         from datetime import datetime, timezone
 
         now = time.monotonic()
@@ -827,8 +824,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Uses a 30-second per-service cache to avoid expensive journalctl calls.
         Linux (systemd --user) only; returns empty on other platforms.
         """
-        import json as _json
-
         service = request.args.get("service", "").strip()
         if not service:
             return jsonify({"error": "Missing required 'service' parameter"}), 400
@@ -949,9 +944,19 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
 
             return jsonify(response_data)
         except subprocess.TimeoutExpired:
-            return jsonify(
-                {"logs": [], "service": service, "total": 0, "since": since, "platform": system}
-            )
+            timeout_data: dict[str, Any] = {
+                "logs": [],
+                "service": service,
+                "total": 0,
+                "since": since,
+                "platform": system,
+            }
+            with _logs_cache_lock:
+                _logs_cache[cache_key] = {
+                    "data": timeout_data,
+                    "expires": time.monotonic() + _LOGS_CACHE_TTL,
+                }
+            return jsonify(timeout_data)
         except Exception as e:
             logger.exception("Error fetching service logs")
             return jsonify({"error": str(e)}), 500
