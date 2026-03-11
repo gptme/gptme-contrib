@@ -110,7 +110,7 @@ def create_app(
         ImportError: If Flask is not installed.
     """
     try:
-        from flask import Flask, jsonify, render_template_string, request
+        from flask import Flask, jsonify, request
     except ImportError:
         raise ImportError(
             "Flask is required for 'gptme-dashboard serve'. "
@@ -1160,6 +1160,10 @@ def create_app(
                 card["error"] = "unreachable"
                 return card
 
+            if not isinstance(status, dict):
+                card["error"] = "invalid status response"
+                return card
+
             card["status"] = status
 
             # Fetch remaining endpoints in parallel
@@ -1290,6 +1294,6 @@ def create_app(
                 "<p>Start the server with <code>--org org.toml</code></p></body></html>",
                 404,
             )
-        return render_template_string(_ORG_PAGE)
+        return _ORG_PAGE
 
     return app
