@@ -1866,38 +1866,24 @@ def test_api_org_no_config(workspace: Path, tmp_path: Path) -> None:
 
 def test_api_org_aggregates_agents(workspace: Path, org_toml: Path) -> None:
     """Test /api/org calls each agent's API and returns agent cards."""
-    import json as _json
 
-    def _mock_urlopen(url, timeout=5):
-        """Return mock responses based on URL."""
-        url_str = str(url)
-        mock = unittest.mock.MagicMock()
-        mock.__enter__ = lambda s: s
-        mock.__exit__ = unittest.mock.MagicMock(return_value=False)
-
-        if "/api/status" in url_str:
-            mock.read.return_value = _json.dumps(
-                {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
-            ).encode()
-        elif "/api/tasks" in url_str:
-            mock.read.return_value = _json.dumps(
-                [{"id": "task-1", "title": "Do something", "state": "active"}]
-            ).encode()
-        elif "/api/services" in url_str:
-            mock.read.return_value = _json.dumps(
-                {"services": [{"name": "gptme.service", "active": True}]}
-            ).encode()
-        elif "/api/sessions" in url_str:
-            mock.read.return_value = _json.dumps(
-                {"sessions": [{"date": "2026-03-11"}], "total": 1}
-            ).encode()
-        else:
-            mock.read.return_value = b"{}"
-        return mock
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        """Return parsed JSON dict/list based on URL path."""
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return [{"id": "task-1", "title": "Do something", "state": "active"}]
+        elif "/api/services" in url:
+            return {"services": [{"name": "gptme.service", "active": True}]}
+        elif "/api/sessions" in url:
+            return {"sessions": [{"date": "2026-03-11"}], "total": 1}
+        return {}
 
     app = create_app(workspace, org_config=org_toml)
     with app.test_client() as c:
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
             resp = c.get("/api/org")
 
     assert resp.status_code == 200
@@ -1915,14 +1901,15 @@ def test_api_org_aggregates_agents(workspace: Path, org_toml: Path) -> None:
 
 def test_api_org_handles_unreachable_agent(workspace: Path, org_toml: Path) -> None:
     """Test /api/org marks unreachable agents with error field."""
-    import urllib.error
 
-    def _mock_urlopen(url, timeout=5):
-        raise urllib.error.URLError("Connection refused")
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        return None  # simulate unreachable agent
 
     app = create_app(workspace, org_config=org_toml)
     with app.test_client() as c:
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
             resp = c.get("/api/org")
 
     assert resp.status_code == 200
@@ -1970,3 +1957,21 @@ def test_create_app_raises_on_bad_org_config(workspace: Path, tmp_path: Path) ->
     bad_config.write_text('[[agents]]\napi = "http://example.com:8042"\n')  # missing name
     with pytest.raises(ValueError, match="missing 'name'"):
         create_app(workspace, org_config=bad_config)
+
+
+def test_fetch_json_blocks_redirects() -> None:
+    """_fetch_json must return None on HTTP redirects (SSRF prevention)."""
+    from unittest.mock import MagicMock
+
+    import urllib.error
+
+    from gptme_dashboard.server import _NoRedirectHandler
+
+    handler = _NoRedirectHandler()
+    req = MagicMock()
+    fp = MagicMock()
+    headers: dict = {}
+
+    # redirect_request must raise URLError, not follow the redirect
+    with pytest.raises(urllib.error.URLError, match="redirect not allowed"):
+        handler.redirect_request(req, fp, 302, "Found", headers, "http://169.254.169.254/")

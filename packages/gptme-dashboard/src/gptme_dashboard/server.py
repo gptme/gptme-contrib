@@ -9,16 +9,42 @@ and dynamic panels activate when the API is reachable.
 from __future__ import annotations
 
 import ipaddress
-import json as _json
+import json
 import logging
 import platform
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Block all HTTP redirects to prevent SSRF via open redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise urllib.error.URLError(f"redirect not allowed: {newurl}")
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _fetch_json(url: str, timeout: int = 5) -> "dict[str, Any] | list[Any] | None":
+    """Fetch JSON from *url* without following HTTP redirects.
+
+    Returns ``None`` on any error (connection refused, timeout, redirect, …).
+    Redirects are blocked to prevent SSRF via a compromised agent API.
+    """
+    try:
+        with _no_redirect_opener.open(url, timeout=timeout) as resp:  # noqa: S310
+            result: dict[str, Any] | list[Any] = json.loads(resp.read())
+            return result
+    except Exception:
+        return None
 
 
 def load_org_config(org_config: Path) -> list[dict[str, str]]:
@@ -431,7 +457,7 @@ def create_app(
                         timeout=5,
                     )
                     if result.returncode == 0 and result.stdout.strip():
-                        units = _json.loads(result.stdout)
+                        units = json.loads(result.stdout)
                         for unit in units:
                             name = unit.get("unit", "")
                             if _is_relevant_service(name, agent_name):
@@ -443,7 +469,7 @@ def create_app(
                                         "sub": unit.get("sub", ""),
                                     }
                                 )
-                except (OSError, subprocess.TimeoutExpired, _json.JSONDecodeError, ValueError):
+                except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
                     pass
 
             elif system == "Darwin":
@@ -511,7 +537,7 @@ def create_app(
                         timeout=5,
                     )
                     if result.returncode == 0 and result.stdout.strip():
-                        units = _json.loads(result.stdout)
+                        units = json.loads(result.stdout)
                         for unit in units:
                             timer_name = unit.get("unit", "")
                             if not _is_relevant_service(timer_name, agent_name):
@@ -544,7 +570,7 @@ def create_app(
                 except (
                     OSError,
                     subprocess.TimeoutExpired,
-                    _json.JSONDecodeError,
+                    json.JSONDecodeError,
                     ValueError,
                     OverflowError,
                 ):
@@ -620,9 +646,9 @@ def create_app(
                         _health_cache["expires"] = now + _HEALTH_CACHE_TTL
                     return jsonify(result)
 
-                units = _json.loads(list_result.stdout)
+                units = json.loads(list_result.stdout)
                 relevant = [u for u in units if _is_relevant_service(u.get("unit", ""), agent_name)]
-            except (OSError, subprocess.TimeoutExpired, _json.JSONDecodeError, ValueError):
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
                 result = {"services": [], "platform": system}
                 with _health_cache_lock:
                     _health_cache["data"] = result
@@ -973,7 +999,7 @@ def create_app(
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().splitlines():
                     try:
-                        entry = _json.loads(line)
+                        entry = json.loads(line)
                         # Extract fields from systemd journal JSON
                         ts_us = int(entry.get("__REALTIME_TIMESTAMP", "0"))
                         prio = str(entry.get("PRIORITY", "6"))
@@ -990,7 +1016,7 @@ def create_app(
                                 "message": message,
                             }
                         )
-                    except (_json.JSONDecodeError, ValueError, TypeError):
+                    except (json.JSONDecodeError, ValueError, TypeError):
                         continue
 
             response_data: dict[str, Any] = {
@@ -1122,25 +1148,14 @@ def create_app(
                 {"error": "No org config loaded. Start server with --org <org.toml>"}
             ), 404
 
-        import json as _json_mod
-        import urllib.request
         from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def _fetch(url: str, timeout: int = 5) -> "dict[str, Any] | list[Any] | None":
-            """Fetch JSON from a URL, returning None on any error."""
-            try:
-                with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
-                    result: dict[str, Any] | list[Any] = _json_mod.loads(resp.read())
-                    return result
-            except Exception:
-                return None
 
         def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
             """Fetch all data for a single agent in parallel sub-requests."""
             api = agent["api"]
             card: dict[str, Any] = {"name": agent["name"], "api": api}
 
-            status = _fetch(f"{api}/api/status")
+            status = _fetch_json(f"{api}/api/status")
             if status is None:
                 card["error"] = "unreachable"
                 return card
@@ -1149,9 +1164,9 @@ def create_app(
 
             # Fetch remaining endpoints in parallel
             with ThreadPoolExecutor(max_workers=3) as sub_ex:
-                fut_tasks = sub_ex.submit(_fetch, f"{api}/api/tasks?state=active")
-                fut_services = sub_ex.submit(_fetch, f"{api}/api/services")
-                fut_sessions = sub_ex.submit(_fetch, f"{api}/api/sessions?limit=1")
+                fut_tasks = sub_ex.submit(_fetch_json, f"{api}/api/tasks?state=active")
+                fut_services = sub_ex.submit(_fetch_json, f"{api}/api/services")
+                fut_sessions = sub_ex.submit(_fetch_json, f"{api}/api/sessions?limit=1")
                 tasks_data = fut_tasks.result()
                 services_data = fut_services.result()
                 sessions_data = fut_sessions.result()
