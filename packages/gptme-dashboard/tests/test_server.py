@@ -1868,9 +1868,10 @@ def test_api_org_aggregates_agents(workspace: Path, org_toml: Path) -> None:
     """Test /api/org calls each agent's API and returns agent cards."""
 
     def _mock_fetch_json(url: str, timeout: int = 5):
-        """Return parsed JSON dict/list based on URL path."""
+        """Return parsed JSON dict/list, agent-aware via URL hostname."""
+        agent_name = "alice" if "alice.example.com" in url else "bob"
         if "/api/status" in url:
-            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+            return {"mode": "dynamic", "agent": agent_name, "workspace": agent_name}
         elif "/api/tasks" in url:
             return [{"id": "task-1", "title": "Do something", "state": "active"}]
         elif "/api/services" in url:
@@ -1897,6 +1898,14 @@ def test_api_org_aggregates_agents(workspace: Path, org_toml: Path) -> None:
     assert bob["active_tasks"] == 1
     assert bob["running_services"] == ["gptme.service"]
     assert bob["last_session"] == "2026-03-11"
+    # Second agent (alice) should also be reachable with correct identity
+    alice = agents[1]
+    assert alice["name"] == "alice"
+    assert "error" not in alice
+    assert alice["status"]["agent"] == "alice"
+    assert alice["active_tasks"] == 1
+    assert alice["running_services"] == ["gptme.service"]
+    assert alice["last_session"] == "2026-03-11"
 
 
 def test_api_org_handles_unreachable_agent(workspace: Path, org_toml: Path) -> None:
