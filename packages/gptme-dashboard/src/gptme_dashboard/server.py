@@ -1283,6 +1283,7 @@ def create_app(
         tag_text = " ".join(item.get("tags", [])).lower()
         category = item.get("category", "").lower()
 
+        title_words = set(title.split())
         kw_words = set(kw_text.split())
         tag_words = set(tag_text.split())
         category_words = set(category.split())
@@ -1291,7 +1292,7 @@ def create_app(
         for word in query_words:
             w = word.lower()
             # Title exact word match
-            if w in title.split():
+            if w in title_words:
                 score += 20
             elif w in title:
                 score += 8
@@ -1361,7 +1362,7 @@ def create_app(
             if type_filter:
                 items = [i for i in items if i["type"] == type_filter]
 
-            query_words = query.split()
+            query_words = re.sub(r"[^\w\s]", " ", query.lower()).split()
             scored: list[tuple[int, dict[str, Any]]] = []
             for item in items:
                 score = _score_item(item, query_words)
