@@ -2018,3 +2018,67 @@ def test_api_org_service_missing_name(workspace: Path, org_toml: Path) -> None:
     bob = next(a for a in agents if a["name"] == "bob")
     # Malformed entry silently skipped; only the named service is returned
     assert bob["running_services"] == ["gptme.service"]
+
+
+def test_api_org_tasks_null(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles tasks=null (non-list) without raising TypeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            # Remote agent returns {"tasks": null} — must not raise TypeError on len()
+            return {"tasks": None}
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["active_tasks"] is None  # non-list tasks → None, not TypeError
+
+
+def test_api_org_card_exception_isolated(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org isolates per-agent failures — one bad agent doesn't crash all cards."""
+    call_count = 0
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        nonlocal call_count
+        call_count += 1
+        if "alice.example.com" in url and "/api/status" in url:
+            raise RuntimeError("alice is on fire")
+        agent_name = "alice" if "alice.example.com" in url else "bob"
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": agent_name, "workspace": agent_name}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    # Endpoint must not 500 even though alice raised an exception
+    assert resp.status_code == 200
+    agents = resp.get_json()["agents"]
+    assert len(agents) == 2
+    bob = next(a for a in agents if a["name"] == "bob")
+    alice = next(a for a in agents if a["name"] == "alice")
+    assert "error" not in bob  # bob succeeded
+    assert "error" in alice  # alice's failure is isolated to her card

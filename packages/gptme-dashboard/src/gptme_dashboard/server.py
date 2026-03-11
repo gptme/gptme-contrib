@@ -1173,7 +1173,7 @@ def create_app(
 
             if isinstance(tasks_data, list):
                 card["active_tasks"] = len(tasks_data)
-            elif isinstance(tasks_data, dict) and "tasks" in tasks_data:
+            elif isinstance(tasks_data, dict) and isinstance(tasks_data.get("tasks"), list):
                 card["active_tasks"] = len(tasks_data["tasks"])
             else:
                 card["active_tasks"] = None
@@ -1199,7 +1199,13 @@ def create_app(
         with ThreadPoolExecutor(max_workers=min(10, len(_org_agents))) as ex:
             futures = {ex.submit(_fetch_agent_card, a): i for i, a in enumerate(_org_agents)}
             for fut in as_completed(futures):
-                cards[futures[fut]] = fut.result()
+                idx = futures[fut]
+                try:
+                    cards[idx] = fut.result()
+                except Exception as e:
+                    agent = _org_agents[idx]
+                    logger.warning("Agent card fetch failed for %s: %s", agent["name"], e)
+                    cards[idx] = {"name": agent["name"], "api": agent["api"], "error": str(e)}
 
         return jsonify({"agents": cards, "count": len(cards)})
 
