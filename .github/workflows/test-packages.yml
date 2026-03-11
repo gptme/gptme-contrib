@@ -114,6 +114,59 @@ jobs:
         run: |
           make -C packages/${{ matrix.package }} test
 
+  # Coverage report (combined for all packages)
+  coverage:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-packages
+
+      - name: Run coverage for all packages
+        run: |
+          # Find all packages with tests and collect coverage
+          for pkg in packages/*/; do
+            name=$(basename "$pkg")
+            # Skip __pycache__ and symlinks
+            [ -L "$pkg" ] && continue
+            [ "$name" = "__pycache__" ] && continue
+            # Only packages with both tests/ and src/
+            if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ] && [ -f "$pkg/Makefile" ]; then
+              echo "=== Coverage for $name ==="
+              uv run --with pytest --with pytest-cov --with pytest-timeout pytest "$pkg/tests" \
+                --cov="$pkg/src" \
+                --cov-append \
+                --cov-report=term-missing \
+                -m "not slow" \
+                --timeout=30 \
+                -q || true
+            fi
+          done
+          # Generate combined XML report once after all packages
+          uv run --with coverage coverage xml || true
+
+      - name: Upload coverage to Codecov
+        if: hashFiles('coverage.xml') != ''
+        uses: codecov/codecov-action@v5
+        with:
+          file: ./coverage.xml
+          flags: packages
+          name: codecov-packages
+          fail_ci_if_error: false
+
   # Typecheck all packages (single job, not parallelized per-package)
   typecheck:
     needs: changes
