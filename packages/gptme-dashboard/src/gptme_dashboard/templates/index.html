@@ -1222,11 +1222,14 @@ async function loadServiceLogs() {
     const logs = data.logs || [];
 
     if (logs.length === 0) {
-      statusEl.textContent = 'No log entries found for this time range.';
+      statusEl.textContent = data.warning
+        ? 'Warning: ' + data.warning
+        : 'No log entries found for this time range.';
       return;
     }
 
-    statusEl.textContent = logs.length + ' entries (last ' + since + ')';
+    statusEl.textContent = logs.length + ' entries (last ' + since + ')'
+      + (data.warning ? ' — Warning: ' + data.warning : '');
 
     tbody.innerHTML = logs.map(entry => {
       const ts = entry.timestamp ? new Date(entry.timestamp * 1000).toLocaleString() : '';
