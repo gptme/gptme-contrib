@@ -1210,6 +1210,7 @@ gptme = [
     { name = "gptme" },
 ]
 test = [
+    { name = "click" },
     { name = "pytest" },
     { name = "pytest-mock" },
 ]
@@ -1217,6 +1218,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.0" },
+    { name = "click", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0" },
     { name = "gptme", marker = "extra == 'gptme'", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "gptme-imagen", extras = ["gptme", "cli", "gemini", "dalle"], marker = "extra == 'all'" },
