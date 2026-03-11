@@ -2,7 +2,7 @@
 
 Automatic context retrieval plugin for gptme.
 
-This plugin adds a TURN_PRE hook that automatically retrieves relevant context once per user turn, using backends like [qmd](https://github.com/ErikBjare/qmd) for semantic and keyword search.
+This plugin adds a STEP_PRE hook that automatically retrieves relevant context before each LLM step, using backends like [qmd](https://github.com/ErikBjare/qmd) for semantic and keyword search. A per-conversation deduplication layer ensures each document is injected at most once, so there's no context bloat in multi-step turns.
 
 ## Installation
 
@@ -31,12 +31,15 @@ inject_as = "system"     # "system" for visible, "hidden" for background context
 
 ## How It Works
 
-1. **TURN_PRE Hook**: Once per user turn (before the first LLM step), the plugin extracts the last user message
+1. **STEP_PRE Hook**: Before each LLM step, the plugin extracts the last user message
 2. **Retrieval**: Queries the configured backend with the user's message text
-3. **Injection**: Adds retrieved context as a system message that persists for the entire turn
+3. **Deduplication**: Checks each result against a per-conversation set of already-injected documents (keyed by source path + content hash)
+4. **Injection**: Adds only new documents as a system message; skips the step silently if nothing new was retrieved
 
-Using TURN_PRE rather than STEP_PRE ensures retrieval runs exactly once per user message, avoiding
-duplicate context injection across the multiple LLM steps that can occur within a single turn.
+This approach is correct for both interactive and autonomous sessions:
+- **Interactive (multi-step)**: Fires on every tool-call step, but deduplication prevents the same doc being injected 5× in a single turn
+- **Autonomous (single-step)**: Behaves identically to TURN_PRE since there's only one step per turn
+- **Topic changes**: When a new user message triggers a different retrieval result, new documents are injected immediately
 
 ## Backends
 

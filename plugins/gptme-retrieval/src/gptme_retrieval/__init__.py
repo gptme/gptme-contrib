@@ -1,8 +1,9 @@
 """
 gptme-retrieval - Automatic context retrieval plugin for gptme.
 
-Provides a TURN_PRE hook that retrieves relevant context once per user turn
-using backends like qmd or gptme-rag for semantic/keyword search.
+Provides a STEP_PRE hook that retrieves relevant context before each LLM step,
+with per-conversation deduplication to avoid injecting the same document twice.
+Uses backends like qmd or gptme-rag for semantic/keyword search.
 
 Configuration via gptme.toml:
 ```toml
@@ -16,6 +17,7 @@ collections = []         # Optional: filter by collection names
 ```
 """
 
+import hashlib
 import json
 import logging
 import shlex
@@ -32,7 +34,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["plugin", "get_retrieval_config", "retrieve_context", "turn_pre_hook"]
+__all__ = [
+    "plugin",
+    "get_retrieval_config",
+    "retrieve_context",
+    "step_pre_hook",
+    "turn_pre_hook",
+]
 
 
 # Default configuration
@@ -45,6 +53,18 @@ DEFAULT_CONFIG = {
     "collections": [],
     "inject_as": "system",  # "system" or "hidden"
 }
+
+# Per-conversation deduplication state: maps conversation name -> set of injected doc keys.
+# A doc key is "source#content_hash" — stable across multiple retrievals of the same document.
+_injected_per_conv: dict[str, set[str]] = {}
+
+
+def _doc_key(result: dict[str, Any]) -> str:
+    """Compute a stable deduplication key for a retrieved document."""
+    source = result.get("source", "")
+    content = result.get("content", "")
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:8]
+    return f"{source}#{content_hash}"
 
 
 def get_retrieval_config() -> dict[str, Any]:
@@ -303,15 +323,85 @@ def _format_retrieval_results(results: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def step_pre_hook(
+    manager: "LogManager",
+) -> Generator[Message, None, None]:
+    """Hook that retrieves relevant context before each LLM step, with deduplication.
+
+    Fires on every LLM step (STEP_PRE) but only injects documents that haven't
+    been seen in this conversation yet. This is better than TURN_PRE for autonomous
+    sessions: it responds to topic changes across steps while never injecting the
+    same document twice.
+
+    Deduplication is keyed by (source, content_hash) per conversation, so a document
+    retrieved on step 1 won't be re-injected on steps 2-N, but a genuinely new document
+    (different source or updated content) will be injected when it first appears.
+    """
+    config = get_retrieval_config()
+
+    if not config.get("enabled", True):
+        return
+
+    # Get the last user message
+    last_user_msg = None
+    for msg in reversed(manager.log.messages):
+        if msg.role == "user":
+            last_user_msg = msg
+            break
+
+    if not last_user_msg:
+        return
+
+    # Retrieve relevant context
+    results = retrieve_context(
+        query=last_user_msg.content,
+        backend=config.get("backend", "qmd"),
+        mode=config.get("mode", "vsearch"),
+        max_results=config.get("max_results", 5),
+        threshold=config.get("threshold", 0.3),
+        collections=config.get("collections", []),
+    )
+
+    if not results:
+        return
+
+    # Deduplicate: only inject documents not already in this conversation's context
+    conv_name = getattr(manager.log, "name", "default")
+    if conv_name not in _injected_per_conv:
+        _injected_per_conv[conv_name] = set()
+    injected = _injected_per_conv[conv_name]
+
+    new_results = [r for r in results if _doc_key(r) not in injected]
+
+    if not new_results:
+        return
+
+    # Format and inject only new results
+    formatted = _format_retrieval_results(new_results)
+
+    if formatted:
+        # Mark these docs as injected before yielding
+        for r in new_results:
+            injected.add(_doc_key(r))
+
+        inject_as = config.get("inject_as", "system")
+        hide = inject_as == "hidden"
+
+        yield Message(
+            role="system",
+            content=formatted,
+            hide=hide,
+        )
+
+
 def turn_pre_hook(
     manager: "LogManager",
 ) -> Generator[Message, None, None]:
-    """Hook that retrieves relevant context once per turn.
+    """Hook that retrieves relevant context once per turn (no deduplication).
 
-    This hook fires before a turn begins (once per user message). It extracts
-    the last user message and retrieves relevant context using the configured
-    backend. Using TURN_PRE instead of STEP_PRE avoids re-running retrieval
-    (and re-injecting duplicate context) on every step within a turn.
+    Fires exactly once per user message (TURN_PRE). Simpler than step_pre_hook
+    but less responsive to topic changes within a multi-step turn.
+    Kept for backward compatibility; step_pre_hook is preferred.
     """
     config = get_retrieval_config()
 
@@ -366,9 +456,9 @@ def register_hooks() -> None:
         return
 
     register_hook(
-        name="gptme_retrieval.turn_pre",
-        hook_type=HookType.TURN_PRE,
-        func=turn_pre_hook,
+        name="gptme_retrieval.step_pre",
+        hook_type=HookType.STEP_PRE,
+        func=step_pre_hook,
         priority=100,  # High priority - run early
     )
 
@@ -379,7 +469,8 @@ def register_hooks() -> None:
 _instructions = """
 ## Retrieval Context
 
-This plugin automatically retrieves relevant context once per user turn (TURN_PRE hook).
+This plugin automatically retrieves relevant context before each LLM step (STEP_PRE hook),
+injecting only documents not already present in the conversation (deduplication by source + content).
 
 Configuration example in gptme.toml:
 ```toml
