@@ -1403,6 +1403,7 @@ function closeSearch() {
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function safeUrl(u) { const s = String(u || ''); return /^https?:\/\//i.test(s) ? s : '#'; }
 
 async function runSearch(q, typeFilter) {
   if (!q || q.length < 2) {
@@ -1440,7 +1441,7 @@ async function runSearch(q, typeFilter) {
       const title = esc(r.title || r.path || '(untitled)');
       const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
       const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim().slice(0, 120)) + '</div>' : '';
-      const url = r.url || '#';
+      const url = safeUrl(r.url);
       return '<a href="' + esc(url) + '" class="search-result" data-idx="' + i + '">'
         + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span></div>'
         + excerpt + '</a>';
