@@ -112,7 +112,25 @@ jobs:
 
       - name: Run tests for ${{ matrix.package }}
         run: |
-          make -C packages/${{ matrix.package }} test
+          PKG=packages/${{ matrix.package }}
+          if [ -d "$PKG/src" ] && [ -d "$PKG/tests" ] && [ -n "$(find "$PKG/tests" -name '*.py' 2>/dev/null | head -1)" ]; then
+            uv run --with pytest-cov pytest "$PKG/tests/" \
+              --cov="$PKG/src" \
+              --cov-report=xml:coverage.xml \
+              --junitxml=junit.xml \
+              -v
+          else
+            make -C packages/${{ matrix.package }} test
+          fi
+
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && matrix.python-version == '3.12' }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: ${{ matrix.package }}
+          fail_ci_if_error: false
 
   # Typecheck all packages (single job, not parallelized per-package)
   typecheck:
