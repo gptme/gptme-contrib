@@ -44,7 +44,14 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         )
 
     from . import generate as _gen_mod
-    from .generate import generate, read_workspace_config, scan_journals, scan_summaries, scan_tasks
+    from .generate import (
+        generate,
+        read_agent_urls,
+        read_workspace_config,
+        scan_journals,
+        scan_summaries,
+        scan_tasks,
+    )
 
     # Generate (or refresh) static site on every serve start.
     # Regenerating ensures the site reflects the current workspace state —
@@ -71,11 +78,13 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         ws = Path(app.config["WORKSPACE"])
         try:
             config = read_workspace_config(ws)
+            urls = read_agent_urls(ws)
             return jsonify(
                 {
                     "mode": "dynamic",
                     "agent": config.get("agent_name", ws.name),
                     "workspace": ws.name,
+                    "urls": urls,
                 }
             )
         except Exception as e:
