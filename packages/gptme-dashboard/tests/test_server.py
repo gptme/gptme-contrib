@@ -1984,3 +1984,37 @@ def test_fetch_json_blocks_redirects() -> None:
     # redirect_request must raise URLError, not follow the redirect
     with pytest.raises(urllib.error.URLError, match="redirect not allowed"):
         handler.redirect_request(req, fp, 302, "Found", headers, "http://169.254.169.254/")
+
+
+def test_api_org_service_missing_name(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles service entries without a 'name' field gracefully (no KeyError)."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            # One malformed entry (no 'name') mixed with a valid one
+            return {
+                "services": [
+                    {"active": True},  # missing 'name' — must not raise KeyError
+                    {"name": "gptme.service", "active": True},
+                ]
+            }
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    agents = resp.get_json()["agents"]
+    bob = next(a for a in agents if a["name"] == "bob")
+    # Malformed entry silently skipped; only the named service is returned
+    assert bob["running_services"] == ["gptme.service"]

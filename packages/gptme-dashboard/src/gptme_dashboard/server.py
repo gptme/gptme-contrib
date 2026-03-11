@@ -1180,7 +1180,9 @@ def create_app(
 
             if isinstance(services_data, dict):
                 svcs = services_data.get("services", [])
-                card["running_services"] = [s["name"] for s in svcs if s.get("active")]
+                card["running_services"] = [
+                    s["name"] for s in svcs if s.get("active") and "name" in s
+                ]
             else:
                 card["running_services"] = None
 
