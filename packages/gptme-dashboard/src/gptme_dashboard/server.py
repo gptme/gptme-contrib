@@ -1282,6 +1282,11 @@ def create_app(
         tag_text = " ".join(item.get("tags", [])).lower()
         category = item.get("category", "").lower()
 
+        kw_words = set(kw_text.split())
+        tag_words = set(tag_text.split())
+        category_words = set(category.split())
+        excerpt_words = set(excerpt.split())
+
         for word in query_words:
             w = word.lower()
             # Title exact word match
@@ -1289,17 +1294,17 @@ def create_app(
                 score += 20
             elif w in title:
                 score += 8
-            # Keyword match (highly relevant for lessons)
-            if w in kw_text:
+            # Keyword match (highly relevant for lessons) — word-boundary to avoid "it" → "activities"
+            if w in kw_words:
                 score += 6
             # Tag match
-            if w in tag_text:
+            if w in tag_words:
                 score += 4
             # Category/state match
-            if w in category:
+            if w in category_words:
                 score += 2
             # Body/excerpt match (low weight, broad)
-            if w in excerpt:
+            if w in excerpt_words:
                 score += 1
 
         return score
