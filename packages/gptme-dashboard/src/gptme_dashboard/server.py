@@ -1449,8 +1449,9 @@ def create_app(
                 records, _store = store_result
                 for r in records:
                     ts = r.timestamp if hasattr(r, "timestamp") else r.get("timestamp", "")
-                    if ts and len(ts) >= 10:
-                        daily[ts[:10]] += 1
+                    if ts:
+                        ts_str = str(ts)[:10]  # handles both str and datetime objects
+                        daily[ts_str] += 1
             else:
                 # Fallback: scan journal subdirectories (skip dirs outside window)
                 journal_dir = ws / "journal"

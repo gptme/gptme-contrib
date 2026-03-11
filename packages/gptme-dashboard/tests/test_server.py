@@ -749,15 +749,19 @@ def test_api_activity_days_clamped(client):
 
 def test_api_activity_journal_fallback(tmp_path: Path):
     """Test /api/activity falls back to journal directory when no SessionStore."""
+    from datetime import date, timedelta
+
     (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
     (tmp_path / "lessons").mkdir()
-    # Create journal entries: 3 .md files on one day, 1 on another
-    j1 = tmp_path / "journal" / "2026-02-10"
+    # Create journal entries: 3 .md files on one day, 1 on another (relative dates)
+    d1 = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    d2 = (date.today() - timedelta(days=9)).strftime("%Y-%m-%d")
+    j1 = tmp_path / "journal" / d1
     j1.mkdir(parents=True)
     (j1 / "session-a.md").write_text("# a")
     (j1 / "session-b.md").write_text("# b")
     (j1 / "session-c.md").write_text("# c")
-    j2 = tmp_path / "journal" / "2026-02-11"
+    j2 = tmp_path / "journal" / d2
     j2.mkdir(parents=True)
     (j2 / "session-d.md").write_text("# d")
 
@@ -770,8 +774,8 @@ def test_api_activity_journal_fallback(tmp_path: Path):
         assert resp.status_code == 200
         data = resp.get_json()
         counts = {e["date"]: e["count"] for e in data["days"]}
-        assert counts.get("2026-02-10", 0) == 3
-        assert counts.get("2026-02-11", 0) == 1
+        assert counts.get(d1, 0) == 3
+        assert counts.get(d2, 0) == 1
 
 
 def test_api_activity_empty_workspace(tmp_path: Path):
