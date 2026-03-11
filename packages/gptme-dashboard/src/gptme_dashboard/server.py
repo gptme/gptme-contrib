@@ -130,7 +130,8 @@ def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
         card["running_services"] = None
 
     if isinstance(sessions_data, dict):
-        sessions = sessions_data.get("sessions", [])
+        sessions = sessions_data.get("sessions")
+        sessions = sessions if isinstance(sessions, list) else []
         first = sessions[0] if sessions else None
         card["last_session"] = first.get("date") if isinstance(first, dict) else None
     else:
@@ -1193,9 +1194,12 @@ def create_app(
         Returns 404 if no org config was loaded.
         """
         if not _org_agents:
-            return jsonify(
-                {"error": "No org config loaded. Start server with --org <org.toml>"}
-            ), 404
+            msg = (
+                f"Org config loaded from {org_config} but contains no agents"
+                if org_config is not None
+                else "No org config loaded. Start server with --org <org.toml>"
+            )
+            return jsonify({"error": msg}), 404
 
         # Fetch all agents in parallel
         cards: list[dict[str, Any]] = [None] * len(_org_agents)  # type: ignore[list-item]
@@ -1287,9 +1291,12 @@ def create_app(
     def org_view() -> Any:
         """Serve the org view page (agent grid)."""
         if not _org_agents:
+            if org_config is not None:
+                msg = f"Org config {org_config} contains no agents"
+            else:
+                msg = "No org config loaded. Start the server with --org &lt;org.toml&gt;"
             return (
-                "<html><body><h1>No org config</h1>"
-                "<p>Start the server with <code>--org org.toml</code></p></body></html>",
+                f"<html><body><h1>No org config</h1><p>{msg}</p></body></html>",
                 404,
             )
         return _ORG_PAGE

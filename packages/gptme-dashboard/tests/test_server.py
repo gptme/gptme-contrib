@@ -2136,3 +2136,30 @@ def test_api_org_session_non_dict(workspace: Path, org_toml: Path) -> None:
     assert resp.status_code == 200
     bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
     assert bob["last_session"] is None  # non-dict session → None, not AttributeError
+
+
+def test_api_org_sessions_non_list(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles sessions=<non-list> without TypeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            # Remote agent returns a non-list sessions value
+            return {"sessions": 42}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["last_session"] is None  # non-list sessions → None, not TypeError
