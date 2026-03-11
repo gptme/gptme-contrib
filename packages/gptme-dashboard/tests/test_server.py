@@ -1949,3 +1949,24 @@ def test_org_view_with_config(workspace: Path, org_toml: Path) -> None:
     html = resp.data.decode()
     assert "Org View" in html
     assert "/api/org" in html
+
+
+def test_org_view_xss_escaping(workspace: Path, org_toml: Path) -> None:
+    """Test /org page includes esc() for XSS prevention."""
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        resp = c.get("/org")
+    html = resp.data.decode()
+    # The page must define an esc() helper for HTML escaping
+    assert "function esc(" in html
+    # All dynamic text insertions should route through esc()
+    assert "esc(a.api)" in html
+    assert "esc(" in html
+
+
+def test_create_app_raises_on_bad_org_config(workspace: Path, tmp_path: Path) -> None:
+    """Test create_app raises when org_config is malformed."""
+    bad_config = tmp_path / "bad.toml"
+    bad_config.write_text('[[agents]]\napi = "http://example.com:8042"\n')  # missing name
+    with pytest.raises(ValueError, match="missing 'name'"):
+        create_app(workspace, org_config=bad_config)

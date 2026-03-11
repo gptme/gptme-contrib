@@ -125,7 +125,8 @@ def create_app(
             _org_agents = load_org_config(org_config)
             logger.info("Org config loaded: %d agents", len(_org_agents))
         except Exception as e:
-            logger.warning("Failed to load org config %s: %s", org_config, e)
+            logger.error("Failed to load org config %s: %s", org_config, e)
+            raise
 
     @app.route("/")
     def index() -> Any:
@@ -1121,12 +1122,9 @@ def create_app(
                 {"error": "No org config loaded. Start server with --org <org.toml>"}
             ), 404
 
-        try:
-            import urllib.error
-            import urllib.request
-            import json as _json_mod
-        except ImportError:
-            return jsonify({"error": "urllib unavailable"}), 500
+        import json as _json_mod
+        import urllib.request
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _fetch(url: str, timeout: int = 5) -> "dict[str, Any] | list[Any] | None":
             """Fetch JSON from a URL, returning None on any error."""
@@ -1137,20 +1135,27 @@ def create_app(
             except Exception:
                 return None
 
-        cards = []
-        for agent in _org_agents:
+        def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
+            """Fetch all data for a single agent in parallel sub-requests."""
             api = agent["api"]
             card: dict[str, Any] = {"name": agent["name"], "api": api}
 
             status = _fetch(f"{api}/api/status")
             if status is None:
                 card["error"] = "unreachable"
-                cards.append(card)
-                continue
+                return card
 
             card["status"] = status
 
-            tasks_data = _fetch(f"{api}/api/tasks?state=active")
+            # Fetch remaining endpoints in parallel
+            with ThreadPoolExecutor(max_workers=3) as sub_ex:
+                fut_tasks = sub_ex.submit(_fetch, f"{api}/api/tasks?state=active")
+                fut_services = sub_ex.submit(_fetch, f"{api}/api/services")
+                fut_sessions = sub_ex.submit(_fetch, f"{api}/api/sessions?limit=1")
+                tasks_data = fut_tasks.result()
+                services_data = fut_services.result()
+                sessions_data = fut_sessions.result()
+
             if isinstance(tasks_data, list):
                 card["active_tasks"] = len(tasks_data)
             elif isinstance(tasks_data, dict) and "tasks" in tasks_data:
@@ -1158,36 +1163,31 @@ def create_app(
             else:
                 card["active_tasks"] = None
 
-            services_data = _fetch(f"{api}/api/services")
             if isinstance(services_data, dict):
                 svcs = services_data.get("services", [])
                 card["running_services"] = [s["name"] for s in svcs if s.get("active")]
             else:
                 card["running_services"] = None
 
-            sessions_data = _fetch(f"{api}/api/sessions?limit=1")
             if isinstance(sessions_data, dict):
                 sessions = sessions_data.get("sessions", [])
                 card["last_session"] = sessions[0].get("date") if sessions else None
             else:
                 card["last_session"] = None
 
-            cards.append(card)
+            return card
+
+        # Fetch all agents in parallel
+        cards: list[dict[str, Any]] = [None] * len(_org_agents)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=min(10, len(_org_agents))) as ex:
+            futures = {ex.submit(_fetch_agent_card, a): i for i, a in enumerate(_org_agents)}
+            for fut in as_completed(futures):
+                cards[futures[fut]] = fut.result()
 
         return jsonify({"agents": cards, "count": len(cards)})
 
-    @app.route("/org")
-    @app.route("/org.html")
-    def org_view() -> Any:
-        """Serve the org view page (agent grid)."""
-        if not _org_agents:
-            return (
-                "<html><body><h1>No org config</h1>"
-                "<p>Start the server with <code>--org org.toml</code></p></body></html>",
-                404,
-            )
-        # Simple self-contained org page — no Jinja template file needed
-        _ORG_PAGE = """<!DOCTYPE html>
+    # Org page template — defined once at create_app scope, not per-request
+    _ORG_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1218,6 +1218,9 @@ def create_app(
   <div id="status-bar">Loading agents...</div>
   <div class="grid" id="agent-grid"></div>
   <script>
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
     async function loadOrg() {
       try {
         const resp = await fetch('/api/org');
@@ -1230,16 +1233,16 @@ def create_app(
         const grid = document.getElementById('agent-grid');
         grid.innerHTML = agents.map(a => {
           const reachable = !a.error;
-          const name = a.status ? (a.status.agent || a.name) : a.name;
-          const apiLink = '<a href="' + a.api + '" target="_blank">' + name + '</a>';
+          const name = esc(a.status ? (a.status.agent || a.name) : a.name);
+          const apiLink = '<a href="' + esc(a.api) + '" target="_blank">' + name + '</a>';
           const dot = '<span class="status ' + (reachable ? 'active' : 'unreachable') + '"></span>';
           let body = '';
           if (!reachable) {
             body = '<div class="error">Unreachable</div>';
           } else {
             if (a.active_tasks !== null) body += '<div class="row"><span>Active tasks</span><span>' + a.active_tasks + '</span></div>';
-            if (a.running_services !== null) body += '<div class="row"><span>Running services</span><span>' + (a.running_services.length ? a.running_services.join(', ') : 'none') + '</span></div>';
-            if (a.last_session) body += '<div class="row"><span>Last session</span><span>' + a.last_session + '</span></div>';
+            if (a.running_services !== null) body += '<div class="row"><span>Running services</span><span>' + (a.running_services.length ? a.running_services.map(esc).join(', ') : 'none') + '</span></div>';
+            if (a.last_session) body += '<div class="row"><span>Last session</span><span>' + esc(a.last_session) + '</span></div>';
           }
           return '<div class="card"><h2>' + dot + apiLink + '</h2>' + body + '</div>';
         }).join('');
@@ -1252,6 +1255,17 @@ def create_app(
   </script>
 </body>
 </html>"""
+
+    @app.route("/org")
+    @app.route("/org.html")
+    def org_view() -> Any:
+        """Serve the org view page (agent grid)."""
+        if not _org_agents:
+            return (
+                "<html><body><h1>No org config</h1>"
+                "<p>Start the server with <code>--org org.toml</code></p></body></html>",
+                404,
+            )
         return render_template_string(_ORG_PAGE)
 
     return app
