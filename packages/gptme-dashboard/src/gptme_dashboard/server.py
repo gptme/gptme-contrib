@@ -1285,7 +1285,7 @@ def create_app(
         for word in query_words:
             w = word.lower()
             # Title exact word match
-            if w == title:
+            if w in title.split():
                 score += 20
             elif w in title:
                 score += 8

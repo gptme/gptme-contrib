@@ -1403,7 +1403,7 @@ function closeSearch() {
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function safeUrl(u) { const s = String(u || ''); return /^https?:\/\//i.test(s) ? s : '#'; }
+function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\//.test(s)) ? s : '#'; }
 
 async function runSearch(q, typeFilter) {
   if (!q || q.length < 2) {
