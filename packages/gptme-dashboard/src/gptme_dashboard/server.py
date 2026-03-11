@@ -828,8 +828,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Linux (systemd --user) only; returns empty on other platforms.
         """
         import json as _json
-        import platform
-        import subprocess
 
         service = request.args.get("service", "").strip()
         if not service:
@@ -914,7 +912,12 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         # Extract fields from systemd journal JSON
                         ts_us = int(entry.get("__REALTIME_TIMESTAMP", "0"))
                         prio = str(entry.get("PRIORITY", "6"))
-                        message = entry.get("MESSAGE", "")
+                        raw_msg = entry.get("MESSAGE", "")
+                        # journalctl encodes binary MESSAGE fields as int arrays
+                        if isinstance(raw_msg, list):
+                            message: str = bytes(raw_msg).decode("utf-8", errors="replace")
+                        else:
+                            message = raw_msg
                         log_entries.append(
                             {
                                 "timestamp": ts_us / 1_000_000,  # epoch seconds (float)
@@ -933,12 +936,16 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 "platform": system,
             }
 
+            now_after = time.monotonic()  # fresh snapshot after subprocess to avoid stale TTL
             with _logs_cache_lock:
                 # Evict expired entries to prevent unbounded growth
-                expired_keys = [k for k, v in _logs_cache.items() if now >= v["expires"]]
+                expired_keys = [k for k, v in _logs_cache.items() if now_after >= v["expires"]]
                 for k in expired_keys:
                     del _logs_cache[k]
-                _logs_cache[cache_key] = {"data": response_data, "expires": now + _LOGS_CACHE_TTL}
+                _logs_cache[cache_key] = {
+                    "data": response_data,
+                    "expires": now_after + _LOGS_CACHE_TTL,
+                }
 
             return jsonify(response_data)
         except subprocess.TimeoutExpired:

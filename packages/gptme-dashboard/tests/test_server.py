@@ -1666,3 +1666,30 @@ def test_api_logs_malformed_json_lines(client):
     assert data["total"] == 2  # malformed line skipped
     assert data["logs"][0]["message"] == "Good line"
     assert data["logs"][1]["message"] == "Another good line"
+
+
+def test_api_logs_binary_message(client):
+    """Test /api/services/logs handles binary MESSAGE fields (int-array encoding)."""
+    # systemd encodes binary/non-UTF-8 MESSAGE as a JSON array of integers
+    binary_msg = list("Hello\x00World".encode("utf-8"))
+    journal_output = json.dumps(
+        {
+            "__REALTIME_TIMESTAMP": "1710072000000000",
+            "PRIORITY": "6",
+            "MESSAGE": binary_msg,
+        }
+    )
+    mock_result = unittest.mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = journal_output
+
+    with (
+        unittest.mock.patch("platform.system", return_value="Linux"),
+        unittest.mock.patch("subprocess.run", return_value=mock_result),
+    ):
+        resp = client.get("/api/services/logs?service=gptme-test.service")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert data["logs"][0]["message"] == "Hello\x00World"
