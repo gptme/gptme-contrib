@@ -184,8 +184,10 @@ jobs:
           done
 
       - name: Upload coverage to Codecov
+        if: hashFiles('coverage.xml') != ''
         uses: codecov/codecov-action@v5
         with:
           file: ./coverage.xml
           flags: unittests
           name: codecov-plugins
+          fail_ci_if_error: false
