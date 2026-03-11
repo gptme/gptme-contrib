@@ -1438,9 +1438,10 @@ async function loadActivityHeatmap() {
 
     function level(count) {
       if (count === 0) return 0;
-      if (count <= Math.ceil(maxCount * 0.25)) return 1;
-      if (count <= Math.ceil(maxCount * 0.5))  return 2;
-      if (count <= Math.ceil(maxCount * 0.75)) return 3;
+      const ratio = count / maxCount;
+      if (ratio <= 0.25) return 1;
+      if (ratio <= 0.5)  return 2;
+      if (ratio <= 0.75) return 3;
       return 4;
     }
 

@@ -1440,6 +1440,8 @@ def create_app(
             days = max(7, min(days, 730))
 
             daily: dict[str, int] = defaultdict(int)
+            today = date.today()
+            start_date_str = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
 
             # Try SessionStore first (fast, structured)
             store_result = _load_sessions_from_store(ws, days)
@@ -1450,17 +1452,15 @@ def create_app(
                     if ts and len(ts) >= 10:
                         daily[ts[:10]] += 1
             else:
-                # Fallback: scan journal subdirectories
+                # Fallback: scan journal subdirectories (skip dirs outside window)
                 journal_dir = ws / "journal"
                 if journal_dir.exists():
                     date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
                     for d in journal_dir.iterdir():
-                        if d.is_dir() and date_pat.match(d.name):
+                        if d.is_dir() and date_pat.match(d.name) and d.name >= start_date_str:
                             count = sum(1 for f in d.iterdir() if f.suffix == ".md")
                             if count > 0:
                                 daily[d.name] = count
-
-            today = date.today()
             result = [
                 {
                     "date": (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d"),

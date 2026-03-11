@@ -3,6 +3,7 @@
 import json
 import textwrap
 import unittest.mock
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,13 +25,14 @@ def workspace(tmp_path: Path) -> Path:
     # Lessons dir (needed for generate)
     (tmp_path / "lessons").mkdir()
 
-    # Session records
+    # Session records — use relative date (5 days ago) to avoid time-bomb failures
     sessions_dir = tmp_path / "state" / "sessions"
     sessions_dir.mkdir(parents=True)
+    _fixture_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
     records = [
         {
             "session_id": "abc1",
-            "timestamp": "2026-03-06T10:00:00Z",
+            "timestamp": f"{_fixture_date}T10:00:00Z",
             "harness": "claude-code",
             "model": "claude-opus-4-6",
             "run_type": "autonomous",
@@ -41,7 +43,7 @@ def workspace(tmp_path: Path) -> Path:
         },
         {
             "session_id": "abc2",
-            "timestamp": "2026-03-06T11:00:00Z",
+            "timestamp": f"{_fixture_date}T11:00:00Z",
             "harness": "gptme",
             "model": "claude-sonnet-4-6",
             "run_type": "autonomous",
@@ -52,7 +54,7 @@ def workspace(tmp_path: Path) -> Path:
         },
         {
             "session_id": "abc3",
-            "timestamp": "2026-03-06T12:00:00Z",
+            "timestamp": f"{_fixture_date}T12:00:00Z",
             "harness": "claude-code",
             "model": "claude-opus-4-6",
             "run_type": "autonomous",
@@ -712,9 +714,10 @@ def test_api_activity_uses_session_store(client):
         assert "date" in entry
         assert "count" in entry
         assert isinstance(entry["count"], int)
-    # Fixture has 3 sessions on 2026-03-06
+    # Fixture has 3 sessions 5 days ago (relative, no time-bomb)
+    expected_date = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
     counts = {e["date"]: e["count"] for e in data["days"]}
-    assert counts.get("2026-03-06", 0) == 3
+    assert counts.get(expected_date, 0) == 3
 
 
 def test_api_activity_ordered_oldest_first(client):
