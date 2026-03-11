@@ -920,7 +920,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                                 "message": message,
                             }
                         )
-                    except (_json.JSONDecodeError, ValueError):
+                    except (_json.JSONDecodeError, ValueError, TypeError):
                         continue
 
             response_data: dict[str, Any] = {

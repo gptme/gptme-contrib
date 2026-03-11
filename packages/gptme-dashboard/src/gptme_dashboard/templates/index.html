@@ -1231,7 +1231,7 @@ async function loadServiceLogs() {
     tbody.innerHTML = logs.map(entry => {
       const ts = entry.timestamp ? new Date(entry.timestamp * 1000).toLocaleString() : '';
       const prio = entry.priority || 'info';
-      const prioCls = 'tag-' + prio;
+      const prioCls = 'tag-' + esc(prio);
       return '<tr>'
         + '<td>' + esc(ts) + '</td>'
         + '<td><span class="tag ' + prioCls + '">' + esc(prio) + '</span></td>'
