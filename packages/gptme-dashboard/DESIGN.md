@@ -49,7 +49,7 @@ Serves the static site plus real-time API endpoints:
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/status` | Workspace name and agent URLs |
+| `GET /api/status` | Agent name, mode, and workspace path |
 | `GET /api/sessions` | Recent agent sessions with outcome/grade |
 | `GET /api/sessions/stats` | Aggregated session stats by model/harness |
 | `GET /api/tasks` | Task list with state/priority |
@@ -70,7 +70,7 @@ Agents register their dashboard URL and API endpoint in `gptme.toml`:
 ```toml
 [agent.urls]
 dashboard = "https://timetobuildbob.github.io/bob/"   # static site (gh-pages)
-dashboard-api = "https://bob.example.com:8080"         # live server (optional)
+dashboard-api = "https://bob.example.com:8042"         # live server (optional)
 ```
 
 gptme-webui reads `dashboard` from `[agent.urls]` and loads it in an iframe/panel.
@@ -132,11 +132,11 @@ A `team.toml` (or `~/.config/gptme/team.toml`) lists known agents:
 ```toml
 [[agents]]
 name = "bob"
-api  = "https://bob.example.com:8080"
+api  = "https://bob.example.com:8042"
 
 [[agents]]
 name = "alice"
-api  = "https://alice.example.com:8080"
+api  = "https://alice.example.com:8042"
 ```
 
 Agents opt-in by starting `gptme-dashboard serve` and publishing their endpoint.
@@ -170,9 +170,10 @@ Remote `gptme-dashboard serve` instances need authentication. Proposed:
 ### Open Questions
 
 1. **Fleet config location**: per-user (`~/.config/gptme/team.toml`) or per-workspace?
-2. **Terminology**: "team", "group", or "fleet"? (`fleet` is taken by gptme.ai k8s infra)
+2. **Terminology**: "team", "org", "group", or "fleet"? (`fleet` is taken by gptme.ai k8s infra; "org" is more general — scales from 2-person teams to large autonomous organizations; "team" implies a size constraint)
 3. **Polling vs SSE**: poll every 30s (simple) or SSE subscriptions (live but complex)?
 4. **Implementation order**: Option A (webui) requires coordinating a webui PR; Option B (standalone) is self-contained
+5. **gptme-server integration**: could `gptme-dashboard serve` be implemented as a `gptme-server` extension rather than a separate server? That would avoid running two servers per agent and consolidate auth work in one place.
 
 ---
 
