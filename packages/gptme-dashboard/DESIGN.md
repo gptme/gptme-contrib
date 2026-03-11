@@ -5,7 +5,7 @@
 `gptme-dashboard` provides a two-layer architecture for agent monitoring:
 
 1. **Per-agent static site + live API** — each agent owns their dashboard
-2. **Fleet aggregation** — a unified view across multiple agents (see [Fleet Design](#fleet-design))
+2. **Org view** — a unified view across multiple agents (see [Org View](#org-view-fleet--multi-agent))
 
 The guiding principle: **each agent owns their dashboard**. The `gptme-dashboard` tool generates
 a self-contained static site deployable to GitHub Pages. gptme-webui loads the dashboard URL from
@@ -77,16 +77,20 @@ gptme-webui reads `dashboard` from `[agent.urls]` and loads it in an iframe/pane
 
 ---
 
-## Fleet Design
+## Org View (Fleet / Multi-Agent)
 
 > **Status**: Design phase. Implementation in Phase 6.
+>
+> **Terminology**: This document uses "org" — it's more general than "team" (scales from 2-person
+> teams to large autonomous organizations). "fleet" is taken by gptme.ai k8s infrastructure.
+> "team" may be used in UI labels where the shorter word reads better.
 
 ### Problem
 
 Agents run on separate VMs/machines. There's no unified view of:
 - Which agents are active/idle
 - What each is working on
-- Service health across the fleet
+- Service health across the org
 - Recent activity (sessions, commits, tasks)
 
 A filesystem-local solution won't work — the design must be distributed and opt-in.
@@ -96,12 +100,12 @@ A filesystem-local solution won't work — the design must be distributed and op
 ```
                     ┌─────────────────────┐
                     │     gptme-webui     │
-                    │   (Team/Fleet tab)  │
+                    │     (Org tab)       │
                     └──────────┬──────────┘
-                               │ reads team.toml
+                               │ reads org.toml
                                │ calls /api/* on each agent
                     ┌──────────▼──────────┐
-                    │   fleet aggregator  │
+                    │   org aggregator    │
                     │  (webui or standalone)
                     └──────┬──────┬───────┘
                            │      │
@@ -114,7 +118,7 @@ A filesystem-local solution won't work — the design must be distributed and op
 
 ### Agent Card
 
-Each agent in the fleet view shows:
+Each agent in the org view shows:
 
 | Field | Source |
 |-------|--------|
@@ -125,9 +129,9 @@ Each agent in the fleet view shows:
 | Running services | `/api/services` filtered |
 | Links | dashboard URL, repo, API endpoint |
 
-### Team Configuration
+### Org Configuration
 
-A `team.toml` (or `~/.config/gptme/team.toml`) lists known agents:
+An `org.toml` (or `~/.config/gptme/org.toml`) lists known agents:
 
 ```toml
 [[agents]]
@@ -141,39 +145,58 @@ api  = "https://alice.example.com:8042"
 
 Agents opt-in by starting `gptme-dashboard serve` and publishing their endpoint.
 
+### gptme-server Integration
+
+**Key question**: should `gptme-dashboard serve` be an extension of `gptme-server` rather than a
+separate process?
+
+**Arguments for integration**:
+- One server per agent instead of two (dashboard + gptme-server)
+- Reuse gptme-server's auth infrastructure (no duplicate auth work)
+- gptme already exposes `/api/conversations` — dashboard data fits naturally alongside it
+- Simpler deployment: agents already run gptme-server; adding dashboard means just enabling an extension
+
+**Arguments against** (or deferring):
+- gptme-server is in gptme core; dashboard is in gptme-contrib — different release cycles
+- Dashboard server has OS-specific features (systemd journals) that are better isolated
+- Extension API for gptme-server doesn't exist yet
+
+**Current stance**: implement `gptme-dashboard serve` as a standalone server initially. Design the
+API so it could be served behind gptme-server as a reverse-proxied extension later without breaking
+the API contract. Track as a Phase 6 option.
+
 ### Implementation Options
 
-**Option A: gptme-webui "Team" tab** *(primary path)*
+**Option A: gptme-webui "Org" tab** *(primary path)*
 
-Add a "Team" tab to gptme-webui that:
-- Reads `team.toml` for agent endpoints
+Add an "Org" tab to gptme-webui that:
+- Reads `org.toml` for agent endpoints
 - Calls each agent's `/api/*` directly
 - Renders agent cards with status/tasks/services
 
 Advantage: reuses gptme-webui's existing multi-host support and auth infrastructure.
 
-**Option B: `gptme-dashboard serve --team`** *(standalone, no webui dependency)*
+**Option B: `gptme-dashboard serve --org`** *(standalone, no webui dependency)*
 
 ```bash
-gptme-dashboard serve --team team.toml --port 8090
+gptme-dashboard serve --org org.toml --port 8090
 ```
 
-Renders a `/team` page by aggregating each agent's API. Useful for self-hosted setups.
+Renders an `/org` page by aggregating each agent's API. Useful for self-hosted setups and as a
+stepping stone before Option A.
 
 ### Authentication
 
 Remote `gptme-dashboard serve` instances need authentication. Proposed:
 - **Phase 6a**: No auth — trust network boundary (internal VMs, VPN)
-- **Phase 6b**: Per-agent bearer tokens in `team.toml`
-- **Phase 6c**: mTLS for production inter-VM communication
+- **Phase 6b**: Per-agent bearer tokens in `org.toml`
+- **Phase 6c**: mTLS for production inter-VM communication; or reuse gptme-server auth if integrated
 
 ### Open Questions
 
-1. **Fleet config location**: per-user (`~/.config/gptme/team.toml`) or per-workspace?
-2. **Terminology**: "team", "org", "group", or "fleet"? (`fleet` is taken by gptme.ai k8s infra; "org" is more general — scales from 2-person teams to large autonomous organizations; "team" implies a size constraint)
-3. **Polling vs SSE**: poll every 30s (simple) or SSE subscriptions (live but complex)?
-4. **Implementation order**: Option A (webui) requires coordinating a webui PR; Option B (standalone) is self-contained
-5. **gptme-server integration**: could `gptme-dashboard serve` be implemented as a `gptme-server` extension rather than a separate server? That would avoid running two servers per agent and consolidate auth work in one place.
+1. **Org config location**: per-user (`~/.config/gptme/org.toml`) or per-workspace?
+2. **Polling vs SSE**: poll every 30s (simple) or SSE subscriptions (live but complex)?
+3. **Implementation order**: Option A (webui) requires coordinating a webui PR; Option B (standalone) is self-contained and faster to ship
 
 ---
 
@@ -187,8 +210,8 @@ Remote `gptme-dashboard serve` instances need authentication. Proposed:
 | 4 | Service health monitoring | ✅ merged |
 | 5a | Service log viewer | 🔄 PR #450 |
 | 5b | Service restart actions with auth | ✅ merged |
-| 6a | Fleet aggregation (standalone `--team`) | 📋 planned |
-| 6b | gptme-webui "Team" tab integration | 📋 planned |
+| 6a | Org view: standalone `--org` aggregator | 📋 planned |
+| 6b | gptme-webui "Org" tab integration | 📋 planned |
 
 ---
 
