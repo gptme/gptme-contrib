@@ -1027,6 +1027,17 @@ async function restartService(name) {
     if (resp.ok) {
       _showRestartFlash(name + ' restarting…', 'success');
       setTimeout(loadServiceHealth, 2000);
+    } else if (resp.status === 403) {
+      // Token may be stale (server restarted with a new auto-generated token).
+      // Re-fetch; if a new token is available, prompt the user to retry.
+      const prevToken = _restartToken;
+      _restartToken = null;
+      await _fetchRestartToken();
+      if (_restartToken && _restartToken !== prevToken) {
+        _showRestartFlash('Session refreshed — click ↺ again to restart.', 'error');
+      } else {
+        _showRestartFlash('Restart failed: invalid token. Reload the page and try again.', 'error');
+      }
     } else {
       _showRestartFlash('Error: ' + (data.error || 'Restart failed'), 'error');
     }

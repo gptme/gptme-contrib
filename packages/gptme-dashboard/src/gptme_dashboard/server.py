@@ -312,8 +312,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                         _MIN_TOKEN_LEN,
                     )
                     _restart_token = ""
-        except Exception:
-            pass
+        except ModuleNotFoundError:
+            logger.debug("tomllib not available (Python < 3.11); skipping gptme.toml restart_token")
+        except Exception as _e:
+            logger.warning("Failed to read restart_token from gptme.toml: %s", _e)
     if not _restart_token:
         _restart_token = _secrets.token_hex(32)
         logger.info(
@@ -330,8 +332,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Returns an empty list gracefully when detection is unavailable.
         """
         import json as _json
-        import platform
-        import subprocess
 
         ws = Path(app.config["WORKSPACE"])
         try:
@@ -413,8 +413,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         when detection is unavailable, or when no relevant timers exist.
         """
         import json as _json
-        import platform
-        import subprocess
         from datetime import datetime, timezone
 
         ws = Path(app.config["WORKSPACE"])
@@ -505,8 +503,6 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         Linux (systemd --user) only; returns empty on other platforms.
         """
         import json as _json
-        import platform
-        import subprocess
         from datetime import datetime, timezone
 
         now = time.monotonic()
