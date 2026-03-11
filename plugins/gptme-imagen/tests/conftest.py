@@ -1,8 +1,25 @@
 """Pytest configuration for gptme_imagen tests."""
 
 import os
+import sys
+from unittest.mock import MagicMock
 
 import pytest
+
+# Pre-populate sys.modules with mock stubs for optional dependencies.
+# This allows tests to patch these modules (e.g., mock.patch("gptme.tools.vision.view_image"))
+# even when the actual packages are not installed, since gptme and openai are optional deps.
+_OPTIONAL_STUB_MODULES = [
+    "openai",
+    "gptme",
+    "gptme.tools",
+    "gptme.tools.vision",
+    "gptme.tools.base",
+    "gptme.config",
+]
+for _mod in _OPTIONAL_STUB_MODULES:
+    if _mod not in sys.modules:
+        sys.modules[_mod] = MagicMock()
 
 
 def pytest_configure(config):
