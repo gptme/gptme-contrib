@@ -8,6 +8,7 @@ from gptme_activity_summary.aw_data import (
     AppUsage,
     AWActivity,
     BrowserDomain,
+    CategoryUsage,
     fetch_aw_activity,
     format_aw_activity_for_prompt,
     _build_timeperiod,
@@ -150,6 +151,86 @@ def test_browser_domain_dataclass():
     d = BrowserDomain(domain="github.com", duration=3600)
     assert d.domain == "github.com"
     assert d.duration == 3600
+
+
+def test_category_usage_name():
+    """CategoryUsage.name joins path with ' > '."""
+    cat = CategoryUsage(category=["Coding", "Python"], duration=3600)
+    assert cat.name == "Coding > Python"
+
+
+def test_category_usage_top_level():
+    """CategoryUsage.top_level returns first element."""
+    cat = CategoryUsage(category=["Work", "Meetings"], duration=1800)
+    assert cat.top_level == "Work"
+
+
+def test_category_usage_empty():
+    """CategoryUsage with empty path returns 'Uncategorized'."""
+    cat = CategoryUsage(category=[], duration=600)
+    assert cat.name == "Uncategorized"
+    assert cat.top_level == "Uncategorized"
+
+
+def test_format_aw_activity_with_categories():
+    """Activity with categories shows category breakdown before apps."""
+    activity = AWActivity(
+        start_date=date(2026, 3, 11),
+        end_date=date(2026, 3, 11),
+        available=True,
+        total_active_seconds=14400,  # 4 hours
+        top_apps=[
+            AppUsage(app="nvim", duration=7200),
+            AppUsage(app="Firefox", duration=7200),
+        ],
+        categories=[
+            CategoryUsage(category=["Coding"], duration=7200),
+            CategoryUsage(category=["Web"], duration=5400),
+            CategoryUsage(category=["Uncategorized"], duration=1800),
+        ],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Time by Category" in text
+    assert "Coding" in text
+    assert "Web" in text
+    assert "Uncategorized" in text
+    # Category section should appear before apps section
+    cat_pos = text.index("### Time by Category")
+    apps_pos = text.index("### Top Applications")
+    assert cat_pos < apps_pos
+
+
+def test_format_aw_activity_without_categories():
+    """Activity without categories skips category section."""
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=3600,
+        top_apps=[AppUsage(app="nvim", duration=3600)],
+        categories=[],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Time by Category" not in text
+    assert "### Top Applications" in text
+
+
+def test_format_aw_activity_category_percentages():
+    """Category percentages are calculated relative to total active time."""
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=3600,
+        top_apps=[AppUsage(app="nvim", duration=3600)],
+        categories=[
+            CategoryUsage(category=["Coding"], duration=2700),  # 75%
+            CategoryUsage(category=["Other"], duration=900),  # 25%
+        ],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "75%" in text
+    assert "25%" in text
 
 
 @pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")

@@ -36,6 +36,24 @@ class BrowserDomain:
 
 
 @dataclass
+class CategoryUsage:
+    """Time spent in an AW category (from user's categorization rules)."""
+
+    category: list[str]  # Category path, e.g. ["Coding", "Python"] or ["Uncategorized"]
+    duration: float  # seconds
+
+    @property
+    def name(self) -> str:
+        """Human-readable category path joined with ' > '."""
+        return " > ".join(self.category) if self.category else "Uncategorized"
+
+    @property
+    def top_level(self) -> str:
+        """Top-level category name (first element of path)."""
+        return self.category[0] if self.category else "Uncategorized"
+
+
+@dataclass
 class AWActivity:
     """Aggregated ActivityWatch data for a time period."""
 
@@ -44,6 +62,7 @@ class AWActivity:
     total_active_seconds: float = 0.0
     top_apps: list[AppUsage] = field(default_factory=list)
     top_domains: list[BrowserDomain] = field(default_factory=list)
+    categories: list[CategoryUsage] = field(default_factory=list)
     # AW was reachable and returned data
     available: bool = False
 
@@ -226,6 +245,56 @@ def _fetch_browser_domains(
     return domains
 
 
+def _fetch_category_usage(
+    client: Any, window_bucket: str, afk_bucket: str | None, timeperiod: tuple[datetime, datetime]
+) -> list[CategoryUsage]:
+    """Fetch time per category using AW's user-configured categorization rules.
+
+    Uses AW's built-in categorize() function with the user's saved $categories rules.
+    Returns an empty list if AW has no categories configured or the query fails.
+
+    The $category field in results is a list like ["Coding", "Python"] or ["Uncategorized"].
+    """
+    if afk_bucket:
+        query = [
+            f'afk_events = query_bucket("{afk_bucket}");',
+            'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
+            f'window_events = query_bucket("{window_bucket}");',
+            "events = filter_period_intersect(window_events, afk_events);",
+            "events = categorize(events, $categories);",
+            'events = merge_events_by_keys(events, ["$category"]);',
+            "events = sort_by_duration(events);",
+            "RETURN = events;",
+        ]
+    else:
+        query = [
+            f'window_events = query_bucket("{window_bucket}");',
+            "events = categorize(window_events, $categories);",
+            'events = merge_events_by_keys(events, ["$category"]);',
+            "events = sort_by_duration(events);",
+            "RETURN = events;",
+        ]
+
+    results = _run_aw_query(client, query, timeperiod)
+    if results is None:
+        return []
+
+    categories: list[CategoryUsage] = []
+    for event in results:
+        if not isinstance(event, dict):
+            continue
+        duration = float(event.get("duration", 0))
+        data = event.get("data", {})
+        category = data.get("$category", [])
+        if not isinstance(category, list):
+            category = [str(category)]
+        if duration < 1:
+            continue
+        categories.append(CategoryUsage(category=category, duration=duration))
+
+    return categories
+
+
 def fetch_aw_activity(start: date, end: date) -> AWActivity:
     """Fetch ActivityWatch activity data for a date range.
 
@@ -279,6 +348,9 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
     if web_bucket:
         activity.top_domains = _fetch_browser_domains(client, web_bucket, afk_bucket, timeperiod)
 
+    # Fetch category breakdown (optional — only if user has configured categories)
+    activity.categories = _fetch_category_usage(client, window_bucket, afk_bucket, timeperiod)
+
     return activity
 
 
@@ -286,6 +358,10 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     """Format ActivityWatch activity as markdown for LLM prompts.
 
     Returns empty string if AW was not available or no data.
+
+    When categories are available (user has configured AW categorization rules),
+    the category breakdown is shown first as a high-level summary, followed by
+    the per-app breakdown for detail.
     """
     if not activity.available or not activity.top_apps:
         return ""
@@ -296,6 +372,19 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     total_h = activity.total_active_hours
     lines.append(f"- **Total active time**: {total_h:.1f}h ({activity.total_active_seconds:.0f}s)")
     lines.append("")
+
+    # Show category breakdown when configured — more meaningful than raw app list
+    if activity.categories:
+        lines.append("### Time by Category")
+        for cat in activity.categories[:12]:  # Top 12 categories
+            pct = (
+                (cat.duration / activity.total_active_seconds * 100)
+                if activity.total_active_seconds > 0
+                else 0
+            )
+            h = cat.duration / 3600
+            lines.append(f"- **{cat.name}**: {h:.1f}h ({pct:.0f}%)")
+        lines.append("")
 
     lines.append("### Top Applications")
     for app in activity.top_apps[:15]:  # Top 15 apps
