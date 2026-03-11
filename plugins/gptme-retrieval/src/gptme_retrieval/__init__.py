@@ -375,9 +375,9 @@ def step_pre_hook(
         return
 
     # Deduplicate: only inject documents not already in this conversation's context.
-    # Use `or "default"` to handle the case where log.name exists but is None (e.g.
-    # nameless/ephemeral conversations) — without this, all such conversations would
-    # share a single dedup set and silently suppress injection for each other.
+    # Use `or "default"` to normalise None (attr present but None) to a string key.
+    # Note: all nameless conversations intentionally share the "default" dedup bucket
+    # (see test_step_pre_hook_none_name_shared_default_bucket).
     conv_name = getattr(manager.log, "name", None) or "default"
     if conv_name not in _injected_per_conv:
         _injected_per_conv[conv_name] = set()

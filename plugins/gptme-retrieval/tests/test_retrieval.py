@@ -236,21 +236,97 @@ def test_injected_per_conv_max_size():
     mock_result = MagicMock()
     mock_result.returncode = 0
 
-    for i in range(_MAX_TRACKED_CONVS + 10):
+    try:
+        for i in range(_MAX_TRACKED_CONVS + 10):
+            mock_result.stdout = (
+                f'[{{"content": "doc {i}", "path": "doc{i}.md", "score": 0.9}}]'
+            )
+            manager = MagicMock()
+            manager.log.messages = [Message(role="user", content=f"query {i}")]
+            manager.log.name = f"conv-{i}"
+            with (
+                patch("gptme_retrieval.get_retrieval_config", return_value=config),
+                patch("subprocess.run", return_value=mock_result),
+            ):
+                list(step_pre_hook(manager))
+
+        assert len(_injected_per_conv) <= _MAX_TRACKED_CONVS
+    finally:
+        _injected_per_conv.clear()
+
+
+def test_injected_per_conv_lru_move_to_end():
+    """Test that an existing conversation is moved to end (LRU) on re-entry, preventing eviction."""
+    _injected_per_conv.clear()
+    config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+
+    try:
+        # Add one conversation first so it sits at position 0 (oldest)
         mock_result.stdout = (
-            f'[{{"content": "doc {i}", "path": "doc{i}.md", "score": 0.9}}]'
+            '[{"content": "first doc", "path": "first.md", "score": 0.9}]'
         )
-        manager = MagicMock()
-        manager.log.messages = [Message(role="user", content=f"query {i}")]
-        manager.log.name = f"conv-{i}"
+        early_manager = MagicMock()
+        early_manager.log.messages = [Message(role="user", content="early query")]
+        early_manager.log.name = "early-conv"
         with (
             patch("gptme_retrieval.get_retrieval_config", return_value=config),
             patch("subprocess.run", return_value=mock_result),
         ):
-            list(step_pre_hook(manager))
+            list(step_pre_hook(early_manager))
 
-    assert len(_injected_per_conv) <= _MAX_TRACKED_CONVS
-    _injected_per_conv.clear()
+        assert "early-conv" in _injected_per_conv
+
+        # Fill up to _MAX_TRACKED_CONVS - 1 more conversations so early-conv is oldest
+        for i in range(_MAX_TRACKED_CONVS - 1):
+            mock_result.stdout = (
+                f'[{{"content": "doc {i}", "path": "doc{i}.md", "score": 0.9}}]'
+            )
+            m = MagicMock()
+            m.log.messages = [Message(role="user", content=f"query {i}")]
+            m.log.name = f"filler-{i}"
+            with (
+                patch("gptme_retrieval.get_retrieval_config", return_value=config),
+                patch("subprocess.run", return_value=mock_result),
+            ):
+                list(step_pre_hook(m))
+
+        assert len(_injected_per_conv) == _MAX_TRACKED_CONVS
+
+        # Re-enter early-conv — this should trigger move_to_end (else branch)
+        mock_result.stdout = '[{"content": "new doc", "path": "new.md", "score": 0.9}]'
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=mock_result),
+        ):
+            list(step_pre_hook(early_manager))
+
+        # early-conv should now be last (most-recently-used), not evicted
+        keys = list(_injected_per_conv.keys())
+        assert (
+            keys[-1] == "early-conv"
+        ), "Re-entered conv should be at end after move_to_end"
+
+        # Adding one more new conversation should evict filler-0 (oldest), not early-conv
+        mock_result.stdout = (
+            '[{"content": "late doc", "path": "late.md", "score": 0.9}]'
+        )
+        m = MagicMock()
+        m.log.messages = [Message(role="user", content="late query")]
+        m.log.name = "late-conv"
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=mock_result),
+        ):
+            list(step_pre_hook(m))
+
+        assert (
+            "early-conv" in _injected_per_conv
+        ), "early-conv must survive eviction after LRU refresh"
+        assert "filler-0" not in _injected_per_conv, "Oldest filler should be evicted"
+    finally:
+        _injected_per_conv.clear()
 
 
 # Backward-compat: turn_pre_hook tests still pass
