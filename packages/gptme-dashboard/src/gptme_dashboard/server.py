@@ -42,7 +42,7 @@ def _fetch_json(url: str, timeout: int = 5) -> "dict[str, Any] | list[Any] | Non
     """
     try:
         with _no_redirect_opener.open(url, timeout=timeout) as resp:  # noqa: S310
-            result: dict[str, Any] | list[Any] = json.loads(resp.read())
+            result: dict[str, Any] | list[Any] = json.loads(resp.read(64 * 1024))
             return result
     except Exception:
         return None
@@ -89,6 +89,54 @@ def load_org_config(org_config: Path) -> list[dict[str, str]]:
             raise ValueError(f"agents[{i}].api must start with http:// or https://, got: {api!r}")
         result.append({"name": agent["name"], "api": api})
     return result
+
+
+def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
+    """Fetch all data for a single agent — status then tasks/services/sessions in parallel."""
+    api = agent["api"]
+    card: dict[str, Any] = {"name": agent["name"], "api": api}
+
+    status = _fetch_json(f"{api}/api/status")
+    if status is None:
+        card["error"] = "unreachable"
+        return card
+
+    if not isinstance(status, dict):
+        card["error"] = "invalid status response"
+        return card
+
+    card["status"] = status
+
+    # Fetch remaining endpoints in parallel using a single shared pool
+    with ThreadPoolExecutor(max_workers=3) as sub_ex:
+        fut_tasks = sub_ex.submit(_fetch_json, f"{api}/api/tasks?state=active")
+        fut_services = sub_ex.submit(_fetch_json, f"{api}/api/services")
+        fut_sessions = sub_ex.submit(_fetch_json, f"{api}/api/sessions?limit=1")
+        tasks_data = fut_tasks.result()
+        services_data = fut_services.result()
+        sessions_data = fut_sessions.result()
+
+    if isinstance(tasks_data, list):
+        card["active_tasks"] = len(tasks_data)
+    elif isinstance(tasks_data, dict) and isinstance(tasks_data.get("tasks"), list):
+        card["active_tasks"] = len(tasks_data["tasks"])
+    else:
+        card["active_tasks"] = None
+
+    if isinstance(services_data, dict):
+        svcs = services_data.get("services") or []
+        card["running_services"] = [s["name"] for s in svcs if s.get("active") and "name" in s]
+    else:
+        card["running_services"] = None
+
+    if isinstance(sessions_data, dict):
+        sessions = sessions_data.get("sessions", [])
+        first = sessions[0] if sessions else None
+        card["last_session"] = first.get("date") if isinstance(first, dict) else None
+    else:
+        card["last_session"] = None
+
+    return card
 
 
 def create_app(
@@ -1148,55 +1196,6 @@ def create_app(
             return jsonify(
                 {"error": "No org config loaded. Start server with --org <org.toml>"}
             ), 404
-
-        def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
-            """Fetch all data for a single agent in parallel sub-requests."""
-            api = agent["api"]
-            card: dict[str, Any] = {"name": agent["name"], "api": api}
-
-            status = _fetch_json(f"{api}/api/status")
-            if status is None:
-                card["error"] = "unreachable"
-                return card
-
-            if not isinstance(status, dict):
-                card["error"] = "invalid status response"
-                return card
-
-            card["status"] = status
-
-            # Fetch remaining endpoints in parallel
-            with ThreadPoolExecutor(max_workers=3) as sub_ex:
-                fut_tasks = sub_ex.submit(_fetch_json, f"{api}/api/tasks?state=active")
-                fut_services = sub_ex.submit(_fetch_json, f"{api}/api/services")
-                fut_sessions = sub_ex.submit(_fetch_json, f"{api}/api/sessions?limit=1")
-                tasks_data = fut_tasks.result()
-                services_data = fut_services.result()
-                sessions_data = fut_sessions.result()
-
-            if isinstance(tasks_data, list):
-                card["active_tasks"] = len(tasks_data)
-            elif isinstance(tasks_data, dict) and isinstance(tasks_data.get("tasks"), list):
-                card["active_tasks"] = len(tasks_data["tasks"])
-            else:
-                card["active_tasks"] = None
-
-            if isinstance(services_data, dict):
-                svcs = services_data.get("services") or []
-                card["running_services"] = [
-                    s["name"] for s in svcs if s.get("active") and "name" in s
-                ]
-            else:
-                card["running_services"] = None
-
-            if isinstance(sessions_data, dict):
-                sessions = sessions_data.get("sessions", [])
-                first = sessions[0] if sessions else None
-                card["last_session"] = first.get("date") if isinstance(first, dict) else None
-            else:
-                card["last_session"] = None
-
-            return card
 
         # Fetch all agents in parallel
         cards: list[dict[str, Any]] = [None] * len(_org_agents)  # type: ignore[list-item]
