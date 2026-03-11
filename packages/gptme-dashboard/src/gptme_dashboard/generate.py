@@ -14,6 +14,7 @@ Designed to work with any gptme workspace (gptme-contrib, bob, alice, etc.).
 import configparser
 import html
 import json
+import logging
 import os
 import re
 import subprocess
@@ -28,6 +29,8 @@ from markdown_it import MarkdownIt
 from pygments import highlight  # type: ignore[import-untyped]
 from pygments.formatters import HtmlFormatter  # type: ignore[import-untyped]
 from pygments.lexers import TextLexer, get_lexer_by_name  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
 
 
 def _highlight_code(code: str, lang: str, attrs: str) -> str:
@@ -203,7 +206,7 @@ def _parse_toml(path: Path) -> dict:
         return {}
 
 
-def read_agent_urls(workspace: Path) -> dict[str, str]:
+def read_agent_urls(workspace: Path, _data: dict | None = None) -> dict[str, str]:
     """Read agent links from gptme.toml.
 
     Reads from ``[agent.urls]`` (the canonical key).
@@ -211,11 +214,17 @@ def read_agent_urls(workspace: Path) -> dict[str, str]:
     Returns a dict of link name → URL, e.g. ``{"dashboard": "https://...", "repo": "..."}``.
     Returns an empty dict if the section is absent or gptme.toml is missing.
 
+    Args:
+        workspace: Path to the workspace root.
+        _data: Pre-parsed TOML data dict.  When provided, avoids re-reading
+            gptme.toml (used by callers that already have the parsed data).
+
     Note: ``[agent.urls]`` is not yet part of gptme's ``AgentConfig``
     schema, so we parse gptme.toml directly rather than going through ``get_project_config``.
     """
-    data = _parse_toml(workspace / "gptme.toml")
-    agent = data.get("agent", {})
+    if _data is None:
+        _data = _parse_toml(workspace / "gptme.toml")
+    agent = _data.get("agent", {})
     links = agent.get("urls", {})
     if isinstance(links, dict):
         safe_links: dict[str, str] = {}
@@ -226,6 +235,12 @@ def read_agent_urls(workspace: Path) -> dict[str, str]:
             parsed = urlparse(url)
             if parsed.scheme in {"http", "https"} and parsed.netloc:
                 safe_links[str(key)] = url
+            else:
+                logger.warning(
+                    "gptme.toml [agent.urls]: skipping %r → %r (unsupported scheme or missing host)",
+                    key,
+                    url,
+                )
         return safe_links
     return {}
 
@@ -948,30 +963,24 @@ def scan_readme(workspace: Path) -> dict:
     return {"body": body, "preview": preview}
 
 
-def read_workspace_config(workspace: Path) -> dict:
-    """Read gptme.toml for workspace metadata using inline TOML parsing."""
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib  # type: ignore[import-not-found]
+def read_workspace_config(workspace: Path, _data: dict | None = None) -> dict:
+    """Read gptme.toml for workspace metadata using inline TOML parsing.
 
-    toml_path = workspace / "gptme.toml"
-    if not toml_path.exists():
-        return {}
-
-    try:
-        with toml_path.open("rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        return {}
+    Args:
+        workspace: Path to the workspace root.
+        _data: Pre-parsed TOML data dict.  When provided, avoids re-reading
+            gptme.toml (used by callers that already have the parsed data).
+    """
+    if _data is None:
+        _data = _parse_toml(workspace / "gptme.toml")
 
     config: dict = {}
 
-    agent = data.get("agent", {})
+    agent = _data.get("agent", {})
     if isinstance(agent, dict) and agent.get("name"):
         config["agent_name"] = agent["name"]
 
-    plugins = data.get("plugins", {})
+    plugins = _data.get("plugins", {})
     if isinstance(plugins, dict) and plugins.get("enabled"):
         config["plugins_enabled"] = list(plugins["enabled"])
 

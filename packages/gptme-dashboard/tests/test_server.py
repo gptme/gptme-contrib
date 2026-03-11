@@ -122,6 +122,29 @@ def test_api_status_with_agent_urls(tmp_path: Path):
         assert data["urls"]["repo"] == "https://github.com/example/linkbot"
 
 
+def test_api_status_url_filtering(tmp_path: Path):
+    """Non-http/https URLs in [agent.urls] must be filtered from /api/status response."""
+    (tmp_path / "gptme.toml").write_text(
+        textwrap.dedent("""\
+        [agent]
+        name = "FilterBot"
+
+        [agent.urls]
+        valid = "https://example.com/"
+        file_url = "file:///etc/passwd"
+        bare_host = "example.com"
+        """)
+    )
+    (tmp_path / "lessons").mkdir()
+    app = create_app(tmp_path, site_dir=tmp_path / "site")
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        data = c.get("/api/status").get_json()
+    assert "valid" in data["urls"]
+    assert "file_url" not in data["urls"]
+    assert "bare_host" not in data["urls"]
+
+
 def test_api_sessions_stats(client):
     """Test /api/sessions/stats returns session statistics."""
     resp = client.get("/api/sessions/stats")
