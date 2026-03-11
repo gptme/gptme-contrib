@@ -318,6 +318,12 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             logger.warning("Failed to read restart_token from gptme.toml: %s", _e)
     if not _restart_token:
         _restart_token = _secrets.token_hex(32)
+        # NOTE: _restart_token is per-process. In multi-worker deployments (Gunicorn,
+        # uWSGI), each worker generates its own token independently, causing 403s when
+        # the browser POSTs to a different worker than it fetched from. This is a
+        # known limitation of the current single-process dev-server use case. If a
+        # multi-worker deployment is ever needed, set GPTME_DASHBOARD_RESTART_TOKEN
+        # from an external source so all workers share the same token.
         logger.info(
             "Dashboard restart token (auto-generated): %s",
             _restart_token,
@@ -717,7 +723,9 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             _is_loopback = False
         if not _is_loopback:
             return jsonify({"enabled": False, "token": None}), 403
-        return jsonify({"enabled": True, "token": _restart_token})
+        resp = jsonify({"enabled": True, "token": _restart_token})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.route("/api/services/<name>/restart", methods=["POST"])
     def api_service_restart(name: str) -> Any:

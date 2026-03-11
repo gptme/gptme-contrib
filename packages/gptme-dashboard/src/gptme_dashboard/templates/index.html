@@ -1059,7 +1059,7 @@ function _showRestartFlash(msg, type) {
     });
     document.body.appendChild(flash);
   }
-  flash.textContent = msg;
+  flash.textContent = msg;  // textContent is safe — do NOT change to innerHTML
   flash.style.background = type === 'success' ? '#2ecc71' : '#e74c3c';
   flash.style.color = '#fff';
   flash.style.display = 'block';
