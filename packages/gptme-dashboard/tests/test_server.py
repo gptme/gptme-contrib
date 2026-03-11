@@ -1790,3 +1790,162 @@ def test_api_logs_exception_path_caches_result(client):
     assert call_count == 1
     data2 = resp2.get_json()
     assert data2["logs"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 6a: Org view tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def org_toml(tmp_path: Path) -> Path:
+    """Create a minimal org.toml for testing."""
+    p = tmp_path / "org.toml"
+    p.write_text(
+        textwrap.dedent("""\
+        [[agents]]
+        name = "bob"
+        api  = "http://bob.example.com:8042"
+
+        [[agents]]
+        name = "alice"
+        api  = "http://alice.example.com:8042"
+        """)
+    )
+    return p
+
+
+def test_load_org_config(org_toml: Path) -> None:
+    """Test load_org_config parses agent list correctly."""
+    from gptme_dashboard.server import load_org_config
+
+    agents = load_org_config(org_toml)
+    assert len(agents) == 2
+    assert agents[0] == {"name": "bob", "api": "http://bob.example.com:8042"}
+    assert agents[1] == {"name": "alice", "api": "http://alice.example.com:8042"}
+
+
+def test_load_org_config_missing_name(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError when agent is missing 'name'."""
+    from gptme_dashboard.server import load_org_config
+
+    p = tmp_path / "bad.toml"
+    p.write_text('[[agents]]\napi = "http://example.com:8042"\n')
+    with pytest.raises(ValueError, match="missing 'name'"):
+        load_org_config(p)
+
+
+def test_load_org_config_missing_api(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError when agent is missing 'api'."""
+    from gptme_dashboard.server import load_org_config
+
+    p = tmp_path / "bad.toml"
+    p.write_text('[[agents]]\nname = "bob"\n')
+    with pytest.raises(ValueError, match="missing 'api'"):
+        load_org_config(p)
+
+
+def test_load_org_config_bad_url_scheme(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError for non-http(s) API URLs."""
+    from gptme_dashboard.server import load_org_config
+
+    p = tmp_path / "bad.toml"
+    p.write_text('[[agents]]\nname = "bob"\napi = "ftp://example.com"\n')
+    with pytest.raises(ValueError, match="must start with http"):
+        load_org_config(p)
+
+
+def test_api_org_no_config(workspace: Path, tmp_path: Path) -> None:
+    """Test /api/org returns 404 when no org config is loaded."""
+    app = create_app(workspace)
+    with app.test_client() as c:
+        resp = c.get("/api/org")
+    assert resp.status_code == 404
+    assert "error" in resp.get_json()
+
+
+def test_api_org_aggregates_agents(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org calls each agent's API and returns agent cards."""
+    import json as _json
+
+    def _mock_urlopen(url, timeout=5):
+        """Return mock responses based on URL."""
+        url_str = str(url)
+        mock = unittest.mock.MagicMock()
+        mock.__enter__ = lambda s: s
+        mock.__exit__ = unittest.mock.MagicMock(return_value=False)
+
+        if "/api/status" in url_str:
+            mock.read.return_value = _json.dumps(
+                {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+            ).encode()
+        elif "/api/tasks" in url_str:
+            mock.read.return_value = _json.dumps(
+                [{"id": "task-1", "title": "Do something", "state": "active"}]
+            ).encode()
+        elif "/api/services" in url_str:
+            mock.read.return_value = _json.dumps(
+                {"services": [{"name": "gptme.service", "active": True}]}
+            ).encode()
+        elif "/api/sessions" in url_str:
+            mock.read.return_value = _json.dumps(
+                {"sessions": [{"date": "2026-03-11"}], "total": 1}
+            ).encode()
+        else:
+            mock.read.return_value = b"{}"
+        return mock
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 2
+    agents = data["agents"]
+    # First agent (bob) should be reachable with data
+    bob = agents[0]
+    assert bob["name"] == "bob"
+    assert "error" not in bob
+    assert bob["active_tasks"] == 1
+    assert bob["running_services"] == ["gptme.service"]
+    assert bob["last_session"] == "2026-03-11"
+
+
+def test_api_org_handles_unreachable_agent(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org marks unreachable agents with error field."""
+    import urllib.error
+
+    def _mock_urlopen(url, timeout=5):
+        raise urllib.error.URLError("Connection refused")
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 2
+    for agent in data["agents"]:
+        assert agent["error"] == "unreachable"
+
+
+def test_org_view_no_config(workspace: Path) -> None:
+    """Test /org returns 404 when no org config is loaded."""
+    app = create_app(workspace)
+    with app.test_client() as c:
+        resp = c.get("/org")
+    assert resp.status_code == 404
+
+
+def test_org_view_with_config(workspace: Path, org_toml: Path) -> None:
+    """Test /org returns an HTML page when org config is loaded."""
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        resp = c.get("/org")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "Org View" in html
+    assert "/api/org" in html

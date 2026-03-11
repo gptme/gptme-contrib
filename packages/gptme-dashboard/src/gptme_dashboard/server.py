@@ -21,13 +21,61 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
+def load_org_config(org_config: Path) -> list[dict[str, str]]:
+    """Load org config from a TOML file listing known agents.
+
+    Expected format::
+
+        [[agents]]
+        name = "bob"
+        api  = "https://bob.example.com:8042"
+
+        [[agents]]
+        name = "alice"
+        api  = "https://alice.example.com:8042"
+
+    Returns a list of agent dicts with ``name`` and ``api`` keys.
+    Raises ``ValueError`` for invalid entries (missing name/api, bad URL scheme).
+    """
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ImportError:
+            raise ImportError(
+                "tomli is required for org config on Python < 3.11: " "pip install tomli"
+            )
+
+    with open(org_config, "rb") as f:
+        data = tomllib.load(f)
+
+    agents = data.get("agents", [])
+    result = []
+    for i, agent in enumerate(agents):
+        if "name" not in agent:
+            raise ValueError(f"agents[{i}] missing 'name' field")
+        if "api" not in agent:
+            raise ValueError(f"agents[{i}] missing 'api' field")
+        api = agent["api"].rstrip("/")
+        if not api.startswith(("http://", "https://")):
+            raise ValueError(f"agents[{i}].api must start with http:// or https://, got: {api!r}")
+        result.append({"name": agent["name"], "api": api})
+    return result
+
+
+def create_app(
+    workspace: Path, site_dir: Path | None = None, org_config: Path | None = None
+) -> Any:
     """Create Flask app serving static dashboard + API.
 
     Args:
         workspace: Path to the gptme workspace root.
         site_dir: Directory containing the generated static site.
             If None, generates into ``<workspace>/_site``.
+        org_config: Optional path to an org TOML config listing remote agents.
+            When provided, enables the ``/api/org`` aggregation endpoint and
+            serves ``/org`` as the org view page.
 
     Returns:
         A Flask application instance.
@@ -36,7 +84,7 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         ImportError: If Flask is not installed.
     """
     try:
-        from flask import Flask, jsonify, request
+        from flask import Flask, jsonify, render_template_string, request
     except ImportError:
         raise ImportError(
             "Flask is required for 'gptme-dashboard serve'. "
@@ -69,6 +117,15 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         static_url_path="",
     )
     app.config["WORKSPACE"] = str(workspace.resolve())
+
+    # Load org config if provided
+    _org_agents: list[dict[str, str]] = []
+    if org_config is not None:
+        try:
+            _org_agents = load_org_config(org_config)
+            logger.info("Org config loaded: %d agents", len(_org_agents))
+        except Exception as e:
+            logger.warning("Failed to load org config %s: %s", org_config, e)
 
     @app.route("/")
     def index() -> Any:
@@ -1043,5 +1100,158 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         except Exception as e:
             logger.exception("Error scanning summaries")
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/org")
+    def api_org() -> Any:
+        """Aggregate status from all known agents in the org.
+
+        Returns a list of agent cards, each containing:
+        - ``name``: agent name from org.toml
+        - ``api``: base API URL
+        - ``status``: agent name/workspace from /api/status (or null on error)
+        - ``tasks``: active task count from /api/tasks?state=active (or null)
+        - ``services``: running service names from /api/services (or null)
+        - ``sessions``: most recent session timestamp from /api/sessions (or null)
+        - ``error``: error message if the agent API was unreachable
+
+        Returns 404 if no org config was loaded.
+        """
+        if not _org_agents:
+            return jsonify(
+                {"error": "No org config loaded. Start server with --org <org.toml>"}
+            ), 404
+
+        try:
+            import urllib.error
+            import urllib.request
+            import json as _json_mod
+        except ImportError:
+            return jsonify({"error": "urllib unavailable"}), 500
+
+        def _fetch(url: str, timeout: int = 5) -> "dict[str, Any] | list[Any] | None":
+            """Fetch JSON from a URL, returning None on any error."""
+            try:
+                with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+                    result: dict[str, Any] | list[Any] = _json_mod.loads(resp.read())
+                    return result
+            except Exception:
+                return None
+
+        cards = []
+        for agent in _org_agents:
+            api = agent["api"]
+            card: dict[str, Any] = {"name": agent["name"], "api": api}
+
+            status = _fetch(f"{api}/api/status")
+            if status is None:
+                card["error"] = "unreachable"
+                cards.append(card)
+                continue
+
+            card["status"] = status
+
+            tasks_data = _fetch(f"{api}/api/tasks?state=active")
+            if isinstance(tasks_data, list):
+                card["active_tasks"] = len(tasks_data)
+            elif isinstance(tasks_data, dict) and "tasks" in tasks_data:
+                card["active_tasks"] = len(tasks_data["tasks"])
+            else:
+                card["active_tasks"] = None
+
+            services_data = _fetch(f"{api}/api/services")
+            if isinstance(services_data, dict):
+                svcs = services_data.get("services", [])
+                card["running_services"] = [s["name"] for s in svcs if s.get("active")]
+            else:
+                card["running_services"] = None
+
+            sessions_data = _fetch(f"{api}/api/sessions?limit=1")
+            if isinstance(sessions_data, dict):
+                sessions = sessions_data.get("sessions", [])
+                card["last_session"] = sessions[0].get("date") if sessions else None
+            else:
+                card["last_session"] = None
+
+            cards.append(card)
+
+        return jsonify({"agents": cards, "count": len(cards)})
+
+    @app.route("/org")
+    @app.route("/org.html")
+    def org_view() -> Any:
+        """Serve the org view page (agent grid)."""
+        if not _org_agents:
+            return (
+                "<html><body><h1>No org config</h1>"
+                "<p>Start the server with <code>--org org.toml</code></p></body></html>",
+                404,
+            )
+        # Simple self-contained org page — no Jinja template file needed
+        _ORG_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Org View</title>
+  <style>
+    :root { --bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text-dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:2rem; }
+    h1 { font-size:1.5rem; margin-bottom:1.5rem; }
+    h1 span { color:var(--text-dim); font-weight:400; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:1rem; }
+    .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:1.25rem; }
+    .card h2 { font-size:1.1rem; margin-bottom:0.75rem; }
+    .card h2 a { color:var(--accent); text-decoration:none; }
+    .status { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+    .status.active { background:var(--green); }
+    .status.unreachable { background:var(--red); }
+    .row { display:flex; justify-content:space-between; font-size:0.875rem; margin-top:0.5rem; color:var(--text-dim); }
+    .row span:last-child { color:var(--text); }
+    .error { color:var(--red); font-size:0.875rem; margin-top:0.5rem; }
+    #status-bar { margin-bottom:1.5rem; font-size:0.875rem; color:var(--text-dim); }
+    #status-bar strong { color:var(--text); }
+  </style>
+</head>
+<body>
+  <h1>Org View <span id="org-summary"></span></h1>
+  <div id="status-bar">Loading agents...</div>
+  <div class="grid" id="agent-grid"></div>
+  <script>
+    async function loadOrg() {
+      try {
+        const resp = await fetch('/api/org');
+        if (!resp.ok) { document.getElementById('status-bar').textContent = 'Failed to load org data'; return; }
+        const data = await resp.json();
+        const agents = data.agents || [];
+        const active = agents.filter(a => !a.error).length;
+        document.getElementById('org-summary').textContent = '(' + agents.length + ' agents)';
+        document.getElementById('status-bar').innerHTML = '<strong>' + active + '</strong> reachable, <strong>' + (agents.length - active) + '</strong> unreachable';
+        const grid = document.getElementById('agent-grid');
+        grid.innerHTML = agents.map(a => {
+          const reachable = !a.error;
+          const name = a.status ? (a.status.agent || a.name) : a.name;
+          const apiLink = '<a href="' + a.api + '" target="_blank">' + name + '</a>';
+          const dot = '<span class="status ' + (reachable ? 'active' : 'unreachable') + '"></span>';
+          let body = '';
+          if (!reachable) {
+            body = '<div class="error">Unreachable</div>';
+          } else {
+            if (a.active_tasks !== null) body += '<div class="row"><span>Active tasks</span><span>' + a.active_tasks + '</span></div>';
+            if (a.running_services !== null) body += '<div class="row"><span>Running services</span><span>' + (a.running_services.length ? a.running_services.join(', ') : 'none') + '</span></div>';
+            if (a.last_session) body += '<div class="row"><span>Last session</span><span>' + a.last_session + '</span></div>';
+          }
+          return '<div class="card"><h2>' + dot + apiLink + '</h2>' + body + '</div>';
+        }).join('');
+      } catch(e) {
+        document.getElementById('status-bar').textContent = 'Error: ' + e.message;
+      }
+    }
+    loadOrg();
+    setInterval(loadOrg, 30000);
+  </script>
+</body>
+</html>"""
+        return render_template_string(_ORG_PAGE)
 
     return app
