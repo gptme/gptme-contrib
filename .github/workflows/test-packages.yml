@@ -133,7 +133,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --all-packages --all-extras
+          uv sync --all-packages
 
       - name: Run coverage for all packages
         run: |
@@ -146,6 +146,8 @@ jobs:
             # Only packages with both tests/ and src/
             if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ] && [ -f "$pkg/Makefile" ]; then
               echo "=== Coverage for $name ==="
+              # Install test extras (e.g. flask for gptme-dashboard[test] -> [serve])
+              uv pip install -e "$pkg[test]" --quiet 2>/dev/null || true
               uv run --with pytest --with pytest-cov --with pytest-timeout pytest "$pkg/tests" \
                 --cov="$pkg/src" \
                 --cov-append \
