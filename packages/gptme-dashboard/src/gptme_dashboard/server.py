@@ -1284,9 +1284,9 @@ def create_app(
         category = item.get("category", "").lower()
 
         title_words = set(re.sub(r"[^\w\s]", " ", title).split())
-        kw_words = set(kw_text.split())
-        tag_words = set(tag_text.split())
-        category_words = set(category.split())
+        kw_words = set(re.sub(r"[^\w\s]", " ", kw_text).split())
+        tag_words = set(re.sub(r"[^\w\s]", " ", tag_text).split())
+        category_words = set(re.sub(r"[^\w\s]", " ", category).split())
         excerpt_words = set(re.sub(r"[^\w\s]", " ", excerpt).split())
 
         for word in query_words:
@@ -1372,7 +1372,7 @@ def create_app(
 
             scored.sort(key=lambda x: x[0], reverse=True)
             total = len(scored)
-            results = [item for _, item in scored[:limit]]
+            results = [dict(item) for _, item in scored[:limit]]
 
             return jsonify(
                 {
