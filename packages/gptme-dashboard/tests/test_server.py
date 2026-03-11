@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from gptme_dashboard.server import create_app
+from gptme_dashboard.server import create_app, load_org_config
 
 
 @pytest.fixture
@@ -2163,3 +2163,39 @@ def test_api_org_sessions_non_list(workspace: Path, org_toml: Path) -> None:
     assert resp.status_code == 200
     bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
     assert bob["last_session"] is None  # non-list sessions → None, not TypeError
+
+
+def test_api_org_service_entry_non_dict(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles non-dict entries in services list without AttributeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            # Remote agent returns a null entry inside services list
+            return {"services": [None, {"name": "gptme", "active": True}]}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    # non-dict entry skipped; valid dict entry included
+    assert bob["running_services"] == ["gptme"]
+
+
+def test_load_org_config_agents_not_list(tmp_path: Path) -> None:
+    """Test load_org_config raises ValueError if agents is not a list."""
+    toml_path = tmp_path / "org.toml"
+    toml_path.write_bytes(b'agents = "not-a-list"\n')
+    with pytest.raises(ValueError, match="must be an array-of-tables"):
+        load_org_config(toml_path)

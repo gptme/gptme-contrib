@@ -78,6 +78,10 @@ def load_org_config(org_config: Path) -> list[dict[str, str]]:
         data = tomllib.load(f)
 
     agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        raise ValueError(
+            f"'agents' must be an array-of-tables ([[agents]]), got: {type(agents).__name__}"
+        )
     result = []
     for i, agent in enumerate(agents):
         if "name" not in agent:
@@ -125,7 +129,9 @@ def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
 
     if isinstance(services_data, dict):
         svcs = services_data.get("services") or []
-        card["running_services"] = [s["name"] for s in svcs if s.get("active") and "name" in s]
+        card["running_services"] = [
+            s["name"] for s in svcs if isinstance(s, dict) and s.get("active") and "name" in s
+        ]
     else:
         card["running_services"] = None
 
