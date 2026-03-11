@@ -2358,3 +2358,29 @@ def test_api_search_valid_types(client):
         resp = client.get(f"/api/search?q=test&type={t}")
         # Empty workspace → 0 results, but valid request
         assert resp.status_code == 200, f"type={t} should be valid"
+
+
+def test_api_search_finds_journal_by_body(tmp_path: Path):
+    """Test /api/search indexes journal body content, not just first-line preview."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    # Create a journal entry where the unique term only appears deep in the body
+    journal_dir = tmp_path / "journal" / "2026-03-01"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "session.md").write_text(
+        "# Session\n\n"
+        "## Summary\n\n"
+        "Worked on routine tasks.\n\n"
+        "## Details\n\n"
+        "Implemented the quuxfrobnicator feature in the backend.\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=quuxfrobnicator")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1, "Journal body content should be indexed and searchable"
+        assert any(r["type"] == "journal" for r in data["results"])

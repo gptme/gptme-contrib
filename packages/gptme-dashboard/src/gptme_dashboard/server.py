@@ -1251,7 +1251,7 @@ def create_app(
                     "category": journal.get("date", ""),
                     "keywords": [],
                     "tags": [],
-                    "excerpt": journal.get("preview", ""),
+                    "excerpt": journal.get("body", "")[:600],
                     "url": "/" + journal.get("page_url", ""),
                     "path": journal.get("path", ""),
                 }
