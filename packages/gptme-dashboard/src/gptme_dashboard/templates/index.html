@@ -1035,6 +1035,7 @@ async function restartService(name) {
   }
 }
 
+let _flashTimer = null;
 function _showRestartFlash(msg, type) {
   let flash = document.getElementById('restart-flash');
   if (!flash) {
@@ -1051,7 +1052,8 @@ function _showRestartFlash(msg, type) {
   flash.style.background = type === 'success' ? '#2ecc71' : '#e74c3c';
   flash.style.color = '#fff';
   flash.style.display = 'block';
-  setTimeout(() => { flash.style.display = 'none'; }, 3000);
+  if (_flashTimer !== null) clearTimeout(_flashTimer);
+  _flashTimer = setTimeout(() => { flash.style.display = 'none'; _flashTimer = null; }, 3000);
 }
 
 async function loadServiceHealth() {
@@ -1085,7 +1087,7 @@ async function loadServiceHealth() {
       const healthCls = 'tag-' + s.health;
       const statusCls = s.active === 'active' ? 'tag-active' : s.active === 'failed' ? 'tag-failed' : 'tag-deprecated';
       const restartBtn = _restartToken
-        ? '<button class="restart-btn" onclick="restartService(' + JSON.stringify(s.name) + ')" title="Restart service">↺</button>'
+        ? '<button class="restart-btn" onclick="restartService(' + JSON.stringify(s.name).replace(/"/g, '&quot;') + ')" title="Restart service">↺</button>'
         : '<span class="restart-btn restart-btn-disabled" title="Restart not available">↺</span>';
       return '<tr>'
         + '<td><strong>' + esc(s.name) + '</strong></td>'

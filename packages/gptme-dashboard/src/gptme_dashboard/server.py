@@ -285,7 +285,16 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     import os as _os
     import secrets as _secrets
 
+    _MIN_TOKEN_LEN = 32
     _restart_token = _os.environ.get("GPTME_DASHBOARD_RESTART_TOKEN", "")
+    if _restart_token and len(_restart_token) < _MIN_TOKEN_LEN:
+        logger.warning(
+            "GPTME_DASHBOARD_RESTART_TOKEN is too short (%d chars, minimum %d); "
+            "falling back to auto-generated token",
+            len(_restart_token),
+            _MIN_TOKEN_LEN,
+        )
+        _restart_token = ""
     if not _restart_token:
         try:
             import tomllib as _tomllib
@@ -295,6 +304,14 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 with open(_toml_path, "rb") as _f:
                     _toml_cfg = _tomllib.load(_f)
                 _restart_token = _toml_cfg.get("dashboard", {}).get("restart_token", "")
+                if _restart_token and len(_restart_token) < _MIN_TOKEN_LEN:
+                    logger.warning(
+                        "gptme.toml [dashboard] restart_token is too short (%d chars, minimum %d); "
+                        "falling back to auto-generated token",
+                        len(_restart_token),
+                        _MIN_TOKEN_LEN,
+                    )
+                    _restart_token = ""
         except Exception:
             pass
     if not _restart_token:
