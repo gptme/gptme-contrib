@@ -177,7 +177,9 @@ jobs:
       - name: Run coverage
         run: |
           # Find all plugins with tests and collect coverage
-          for plugin in plugins/*/; do
+          # All plugins in this repo use src/ layout; the check is belt-and-suspenders
+          for plugin_dir in plugins/*/; do
+            plugin="${plugin_dir%/}"  # strip trailing slash to avoid double-slash paths
             if [ -d "$plugin/tests" ] && [ -d "$plugin/src" ]; then
               pytest "$plugin/tests" -v -m "not slow" --cov="$plugin/src" --cov-append --cov-report=term-missing --timeout=30 || true
             fi
