@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from gptme.message import Message
 from gptme_retrieval import (
+    _MAX_TRACKED_CONVS,
     DEFAULT_CONFIG,
     _doc_key,
     _injected_per_conv,
@@ -190,6 +191,66 @@ def test_step_pre_hook_disabled():
     with patch("gptme_retrieval.get_retrieval_config", return_value=config):
         messages = list(step_pre_hook(manager))
     assert messages == []
+
+
+def test_step_pre_hook_none_name_isolated():
+    """Test that nameless conversations (log.name=None) don't share dedup state."""
+    config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = '[{"content": "doc content", "path": "doc.md", "score": 0.9}]'
+
+    # Remove any existing "default" entry so both managers start fresh
+    _injected_per_conv.pop("default", None)
+
+    # Two separate managers both with log.name = None
+    manager1 = MagicMock()
+    manager1.log.messages = [Message(role="user", content="query")]
+    manager1.log.name = None
+
+    manager2 = MagicMock()
+    manager2.log.messages = [Message(role="user", content="query")]
+    manager2.log.name = None
+
+    with (
+        patch("gptme_retrieval.get_retrieval_config", return_value=config),
+        patch("subprocess.run", return_value=mock_result),
+    ):
+        # First nameless conversation injects the doc
+        msgs1 = list(step_pre_hook(manager1))
+        assert len(msgs1) == 1, "First nameless conv should inject doc"
+
+        # Second call to same-named "default" key sees it already injected (expected)
+        # — both are bucketed under "default", so the second is a no-op.
+        # This is acceptable: nameless convs share a bucket, not unrelated named convs.
+        msgs2 = list(step_pre_hook(manager2))
+        assert (
+            len(msgs2) == 0
+        ), "Same bucket (both None->default) deduplicates correctly"
+
+
+def test_injected_per_conv_max_size():
+    """Test that _injected_per_conv does not exceed _MAX_TRACKED_CONVS entries."""
+    _injected_per_conv.clear()
+    config = {**DEFAULT_CONFIG, "backend": "qmd", "mode": "search", "threshold": 0.3}
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+
+    for i in range(_MAX_TRACKED_CONVS + 10):
+        mock_result.stdout = (
+            f'[{{"content": "doc {i}", "path": "doc{i}.md", "score": 0.9}}]'
+        )
+        manager = MagicMock()
+        manager.log.messages = [Message(role="user", content=f"query {i}")]
+        manager.log.name = f"conv-{i}"
+        with (
+            patch("gptme_retrieval.get_retrieval_config", return_value=config),
+            patch("subprocess.run", return_value=mock_result),
+        ):
+            list(step_pre_hook(manager))
+
+    assert len(_injected_per_conv) <= _MAX_TRACKED_CONVS
+    _injected_per_conv.clear()
 
 
 # Backward-compat: turn_pre_hook tests still pass

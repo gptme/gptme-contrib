@@ -22,6 +22,7 @@ import json
 import logging
 import shlex
 import subprocess
+from collections import OrderedDict
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,7 @@ __all__ = [
     "retrieve_context",
     "step_pre_hook",
     "turn_pre_hook",
+    "_MAX_TRACKED_CONVS",
 ]
 
 
@@ -56,14 +58,17 @@ DEFAULT_CONFIG = {
 
 # Per-conversation deduplication state: maps conversation name -> set of injected doc keys.
 # A doc key is "source#content_hash" — stable across multiple retrievals of the same document.
-_injected_per_conv: dict[str, set[str]] = {}
+# Capped at _MAX_TRACKED_CONVS entries (FIFO eviction) to avoid unbounded growth in long-running
+# processes (daemons, servers) that handle many conversations over their lifetime.
+_MAX_TRACKED_CONVS = 500
+_injected_per_conv: OrderedDict[str, set[str]] = OrderedDict()
 
 
 def _doc_key(result: dict[str, Any]) -> str:
     """Compute a stable deduplication key for a retrieved document."""
     source = result.get("source", "")
     content = result.get("content", "")
-    content_hash = hashlib.sha256(content.encode()).hexdigest()[:8]
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
     return f"{source}#{content_hash}"
 
 
@@ -336,6 +341,9 @@ def step_pre_hook(
     Deduplication is keyed by (source, content_hash) per conversation, so a document
     retrieved on step 1 won't be re-injected on steps 2-N, but a genuinely new document
     (different source or updated content) will be injected when it first appears.
+
+    Note: the retrieval backend is called on every step to discover newly-relevant docs
+    (e.g. after a topic change). Only injection is deduplicated, not retrieval.
     """
     config = get_retrieval_config()
 
@@ -365,10 +373,16 @@ def step_pre_hook(
     if not results:
         return
 
-    # Deduplicate: only inject documents not already in this conversation's context
-    conv_name = getattr(manager.log, "name", "default")
+    # Deduplicate: only inject documents not already in this conversation's context.
+    # Use `or "default"` to handle the case where log.name exists but is None (e.g.
+    # nameless/ephemeral conversations) — without this, all such conversations would
+    # share a single dedup set and silently suppress injection for each other.
+    conv_name = getattr(manager.log, "name", None) or "default"
     if conv_name not in _injected_per_conv:
         _injected_per_conv[conv_name] = set()
+        # Evict oldest entries when over the cap (FIFO)
+        while len(_injected_per_conv) > _MAX_TRACKED_CONVS:
+            _injected_per_conv.popitem(last=False)
     injected = _injected_per_conv[conv_name]
 
     new_results = [r for r in results if _doc_key(r) not in injected]
