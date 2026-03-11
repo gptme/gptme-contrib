@@ -2082,3 +2082,57 @@ def test_api_org_card_exception_isolated(workspace: Path, org_toml: Path) -> Non
     alice = next(a for a in agents if a["name"] == "alice")
     assert "error" not in bob  # bob succeeded
     assert "error" in alice  # alice's failure is isolated to her card
+
+
+def test_api_org_services_null(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles services=null (explicit null) without TypeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            # Remote agent returns {"services": null} — .get("services", []) returns None
+            return {"services": None}
+        elif "/api/sessions" in url:
+            return {"sessions": [], "total": 0}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["running_services"] == []  # null services → empty list, not TypeError
+
+
+def test_api_org_session_non_dict(workspace: Path, org_toml: Path) -> None:
+    """Test /api/org handles sessions[0]=null without AttributeError."""
+
+    def _mock_fetch_json(url: str, timeout: int = 5):
+        if "/api/status" in url:
+            return {"mode": "dynamic", "agent": "bob", "workspace": "bob"}
+        elif "/api/tasks" in url:
+            return []
+        elif "/api/services" in url:
+            return {"services": []}
+        elif "/api/sessions" in url:
+            # Remote agent returns a non-dict first session entry
+            return {"sessions": [None], "total": 1}
+        return {}
+
+    app = create_app(workspace, org_config=org_toml)
+    with app.test_client() as c:
+        with unittest.mock.patch(
+            "gptme_dashboard.server._fetch_json", side_effect=_mock_fetch_json
+        ):
+            resp = c.get("/api/org")
+
+    assert resp.status_code == 200
+    bob = next(a for a in resp.get_json()["agents"] if a["name"] == "bob")
+    assert bob["last_session"] is None  # non-dict session → None, not AttributeError

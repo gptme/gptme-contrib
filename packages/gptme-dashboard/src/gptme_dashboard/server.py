@@ -1179,7 +1179,7 @@ def create_app(
                 card["active_tasks"] = None
 
             if isinstance(services_data, dict):
-                svcs = services_data.get("services", [])
+                svcs = services_data.get("services") or []
                 card["running_services"] = [
                     s["name"] for s in svcs if s.get("active") and "name" in s
                 ]
@@ -1188,7 +1188,8 @@ def create_app(
 
             if isinstance(sessions_data, dict):
                 sessions = sessions_data.get("sessions", [])
-                card["last_session"] = sessions[0].get("date") if sessions else None
+                first = sessions[0] if sessions else None
+                card["last_session"] = first.get("date") if isinstance(first, dict) else None
             else:
                 card["last_session"] = None
 
