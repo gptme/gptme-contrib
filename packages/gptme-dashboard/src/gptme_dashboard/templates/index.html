@@ -1469,6 +1469,7 @@ document.getElementById('global-search-input').addEventListener('input', functio
 });
 
 document.getElementById('search-type-filter').addEventListener('change', function() {
+  clearTimeout(_searchTimer);
   const q = document.getElementById('global-search-input').value.trim();
   runSearch(q, this.value);
 });
