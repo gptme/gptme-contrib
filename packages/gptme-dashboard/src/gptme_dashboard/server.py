@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -1285,7 +1286,7 @@ def create_app(
         kw_words = set(kw_text.split())
         tag_words = set(tag_text.split())
         category_words = set(category.split())
-        excerpt_words = set(excerpt.split())
+        excerpt_words = set(re.sub(r"[^\w\s]", " ", excerpt).split())
 
         for word in query_words:
             w = word.lower()

@@ -1396,6 +1396,8 @@ function openSearch() {
 }
 
 function closeSearch() {
+  clearTimeout(_searchTimer);
+  if (_searchAbortController) _searchAbortController.abort();
   document.getElementById('search-overlay').classList.remove('open');
   document.getElementById('global-search-input').value = '';
   document.getElementById('search-results-area').innerHTML =
