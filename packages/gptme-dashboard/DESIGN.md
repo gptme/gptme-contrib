@@ -42,18 +42,23 @@ Scans the workspace and produces `_site/`:
 ### Live Server (`serve` command)
 
 ```
-gptme-dashboard serve --workspace /path/to/agent --port 8080
+gptme-dashboard serve --workspace /path/to/agent --port 8042
 ```
 
 Serves the static site plus real-time API endpoints:
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /api/status` | Workspace name and agent URLs |
 | `GET /api/sessions` | Recent agent sessions with outcome/grade |
+| `GET /api/sessions/stats` | Aggregated session stats by model/harness |
 | `GET /api/tasks` | Task list with state/priority |
-| `GET /api/services` | systemd service health |
-| `GET /api/services/logs` | Per-service journal logs (Linux only) |
+| `GET /api/services` | systemd/launchd service list |
+| `GET /api/services/health` | Detailed health metrics per service (memory, restarts, errors) |
+| `GET /api/services/restart-enabled` | CSRF token for restart actions |
+| `POST /api/services/<name>/restart` | Restart a named service |
 | `GET /api/schedule` | Timer/schedule status |
+| `GET /api/journals` | Recent journal entries |
 | `GET /api/summaries` | Knowledge summaries |
 
 All endpoints return JSON. The frontend polls these and progressively enhances the static HTML.
@@ -103,7 +108,7 @@ A filesystem-local solution won't work — the design must be distributed and op
               ┌────────────▼──┐ ┌─▼────────────┐
               │  Bob's VM     │ │  Alice's VM   │
               │ gptme-dashboard │ │ gptme-dashboard│
-              │ serve :8080   │ │ serve :8080   │
+              │ serve :8042   │ │ serve :8042   │
               └───────────────┘ └───────────────┘
 ```
 
