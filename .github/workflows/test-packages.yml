@@ -162,6 +162,7 @@ jobs:
         if: hashFiles('coverage.xml') != ''
         uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
           flags: packages
           name: codecov-packages

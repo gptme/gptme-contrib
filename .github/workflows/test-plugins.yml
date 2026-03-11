@@ -176,18 +176,21 @@ jobs:
 
       - name: Run coverage
         run: |
-          # Find all plugins with tests and run coverage
+          # Find all plugins with tests and collect coverage
           for plugin in plugins/*/; do
-            if [ -d "$plugin/tests" ]; then
-              pytest "$plugin/tests" -v -m "not slow" --cov="$plugin" --cov-append --cov-report=xml --cov-report=term --timeout=30 || true
+            if [ -d "$plugin/tests" ] && [ -d "$plugin/src" ]; then
+              pytest "$plugin/tests" -v -m "not slow" --cov="$plugin/src" --cov-append --cov-report=term-missing --timeout=30 || true
             fi
           done
+          # Generate combined XML report once after all plugins
+          coverage xml || true
 
       - name: Upload coverage to Codecov
         if: hashFiles('coverage.xml') != ''
         uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
-          flags: unittests
+          flags: plugins
           name: codecov-plugins
           fail_ci_if_error: false
