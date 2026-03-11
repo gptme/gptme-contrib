@@ -103,6 +103,18 @@ tr:hover { background: var(--accent-dim); }
 .tag-degraded { border-color: var(--red); color: var(--red); }
 .tag-unhealthy { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.1); }
 .tag-failed { border-color: var(--red); color: var(--red); }
+.restart-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.1rem 0.4rem;
+  color: var(--text);
+  transition: background 0.15s;
+}
+.restart-btn:hover { background: var(--surface); }
+.restart-btn-disabled { opacity: 0.3; cursor: not-allowed; font-size: 1rem; }
 
 /* Category bar chart (compact) */
 .cat-chart {
@@ -373,7 +385,7 @@ tr:hover { background: var(--accent-dim); }
   <h2>Service Health <span class="count-badge" id="health-summary"></span></h2>
   <table id="health-table">
     <thead>
-      <tr><th>Service</th><th>Health</th><th>Status</th><th>Uptime</th><th>Restarts</th><th>Memory</th><th>Errors (1h)</th></tr>
+      <tr><th>Service</th><th>Health</th><th>Status</th><th>Uptime</th><th>Restarts</th><th>Memory</th><th>Errors (1h)</th><th>Actions</th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -756,6 +768,7 @@ async function initDynamic() {
     loadRecentSessions();
     loadServices();
     loadSchedule();
+    _fetchRestartToken();
     loadServiceHealth();
     // Auto-refresh health every 30 seconds — always retry to recover from transient errors
     setInterval(loadServiceHealth, 30000);
@@ -988,6 +1001,59 @@ function formatMemory(bytes) {
   return bytes + ' B';
 }
 
+// Restart token — fetched once at startup from /api/services/restart-enabled.
+// Stored in JS memory; cross-origin scripts cannot read it (CORS blocked).
+let _restartToken = null;
+
+async function _fetchRestartToken() {
+  try {
+    const resp = await fetch('/api/services/restart-enabled');
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.enabled && data.token) { _restartToken = data.token; }
+    }
+  } catch (e) { /* ignore — restart buttons will be disabled */ }
+}
+
+async function restartService(name) {
+  if (!_restartToken) { alert('Restart not available — no token configured.'); return; }
+  if (!confirm('Restart ' + name + '?\n\nThe service will briefly stop before restarting.')) return;
+  try {
+    const resp = await fetch('/api/services/' + encodeURIComponent(name) + '/restart', {
+      method: 'POST',
+      headers: { 'X-Restart-Token': _restartToken },
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      _showRestartFlash(name + ' restarting…', 'success');
+      setTimeout(loadServiceHealth, 2000);
+    } else {
+      _showRestartFlash('Error: ' + (data.error || 'Restart failed'), 'error');
+    }
+  } catch (e) {
+    _showRestartFlash('Restart request failed', 'error');
+  }
+}
+
+function _showRestartFlash(msg, type) {
+  let flash = document.getElementById('restart-flash');
+  if (!flash) {
+    flash = document.createElement('div');
+    flash.id = 'restart-flash';
+    Object.assign(flash.style, {
+      position: 'fixed', bottom: '1rem', right: '1rem',
+      padding: '0.5rem 1rem', borderRadius: '4px',
+      fontWeight: 'bold', zIndex: '9999',
+    });
+    document.body.appendChild(flash);
+  }
+  flash.textContent = msg;
+  flash.style.background = type === 'success' ? '#2ecc71' : '#e74c3c';
+  flash.style.color = '#fff';
+  flash.style.display = 'block';
+  setTimeout(() => { flash.style.display = 'none'; }, 3000);
+}
+
 async function loadServiceHealth() {
   try {
     const resp = await fetch('/api/services/health');
@@ -996,7 +1062,7 @@ async function loadServiceHealth() {
     const services = data.services || [];
     const tbody = document.querySelector('#health-table tbody');
     if (services.length === 0) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="opacity:0.6">No gptme services found</td></tr>';
+      if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="opacity:0.6">No gptme services found</td></tr>';
       document.getElementById('service-health').style.display = '';
       return;
     }
@@ -1018,6 +1084,9 @@ async function loadServiceHealth() {
     tbody.innerHTML = services.map(s => {
       const healthCls = 'tag-' + s.health;
       const statusCls = s.active === 'active' ? 'tag-active' : s.active === 'failed' ? 'tag-failed' : 'tag-deprecated';
+      const restartBtn = _restartToken
+        ? '<button class="restart-btn" onclick="restartService(\'' + esc(s.name) + '\')" title="Restart service">↺</button>'
+        : '<span class="restart-btn restart-btn-disabled" title="Restart not available">↺</span>';
       return '<tr>'
         + '<td><strong>' + esc(s.name) + '</strong></td>'
         + '<td><span class="tag ' + healthCls + '">' + esc(s.health) + '</span></td>'
@@ -1026,6 +1095,7 @@ async function loadServiceHealth() {
         + '<td>' + (s.restart_count || 0) + '</td>'
         + '<td>' + formatMemory(s.memory_bytes) + '</td>'
         + '<td>' + (s.recent_errors || 0) + '</td>'
+        + '<td>' + restartBtn + '</td>'
         + '</tr>';
     }).join('');
 

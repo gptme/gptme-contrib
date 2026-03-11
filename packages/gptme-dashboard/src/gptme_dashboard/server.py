@@ -277,6 +277,31 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
     # or no cgroup data is available. Treat as "no data" rather than ~17.2 EB.
     _UINT64_MAX = 18446744073709551615
 
+    # Restart token — read from env → gptme.toml [dashboard] → auto-generate.
+    # Printed at startup so the user can find it in the server log.
+    import os as _os
+    import secrets as _secrets
+
+    _restart_token = _os.environ.get("GPTME_DASHBOARD_RESTART_TOKEN", "")
+    if not _restart_token:
+        try:
+            import tomllib as _tomllib
+
+            _toml_path = workspace / "gptme.toml"
+            if _toml_path.exists():
+                with open(_toml_path, "rb") as _f:
+                    _toml_cfg = _tomllib.load(_f)
+                _restart_token = _toml_cfg.get("dashboard", {}).get("restart_token", "")
+        except Exception:
+            pass
+    if not _restart_token:
+        _restart_token = _secrets.token_hex(32)
+        logger.warning(
+            "Dashboard restart token (auto-generated): %s",
+            _restart_token,
+        )
+        print(f"\n[dashboard] Restart token: {_restart_token}\n", flush=True)
+
     @app.route("/api/services")
     def api_services() -> Any:
         """Return systemd/launchd service status for gptme-related services.
@@ -662,6 +687,91 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
                 _health_cache["data"] = {"error": str(e), "platform": system}
                 _health_cache["expires"] = now + 10.0
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/services/restart-enabled")
+    def api_services_restart_enabled() -> Any:
+        """Return whether restart actions are enabled and the session token.
+
+        Only responds to localhost requests. Cross-origin JS cannot read this
+        response (CORS blocked by browsers), so returning the token here is
+        safe — it follows the standard CSRF token pattern.
+        """
+        loopback = {"127.0.0.1", "::1"}
+        if request.remote_addr not in loopback:
+            return jsonify({"enabled": False, "token": None}), 403
+        return jsonify({"enabled": True, "token": _restart_token})
+
+    @app.route("/api/services/<name>/restart", methods=["POST"])
+    def api_service_restart(name: str) -> Any:
+        """Restart a managed systemd service.
+
+        Security model (defense in depth):
+        1. Loopback-only: reject non-localhost requests.
+        2. Token check: ``X-Restart-Token`` header must match server token.
+        3. Whitelist: service name must pass ``_is_relevant_service()``.
+        4. Execute: ``systemctl --user restart <name>``.
+        """
+        import platform
+        import subprocess
+
+        # 1. Loopback check
+        loopback = {"127.0.0.1", "::1"}
+        if request.remote_addr not in loopback:
+            return jsonify(
+                {"error": "Restart only allowed from localhost", "status": "forbidden"}
+            ), 403
+
+        # 2. Token check (constant-time comparison to avoid timing attacks)
+        import secrets as _secrets_
+
+        token = request.headers.get("X-Restart-Token", "")
+        if not _secrets_.compare_digest(token.encode(), _restart_token.encode()):
+            return jsonify({"error": "Invalid restart token", "status": "forbidden"}), 403
+
+        # 3. Whitelist check
+        ws = Path(app.config["WORKSPACE"])
+        agent_name = _get_agent_name(ws)
+        if not _is_relevant_service(name, agent_name):
+            return (
+                jsonify({"error": "Service not allowed", "status": "forbidden", "service": name}),
+                403,
+            )
+
+        # 4. Linux/systemd only
+        if platform.system() != "Linux":
+            return (
+                jsonify(
+                    {"error": "Restart only supported on Linux/systemd", "status": "unsupported"}
+                ),
+                501,
+            )
+
+        # 5. Execute restart
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "restart", name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                logger.info("Restarted service %s via dashboard", name)
+                return jsonify(
+                    {
+                        "service": name,
+                        "action": "restart",
+                        "status": "ok",
+                        "message": "Service restart triggered",
+                    }
+                )
+            else:
+                err = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                logger.warning("Failed to restart %s: %s", name, err)
+                return jsonify({"service": name, "error": err, "status": "error"}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"service": name, "error": "Restart timed out", "status": "error"}), 500
+        except OSError as e:
+            return jsonify({"service": name, "error": str(e), "status": "error"}), 500
 
     @app.route("/api/journals")
     def api_journals() -> Any:
