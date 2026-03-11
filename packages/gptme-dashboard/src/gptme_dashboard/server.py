@@ -1294,7 +1294,7 @@ def create_app(
             # Title exact word match
             if w in title_words:
                 score += 20
-            elif w in title:
+            elif any(tw.startswith(w) for tw in title_words):
                 score += 8
             # Keyword match (highly relevant for lessons) — word-boundary to avoid "it" → "activities"
             if w in kw_words:
