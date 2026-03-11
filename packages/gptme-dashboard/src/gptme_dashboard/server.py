@@ -8,7 +8,10 @@ and dynamic panels activate when the API is reachable.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import platform
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -296,11 +299,10 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             pass
     if not _restart_token:
         _restart_token = _secrets.token_hex(32)
-        logger.warning(
+        logger.info(
             "Dashboard restart token (auto-generated): %s",
             _restart_token,
         )
-        print(f"\n[dashboard] Restart token: {_restart_token}\n", flush=True)
 
     @app.route("/api/services")
     def api_services() -> Any:
@@ -696,8 +698,11 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         response (CORS blocked by browsers), so returning the token here is
         safe — it follows the standard CSRF token pattern.
         """
-        loopback = {"127.0.0.1", "::1"}
-        if request.remote_addr not in loopback:
+        try:
+            _is_loopback = ipaddress.ip_address(request.remote_addr or "").is_loopback
+        except ValueError:
+            _is_loopback = False
+        if not _is_loopback:
             return jsonify({"enabled": False, "token": None}), 403
         return jsonify({"enabled": True, "token": _restart_token})
 
@@ -711,12 +716,12 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
         3. Whitelist: service name must pass ``_is_relevant_service()``.
         4. Execute: ``systemctl --user restart <name>``.
         """
-        import platform
-        import subprocess
-
         # 1. Loopback check
-        loopback = {"127.0.0.1", "::1"}
-        if request.remote_addr not in loopback:
+        try:
+            _is_loopback = ipaddress.ip_address(request.remote_addr or "").is_loopback
+        except ValueError:
+            _is_loopback = False
+        if not _is_loopback:
             return jsonify(
                 {"error": "Restart only allowed from localhost", "status": "forbidden"}
             ), 403
