@@ -180,6 +180,8 @@ def create_app(
         read_agent_urls,
         read_workspace_config,
         scan_journals,
+        scan_lessons,
+        scan_skills,
         scan_summaries,
         scan_tasks,
     )
@@ -1182,6 +1184,192 @@ def create_app(
             return jsonify(entries)
         except Exception as e:
             logger.exception("Error scanning summaries")
+            return jsonify({"error": str(e)}), 500
+
+    # --- Search ---
+    # In-memory search index: cached for SEARCH_CACHE_TTL seconds
+    _SEARCH_CACHE_TTL = 300
+    _search_cache: dict[str, Any] = {"data": None, "expires": 0.0}
+
+    def _build_search_index(ws: Path) -> "list[dict[str, Any]]":
+        """Build a unified list of searchable items from the workspace."""
+        items: list[dict[str, Any]] = []
+
+        # Lessons
+        for lesson in scan_lessons(ws):
+            items.append(
+                {
+                    "type": "lesson",
+                    "title": lesson.get("title", ""),
+                    "category": lesson.get("category", ""),
+                    "keywords": lesson.get("all_keywords", []),
+                    "tags": [],
+                    "excerpt": lesson.get("body", "")[:600],
+                    "url": "/lessons/" + lesson.get("page_url", ""),
+                    "path": lesson.get("path", ""),
+                }
+            )
+
+        # Skills
+        for skill in scan_skills(ws):
+            items.append(
+                {
+                    "type": "skill",
+                    "title": skill.get("title", "") or skill.get("name", ""),
+                    "category": "",
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": skill.get("description", "") + " " + skill.get("body", "")[:400],
+                    "url": "/skills/" + skill.get("page_url", ""),
+                    "path": skill.get("path", ""),
+                }
+            )
+
+        # Tasks
+        for task in scan_tasks(ws):
+            items.append(
+                {
+                    "type": "task",
+                    "title": task.get("title", ""),
+                    "category": task.get("state", ""),
+                    "keywords": [],
+                    "tags": task.get("tags", []),
+                    "excerpt": task.get("body", "")[:600],
+                    "url": "/tasks/" + task.get("page_url", ""),
+                    "path": task.get("path", ""),
+                }
+            )
+
+        # Journals — use all available (limit=500 to get recent history)
+        for journal in scan_journals(ws, limit=500):
+            items.append(
+                {
+                    "type": "journal",
+                    "title": journal.get("name", "") or journal.get("date", ""),
+                    "category": journal.get("date", ""),
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": journal.get("preview", ""),
+                    "url": "/journals/" + journal.get("page_url", ""),
+                    "path": journal.get("path", ""),
+                }
+            )
+
+        # Summaries
+        for summary in scan_summaries(ws, limit=100):
+            items.append(
+                {
+                    "type": "summary",
+                    "title": summary.get("title", "") or summary.get("period", ""),
+                    "category": summary.get("period_type", ""),
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": summary.get("body", "")[:600],
+                    "url": "/summaries/" + summary.get("page_url", ""),
+                    "path": summary.get("path", ""),
+                }
+            )
+
+        return items
+
+    def _score_item(item: "dict[str, Any]", query_words: "list[str]") -> int:
+        """Score an item by how well it matches query_words. Higher = more relevant."""
+        score = 0
+        title = item.get("title", "").lower()
+        excerpt = item.get("excerpt", "").lower()
+        kw_text = " ".join(item.get("keywords", [])).lower()
+        tag_text = " ".join(item.get("tags", [])).lower()
+        category = item.get("category", "").lower()
+
+        for word in query_words:
+            w = word.lower()
+            # Title exact word match
+            if w == title:
+                score += 20
+            elif w in title:
+                score += 8
+            # Keyword match (highly relevant for lessons)
+            if w in kw_text:
+                score += 6
+            # Tag match
+            if w in tag_text:
+                score += 4
+            # Category/state match
+            if w in category:
+                score += 2
+            # Body/excerpt match (low weight, broad)
+            if w in excerpt:
+                score += 1
+
+        return score
+
+    _SEARCH_VALID_TYPES = frozenset({"lesson", "skill", "task", "journal", "summary"})
+
+    @app.route("/api/search")
+    def api_search() -> Any:
+        """Full-text search across workspace content.
+
+        Query parameters:
+            q (str): Search query, minimum 2 characters. Required.
+            type (str): Filter to a specific content type.
+                One of: lesson, skill, task, journal, summary.
+            limit (int): Maximum results to return (1–100, default 20).
+
+        Returns:
+            JSON with ``results`` list, ``total`` count, ``query``, and
+            ``type_filter`` (null when not filtered).
+        """
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            query = (request.args.get("q") or "").strip()
+            if len(query) < 2:
+                return jsonify({"error": "Query must be at least 2 characters"}), 400
+
+            type_filter = (request.args.get("type") or "").lower()
+            if type_filter and type_filter not in _SEARCH_VALID_TYPES:
+                return jsonify(
+                    {
+                        "error": (
+                            f"Invalid type '{type_filter}'. "
+                            f"Must be one of: {', '.join(sorted(_SEARCH_VALID_TYPES))}"
+                        )
+                    }
+                ), 400
+
+            limit = request.args.get("limit", 20, type=int)
+            limit = max(1, min(limit, 100))
+
+            # Build or refresh the search index
+            now = time.monotonic()
+            if _search_cache["data"] is None or now >= _search_cache["expires"]:
+                _search_cache["data"] = _build_search_index(ws)
+                _search_cache["expires"] = now + _SEARCH_CACHE_TTL
+
+            items: list[dict[str, Any]] = _search_cache["data"]
+            if type_filter:
+                items = [i for i in items if i["type"] == type_filter]
+
+            query_words = query.split()
+            scored: list[tuple[int, dict[str, Any]]] = []
+            for item in items:
+                score = _score_item(item, query_words)
+                if score > 0:
+                    scored.append((score, item))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            total = len(scored)
+            results = [item for _, item in scored[:limit]]
+
+            return jsonify(
+                {
+                    "results": results,
+                    "total": total,
+                    "query": query,
+                    "type_filter": type_filter or None,
+                }
+            )
+        except Exception as e:
+            logger.exception("Error searching workspace")
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/org")
