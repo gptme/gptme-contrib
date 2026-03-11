@@ -736,11 +736,14 @@ def batch_generate(
 
     if view:
         # Display all images to LLM after generation
-        from gptme.tools.vision import view_image
+        try:
+            from gptme.tools.vision import view_image
 
-        print(f"\n✓ Displaying {total} generated images to assistant")
-        for result in results:
-            view_image(result.image_path)
+            print(f"\n✓ Displaying {total} generated images to assistant")
+            for result in results:
+                view_image(result.image_path)
+        except ImportError:
+            pass
 
     return results
 
@@ -806,12 +809,15 @@ def compare_providers(
 
     if view and results:
         # Display all images to LLM for comparison
-        from gptme.tools.vision import view_image
+        try:
+            from gptme.tools.vision import view_image
 
-        print(f"\n✓ Displaying {len(results)} images for comparison")
-        for prov, result in results.items():
-            print(f"\n--- {prov.upper()} ---")
-            view_image(result.image_path)
+            print(f"\n✓ Displaying {len(results)} images for comparison")
+            for prov, result in results.items():
+                print(f"\n--- {prov.upper()} ---")
+                view_image(result.image_path)
+        except ImportError:
+            pass
 
     return results
 
