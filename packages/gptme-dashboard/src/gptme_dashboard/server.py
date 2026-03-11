@@ -1190,6 +1190,7 @@ def create_app(
     # In-memory search index: cached for SEARCH_CACHE_TTL seconds
     _SEARCH_CACHE_TTL = 300
     _search_cache: dict[str, Any] = {"data": None, "expires": 0.0}
+    _search_cache_lock = threading.Lock()
 
     def _build_search_index(ws: Path) -> "list[dict[str, Any]]":
         """Build a unified list of searchable items from the workspace."""
@@ -1261,7 +1262,7 @@ def create_app(
                 {
                     "type": "summary",
                     "title": summary.get("title", "") or summary.get("period", ""),
-                    "category": summary.get("period_type", ""),
+                    "category": summary.get("type", ""),
                     "keywords": [],
                     "tags": [],
                     "excerpt": summary.get("body", "")[:600],
@@ -1339,11 +1340,16 @@ def create_app(
             limit = request.args.get("limit", 20, type=int)
             limit = max(1, min(limit, 100))
 
-            # Build or refresh the search index
+            # Build or refresh the search index (lock prevents redundant rebuilds)
             now = time.monotonic()
             if _search_cache["data"] is None or now >= _search_cache["expires"]:
-                _search_cache["data"] = _build_search_index(ws)
-                _search_cache["expires"] = now + _SEARCH_CACHE_TTL
+                with _search_cache_lock:
+                    if (
+                        _search_cache["data"] is None
+                        or time.monotonic() >= _search_cache["expires"]
+                    ):
+                        _search_cache["data"] = _build_search_index(ws)
+                        _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
 
             items: list[dict[str, Any]] = _search_cache["data"]
             if type_filter:
