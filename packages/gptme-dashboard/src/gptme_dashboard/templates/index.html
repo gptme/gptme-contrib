@@ -768,7 +768,7 @@ async function initDynamic() {
     loadRecentSessions();
     loadServices();
     loadSchedule();
-    _fetchRestartToken();
+    await _fetchRestartToken();
     loadServiceHealth();
     // Auto-refresh health every 30 seconds — always retry to recover from transient errors
     setInterval(loadServiceHealth, 30000);
@@ -1085,7 +1085,7 @@ async function loadServiceHealth() {
       const healthCls = 'tag-' + s.health;
       const statusCls = s.active === 'active' ? 'tag-active' : s.active === 'failed' ? 'tag-failed' : 'tag-deprecated';
       const restartBtn = _restartToken
-        ? '<button class="restart-btn" onclick="restartService(\'' + esc(s.name) + '\')" title="Restart service">↺</button>'
+        ? '<button class="restart-btn" onclick="restartService(' + JSON.stringify(s.name) + ')" title="Restart service">↺</button>'
         : '<span class="restart-btn restart-btn-disabled" title="Restart not available">↺</span>';
       return '<tr>'
         + '<td><strong>' + esc(s.name) + '</strong></td>'

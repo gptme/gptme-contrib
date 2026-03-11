@@ -722,10 +722,8 @@ def create_app(workspace: Path, site_dir: Path | None = None) -> Any:
             ), 403
 
         # 2. Token check (constant-time comparison to avoid timing attacks)
-        import secrets as _secrets_
-
         token = request.headers.get("X-Restart-Token", "")
-        if not _secrets_.compare_digest(token.encode(), _restart_token.encode()):
+        if not _secrets.compare_digest(token.encode(), _restart_token.encode()):
             return jsonify({"error": "Invalid restart token", "status": "forbidden"}), 403
 
         # 3. Whitelist check
