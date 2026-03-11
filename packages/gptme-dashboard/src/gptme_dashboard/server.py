@@ -433,6 +433,11 @@ def create_app(
     _HEALTH_CACHE_TTL = 60
     _health_cache: dict[str, Any] = {"data": None, "expires": 0.0}
     _health_cache_lock = threading.Lock()
+
+    # Cache for activity endpoint (SessionStore / journal scan); 5-min TTL
+    _ACTIVITY_CACHE_TTL = 300
+    _activity_cache: dict[str, Any] = {"data": None, "days": None, "expires": 0.0}
+    _activity_cache_lock = threading.Lock()
     # UINT64_MAX: systemd returns this sentinel when MemoryAccounting is disabled
     # or no cgroup data is available. Treat as "no data" rather than ~17.2 EB.
     _UINT64_MAX = 18446744073709551615
@@ -1439,6 +1444,15 @@ def create_app(
             days = request.args.get("days", 365, type=int)
             days = max(7, min(days, 730))
 
+            now = time.monotonic()
+            with _activity_cache_lock:
+                if (
+                    _activity_cache["data"] is not None
+                    and _activity_cache["days"] == days
+                    and now < _activity_cache["expires"]
+                ):
+                    return jsonify(_activity_cache["data"])
+
             daily: dict[str, int] = defaultdict(int)
             today = date.today()
             start_date_str = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
@@ -1471,7 +1485,12 @@ def create_app(
                 }
                 for i in range(days)
             ]
-            return jsonify({"days": result})
+            payload = {"days": result}
+            with _activity_cache_lock:
+                _activity_cache["data"] = payload
+                _activity_cache["days"] = days
+                _activity_cache["expires"] = time.monotonic() + _ACTIVITY_CACHE_TTL
+            return jsonify(payload)
         except Exception as e:
             logger.exception("Error computing activity data")
             return jsonify({"error": str(e)}), 500
