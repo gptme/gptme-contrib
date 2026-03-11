@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -1148,8 +1149,6 @@ def create_app(
                 {"error": "No org config loaded. Start server with --org <org.toml>"}
             ), 404
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
             """Fetch all data for a single agent in parallel sub-requests."""
             api = agent["api"]
@@ -1262,7 +1261,7 @@ def create_app(
         grid.innerHTML = agents.map(a => {
           const reachable = !a.error;
           const name = esc(a.status ? (a.status.agent || a.name) : a.name);
-          const apiLink = '<a href="' + esc(a.api) + '" target="_blank">' + name + '</a>';
+          const apiLink = '<a href="' + esc(a.api) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>';
           const dot = '<span class="status ' + (reachable ? 'active' : 'unreachable') + '"></span>';
           let body = '';
           if (!reachable) {
