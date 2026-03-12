@@ -1364,9 +1364,15 @@ def create_app(
                     _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
 
             if needs_rebuild:
-                new_index = _build_search_index(ws)
-                with _search_cache_lock:
-                    _search_cache["data"] = new_index
+                try:
+                    new_index = _build_search_index(ws)
+                    with _search_cache_lock:
+                        _search_cache["data"] = new_index
+                except Exception:
+                    # Release the slot so the next request retries the build
+                    with _search_cache_lock:
+                        _search_cache["expires"] = 0.0
+                    raise
 
             with _search_cache_lock:
                 items: list[dict[str, Any]] = _search_cache["data"] or []
