@@ -177,6 +177,7 @@ def create_app(
     from . import generate as _gen_mod
     from .generate import (
         _parse_toml,
+        detect_submodules,
         generate,
         read_agent_urls,
         read_workspace_config,
@@ -1197,35 +1198,50 @@ def create_app(
         """Build a unified list of searchable items from the workspace."""
         items: list[dict[str, Any]] = []
 
-        # Lessons
-        for lesson in scan_lessons(ws):
-            items.append(
-                {
-                    "type": "lesson",
-                    "title": lesson.get("title", ""),
-                    "category": lesson.get("category", ""),
-                    "keywords": lesson.get("all_keywords", []),
-                    "tags": [],
-                    "excerpt": lesson.get("body", "")[:600],
-                    "url": "/" + lesson.get("page_url", ""),
-                    "path": lesson.get("path", ""),
-                }
-            )
+        def _add_lessons(lessons: "list[dict[str, Any]]") -> None:
+            for lesson in lessons:
+                items.append(
+                    {
+                        "type": "lesson",
+                        "title": lesson.get("title", ""),
+                        "category": lesson.get("category", ""),
+                        "keywords": lesson.get("all_keywords", []),
+                        "tags": [],
+                        "excerpt": lesson.get("body", "")[:600],
+                        "url": "/" + lesson.get("page_url", ""),
+                        "path": lesson.get("path", ""),
+                    }
+                )
 
-        # Skills
-        for skill in scan_skills(ws):
-            items.append(
-                {
-                    "type": "skill",
-                    "title": skill.get("title", "") or skill.get("name", ""),
-                    "category": "",
-                    "keywords": [],
-                    "tags": [],
-                    "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[:600],
-                    "url": "/" + skill.get("page_url", ""),
-                    "path": skill.get("path", ""),
-                }
-            )
+        def _add_skills(skills: "list[dict[str, Any]]") -> None:
+            for skill in skills:
+                items.append(
+                    {
+                        "type": "skill",
+                        "title": skill.get("title", "") or skill.get("name", ""),
+                        "category": "",
+                        "keywords": [],
+                        "tags": [],
+                        "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[
+                            :600
+                        ],
+                        "url": "/" + skill.get("page_url", ""),
+                        "path": skill.get("path", ""),
+                    }
+                )
+
+        # Main workspace lessons and skills
+        _add_lessons(scan_lessons(ws))
+        _add_skills(scan_skills(ws))
+
+        # Submodule lessons and skills (e.g. gptme-contrib, gptme-superuser)
+        for sub in detect_submodules(ws):
+            sub_path = sub["abs_path"]
+            sub_name = sub["name"]
+            if sub.get("has_lessons"):
+                _add_lessons(scan_lessons(sub_path, source=sub_name))
+            if sub.get("has_skills"):
+                _add_skills(scan_skills(sub_path, source=sub_name))
 
         # Tasks
         for task in scan_tasks(ws):

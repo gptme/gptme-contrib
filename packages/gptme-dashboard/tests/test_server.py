@@ -2392,3 +2392,36 @@ def test_api_search_pure_punctuation_query(client):
     assert resp.status_code == 400
     data = resp.get_json()
     assert "error" in data
+
+
+def test_api_search_indexes_submodule_lessons(tmp_path: Path):
+    """Test /api/search includes lessons from git submodules."""
+    ws = _make_search_workspace(tmp_path)
+
+    # Simulate a submodule with its own lessons dir
+    sub_dir = ws / "gptme-contrib"
+    sub_dir.mkdir()
+    sub_lessons = sub_dir / "lessons" / "workflow"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "submodule-deploy.md").write_text(
+        "---\nmatch:\n  keywords: [deploy workflow, submodule deploy]\nstatus: active\n---\n"
+        "# Submodule Deploy Workflow\n\nDeploy from submodule correctly.\n"
+    )
+
+    # Create a .gitmodules file so detect_submodules picks it up
+    (ws / ".gitmodules").write_text(
+        '[submodule "gptme-contrib"]\n'
+        "    path = gptme-contrib\n"
+        "    url = https://github.com/gptme/gptme-contrib.git\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=deploy")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1, "Submodule lessons should be indexed and searchable"
+        assert any(r["type"] == "lesson" for r in data["results"])
