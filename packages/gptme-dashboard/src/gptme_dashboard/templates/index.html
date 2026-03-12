@@ -218,6 +218,100 @@ tr:hover { background: var(--accent-dim); }
 .search-box::placeholder { color: var(--text-dim); }
 .search-box:focus { outline: none; border-color: var(--accent); }
 
+/* Global search modal */
+#search-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 1000;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+#search-overlay.open { display: flex; }
+#search-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 620px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+#search-input-wrap {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  gap: 0.5rem;
+}
+#search-input-wrap svg { color: var(--text-dim); flex-shrink: 0; }
+#global-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 1rem;
+  outline: none;
+}
+#global-search-input::placeholder { color: var(--text-dim); }
+#search-type-filter {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.8rem;
+  padding: 0.2rem 0.4rem;
+}
+#search-results-area {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.search-result {
+  display: block;
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.search-result:hover, .search-result.selected { background: var(--code-bg); }
+.search-result:last-child { border-bottom: none; }
+.search-result-top { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem; }
+.search-result-title { font-weight: 500; }
+.search-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: var(--accent-dim, rgba(88,166,255,0.15));
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.search-result-excerpt { font-size: 0.82rem; color: var(--text-dim); }
+#search-footer {
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+}
+.search-empty { padding: 2rem; text-align: center; color: var(--text-dim); }
+#search-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+#search-btn:hover { border-color: var(--accent); color: var(--accent); }
+
 /* Rendered markdown content (About/README section) */
 .content { line-height: 1.6; }
 .content h1, .content h2 { font-size: 1.1rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
@@ -278,10 +372,42 @@ tr:hover { background: var(--accent-dim); }
 {% endblock %}
 
 {% block content %}
-<header>
-  <h1>{{ workspace_name }} <span>workspace</span></h1>
-  <p>A <a href="https://gptme.org">gptme</a> workspace dashboard{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}{% if agent_urls %}{% for name, url in agent_urls.items() %} &middot; <a href="{{ url }}">{{ name }}</a>{% endfor %}{% endif %}</p>
+<header style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
+  <div>
+    <h1>{{ workspace_name }} <span>workspace</span></h1>
+    <p>A <a href="https://gptme.org">gptme</a> workspace dashboard{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}{% if agent_urls %}{% for name, url in agent_urls.items() %} &middot; <a href="{{ url }}">{{ name }}</a>{% endfor %}{% endif %}</p>
+  </div>
+  <button id="search-btn" onclick="openSearch()" title="Search workspace (/)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    Search
+    <kbd style="font-size:0.7rem;opacity:0.7;">/</kbd>
+  </button>
 </header>
+
+<!-- Global search overlay -->
+<div id="search-overlay" role="dialog" aria-modal="true" aria-label="Search workspace" onclick="if(event.target===this)closeSearch()">
+  <div id="search-modal">
+    <div id="search-input-wrap">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="global-search-input" type="search" placeholder="Search lessons, tasks, journals…" autocomplete="off">
+      <select id="search-type-filter">
+        <option value="">All types</option>
+        <option value="lesson">Lessons</option>
+        <option value="skill">Skills</option>
+        <option value="task">Tasks</option>
+        <option value="journal">Journals</option>
+        <option value="summary">Summaries</option>
+      </select>
+    </div>
+    <div id="search-results-area">
+      <div class="search-empty">Type to search across your workspace</div>
+    </div>
+    <div id="search-footer">
+      <span id="search-result-count"></span>
+      <span>↑↓ navigate &nbsp; ↵ open &nbsp; Esc close</span>
+    </div>
+  </div>
+</div>
 
 <!-- Stats -->
 <div class="stats">
@@ -1254,6 +1380,129 @@ document.addEventListener('click', function(e) {
   if (!link) return;
   e.preventDefault();
   showServiceLogs(link.dataset.service);
+});
+</script>
+
+<script>
+/* === Global search === */
+let _searchTimer = null;
+let _searchSelected = -1;
+let _searchAbortController = null;
+
+function openSearch() {
+  document.getElementById('search-overlay').classList.add('open');
+  document.getElementById('global-search-input').focus();
+  _searchSelected = -1;
+}
+
+function closeSearch() {
+  clearTimeout(_searchTimer);
+  if (_searchAbortController) _searchAbortController.abort();
+  document.getElementById('search-overlay').classList.remove('open');
+  document.getElementById('global-search-input').value = '';
+  document.getElementById('search-results-area').innerHTML =
+    '<div class="search-empty">Type to search across your workspace</div>';
+  document.getElementById('search-result-count').textContent = '';
+}
+
+function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) ? s : '#'; }
+
+async function runSearch(q, typeFilter) {
+  if (!q || q.length < 2) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Type at least 2 characters to search</div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+  // Abort any in-flight request to prevent stale results overwriting newer ones
+  if (_searchAbortController) _searchAbortController.abort();
+  _searchAbortController = new AbortController();
+  const signal = _searchAbortController.signal;
+
+  const params = new URLSearchParams({ q, limit: '20' });
+  if (typeFilter) params.set('type', typeFilter);
+  try {
+    const resp = await fetch('/api/search?' + params, { signal });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">' + esc(err.error || 'Search error (' + resp.status + ')') + '</div>';
+      return;
+    }
+    const data = await resp.json().catch(() => ({}));
+    const results = data.results || [];
+    const total = data.total || 0;
+    _searchSelected = -1;
+
+    if (results.length === 0) {
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">No results for <strong>' + esc(q) + '</strong></div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
+
+    document.getElementById('search-result-count').textContent =
+      total + ' result' + (total === 1 ? '' : 's') + (total > results.length ? ' (showing ' + results.length + ')' : '');
+
+    document.getElementById('search-results-area').innerHTML = results.map((r) => {
+      const title = esc(r.title || r.path || '(untitled)');
+      const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
+      const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim().slice(0, 120)) + '</div>' : '';
+      const url = safeUrl(r.url);
+      return '<a href="' + esc(url) + '" class="search-result">'
+        + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span></div>'
+        + excerpt + '</a>';
+    }).join('');
+  } catch(e) {
+    if (e.name === 'AbortError') return;  // Superseded by newer request
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+document.getElementById('global-search-input').addEventListener('input', function() {
+  clearTimeout(_searchTimer);
+  const q = this.value.trim();
+  const typeFilter = document.getElementById('search-type-filter').value;
+  _searchTimer = setTimeout(() => runSearch(q, typeFilter), 250);
+});
+
+document.getElementById('search-type-filter').addEventListener('change', function() {
+  clearTimeout(_searchTimer);
+  const q = document.getElementById('global-search-input').value.trim();
+  runSearch(q, this.value);
+});
+
+document.getElementById('global-search-input').addEventListener('keydown', function(e) {
+  const results = document.querySelectorAll('.search-result');
+  if (e.key === 'Escape') { closeSearch(); return; }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _searchSelected = Math.min(_searchSelected + 1, results.length - 1);
+    results.forEach((r, i) => r.classList.toggle('selected', i === _searchSelected));
+    if (results[_searchSelected]) results[_searchSelected].scrollIntoView({block:'nearest'});
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _searchSelected = Math.max(_searchSelected - 1, -1);
+    results.forEach((r, i) => r.classList.toggle('selected', i === _searchSelected));
+    if (_searchSelected >= 0 && results[_searchSelected]) results[_searchSelected].scrollIntoView({block:'nearest'});
+  } else if (e.key === 'Enter' && _searchSelected >= 0) {
+    e.preventDefault();
+    if (results[_searchSelected]) results[_searchSelected].click();
+  }
+});
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+      e.preventDefault();
+      openSearch();
+    }
+  }
+  if (e.key === 'Escape' && document.getElementById('search-overlay').classList.contains('open')) {
+    closeSearch();
+  }
 });
 </script>
 {% endblock %}

@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -176,10 +177,13 @@ def create_app(
     from . import generate as _gen_mod
     from .generate import (
         _parse_toml,
+        detect_submodules,
         generate,
         read_agent_urls,
         read_workspace_config,
         scan_journals,
+        scan_lessons,
+        scan_skills,
         scan_summaries,
         scan_tasks,
     )
@@ -1182,6 +1186,232 @@ def create_app(
             return jsonify(entries)
         except Exception as e:
             logger.exception("Error scanning summaries")
+            return jsonify({"error": str(e)}), 500
+
+    # --- Search ---
+    # In-memory search index: cached for SEARCH_CACHE_TTL seconds
+    _SEARCH_CACHE_TTL = 300
+    _search_cache: dict[str, Any] = {"data": None, "expires": 0.0}
+    _search_cache_lock = threading.Lock()
+
+    def _build_search_index(ws: Path) -> "list[dict[str, Any]]":
+        """Build a unified list of searchable items from the workspace."""
+        items: list[dict[str, Any]] = []
+
+        def _add_lessons(lessons: "list[dict[str, Any]]") -> None:
+            for lesson in lessons:
+                items.append(
+                    {
+                        "type": "lesson",
+                        "title": lesson.get("title", ""),
+                        "category": lesson.get("category", ""),
+                        "keywords": lesson.get("all_keywords", []),
+                        "tags": [],
+                        "excerpt": lesson.get("body", "")[:600],
+                        "url": "/" + lesson.get("page_url", ""),
+                        "path": lesson.get("path", ""),
+                    }
+                )
+
+        def _add_skills(skills: "list[dict[str, Any]]") -> None:
+            for skill in skills:
+                items.append(
+                    {
+                        "type": "skill",
+                        "title": skill.get("title", "") or skill.get("name", ""),
+                        "category": skill.get("category", ""),
+                        "keywords": skill.get("keywords", []),
+                        "tags": skill.get("tags", []),
+                        "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[
+                            :600
+                        ],
+                        "url": "/" + skill.get("page_url", ""),
+                        "path": skill.get("path", ""),
+                    }
+                )
+
+        # Main workspace lessons and skills
+        _add_lessons(scan_lessons(ws))
+        _add_skills(scan_skills(ws))
+
+        # Submodule lessons and skills (e.g. gptme-contrib, gptme-superuser)
+        for sub in detect_submodules(ws):
+            sub_path = sub["abs_path"]
+            sub_name = sub["name"]
+            if sub.get("has_lessons"):
+                _add_lessons(scan_lessons(sub_path, source=sub_name))
+            if sub.get("has_skills"):
+                _add_skills(scan_skills(sub_path, source=sub_name))
+
+        # Tasks — limit to 500 to keep index size bounded
+        for task in scan_tasks(ws)[:500]:
+            items.append(
+                {
+                    "type": "task",
+                    "title": task.get("title", ""),
+                    "category": task.get("state", ""),
+                    "keywords": [],
+                    "tags": task.get("tags", []),
+                    "excerpt": task.get("body", "")[:600],
+                    "url": "/" + task.get("page_url", ""),
+                    "path": task.get("path", ""),
+                }
+            )
+
+        # Journals — use all available (limit=500 to get recent history)
+        for journal in scan_journals(ws, limit=500):
+            items.append(
+                {
+                    "type": "journal",
+                    "title": journal.get("name", "") or journal.get("date", ""),
+                    "category": journal.get("date", ""),
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": journal.get("body", "")[:600],
+                    "url": "/" + journal.get("page_url", ""),
+                    "path": journal.get("path", ""),
+                }
+            )
+
+        # Summaries
+        for summary in scan_summaries(ws, limit=100):
+            items.append(
+                {
+                    "type": "summary",
+                    "title": summary.get("title", "") or summary.get("period", ""),
+                    "category": summary.get("type", ""),
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": summary.get("body", "")[:600],
+                    "url": "/" + summary.get("page_url", ""),
+                    "path": summary.get("path", ""),
+                }
+            )
+
+        return items
+
+    def _score_item(item: "dict[str, Any]", query_words: "list[str]") -> int:
+        """Score an item by how well it matches query_words. Higher = more relevant."""
+        score = 0
+        title = item.get("title", "").lower()
+        excerpt = item.get("excerpt", "").lower()
+        kw_text = " ".join(item.get("keywords", [])).lower()
+        tag_text = " ".join(item.get("tags", [])).lower()
+        category = item.get("category", "").lower()
+
+        title_words = set(re.sub(r"[^\w\s]", " ", title).split())
+        kw_words = set(re.sub(r"[^\w\s]", " ", kw_text).split())
+        tag_words = set(re.sub(r"[^\w\s]", " ", tag_text).split())
+        category_words = set(re.sub(r"[^\w\s]", " ", category).split())
+        excerpt_words = set(re.sub(r"[^\w\s]", " ", excerpt).split())
+
+        for w in query_words:
+            # Title exact word match
+            if w in title_words:
+                score += 20
+            elif any(tw.startswith(w) for tw in title_words):
+                score += 8
+            # Keyword match (highly relevant for lessons) — word-boundary to avoid "it" → "activities"
+            if w in kw_words:
+                score += 6
+            # Tag match
+            if w in tag_words:
+                score += 4
+            # Category/state match
+            if w in category_words:
+                score += 2
+            # Body/excerpt match (low weight, broad)
+            if w in excerpt_words:
+                score += 1
+
+        return score
+
+    _SEARCH_VALID_TYPES = frozenset({"lesson", "skill", "task", "journal", "summary"})
+
+    @app.route("/api/search")
+    def api_search() -> Any:
+        """Full-text search across workspace content.
+
+        Query parameters:
+            q (str): Search query, minimum 2 characters. Required.
+            type (str): Filter to a specific content type.
+                One of: lesson, skill, task, journal, summary.
+            limit (int): Maximum results to return (1–100, default 20).
+
+        Returns:
+            JSON with ``results`` list, ``total`` count, ``query``, and
+            ``type_filter`` (null when not filtered).
+        """
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            query = (request.args.get("q") or "").strip()
+            query_words = re.sub(r"[^\w\s]", " ", query.lower()).split()
+            if len(query) < 2 or not query_words:
+                return jsonify({"error": "Query must be at least 2 characters"}), 400
+
+            type_filter = (request.args.get("type") or "").lower()
+            if type_filter and type_filter not in _SEARCH_VALID_TYPES:
+                return jsonify(
+                    {
+                        "error": (
+                            f"Invalid type '{type_filter}'. "
+                            f"Must be one of: {', '.join(sorted(_SEARCH_VALID_TYPES))}"
+                        )
+                    }
+                ), 400
+
+            limit = request.args.get("limit", 20, type=int)
+            limit = max(1, min(limit, 100))
+
+            # Build or refresh the search index outside the lock to avoid stalling
+            # concurrent requests during the (potentially slow) workspace scan.
+            now = time.monotonic()
+            needs_rebuild = False
+            with _search_cache_lock:
+                # Use expires as the sole rebuild gate: once claimed (set to a future
+                # time), concurrent threads — including those seeing data=None on a cold
+                # cache — all skip the rebuild and get [] until the index is ready.
+                needs_rebuild = now >= _search_cache["expires"]
+                if needs_rebuild:
+                    # Claim the slot so other threads skip the rebuild
+                    _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
+
+            if needs_rebuild:
+                try:
+                    new_index = _build_search_index(ws)
+                    with _search_cache_lock:
+                        _search_cache["data"] = new_index
+                except Exception:
+                    # Release the slot so the next request retries the build
+                    with _search_cache_lock:
+                        _search_cache["expires"] = 0.0
+                    raise
+
+            with _search_cache_lock:
+                items: list[dict[str, Any]] = _search_cache["data"] or []
+            if type_filter:
+                items = [i for i in items if i["type"] == type_filter]
+
+            scored: list[tuple[int, dict[str, Any]]] = []
+            for item in items:
+                score = _score_item(item, query_words)
+                if score > 0:
+                    scored.append((score, item))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            total = len(scored)
+            results = [dict(item) for _, item in scored[:limit]]
+
+            return jsonify(
+                {
+                    "results": results,
+                    "total": total,
+                    "query": query,
+                    "type_filter": type_filter or None,
+                }
+            )
+        except Exception as e:
+            logger.exception("Error searching workspace")
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/org")

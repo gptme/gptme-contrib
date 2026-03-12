@@ -2199,3 +2199,229 @@ def test_load_org_config_agents_not_list(tmp_path: Path) -> None:
     toml_path.write_bytes(b'agents = "not-a-list"\n')
     with pytest.raises(ValueError, match="must be an array-of-tables"):
         load_org_config(toml_path)
+
+
+# ── /api/search tests ──────────────────────────────────────────────────────────
+
+
+def _make_search_workspace(tmp_path: Path) -> Path:
+    """Create a workspace with tasks and lessons for search testing."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "git-workflow.md").write_text(
+        "---\nmatch:\n  keywords: [git commit, git workflow]\nstatus: active\n---\n"
+        "# Git Workflow\n\nAlways use conventional commits when contributing.\n"
+    )
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "fix-bug.md").write_text(
+        "---\nstate: active\npriority: high\ntags: [bugfix, git]\ncreated: 2026-03-01\n---\n"
+        "# Fix Git Bug\n\nSomething went wrong with the git integration.\n"
+    )
+    return tmp_path
+
+
+def test_api_search_missing_query(client):
+    """Test /api/search returns 400 when q is missing or too short."""
+    resp = client.get("/api/search")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.get("/api/search?q=a")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+def test_api_search_invalid_type(client):
+    """Test /api/search returns 400 for unknown type filter."""
+    resp = client.get("/api/search?q=git&type=banana")
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "error" in data
+    assert "banana" in data["error"]
+
+
+def test_api_search_empty_workspace(client):
+    """Test /api/search returns empty results on a minimal workspace."""
+    resp = client.get("/api/search?q=git")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["results"] == []
+    assert data["total"] == 0
+    assert data["query"] == "git"
+    assert data["type_filter"] is None
+
+
+def test_api_search_finds_task(tmp_path: Path):
+    """Test /api/search matches task titles."""
+    ws = _make_search_workspace(tmp_path)
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=git+bug")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1
+        titles = [r["title"] for r in data["results"]]
+        assert any("Git" in t for t in titles)
+        # Verify task URL has correct format: /tasks/<id>.html (not doubled /tasks/tasks/…)
+        task_results = [r for r in data["results"] if r["type"] == "task"]
+        assert task_results, "Expected at least one task result"
+        task_url = task_results[0]["url"]
+        assert task_url.startswith("/tasks/"), f"Task URL should start with /tasks/: {task_url}"
+        assert "/tasks/tasks/" not in task_url, f"Doubled URL prefix in task URL: {task_url}"
+
+
+def test_api_search_type_filter(tmp_path: Path):
+    """Test /api/search?type=task returns only tasks."""
+    ws = _make_search_workspace(tmp_path)
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=git&type=task")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["type_filter"] == "task"
+        for result in data["results"]:
+            assert result["type"] == "task"
+
+
+def test_api_search_type_filter_lesson(tmp_path: Path):
+    """Test /api/search?type=lesson returns only lessons."""
+    ws = _make_search_workspace(tmp_path)
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=git&type=lesson")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["type_filter"] == "lesson"
+        for result in data["results"]:
+            assert result["type"] == "lesson"
+            # Verify URL has no doubled prefix: /lessons/lessons/… is wrong
+            url = result["url"]
+            assert url.startswith("/lessons/"), f"Lesson URL should start with /lessons/: {url}"
+            assert "/lessons/lessons/" not in url, f"Doubled URL prefix in lesson URL: {url}"
+
+
+def test_api_search_limit(tmp_path: Path):
+    """Test /api/search?limit=N caps response to N results."""
+    ws = _make_search_workspace(tmp_path)
+    # Add more tasks to exceed limit
+    for i in range(5):
+        (ws / "tasks" / f"extra-git-task-{i}.md").write_text(
+            f"---\nstate: active\ncreated: 2026-03-0{i + 1}\n---\n# Extra Git Task {i}\n"
+        )
+
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=git&limit=2")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data["results"]) == 2
+
+
+def test_api_search_response_structure(tmp_path: Path):
+    """Test /api/search result items have the expected structure."""
+    ws = _make_search_workspace(tmp_path)
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=git")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "results" in data
+        assert "total" in data
+        assert "query" in data
+        assert "type_filter" in data
+        for result in data["results"]:
+            assert "type" in result
+            assert "title" in result
+            assert "url" in result
+
+
+def test_api_search_valid_types(client):
+    """Test /api/search accepts all documented type values."""
+    for t in ("lesson", "skill", "task", "journal", "summary"):
+        resp = client.get(f"/api/search?q=test&type={t}")
+        # Empty workspace → 0 results, but valid request
+        assert resp.status_code == 200, f"type={t} should be valid"
+
+
+def test_api_search_finds_journal_by_body(tmp_path: Path):
+    """Test /api/search indexes journal body content, not just first-line preview."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    # Create a journal entry where the unique term only appears deep in the body
+    journal_dir = tmp_path / "journal" / "2026-03-01"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "session.md").write_text(
+        "# Session\n\n"
+        "## Summary\n\n"
+        "Worked on routine tasks.\n\n"
+        "## Details\n\n"
+        "Implemented the quuxfrobnicator feature in the backend.\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=quuxfrobnicator")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1, "Journal body content should be indexed and searchable"
+        assert any(r["type"] == "journal" for r in data["results"])
+
+
+def test_api_search_pure_punctuation_query(client):
+    """Test /api/search returns 400 for queries that normalise to zero words (e.g. '--')."""
+    resp = client.get("/api/search?q=--")
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "error" in data
+
+
+def test_api_search_indexes_submodule_lessons(tmp_path: Path):
+    """Test /api/search includes lessons from git submodules."""
+    ws = _make_search_workspace(tmp_path)
+
+    # Simulate a submodule with its own lessons dir
+    sub_dir = ws / "gptme-contrib"
+    sub_dir.mkdir()
+    sub_lessons = sub_dir / "lessons" / "workflow"
+    sub_lessons.mkdir(parents=True)
+    (sub_lessons / "submodule-deploy.md").write_text(
+        "---\nmatch:\n  keywords: [deploy workflow, submodule deploy]\nstatus: active\n---\n"
+        "# Submodule Deploy Workflow\n\nDeploy from submodule correctly.\n"
+    )
+
+    # Create a .gitmodules file so detect_submodules picks it up
+    (ws / ".gitmodules").write_text(
+        '[submodule "gptme-contrib"]\n'
+        "    path = gptme-contrib\n"
+        "    url = https://github.com/gptme/gptme-contrib.git\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=deploy")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1, "Submodule lessons should be indexed and searchable"
+        assert any(r["type"] == "lesson" for r in data["results"])
