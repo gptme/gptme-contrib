@@ -279,7 +279,7 @@ Fields:
 | Current task title | `/api/tasks?state=active` first result |
 | Latest session summary | `/api/sessions` first result `.outcome` |
 | `[Open]` button | links to `agent.urls.dashboard`; hidden if not set |
-| `[↗]` button | opens the agent's gptme-webui directly in a new tab (the server URL already configured in gptme-webui) |
+| `[↗]` button | opens the agent's chat interface in gptme-webui in a new tab; URL uses gptme-webui's server deep-link format (e.g., `https://app.gptme.ai/?server=http%3A%2F%2Fbob-vm%3A8140`); exact format is TBD by gptme-webui implementation |
 
 ### Agent Command Center Vision
 
