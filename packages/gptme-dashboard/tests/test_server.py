@@ -3,6 +3,7 @@
 import json
 import textwrap
 import unittest.mock
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,13 +25,14 @@ def workspace(tmp_path: Path) -> Path:
     # Lessons dir (needed for generate)
     (tmp_path / "lessons").mkdir()
 
-    # Session records
+    # Session records — use relative date (5 days ago) to avoid time-bomb failures
     sessions_dir = tmp_path / "state" / "sessions"
     sessions_dir.mkdir(parents=True)
+    _fixture_date = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
     records = [
         {
             "session_id": "abc1",
-            "timestamp": "2026-03-06T10:00:00Z",
+            "timestamp": f"{_fixture_date}T10:00:00Z",
             "harness": "claude-code",
             "model": "claude-opus-4-6",
             "run_type": "autonomous",
@@ -41,7 +43,7 @@ def workspace(tmp_path: Path) -> Path:
         },
         {
             "session_id": "abc2",
-            "timestamp": "2026-03-06T11:00:00Z",
+            "timestamp": f"{_fixture_date}T11:00:00Z",
             "harness": "gptme",
             "model": "claude-sonnet-4-6",
             "run_type": "autonomous",
@@ -52,7 +54,7 @@ def workspace(tmp_path: Path) -> Path:
         },
         {
             "session_id": "abc3",
-            "timestamp": "2026-03-06T12:00:00Z",
+            "timestamp": f"{_fixture_date}T12:00:00Z",
             "harness": "claude-code",
             "model": "claude-opus-4-6",
             "run_type": "autonomous",
@@ -694,6 +696,146 @@ def test_api_summaries_invalid_type_returns_400(tmp_path: Path):
         data = resp.get_json()
         assert "error" in data
         assert "quarterly" in data["error"]
+
+
+# --- Activity Heatmap (Phase 6c) ---
+
+
+def test_api_activity_uses_session_store(client):
+    """Test /api/activity uses SessionStore records when available."""
+    pytest.importorskip("gptme_sessions")
+    resp = client.get("/api/activity?days=30")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "days" in data
+    assert isinstance(data["days"], list)
+    assert len(data["days"]) == 30
+    # Each entry has 'date' and 'count'
+    for entry in data["days"]:
+        assert "date" in entry
+        assert "count" in entry
+        assert isinstance(entry["count"], int)
+    # Fixture has 3 sessions 5 days ago (relative, no time-bomb)
+    expected_date = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+    counts = {e["date"]: e["count"] for e in data["days"]}
+    assert counts.get(expected_date, 0) == 3
+
+
+def test_api_activity_ordered_oldest_first(client):
+    """Test /api/activity returns days ordered oldest → newest."""
+    pytest.importorskip("gptme_sessions")
+    resp = client.get("/api/activity?days=7")
+    assert resp.status_code == 200
+    dates = [e["date"] for e in resp.get_json()["days"]]
+    assert dates == sorted(dates)
+
+
+def test_api_activity_default_365_days(client):
+    """Test /api/activity defaults to 365 days."""
+    pytest.importorskip("gptme_sessions")
+    resp = client.get("/api/activity")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["days"]) == 365
+
+
+def test_api_activity_days_clamped(client):
+    """Test /api/activity clamps days to [7, 730]."""
+    pytest.importorskip("gptme_sessions")
+    resp = client.get("/api/activity?days=9999")
+    assert resp.status_code == 200
+    assert len(resp.get_json()["days"]) == 730
+
+    resp2 = client.get("/api/activity?days=1")
+    assert resp2.status_code == 200
+    assert len(resp2.get_json()["days"]) == 7
+
+
+def test_api_activity_journal_fallback(tmp_path: Path):
+    """Test /api/activity falls back to journal directory when no SessionStore."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+    # Create journal entries: 3 .md files on one day, 1 on another (relative dates)
+    d1 = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    d2 = (date.today() - timedelta(days=9)).strftime("%Y-%m-%d")
+    j1 = tmp_path / "journal" / d1
+    j1.mkdir(parents=True)
+    (j1 / "session-a.md").write_text("# a")
+    (j1 / "session-b.md").write_text("# b")
+    (j1 / "session-c.md").write_text("# c")
+    j2 = tmp_path / "journal" / d2
+    j2.mkdir(parents=True)
+    (j2 / "session-d.md").write_text("# d")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/activity?days=365")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        counts = {e["date"]: e["count"] for e in data["days"]}
+        assert counts.get(d1, 0) == 3
+        assert counts.get(d2, 0) == 1
+
+
+def test_api_activity_broken_store_falls_back_to_journal(tmp_path: Path, monkeypatch):
+    """Test /api/activity falls back to journal when store.query() raises."""
+    pytest.importorskip("gptme_sessions")
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+    # Create a store directory so _load_sessions_from_store sees it as "present"
+    (tmp_path / "state" / "sessions").mkdir(parents=True)
+    # Create a journal entry to verify fallback is used
+    d1 = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+    j1 = tmp_path / "journal" / d1
+    j1.mkdir(parents=True)
+    (j1 / "session.md").write_text("# session")
+
+    # Patch SessionStore.query to raise, simulating a corrupted store
+    import gptme_dashboard.server as srv
+
+    original_store_importable = srv._store_importable  # noqa: SLF001
+
+    class _BrokenStore:
+        def __init__(self, **_kw):
+            pass
+
+        def query(self, **_kw):
+            raise RuntimeError("corrupted JSONL")
+
+    monkeypatch.setattr("gptme_sessions.store.SessionStore", _BrokenStore, raising=False)
+    monkeypatch.setattr(srv, "_store_importable", True)
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/activity?days=30")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        counts = {e["date"]: e["count"] for e in data["days"]}
+        assert counts.get(d1, 0) == 1, "journal fallback should fire when store is broken"
+
+    monkeypatch.setattr(srv, "_store_importable", original_store_importable)
+
+
+def test_api_activity_empty_workspace(tmp_path: Path):
+    """Test /api/activity returns zeros when no sessions or journal."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/activity?days=7")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert all(e["count"] == 0 for e in data["days"])
 
 
 # --- Schedule (Phase 3) ---

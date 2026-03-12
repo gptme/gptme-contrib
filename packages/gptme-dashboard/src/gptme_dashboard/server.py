@@ -18,11 +18,20 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+try:
+    import gptme_sessions  # noqa: F401
+
+    _store_importable = True
+except Exception:
+    _store_importable = False
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -238,23 +247,41 @@ def create_app(
             logger.exception("Error reading workspace config")
             return jsonify({"error": str(e)}), 500
 
+    class _StoreBroken:
+        """Sentinel: store directory exists and gptme_sessions is importable,
+        but the query raised an exception (e.g. corrupted JSONL).
+
+        Callers that have a journal-based fallback (e.g. ``api_activity``)
+        should treat this as a signal to use that fallback rather than
+        silently returning empty/zero data.
+        """
+
     def _load_sessions_from_store(
         ws: Path, days: int | None = None
-    ) -> tuple[list[Any], Any] | None:
+    ) -> tuple[list[Any], Any] | _StoreBroken | None:
         """Try loading sessions from SessionStore (structured JSONL records).
 
-        Returns (records, store) if data is available, or None to signal the
-        caller to fall back to scan_recent_sessions.
+        Return values:
+        - ``(records, store)``: data available — use it.
+        - ``None``: store absent or ``gptme_sessions`` not installed — caller
+          may fall back to ``scan_recent_sessions``.
+        - ``_StoreBroken``: store directory exists and package is importable
+          but the query raised an exception — callers with a secondary fallback
+          (e.g. journal scan) should use it rather than returning zeros.
 
         ``days=None`` means no time filter (load all records).
         ``days=0`` is treated as the default window (30 days) to stay consistent
         with the scan_recent_sessions fallback path.
         ``days>0`` filters to the last N days.
         """
+        # Distinguish import/init failure (→ None) from query failure (→ _StoreBroken).
         try:
             from gptme_sessions.store import SessionStore
 
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
+        except Exception:
+            return None
+        try:
             if days and days > 0:
                 records = store.query(since_days=days)
             elif days is None:
@@ -266,7 +293,7 @@ def create_app(
                 return None
             return list(records), store
         except Exception:
-            return None
+            return _StoreBroken()
 
     # Cache for scan_recent_sessions (expensive); expires after 5 minutes
     _SCAN_CACHE_TTL = 300
@@ -293,7 +320,7 @@ def create_app(
 
             # Try SessionStore first (fast, structured)
             store_result = _load_sessions_from_store(ws, days)
-            if store_result is not None:
+            if store_result is not None and not isinstance(store_result, _StoreBroken):
                 records, store = store_result
                 return jsonify(store.stats(records))
 
@@ -369,7 +396,7 @@ def create_app(
 
             # Try SessionStore first
             store_result = _load_sessions_from_store(ws, days)
-            if store_result is not None:
+            if store_result is not None and not isinstance(store_result, _StoreBroken):
                 records, _store = store_result
                 records = sorted(records, key=lambda r: r.timestamp, reverse=True)
                 # Convert to dicts for uniform filtering
@@ -433,6 +460,11 @@ def create_app(
     _HEALTH_CACHE_TTL = 60
     _health_cache: dict[str, Any] = {"data": None, "expires": 0.0}
     _health_cache_lock = threading.Lock()
+
+    # Cache for activity endpoint (SessionStore / journal scan); 5-min TTL
+    _ACTIVITY_CACHE_TTL = 300
+    _activity_cache: dict[str, Any] = {"data": None, "days": None, "expires": 0.0}
+    _activity_cache_lock = threading.Lock()
     # UINT64_MAX: systemd returns this sentinel when MemoryAccounting is disabled
     # or no cgroup data is available. Treat as "no data" rather than ~17.2 EB.
     _UINT64_MAX = 18446744073709551615
@@ -1412,6 +1444,87 @@ def create_app(
             )
         except Exception as e:
             logger.exception("Error searching workspace")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/activity")
+    def api_activity() -> Any:
+        """Return daily session counts for the last N days.
+
+        Uses SessionStore records if available; falls back to journal
+        subdirectory scanning (counts ``.md`` files per ``YYYY-MM-DD`` dir).
+
+        Query params:
+          - days: int (7–730, default 365)
+
+        Returns::
+
+            {"days": [{"date": "YYYY-MM-DD", "count": N}, ...]}
+
+        Ordered oldest → newest.
+        """
+        ws = Path(app.config["WORKSPACE"])
+        try:
+            days = request.args.get("days", 365, type=int)
+            days = max(7, min(days, 730))
+
+            now = time.monotonic()
+            with _activity_cache_lock:
+                if (
+                    _activity_cache["data"] is not None
+                    and _activity_cache["days"] == days
+                    and now < _activity_cache["expires"]
+                ):
+                    return jsonify(_activity_cache["data"])
+
+            daily: dict[str, int] = defaultdict(int)
+            today = date.today()
+            start_date_str = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+            # Try SessionStore first (fast, structured).
+            # Fall back to journal scanning when the store is absent, not installed,
+            # or broken (query raised an exception).  When the store exists and is
+            # healthy but has no records in this window, return zeros intentionally
+            # rather than mixing in stale journal counts.
+            store_dir = ws / "state" / "sessions"
+            date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+            store_result = _load_sessions_from_store(ws, days)
+            if store_result is not None and not isinstance(store_result, _StoreBroken):
+                records, _store = store_result
+                for r in records:
+                    ts = r.timestamp if hasattr(r, "timestamp") else r.get("timestamp", "")
+                    if ts:
+                        ts_str = str(ts)[:10]  # handles both str and datetime objects
+                        if date_pat.match(ts_str):
+                            daily[ts_str] += 1
+            elif (
+                not store_dir.exists()
+                or not _store_importable
+                or isinstance(store_result, _StoreBroken)
+            ):
+                # No SessionStore, package not installed, or store broken → journal scan.
+                journal_dir = ws / "journal"
+                if journal_dir.exists():
+                    for jdir in journal_dir.iterdir():
+                        if (
+                            jdir.is_dir()
+                            and date_pat.match(jdir.name)
+                            and jdir.name >= start_date_str
+                        ):
+                            count = sum(1 for f in jdir.iterdir() if f.suffix == ".md")
+                            if count > 0:
+                                daily[jdir.name] = count
+            result = []
+            for i in range(days):
+                d = (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+                result.append({"date": d, "count": daily.get(d, 0)})
+            payload = {"days": result}
+            with _activity_cache_lock:
+                _activity_cache["data"] = payload
+                _activity_cache["days"] = days
+                _activity_cache["expires"] = time.monotonic() + _ACTIVITY_CACHE_TTL
+            return jsonify(payload)
+        except Exception as e:
+            logger.exception("Error computing activity data")
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/org")
