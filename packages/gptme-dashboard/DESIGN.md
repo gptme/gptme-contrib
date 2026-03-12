@@ -310,9 +310,10 @@ The status/task/session fields are achievable with the existing `/api/*` endpoin
 
 **Step 3** (gptme/gptme): Add "Org" tab to gptme-webui
 - For each configured server, probe `GET /api/config` for `agent.urls.dashboard-api`
-- If `dashboard-api` is **present**: fetch agent data via gptme-server's `/api/dashboard-proxy/*` route and render a full card (status, last activity, active tasks, service health)
-- If `dashboard-api` is **absent**: still show the server in the Org tab as a minimal card with the server name/URL and a "dashboard not configured" indicator — allows operators to see all their servers even before they set up `gptme-dashboard serve`; no API calls are made for these entries
-- "Open dashboard" button links to `agent.urls.dashboard`; if `agent.urls.dashboard` is not set, the button is hidden and only the API-backed card fields (status, tasks, services) are shown
+- If `dashboard-api` is **present**: fetch agent data via gptme-server's `/api/dashboard-proxy/*` route and render a full card (status, last activity, active tasks, service health); show `[Open]` button linking to `agent.urls.dashboard` (hidden if unset)
+- If `dashboard-api` is **absent**:
+  - If `agent.urls.dashboard` is set: show minimal card with server name/URL + `[Open]` button (links to static site); omit live-data fields; add "live API not available" note
+  - If neither key is set: show minimal card with server name/URL and a "dashboard not configured" indicator; no API calls made
 
 **Step 4** (optional, later): Auth for dashboard-proxy route
 - gptme-server's existing auth mechanism covers the proxy route — no new config file needed
