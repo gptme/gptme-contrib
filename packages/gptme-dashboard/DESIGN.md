@@ -222,7 +222,7 @@ Rather than a separate org config file, gptme-webui uses the servers it already 
    ```json
    { "agent": { "urls": { "dashboard": "...", "dashboard-api": "http://localhost:8042" } } }
    ```
-3. If `dashboard-api` is present, gptme-server proxies `/api/dashboard-proxy/*` → `http://localhost:8042/*`
+3. If `dashboard-api` is present, gptme-server proxies `/api/dashboard-proxy/*` → `http://localhost:8042/api/*`
 4. gptme-webui fetches agent data via the gptme-server proxy (same-origin, no CORS/mixed-content)
 
 This is **discovery-based** — no separate org.toml or manual URL configuration. The connection
