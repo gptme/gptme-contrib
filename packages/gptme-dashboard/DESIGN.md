@@ -243,7 +243,7 @@ between multi-host gptme-server and per-agent gptme-dashboard is automatic.
 
 ```
 gptme-webui (user's browser)
-    │  (all requests are same-origin — no CORS, no mixed-content)
+    │  (dashboard-api calls proxied via gptme-server — no CORS/mixed-content on port 8042)
     ├── Server: bob-vm:8140  (gptme-server)
     │   GET /api/config → { agent.urls.dashboard-api: "http://localhost:8042" }
     │   GET /api/dashboard-proxy/status  ──proxy──▶  localhost:8042/api/status
