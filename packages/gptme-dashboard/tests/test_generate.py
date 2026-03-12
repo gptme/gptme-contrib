@@ -2944,6 +2944,41 @@ def test_guidance_collapses_at_five_rows(workspace: Path, tmp_path: Path):
     assert "Browse all" in html
 
 
+def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path):
+    """Filter controls for guidance section are hidden until the section is expanded."""
+    # Need >5 guidance items to trigger the show-more button with data-controls
+    for i in range(6):
+        skill_dir = workspace / "skills" / f"filter-skill-{i}"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            name: Filter Skill {i}
+            description: Skill {i} for filter panel test
+            ---
+            # Filter Skill {i}
+            Content.
+            """)
+        )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Advanced filter panel should be present but hidden
+    assert 'id="guidance-adv-filters"' in html
+    assert 'id="guidance-adv-filters" style="display:none"' in html
+
+    # Show-more button should reference the filter panel via data-controls
+    assert 'data-controls="guidance-adv-filters"' in html
+
+    # toggleRows JS should handle data-controls to reveal the panel
+    assert "controlsId" in html
+    assert "btn.dataset.controls" in html
+
+
 # --- Atom feed tests ---
 
 

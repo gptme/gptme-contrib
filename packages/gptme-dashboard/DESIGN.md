@@ -211,9 +211,11 @@ Remote `gptme-dashboard serve` instances need authentication. Proposed:
 | 5a | Service log viewer | ✅ merged |
 | 5b | Service restart actions with auth | ✅ merged |
 | 6a | Org view: standalone `--org` aggregator | ✅ merged |
-| 6b | Full-text search across workspace content | 🔄 PR #465 |
-| 6c | Activity heatmap (daily session counts) | 🔄 PR #466 |
-| 6d | gptme-webui Agent Links sidebar | 🔄 gptme/gptme#1657 |
+| 6b | Full-text search across workspace content | ✅ merged (#465) |
+| 6c | Activity heatmap (daily session counts) | ✅ merged (#466) |
+| 6d | gptme-webui Agent Links sidebar | ✅ merged (gptme/gptme#1657) |
+| 7a | UX: filter controls hidden until guidance section expanded | ✅ merged |
+| 7b | gptme-webui "Org" tab (fleet-wide view) | 📋 planned |
 
 ---
 

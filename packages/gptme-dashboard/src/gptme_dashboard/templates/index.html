@@ -787,29 +787,32 @@ tr:hover { background: var(--accent-dim); }
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
-  <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
-  <!-- Kind chips (Lessons / Skills) -->
-  <div class="filter-row" id="kind-filters">
-    <button class="filter-btn active" data-kind="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
-    <button class="filter-btn" data-kind="lesson">Lessons <span class="chip-count">{{ stats.total_lessons }}</span></button>
-    <button class="filter-btn" data-kind="skill">Skills <span class="chip-count">{{ stats.total_skills }}</span></button>
+  <!-- Advanced filters: hidden until section is expanded -->
+  <div id="guidance-adv-filters" style="display:none">
+    <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
+    <!-- Kind chips (Lessons / Skills) -->
+    <div class="filter-row" id="kind-filters">
+      <button class="filter-btn active" data-kind="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+      <button class="filter-btn" data-kind="lesson">Lessons <span class="chip-count">{{ stats.total_lessons }}</span></button>
+      <button class="filter-btn" data-kind="skill">Skills <span class="chip-count">{{ stats.total_skills }}</span></button>
+    </div>
+    <!-- Category chips -->
+    <div class="cat-chart" id="guidance-filters">
+      <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+      {% for cat, count in stats.lesson_categories.items() %}
+      <button class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></button>
+      {% endfor %}
+    </div>
+    {% if sources %}
+    <div class="filter-row" id="source-filters">
+      <button class="filter-btn active" data-source="all">All sources</button>
+      <button class="filter-btn" data-source="_local">Local</button>
+      {% for src in sources %}
+      <button class="filter-btn" data-source="{{ src }}">{{ src }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
   </div>
-  <!-- Category chips -->
-  <div class="cat-chart" id="guidance-filters">
-    <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
-    {% for cat, count in stats.lesson_categories.items() %}
-    <button class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></button>
-    {% endfor %}
-  </div>
-  {% if sources %}
-  <div class="filter-row" id="source-filters">
-    <button class="filter-btn active" data-source="all">All sources</button>
-    <button class="filter-btn" data-source="_local">Local</button>
-    {% for src in sources %}
-    <button class="filter-btn" data-source="{{ src }}">{{ src }}</button>
-    {% endfor %}
-  </div>
-  {% endif %}
   <table id="guidance-table">
     <thead>
       <tr><th>Title</th><th>Kind</th><th>Category</th><th>Status</th><th>Keywords</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr>
@@ -829,7 +832,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if guidance | length > 5 %}
-  <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
+  <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" data-controls="guidance-adv-filters" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
   {% endif %}
 </section>
 {% endblock %}
@@ -846,6 +849,12 @@ function toggleRows(btn, tableId) {
   const noun = btn.dataset.noun || 'items';
   const collapsedLabel = btn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
   btn.textContent = showing ? collapsedLabel : 'Show fewer';
+  // Toggle associated controls panel (e.g. filter bar)
+  const controlsId = btn.dataset.controls;
+  if (controlsId) {
+    const controls = document.getElementById(controlsId);
+    if (controls) controls.style.display = showing ? 'none' : '';
+  }
 }
 
 // Guidance (lessons + skills) filtering
