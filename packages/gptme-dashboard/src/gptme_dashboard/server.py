@@ -247,23 +247,41 @@ def create_app(
             logger.exception("Error reading workspace config")
             return jsonify({"error": str(e)}), 500
 
+    class _StoreBroken:
+        """Sentinel: store directory exists and gptme_sessions is importable,
+        but the query raised an exception (e.g. corrupted JSONL).
+
+        Callers that have a journal-based fallback (e.g. ``api_activity``)
+        should treat this as a signal to use that fallback rather than
+        silently returning empty/zero data.
+        """
+
     def _load_sessions_from_store(
         ws: Path, days: int | None = None
-    ) -> tuple[list[Any], Any] | None:
+    ) -> tuple[list[Any], Any] | _StoreBroken | None:
         """Try loading sessions from SessionStore (structured JSONL records).
 
-        Returns (records, store) if data is available, or None to signal the
-        caller to fall back to scan_recent_sessions.
+        Return values:
+        - ``(records, store)``: data available — use it.
+        - ``None``: store absent or ``gptme_sessions`` not installed — caller
+          may fall back to ``scan_recent_sessions``.
+        - ``_StoreBroken``: store directory exists and package is importable
+          but the query raised an exception — callers with a secondary fallback
+          (e.g. journal scan) should use it rather than returning zeros.
 
         ``days=None`` means no time filter (load all records).
         ``days=0`` is treated as the default window (30 days) to stay consistent
         with the scan_recent_sessions fallback path.
         ``days>0`` filters to the last N days.
         """
+        # Distinguish import/init failure (→ None) from query failure (→ _StoreBroken).
         try:
             from gptme_sessions.store import SessionStore
 
             store = SessionStore(sessions_dir=ws / "state" / "sessions")
+        except Exception:
+            return None
+        try:
             if days and days > 0:
                 records = store.query(since_days=days)
             elif days is None:
@@ -275,7 +293,7 @@ def create_app(
                 return None
             return list(records), store
         except Exception:
-            return None
+            return _StoreBroken()
 
     # Cache for scan_recent_sessions (expensive); expires after 5 minutes
     _SCAN_CACHE_TTL = 300
@@ -302,7 +320,7 @@ def create_app(
 
             # Try SessionStore first (fast, structured)
             store_result = _load_sessions_from_store(ws, days)
-            if store_result is not None:
+            if store_result is not None and not isinstance(store_result, _StoreBroken):
                 records, store = store_result
                 return jsonify(store.stats(records))
 
@@ -378,7 +396,7 @@ def create_app(
 
             # Try SessionStore first
             store_result = _load_sessions_from_store(ws, days)
-            if store_result is not None:
+            if store_result is not None and not isinstance(store_result, _StoreBroken):
                 records, _store = store_result
                 records = sorted(records, key=lambda r: r.timestamp, reverse=True)
                 # Convert to dicts for uniform filtering
@@ -1463,13 +1481,14 @@ def create_app(
             start_date_str = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
 
             # Try SessionStore first (fast, structured).
-            # Only fall back to journal scanning when the store directory does not
-            # exist at all — if the store exists but has no records in this window
-            # we should return zeros, not mix in stale journal counts.
+            # Fall back to journal scanning when the store is absent, not installed,
+            # or broken (query raised an exception).  When the store exists and is
+            # healthy but has no records in this window, return zeros intentionally
+            # rather than mixing in stale journal counts.
             store_dir = ws / "state" / "sessions"
             date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
             store_result = _load_sessions_from_store(ws, days)
-            if store_result is not None:
+            if store_result is not None and not isinstance(store_result, _StoreBroken):
                 records, _store = store_result
                 for r in records:
                     ts = r.timestamp if hasattr(r, "timestamp") else r.get("timestamp", "")
@@ -1477,24 +1496,27 @@ def create_app(
                         ts_str = str(ts)[:10]  # handles both str and datetime objects
                         if date_pat.match(ts_str):
                             daily[ts_str] += 1
-            elif not store_dir.exists() or not _store_importable:
-                # No SessionStore (or package not installed) — fall back to journal subdirectory scan.
+            elif (
+                not store_dir.exists()
+                or not _store_importable
+                or isinstance(store_result, _StoreBroken)
+            ):
+                # No SessionStore, package not installed, or store broken → journal scan.
                 journal_dir = ws / "journal"
                 if journal_dir.exists():
-                    for d in journal_dir.iterdir():
-                        if d.is_dir() and date_pat.match(d.name) and d.name >= start_date_str:
-                            count = sum(1 for f in d.iterdir() if f.suffix == ".md")
+                    for jdir in journal_dir.iterdir():
+                        if (
+                            jdir.is_dir()
+                            and date_pat.match(jdir.name)
+                            and jdir.name >= start_date_str
+                        ):
+                            count = sum(1 for f in jdir.iterdir() if f.suffix == ".md")
                             if count > 0:
-                                daily[d.name] = count
-            result = [
-                {
-                    "date": (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d"),
-                    "count": daily.get(
-                        (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d"), 0
-                    ),
-                }
-                for i in range(days)
-            ]
+                                daily[jdir.name] = count
+            result = []
+            for i in range(days):
+                d = (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+                result.append({"date": d, "count": daily.get(d, 0)})
             payload = {"days": result}
             with _activity_cache_lock:
                 _activity_cache["data"] = payload

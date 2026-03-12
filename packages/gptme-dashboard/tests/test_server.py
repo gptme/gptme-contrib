@@ -780,6 +780,47 @@ def test_api_activity_journal_fallback(tmp_path: Path):
         assert counts.get(d2, 0) == 1
 
 
+def test_api_activity_broken_store_falls_back_to_journal(tmp_path: Path, monkeypatch):
+    """Test /api/activity falls back to journal when store.query() raises."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    (tmp_path / "lessons").mkdir()
+    # Create a store directory so _load_sessions_from_store sees it as "present"
+    (tmp_path / "state" / "sessions").mkdir(parents=True)
+    # Create a journal entry to verify fallback is used
+    d1 = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+    j1 = tmp_path / "journal" / d1
+    j1.mkdir(parents=True)
+    (j1 / "session.md").write_text("# session")
+
+    # Patch SessionStore.query to raise, simulating a corrupted store
+    import gptme_dashboard.server as srv
+
+    original_store_importable = srv._store_importable  # noqa: SLF001
+
+    class _BrokenStore:
+        def __init__(self, **_kw):
+            pass
+
+        def query(self, **_kw):
+            raise RuntimeError("corrupted JSONL")
+
+    monkeypatch.setattr("gptme_sessions.store.SessionStore", _BrokenStore, raising=False)
+    monkeypatch.setattr(srv, "_store_importable", True)
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/activity?days=30")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        counts = {e["date"]: e["count"] for e in data["days"]}
+        assert counts.get(d1, 0) == 1, "journal fallback should fire when store is broken"
+
+    monkeypatch.setattr(srv, "_store_importable", original_store_importable)
+
+
 def test_api_activity_empty_workspace(tmp_path: Path):
     """Test /api/activity returns zeros when no sessions or journal."""
     (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
