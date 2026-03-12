@@ -1244,7 +1244,7 @@ def create_app(
                 _add_skills(scan_skills(sub_path, source=sub_name))
 
         # Tasks — limit to 500 to keep index size bounded
-        for task in list(scan_tasks(ws))[:500]:
+        for task in scan_tasks(ws)[:500]:
             items.append(
                 {
                     "type": "task",

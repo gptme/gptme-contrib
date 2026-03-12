@@ -1405,7 +1405,7 @@ function closeSearch() {
   document.getElementById('search-result-count').textContent = '';
 }
 
-function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\//.test(s)) ? s : '#'; }
+function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) ? s : '#'; }
 
 async function runSearch(q, typeFilter) {
   if (!q || q.length < 2) {
