@@ -1221,9 +1221,7 @@ def create_app(
                     "category": "",
                     "keywords": [],
                     "tags": [],
-                    "excerpt": (skill.get("description", "") + " " + skill.get("body", "")[:400])[
-                        :600
-                    ],
+                    "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[:600],
                     "url": "/" + skill.get("page_url", ""),
                     "path": skill.get("path", ""),
                 }
