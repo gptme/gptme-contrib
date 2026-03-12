@@ -18,7 +18,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1435,10 +1437,6 @@ def create_app(
 
         Ordered oldest → newest.
         """
-        import re
-        from collections import defaultdict
-        from datetime import date, timedelta
-
         ws = Path(app.config["WORKSPACE"])
         try:
             days = request.args.get("days", 365, type=int)

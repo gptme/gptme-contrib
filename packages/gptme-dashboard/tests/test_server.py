@@ -3,7 +3,7 @@
 import json
 import textwrap
 import unittest.mock
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,7 @@ def workspace(tmp_path: Path) -> Path:
     # Session records — use relative date (5 days ago) to avoid time-bomb failures
     sessions_dir = tmp_path / "state" / "sessions"
     sessions_dir.mkdir(parents=True)
-    _fixture_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    _fixture_date = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
     records = [
         {
             "session_id": "abc1",
