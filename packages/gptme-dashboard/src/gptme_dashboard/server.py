@@ -263,8 +263,12 @@ def create_app(
 
         Return values:
         - ``(records, store)``: data available — use it.
-        - ``None``: store absent or ``gptme_sessions`` not installed — caller
-          may fall back to ``scan_recent_sessions``.
+        - ``None``: one of three situations — store absent, ``gptme_sessions``
+          not installed, or store healthy but the time window contains no
+          records. Callers that only need "is there data?" may fall back to
+          ``scan_recent_sessions``; callers that need to distinguish
+          "healthy-empty" from "absent" (e.g. ``api_activity``) should
+          inspect other signals (``store_dir.exists()``, ``_store_importable``).
         - ``_StoreBroken``: store directory exists and package is importable
           but the query raised an exception — callers with a secondary fallback
           (e.g. journal scan) should use it rather than returning zeros.
@@ -635,8 +639,9 @@ def create_app(
                             if not _is_relevant_service(timer_name, agent_name):
                                 continue
                             # Timestamps are in microseconds since epoch
-                            next_us = unit.get("next", 0)
-                            last_us = unit.get("last", 0)
+                            # systemd may return null for never-run/never-scheduled timers
+                            next_us = unit.get("next") or 0
+                            last_us = unit.get("last") or 0
                             next_iso = (
                                 datetime.fromtimestamp(
                                     next_us / 1_000_000, tz=timezone.utc

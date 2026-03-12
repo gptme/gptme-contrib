@@ -796,8 +796,6 @@ def test_api_activity_broken_store_falls_back_to_journal(tmp_path: Path, monkeyp
     # Patch SessionStore.query to raise, simulating a corrupted store
     import gptme_dashboard.server as srv
 
-    original_store_importable = srv._store_importable  # noqa: SLF001
-
     class _BrokenStore:
         def __init__(self, **_kw):
             pass
@@ -818,8 +816,6 @@ def test_api_activity_broken_store_falls_back_to_journal(tmp_path: Path, monkeyp
         data = resp.get_json()
         counts = {e["date"]: e["count"] for e in data["days"]}
         assert counts.get(d1, 0) == 1, "journal fallback should fire when store is broken"
-
-    monkeypatch.setattr(srv, "_store_importable", original_store_importable)
 
 
 def test_api_activity_empty_workspace(tmp_path: Path):
