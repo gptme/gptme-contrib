@@ -852,11 +852,12 @@ function toggleRows(btn, tableId) {
   // Toggle associated controls panel (e.g. filter bar)
   const controlsId = btn.dataset.controls;
   if (controlsId) {
+    // Track expanded state unconditionally so applyFilters stays in sync
+    // even if the DOM element is temporarily absent.
+    btn.dataset.expanded = showing ? '' : 'true';
     const controls = document.getElementById(controlsId);
     if (controls) {
       controls.style.display = showing ? 'none' : '';
-      // Track expanded state on the button itself (generic, no hardcoded IDs)
-      btn.dataset.expanded = showing ? '' : 'true';
     }
   }
 }

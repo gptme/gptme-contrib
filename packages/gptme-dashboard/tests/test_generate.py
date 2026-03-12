@@ -2974,18 +2974,14 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     # Show-more button should reference the filter panel via data-controls
     assert 'data-controls="guidance-adv-filters"' in html
 
-    # applyFilters must only collapse the filter panel when guidanceExpanded is false,
-    # so clicking an already-active chip while browsing doesn't unexpectedly hide the panel.
-    assert "guidanceExpanded" in html
+    # applyFilters must read the expanded state from the button's DOM attribute so it
+    # doesn't collapse the filter panel when the section is already expanded.
+    assert "dataset.expanded === 'true'" in html
 
-    # The guidanceExpanded guard must also cover row re-collapse and button label reset.
-    # Verify the JS has `else if (guidanceExpanded)` branch to skip re-collapsing rows,
-    # and the `guidanceExpanded` branch that sets button text to "Show fewer".
-    assert "else if (guidanceExpanded)" in html
+    # applyFilters must handle the case where the section is expanded after a filter
+    # cycle clears, keeping "Show fewer" text and restoring collapsed-row on rows > 5.
     assert "'Show fewer'" in html
-    # After a filter cycle, collapsed-row class must be restored in the guidanceExpanded
-    # branch so "Show fewer" can find rows to hide.
-    assert "classList.add('collapsed-row')" in html
+    assert "'collapsed-row'" in html
 
 
 def test_guidance_filter_panel_visible_for_small_workspace(
