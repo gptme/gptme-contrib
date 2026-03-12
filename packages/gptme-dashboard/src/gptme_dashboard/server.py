@@ -1289,8 +1289,7 @@ def create_app(
         category_words = set(re.sub(r"[^\w\s]", " ", category).split())
         excerpt_words = set(re.sub(r"[^\w\s]", " ", excerpt).split())
 
-        for word in query_words:
-            w = word.lower()
+        for w in query_words:
             # Title exact word match
             if w in title_words:
                 score += 20
