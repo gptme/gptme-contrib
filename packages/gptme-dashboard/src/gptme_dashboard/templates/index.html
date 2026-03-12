@@ -1429,7 +1429,7 @@ async function runSearch(q, typeFilter) {
         '<div class="search-empty">' + esc(err.error || 'Search error (' + resp.status + ')') + '</div>';
       return;
     }
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     const results = data.results || [];
     const total = data.total || 0;
     _searchSelected = -1;

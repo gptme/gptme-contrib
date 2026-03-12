@@ -1219,9 +1219,9 @@ def create_app(
                     {
                         "type": "skill",
                         "title": skill.get("title", "") or skill.get("name", ""),
-                        "category": "",
-                        "keywords": [],
-                        "tags": [],
+                        "category": skill.get("category", ""),
+                        "keywords": skill.get("keywords", []),
+                        "tags": skill.get("tags", []),
                         "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[
                             :600
                         ],
@@ -1243,8 +1243,8 @@ def create_app(
             if sub.get("has_skills"):
                 _add_skills(scan_skills(sub_path, source=sub_name))
 
-        # Tasks
-        for task in scan_tasks(ws):
+        # Tasks — limit to 500 to keep index size bounded
+        for task in list(scan_tasks(ws))[:500]:
             items.append(
                 {
                     "type": "task",
