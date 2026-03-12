@@ -296,9 +296,10 @@ This is achievable with the existing `/api/*` endpoints. The main new piece is t
 
 **Step 1** (gptme-contrib): No changes needed. Existing API is sufficient.
 
-**Step 2** (gptme/gptme): Extend gptme-server `/api/config` to include `[agent.urls]` from `gptme.toml`.
-- Small change: read `gptme.toml` and expose `agent.urls` in config response
-- Enables gptme-webui to discover the dashboard-api URL without manual configuration
+**Step 2** (gptme/gptme): Extend gptme-server to support the dashboard-proxy integration.
+- Expose `agent.urls` from `gptme.toml` in the `/api/config` response (enables webui discovery)
+- Add `/api/dashboard-proxy/*` → `http://localhost:8042/api/*` reverse-proxy route (only active when `agent.urls.dashboard-api` is set in `gptme.toml`)
+- Together these two changes let gptme-webui discover the dashboard-api URL and fetch agent data without CORS or mixed-content issues
 
 **Step 3** (gptme/gptme): Add "Org" tab to gptme-webui
 - For each configured server, probe `GET /api/config` for `agent.urls.dashboard-api`
