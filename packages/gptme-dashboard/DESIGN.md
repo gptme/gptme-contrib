@@ -265,21 +265,23 @@ Each agent renders as a card in gptme-webui's "Org" tab:
 │  Last active: 2 hours ago                     │
 │  Active tasks: 3  •  Services: 4/4 healthy    │
 │  Working on: gptme-contrib#382 dashboard      │
-│  Recent session: productive (2h) — PR opened  │
+│  Recent session: productive                   │
 └──────────────────────────────────────────────┘
 ```
 
 Fields:
 | Field | API source |
 |-------|-----------|
-| Status (active/idle) | `/api/tasks?state=active` — active tasks = agent is working |
+| Status (active/idle) | `/api/tasks?state=active` — active tasks = agent is working _(shared call — see note below)_ |
 | Last active | `/api/sessions` — most recent session timestamp |
-| Active task count | `/api/tasks?state=active` |
+| Active task count | `/api/tasks?state=active` _(shared call)_ |
 | Service health | `/api/services/health` |
-| Current task title | `/api/tasks?state=active` first result |
-| Latest session summary | `/api/sessions` first result `.outcome` |
+| Current task title | `/api/tasks?state=active` first result _(shared call)_ |
+| Latest session summary | `/api/sessions` first result `.outcome` (e.g. `"productive"`) |
 | `[Open]` button | links to `agent.urls.dashboard`; hidden if not set |
 | `[↗]` button | opens the agent's chat interface in gptme-webui in a new tab; URL is relative to the current gptme-webui instance's origin, e.g. `/?server=http%3A%2F%2Fbob-vm%3A8140`; exact deep-link format is TBD by gptme-webui implementation |
+
+> **Note**: Status, active task count, and current task title all derive from a single `/api/tasks?state=active` call per poll cycle — implementations should fetch once and reuse the response for all three fields.
 
 ### Agent Command Center Vision
 
@@ -314,6 +316,7 @@ The status/task/session fields are achievable with the existing `/api/*` endpoin
 - If `dashboard-api` is **absent**:
   - If `agent.urls.dashboard` is set: show minimal card with server name/URL + `[Open]` button (links to static site); omit live-data fields; add "live API not available" note
   - If neither key is set: show minimal card with server name/URL and a "dashboard not configured" indicator; no API calls made
+- **Polling cadence**: poll each agent's live-data endpoints (tasks, services, sessions) every 30 seconds; a shorter interval (e.g. 10 s) can be used for the active card when drill-down is open. SSE support is not planned for Phase 7b — if gptme-server gains SSE endpoints in the future, the Org tab can subscribe instead of polling.
 
 **Step 4** (optional, later): Auth for dashboard-proxy route
 - gptme-server's existing auth mechanism covers the proxy route — no new config file needed
