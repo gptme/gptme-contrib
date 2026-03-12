@@ -635,8 +635,8 @@ def create_app(
                             if not _is_relevant_service(timer_name, agent_name):
                                 continue
                             # Timestamps are in microseconds since epoch
-                            next_us = unit.get("next", 0)
-                            last_us = unit.get("last", 0)
+                            next_us = unit.get("next") or 0
+                            last_us = unit.get("last") or 0
                             next_iso = (
                                 datetime.fromtimestamp(
                                     next_us / 1_000_000, tz=timezone.utc

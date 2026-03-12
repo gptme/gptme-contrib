@@ -925,11 +925,13 @@ function applyFilters() {
       row.classList.remove('collapsed-row');
     } else if (guidanceExpanded) {
       // Section is explicitly expanded — show all rows.
-      // Re-add collapsed-row class (stripped by the isFiltering branch) so that a
-      // subsequent "Show fewer" click can find these rows and hide them again.
+      // Re-add collapsed-row for rows >5 (stripped by isFiltering branch) so
+      // "Show fewer" can find and hide them. Defensively remove it for rows ≤5
+      // to keep state clean if ever entered via an unexpected path.
       // Note: match is always true here (!isFiltering means all filters are at 'all').
       idx++;
       if (idx > 5) row.classList.add('collapsed-row');
+      else row.classList.remove('collapsed-row');
       row.style.display = '';
     } else {
       // Restore collapse state (≤5 rows visible).

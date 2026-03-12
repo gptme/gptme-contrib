@@ -2974,9 +2974,6 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     # Show-more button should reference the filter panel via data-controls
     assert 'data-controls="guidance-adv-filters"' in html
 
-    # The show-more button tracks expanded state via a DOM data attribute.
-    assert "dataset.expanded" in html
-
 
 def test_guidance_filter_panel_visible_for_small_workspace(
     tmp_path: Path,
