@@ -3010,6 +3010,26 @@ def test_guidance_filter_panel_visible_for_small_workspace(
     assert 'id="guidance-show-more"' not in html
 
 
+def test_generate_dashboard_navigation_sidebar(workspace: Path, tmp_path: Path):
+    """Dashboard includes a quick-navigation sidebar for major sections."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'class="dashboard-layout"' in html
+    assert 'class="dashboard-nav"' in html
+    assert 'aria-label="Dashboard navigation"' in html
+    assert 'href="#guidance"' in html
+    assert 'href="#packages"' in html
+    assert 'href="#plugins"' in html
+    assert 'href="#recent-sessions"' in html
+    assert 'href="#activity-heatmap"' in html
+    assert 'href="#service-health"' in html
+    assert "Quick navigation" in html
+
+
 # --- Atom feed tests ---
 
 
