@@ -26,6 +26,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+try:
+    import gptme_sessions  # noqa: F401
+
+    _store_importable = True
+except Exception:
+    _store_importable = False
+
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Block all HTTP redirects to prevent SSRF via open redirects."""
@@ -1468,8 +1475,8 @@ def create_app(
                     if ts:
                         ts_str = str(ts)[:10]  # handles both str and datetime objects
                         daily[ts_str] += 1
-            elif not store_dir.exists():
-                # No SessionStore at all — fall back to journal subdirectory scan.
+            elif not store_dir.exists() or not _store_importable:
+                # No SessionStore (or package not installed) — fall back to journal subdirectory scan.
                 journal_dir = ws / "journal"
                 if journal_dir.exists():
                     date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")

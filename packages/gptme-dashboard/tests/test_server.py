@@ -749,8 +749,6 @@ def test_api_activity_days_clamped(client):
 
 def test_api_activity_journal_fallback(tmp_path: Path):
     """Test /api/activity falls back to journal directory when no SessionStore."""
-    from datetime import date, timedelta
-
     (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
     (tmp_path / "lessons").mkdir()
     # Create journal entries: 3 .md files on one day, 1 on another (relative dates)
