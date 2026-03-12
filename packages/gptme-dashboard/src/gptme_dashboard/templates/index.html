@@ -882,14 +882,14 @@ function applyFilters() {
   if (showMoreBtn) {
     showMoreBtn.style.display = isFiltering ? 'none' : '';
     if (!isFiltering) {
-      // Reset button text when collapse is restored after a filter cycle
-      const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
-      const noun = showMoreBtn.dataset.noun || 'items';
-      showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
-      // Re-hide the controls panel only if the user hasn't explicitly expanded it.
-      // Without this guard, clicking an already-active chip ("All" while "All" is selected)
-      // while browsing unexpectedly collapses the section.
-      if (!guidanceExpanded) {
+      if (guidanceExpanded) {
+        // User explicitly expanded the section — keep it expanded: "Show fewer" label, controls visible.
+        showMoreBtn.textContent = 'Show fewer';
+      } else {
+        // Restore collapsed label and hide controls when user hasn't expanded.
+        const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
+        const noun = showMoreBtn.dataset.noun || 'items';
+        showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
         const controlsId = showMoreBtn.dataset.controls;
         if (controlsId) {
           const controlsEl = document.getElementById(controlsId);
@@ -916,8 +916,11 @@ function applyFilters() {
     if (isFiltering) {
       row.style.display = match ? '' : 'none';
       row.classList.remove('collapsed-row');
+    } else if (guidanceExpanded) {
+      // Section is explicitly expanded — show all rows, no re-collapse.
+      row.style.display = match ? '' : 'none';
     } else {
-      // Restore collapse state
+      // Restore collapse state (≤5 rows visible).
       idx++;
       if (idx > 5) {
         row.classList.add('collapsed-row');

@@ -2978,6 +2978,12 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     # so clicking an already-active chip while browsing doesn't unexpectedly hide the panel.
     assert "guidanceExpanded" in html
 
+    # The guidanceExpanded guard must also cover row re-collapse and button label reset.
+    # Verify the JS has `else if (guidanceExpanded)` branch to skip re-collapsing rows,
+    # and the `guidanceExpanded` branch that sets button text to "Show fewer".
+    assert "else if (guidanceExpanded)" in html
+    assert "'Show fewer'" in html
+
 
 def test_guidance_filter_panel_visible_for_small_workspace(
     tmp_path: Path,
