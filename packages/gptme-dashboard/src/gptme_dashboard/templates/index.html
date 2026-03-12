@@ -855,8 +855,8 @@ function toggleRows(btn, tableId) {
     const controls = document.getElementById(controlsId);
     if (controls) {
       controls.style.display = showing ? 'none' : '';
-      // Track whether the guidance section was explicitly expanded by the user
-      if (controlsId === 'guidance-adv-filters') guidanceExpanded = !showing;
+      // Track expanded state on the button itself (generic, no hardcoded IDs)
+      btn.dataset.expanded = showing ? '' : 'true';
     }
   }
 }
@@ -872,11 +872,12 @@ const showMoreBtn = document.getElementById('guidance-show-more');
 let activeCategory = 'all';
 let activeKind = 'all';
 let activeSource = 'all';
-let guidanceExpanded = false;  // tracks explicit user expansion via "Browse all"
 
 function applyFilters() {
   const query = (searchBox ? searchBox.value : '').toLowerCase();
   const isFiltering = activeCategory !== 'all' || activeKind !== 'all' || activeSource !== 'all' || query;
+  // Read expanded state from DOM (set by toggleRows via btn.dataset.expanded)
+  const guidanceExpanded = showMoreBtn && showMoreBtn.dataset.expanded === 'true';
 
   // When filtering, show all rows (override collapse)
   if (showMoreBtn) {
@@ -885,6 +886,11 @@ function applyFilters() {
       if (guidanceExpanded) {
         // User explicitly expanded the section — keep it expanded: "Show fewer" label, controls visible.
         showMoreBtn.textContent = 'Show fewer';
+        const controlsId = showMoreBtn.dataset.controls;
+        if (controlsId) {
+          const controlsEl = document.getElementById(controlsId);
+          if (controlsEl) controlsEl.style.display = '';
+        }
       } else {
         // Restore collapsed label and hide controls when user hasn't expanded.
         const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
