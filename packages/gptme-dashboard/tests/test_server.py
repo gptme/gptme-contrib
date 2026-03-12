@@ -782,6 +782,7 @@ def test_api_activity_journal_fallback(tmp_path: Path):
 
 def test_api_activity_broken_store_falls_back_to_journal(tmp_path: Path, monkeypatch):
     """Test /api/activity falls back to journal when store.query() raises."""
+    pytest.importorskip("gptme_sessions")
     (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
     (tmp_path / "lessons").mkdir()
     # Create a store directory so _load_sessions_from_store sees it as "present"
