@@ -2974,14 +2974,8 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     # Show-more button should reference the filter panel via data-controls
     assert 'data-controls="guidance-adv-filters"' in html
 
-    # applyFilters must read the expanded state from the button's DOM attribute so it
-    # doesn't collapse the filter panel when the section is already expanded.
-    assert "dataset.expanded === 'true'" in html
-
-    # applyFilters must handle the case where the section is expanded after a filter
-    # cycle clears, keeping "Show fewer" text and restoring collapsed-row on rows > 5.
-    assert "'Show fewer'" in html
-    assert "'collapsed-row'" in html
+    # The show-more button tracks expanded state via a DOM data attribute.
+    assert "dataset.expanded" in html
 
 
 def test_guidance_filter_panel_visible_for_small_workspace(

@@ -927,9 +927,10 @@ function applyFilters() {
       // Section is explicitly expanded — show all rows.
       // Re-add collapsed-row class (stripped by the isFiltering branch) so that a
       // subsequent "Show fewer" click can find these rows and hide them again.
+      // Note: match is always true here (!isFiltering means all filters are at 'all').
       idx++;
       if (idx > 5) row.classList.add('collapsed-row');
-      row.style.display = match ? '' : 'none';
+      row.style.display = '';
     } else {
       // Restore collapse state (≤5 rows visible).
       idx++;
