@@ -70,7 +70,7 @@ Agents register their dashboard URL and API endpoint in `gptme.toml`:
 ```toml
 [agent.urls]
 dashboard = "https://timetobuildbob.github.io/bob/"   # static site (gh-pages)
-dashboard-api = "https://bob.example.com:8042"         # live server (optional)
+dashboard-api = "http://localhost:8042"               # live server (consumed via gptme-server proxy)
 ```
 
 gptme-webui reads `dashboard` from `[agent.urls]` and loads it in an iframe/panel.
@@ -81,6 +81,11 @@ gptme-webui reads `dashboard` from `[agent.urls]` and loads it in an iframe/pane
 
 > **Status**: Phase 6a (standalone `--org` aggregator) is merged. Phase 7b (gptme-webui
 > integration) is planned — see [Phase 7b design](#phase-7b-gptme-webui-fleet-integration) below.
+>
+> **Scope note**: The rest of this section documents the shipped standalone Phase 6a path, which
+> uses `org.toml` and talks directly to each dashboard API. The separate Phase 7b section below is
+> the browser-integrated design and intentionally replaces that with discovery via `/api/config`
+> plus proxying through gptme-server.
 >
 > **Terminology**: This document uses "org" — it's more general than "team" (scales from 2-person
 > teams to large autonomous organizations). "fleet" is taken by gptme.ai k8s infrastructure.
@@ -96,15 +101,15 @@ Agents run on separate VMs/machines. There's no unified view of:
 
 A filesystem-local solution won't work — the design must be distributed and opt-in.
 
-### Architecture
+### Phase 6a Architecture (standalone)
 
 ```
                     ┌─────────────────────┐
                     │     gptme-webui     │
                     │     (Org tab)       │
                     └──────────┬──────────┘
-                               │ reads org.toml
-                               │ calls /api/* on each agent
+                               │ reads org.toml (Phase 6a only)
+                               │ calls /api/* on each agent directly
                     ┌──────────▼──────────┐
                     │   org aggregator    │
                     │  (webui or standalone)
@@ -130,7 +135,7 @@ Each agent in the org view shows:
 | Running services | `/api/services` filtered |
 | Links | dashboard URL, repo, API endpoint |
 
-### Org Configuration
+### Phase 6a Org Configuration (standalone only)
 
 An `org.toml` (or `~/.config/gptme/org.toml`) lists known agents:
 
@@ -168,14 +173,13 @@ the API contract. Track as a Phase 6 option.
 
 ### Implementation Options
 
-**Option A: gptme-webui "Org" tab** *(primary path)*
+**Option A: gptme-webui "Org" tab** *(superseded here; see Phase 7b below)*
 
-Add an "Org" tab to gptme-webui that:
-- Reads `org.toml` for agent endpoints
-- Calls each agent's `/api/*` directly
-- Renders agent cards with status/tasks/services
+The original sketch was: read `org.toml`, call each agent's `/api/*` directly, and render cards in
+webui. That is no longer the recommended browser architecture.
 
-Advantage: reuses gptme-webui's existing multi-host support and auth infrastructure.
+**Superseded by Phase 7b**: gptme-webui should instead discover `agent.urls` via `/api/config` and
+fetch dashboard data through the same-origin `/api/dashboard-proxy/*` route on gptme-server.
 
 **Option B: `gptme-dashboard serve --org`** *(standalone, no webui dependency)*
 
@@ -188,7 +192,8 @@ stepping stone before Option A.
 
 ### Authentication
 
-Remote `gptme-dashboard serve` instances need authentication. Proposed:
+Remote `gptme-dashboard serve` instances need authentication. For the standalone `--org` path,
+proposed evolution was:
 - **Phase 6a**: No auth — trust network boundary (internal VMs, VPN)
 - **Phase 6b**: Per-agent bearer tokens in `org.toml`
 - **Phase 6c**: mTLS for production inter-VM communication; or reuse gptme-server auth if integrated
