@@ -278,6 +278,8 @@ Fields:
 | Service health | `/api/services/health` |
 | Current task title | `/api/tasks?state=active` first result |
 | Latest session summary | `/api/sessions` first result `.outcome` |
+| `[Open]` button | links to `agent.urls.dashboard`; hidden if not set |
+| `[↗]` button | opens the agent's gptme-webui directly in a new tab (the server URL already configured in gptme-webui) |
 
 ### Agent Command Center Vision
 
@@ -290,7 +292,7 @@ The fleet view as a command center:
 - **Grid layout**: agent cards in a responsive grid, maximize per monitor
 - **Status at a glance**: color-coded status (green=active, yellow=idle, red=error)
 - **Drill-down**: click card → full dashboard (iframe or new tab)
-- **Quick actions**: restart service, reassign task, view logs — without leaving the command center
+- **Quick actions**: restart service, reassign task, view logs — without leaving the command center (restart service uses `/api/services/{name}/restart`; reassign task and view logs require future endpoints)
 - **Idle detection**: surface agents with no active tasks ("available for work")
 - **Usage/cost metrics**: model calls, tokens, time — per agent per day (requires future `/api/usage` endpoint)
 
