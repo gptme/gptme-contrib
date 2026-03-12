@@ -2984,6 +2984,41 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     assert "controlsEl.style.display = 'none'" in html
 
 
+def test_guidance_filter_panel_visible_for_small_workspace(
+    tmp_path: Path,
+):
+    """Filter controls are always visible when guidance items ≤ 5 (no show-more button)."""
+    # Create a minimal workspace with only 3 guidance items (below collapse threshold)
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "SmallAgent"\n')
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    for i in range(3):
+        (lessons_dir / f"lesson-{i}.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            match:
+              keywords: ["kw{i}"]
+            status: active
+            ---
+            # Lesson {i}
+            Content.
+            """)
+        )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(tmp_path, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Filter panel must exist
+    assert 'id="guidance-adv-filters"' in html
+    # Must NOT be hidden — no show-more button exists for ≤5 items
+    assert 'id="guidance-adv-filters" style="display:none"' not in html
+    # No show-more button (nothing to expand)
+    assert 'id="guidance-show-more"' not in html
+
+
 # --- Atom feed tests ---
 
 

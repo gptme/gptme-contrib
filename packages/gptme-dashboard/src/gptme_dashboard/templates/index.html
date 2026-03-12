@@ -787,8 +787,8 @@ tr:hover { background: var(--accent-dim); }
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
-  <!-- Advanced filters: hidden until section is expanded -->
-  <div id="guidance-adv-filters" style="display:none">
+  <!-- Advanced filters: hidden until section is expanded (only when >5 items with a show-more button) -->
+  <div id="guidance-adv-filters"{% if guidance | length > 5 %} style="display:none"{% endif %}>
     <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
     <!-- Kind chips (Lessons / Skills) -->
     <div class="filter-row" id="kind-filters">
