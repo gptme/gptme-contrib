@@ -1332,7 +1332,8 @@ def create_app(
         ws = Path(app.config["WORKSPACE"])
         try:
             query = (request.args.get("q") or "").strip()
-            if len(query) < 2:
+            query_words = re.sub(r"[^\w\s]", " ", query.lower()).split()
+            if len(query) < 2 or not query_words:
                 return jsonify({"error": "Query must be at least 2 characters"}), 400
 
             type_filter = (request.args.get("type") or "").lower()
@@ -1349,23 +1350,26 @@ def create_app(
             limit = request.args.get("limit", 20, type=int)
             limit = max(1, min(limit, 100))
 
-            # Build or refresh the search index (lock prevents redundant rebuilds)
+            # Build or refresh the search index outside the lock to avoid stalling
+            # concurrent requests during the (potentially slow) workspace scan.
             now = time.monotonic()
-            if _search_cache["data"] is None or now >= _search_cache["expires"]:
+            needs_rebuild = False
+            with _search_cache_lock:
+                needs_rebuild = _search_cache["data"] is None or now >= _search_cache["expires"]
+                if needs_rebuild:
+                    # Claim the slot so other threads skip the rebuild
+                    _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
+
+            if needs_rebuild:
+                new_index = _build_search_index(ws)
                 with _search_cache_lock:
-                    if (
-                        _search_cache["data"] is None
-                        or time.monotonic() >= _search_cache["expires"]
-                    ):
-                        _search_cache["data"] = _build_search_index(ws)
-                        _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
+                    _search_cache["data"] = new_index
 
             with _search_cache_lock:
                 items: list[dict[str, Any]] = _search_cache["data"]
             if type_filter:
                 items = [i for i in items if i["type"] == type_filter]
 
-            query_words = re.sub(r"[^\w\s]", " ", query.lower()).split()
             scored: list[tuple[int, dict[str, Any]]] = []
             for item in items:
                 score = _score_item(item, query_words)

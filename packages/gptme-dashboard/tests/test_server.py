@@ -2384,3 +2384,11 @@ def test_api_search_finds_journal_by_body(tmp_path: Path):
         data = resp.get_json()
         assert data["total"] >= 1, "Journal body content should be indexed and searchable"
         assert any(r["type"] == "journal" for r in data["results"])
+
+
+def test_api_search_pure_punctuation_query(client):
+    """Test /api/search returns 400 for queries that normalise to zero words (e.g. '--')."""
+    resp = client.get("/api/search?q=--")
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "error" in data
