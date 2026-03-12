@@ -279,7 +279,7 @@ Fields:
 | Current task title | `/api/tasks?state=active` first result |
 | Latest session summary | `/api/sessions` first result `.outcome` |
 | `[Open]` button | links to `agent.urls.dashboard`; hidden if not set |
-| `[↗]` button | opens the agent's chat interface in gptme-webui in a new tab; URL uses gptme-webui's server deep-link format (e.g., `https://app.gptme.ai/?server=http%3A%2F%2Fbob-vm%3A8140`); exact format is TBD by gptme-webui implementation |
+| `[↗]` button | opens the agent's chat interface in gptme-webui in a new tab; URL is relative to the current gptme-webui instance's origin, e.g. `/?server=http%3A%2F%2Fbob-vm%3A8140`; exact deep-link format is TBD by gptme-webui implementation |
 
 ### Agent Command Center Vision
 
@@ -310,8 +310,8 @@ The status/task/session fields are achievable with the existing `/api/*` endpoin
 
 **Step 3** (gptme/gptme): Add "Org" tab to gptme-webui
 - For each configured server, probe `GET /api/config` for `agent.urls.dashboard-api`
-- If present, fetch agent data via gptme-server's `/api/dashboard-proxy/*` route
-- Card renders: status, last activity, active tasks, service health
+- If `dashboard-api` is **present**: fetch agent data via gptme-server's `/api/dashboard-proxy/*` route and render a full card (status, last activity, active tasks, service health)
+- If `dashboard-api` is **absent**: still show the server in the Org tab as a minimal card with the server name/URL and a "dashboard not configured" indicator — allows operators to see all their servers even before they set up `gptme-dashboard serve`; no API calls are made for these entries
 - "Open dashboard" button links to `agent.urls.dashboard`; if `agent.urls.dashboard` is not set, the button is hidden and only the API-backed card fields (status, tasks, services) are shown
 
 **Step 4** (optional, later): Auth for dashboard-proxy route
