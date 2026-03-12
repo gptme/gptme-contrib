@@ -2328,7 +2328,7 @@ def test_api_search_limit(tmp_path: Path):
         resp = c.get("/api/search?q=git&limit=2")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert len(data["results"]) <= 2
+        assert len(data["results"]) == 2
 
 
 def test_api_search_response_structure(tmp_path: Path):

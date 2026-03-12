@@ -1355,7 +1355,10 @@ def create_app(
             now = time.monotonic()
             needs_rebuild = False
             with _search_cache_lock:
-                needs_rebuild = _search_cache["data"] is None or now >= _search_cache["expires"]
+                # Use expires as the sole rebuild gate: once claimed (set to a future
+                # time), concurrent threads — including those seeing data=None on a cold
+                # cache — all skip the rebuild and get [] until the index is ready.
+                needs_rebuild = now >= _search_cache["expires"]
                 if needs_rebuild:
                     # Claim the slot so other threads skip the rebuild
                     _search_cache["expires"] = time.monotonic() + _SEARCH_CACHE_TTL
@@ -1366,7 +1369,7 @@ def create_app(
                     _search_cache["data"] = new_index
 
             with _search_cache_lock:
-                items: list[dict[str, Any]] = _search_cache["data"]
+                items: list[dict[str, Any]] = _search_cache["data"] or []
             if type_filter:
                 items = [i for i in items if i["type"] == type_filter]
 
