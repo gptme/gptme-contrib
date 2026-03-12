@@ -129,7 +129,7 @@ Each agent in the org view shows:
 | Field | Source |
 |-------|--------|
 | Name | `gptme.toml [agent] name` |
-| Status | `/api/services` (active/idle/unknown) |
+| Status | `/api/tasks?state=active` (active if any), `/api/services/health` (error states) |
 | Last activity | `/api/sessions` latest timestamp |
 | Active tasks | `/api/tasks?state=active` count |
 | Running services | `/api/services` filtered |
@@ -272,7 +272,7 @@ Each agent renders as a card in gptme-webui's "Org" tab:
 Fields:
 | Field | API source |
 |-------|-----------|
-| Status (active/idle) | `/api/services` — any service active? |
+| Status (active/idle) | `/api/tasks?state=active` — active tasks = agent is working |
 | Last active | `/api/sessions` — most recent session timestamp |
 | Active task count | `/api/tasks?state=active` |
 | Service health | `/api/services/health` |
@@ -292,9 +292,9 @@ The fleet view as a command center:
 - **Drill-down**: click card → full dashboard (iframe or new tab)
 - **Quick actions**: restart service, reassign task, view logs — without leaving the command center
 - **Idle detection**: surface agents with no active tasks ("available for work")
-- **Usage/cost metrics**: model calls, tokens, time — per agent per day
+- **Usage/cost metrics**: model calls, tokens, time — per agent per day (requires future `/api/usage` endpoint)
 
-This is achievable with the existing `/api/*` endpoints. The main new piece is the gptme-webui
+The status/task/session fields are achievable with the existing `/api/*` endpoints. The main new piece is the gptme-webui
 "Org" tab implementation.
 
 ### Implementation Plan
