@@ -79,7 +79,8 @@ gptme-webui reads `dashboard` from `[agent.urls]` and loads it in an iframe/pane
 
 ## Org View (Fleet / Multi-Agent)
 
-> **Status**: Design phase. Implementation in Phase 6.
+> **Status**: Phase 6a (standalone `--org` aggregator) is merged. Phase 7b (gptme-webui
+> integration) is planned — see [Phase 7b design](#phase-7b-gptme-webui-fleet-integration) below.
 >
 > **Terminology**: This document uses "org" — it's more general than "team" (scales from 2-person
 > teams to large autonomous organizations). "fleet" is taken by gptme.ai k8s infrastructure.
@@ -196,7 +197,116 @@ Remote `gptme-dashboard serve` instances need authentication. Proposed:
 
 1. **Org config location**: per-user (`~/.config/gptme/org.toml`) or per-workspace?
 2. **Polling vs SSE**: poll every 30s (simple) or SSE subscriptions (live but complex)?
-3. **Implementation order**: Option A (webui) requires coordinating a webui PR; Option B (standalone) is self-contained and faster to ship
+3. **Implementation order**: Option A (webui) is the primary long-term path; Option B (standalone)
+   is already shipped as Phase 6a and serves as a stepping stone.
+
+---
+
+## Phase 7b: gptme-webui Fleet Integration
+
+> Based on discussion in gptme/gptme-contrib#382 (2026-03-11).
+
+### Problem Statement
+
+Agents run on separate VMs/machines. gptme-webui is the natural aggregator since it already has
+multi-host support in progress (ErikBjare/bob#252). The standalone `--org` aggregator (Phase 6a)
+is useful for headless deployments, but the primary user-facing fleet view should live in
+gptme-webui where the rest of the agent interaction happens.
+
+### Design: Discovery via /api/config
+
+Rather than a separate org config file, gptme-webui uses the servers it already knows about:
+
+1. For each connected server, gptme-webui calls `GET /api/config` (from gptme-server)
+2. The response includes `[agent.urls]` from `gptme.toml`:
+   ```json
+   { "agent": { "urls": { "dashboard": "...", "dashboard-api": "http://host:8042" } } }
+   ```
+3. If `dashboard-api` is present, gptme-webui can query gptme-dashboard endpoints on that host
+
+This is **discovery-based** — no separate org.toml or manual URL configuration. The connection
+between multi-host gptme-server and per-agent gptme-dashboard is automatic.
+
+```
+gptme-webui (user's browser)
+    │
+    ├── Server: bob-vm:8140  (gptme-server)
+    │   GET /api/config → agent.urls.dashboard-api = "http://bob-vm:8042"
+    │   │
+    │   └── Dashboard API: bob-vm:8042  (gptme-dashboard serve)
+    │       GET /api/status, /api/sessions, /api/tasks, /api/services
+    │
+    └── Server: alice-vm:8140  (gptme-server)
+        GET /api/config → agent.urls.dashboard-api = "http://alice-vm:8042"
+        │
+        └── Dashboard API: alice-vm:8042  (gptme-dashboard serve)
+            GET /api/status, /api/sessions, /api/tasks, /api/services
+```
+
+### Agent Card (Fleet View)
+
+Each agent renders as a card in gptme-webui's "Org" tab:
+
+```
+┌──────────────────────────────────────────────┐
+│  🟢 Bob                          [Open] [↗]  │
+│  Last active: 2 hours ago                     │
+│  Active tasks: 3  •  Services: 4/4 healthy    │
+│  Working on: gptme-contrib#382 dashboard      │
+│  Recent session: productive (2h) — PR opened  │
+└──────────────────────────────────────────────┘
+```
+
+Fields:
+| Field | API source |
+|-------|-----------|
+| Status (active/idle) | `/api/services` — any service active? |
+| Last active | `/api/sessions` — most recent session timestamp |
+| Active task count | `/api/tasks?state=active` |
+| Service health | `/api/services/health` |
+| Current task title | `/api/tasks?state=active` first result |
+| Latest session summary | `/api/sessions` first result `.outcome` |
+
+### Agent Command Center Vision
+
+> Inspired by: "I feel a need to have a proper 'agent command center' IDE for teams of them, which
+> I could maximize per monitor. I want to see/hide toggle them, see if any are idle, pop open
+> related tools (e.g. terminal), stats (usage), etc." — ErikBjare
+
+The fleet view as a command center:
+
+- **Grid layout**: agent cards in a responsive grid, maximize per monitor
+- **Status at a glance**: color-coded status (green=active, yellow=idle, red=error)
+- **Drill-down**: click card → full dashboard (iframe or new tab)
+- **Quick actions**: restart service, reassign task, view logs — without leaving the command center
+- **Idle detection**: surface agents with no active tasks ("available for work")
+- **Usage/cost metrics**: model calls, tokens, time — per agent per day
+
+This is achievable with the existing `/api/*` endpoints. The main new piece is the gptme-webui
+"Org" tab implementation.
+
+### Implementation Plan
+
+**Step 1** (gptme-contrib): No changes needed. Existing API is sufficient.
+
+**Step 2** (gptme/gptme): Extend gptme-server `/api/config` to include `[agent.urls]` from `gptme.toml`.
+- Small change: read `gptme.toml` and expose `agent.urls` in config response
+- Enables gptme-webui to discover the dashboard-api URL without manual configuration
+
+**Step 3** (gptme/gptme): Add "Org" tab to gptme-webui
+- For each configured server, probe `GET /api/config` for `agent.urls.dashboard-api`
+- If present, render agent card by calling that server's gptme-dashboard API
+- Card renders: status, last activity, active tasks, service health
+- "Open dashboard" button links to `agent.urls.dashboard`
+
+**Step 4** (optional, later): Bearer token auth for cross-VM dashboard-api calls
+- `org.toml` can carry per-agent tokens as a fallback when gptme-server is unavailable
+
+### What We're NOT Doing
+
+- Not running gptme-dashboard on every agent that doesn't want fleet visibility
+- Not requiring a central coordinator/server — it's peer-to-peer (browser → each agent's API)
+- Not replacing gptme-webui's existing session/conversation view — the "Org" tab is additive
 
 ---
 
@@ -211,9 +321,11 @@ Remote `gptme-dashboard serve` instances need authentication. Proposed:
 | 5a | Service log viewer | ✅ merged |
 | 5b | Service restart actions with auth | ✅ merged |
 | 6a | Org view: standalone `--org` aggregator | ✅ merged |
-| 6b | Full-text search across workspace content | 🔄 PR #465 |
-| 6c | Activity heatmap (daily session counts) | 🔄 PR #466 |
-| 6d | gptme-webui Agent Links sidebar | 🔄 gptme/gptme#1657 |
+| 6b | Full-text search across workspace content | ✅ merged (#465) |
+| 6c | Activity heatmap (daily session counts) | ✅ merged (#466) |
+| 6d | gptme-webui Agent Links sidebar | ✅ merged (gptme/gptme#1657) |
+| 7a | UX: filter controls hidden until guidance section expanded | 🔄 PR #467 |
+| 7b | gptme-webui "Org" tab (fleet-wide view via discovery) | 📋 planned |
 
 ---
 
