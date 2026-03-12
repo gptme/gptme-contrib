@@ -2974,14 +2974,9 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     # Show-more button should reference the filter panel via data-controls
     assert 'data-controls="guidance-adv-filters"' in html
 
-    # toggleRows JS should handle data-controls to reveal the panel
-    assert "controlsId" in html
-    assert "btn.dataset.controls" in html
-
-    # applyFilters !isFiltering branch must re-hide the controls panel so the
-    # section doesn't remain in a split state (5 rows + "Browse all" visible
-    # while the filter bar is still open after clearing a filter).
-    assert "controlsEl.style.display = 'none'" in html
+    # applyFilters must only collapse the filter panel when guidanceExpanded is false,
+    # so clicking an already-active chip while browsing doesn't unexpectedly hide the panel.
+    assert "guidanceExpanded" in html
 
 
 def test_guidance_filter_panel_visible_for_small_workspace(

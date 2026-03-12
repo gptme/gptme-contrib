@@ -853,7 +853,11 @@ function toggleRows(btn, tableId) {
   const controlsId = btn.dataset.controls;
   if (controlsId) {
     const controls = document.getElementById(controlsId);
-    if (controls) controls.style.display = showing ? 'none' : '';
+    if (controls) {
+      controls.style.display = showing ? 'none' : '';
+      // Track whether the guidance section was explicitly expanded by the user
+      if (controlsId === 'guidance-adv-filters') guidanceExpanded = !showing;
+    }
   }
 }
 
@@ -868,6 +872,7 @@ const showMoreBtn = document.getElementById('guidance-show-more');
 let activeCategory = 'all';
 let activeKind = 'all';
 let activeSource = 'all';
+let guidanceExpanded = false;  // tracks explicit user expansion via "Browse all"
 
 function applyFilters() {
   const query = (searchBox ? searchBox.value : '').toLowerCase();
@@ -881,11 +886,15 @@ function applyFilters() {
       const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
       const noun = showMoreBtn.dataset.noun || 'items';
       showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
-      // Re-hide the controls panel since section is now collapsed again
-      const controlsId = showMoreBtn.dataset.controls;
-      if (controlsId) {
-        const controlsEl = document.getElementById(controlsId);
-        if (controlsEl) controlsEl.style.display = 'none';
+      // Re-hide the controls panel only if the user hasn't explicitly expanded it.
+      // Without this guard, clicking an already-active chip ("All" while "All" is selected)
+      // while browsing unexpectedly collapses the section.
+      if (!guidanceExpanded) {
+        const controlsId = showMoreBtn.dataset.controls;
+        if (controlsId) {
+          const controlsEl = document.getElementById(controlsId);
+          if (controlsEl) controlsEl.style.display = 'none';
+        }
       }
     }
   }
