@@ -2978,6 +2978,11 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     assert "controlsId" in html
     assert "btn.dataset.controls" in html
 
+    # applyFilters !isFiltering branch must re-hide the controls panel so the
+    # section doesn't remain in a split state (5 rows + "Browse all" visible
+    # while the filter bar is still open after clearing a filter).
+    assert "controlsEl.style.display = 'none'" in html
+
 
 # --- Atom feed tests ---
 

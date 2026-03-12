@@ -881,6 +881,12 @@ function applyFilters() {
       const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
       const noun = showMoreBtn.dataset.noun || 'items';
       showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
+      // Re-hide the controls panel since section is now collapsed again
+      const controlsId = showMoreBtn.dataset.controls;
+      if (controlsId) {
+        const controlsEl = document.getElementById(controlsId);
+        if (controlsEl) controlsEl.style.display = 'none';
+      }
     }
   }
 
