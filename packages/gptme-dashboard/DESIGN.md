@@ -310,7 +310,7 @@ The status/task/session fields are achievable with the existing `/api/*` endpoin
 - For each configured server, probe `GET /api/config` for `agent.urls.dashboard-api`
 - If present, fetch agent data via gptme-server's `/api/dashboard-proxy/*` route
 - Card renders: status, last activity, active tasks, service health
-- "Open dashboard" button links to `agent.urls.dashboard`
+- "Open dashboard" button links to `agent.urls.dashboard`; if `agent.urls.dashboard` is not set, the button is hidden and only the API-backed card fields (status, tasks, services) are shown
 
 **Step 4** (optional, later): Auth for dashboard-proxy route
 - gptme-server's existing auth mechanism covers the proxy route — no new config file needed
