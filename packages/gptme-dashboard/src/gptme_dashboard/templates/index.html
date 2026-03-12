@@ -917,7 +917,11 @@ function applyFilters() {
       row.style.display = match ? '' : 'none';
       row.classList.remove('collapsed-row');
     } else if (guidanceExpanded) {
-      // Section is explicitly expanded — show all rows, no re-collapse.
+      // Section is explicitly expanded — show all rows.
+      // Re-add collapsed-row class (stripped by the isFiltering branch) so that a
+      // subsequent "Show fewer" click can find these rows and hide them again.
+      idx++;
+      if (idx > 5) row.classList.add('collapsed-row');
       row.style.display = match ? '' : 'none';
     } else {
       // Restore collapse state (≤5 rows visible).

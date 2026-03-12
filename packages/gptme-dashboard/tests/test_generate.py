@@ -2983,6 +2983,9 @@ def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path
     # and the `guidanceExpanded` branch that sets button text to "Show fewer".
     assert "else if (guidanceExpanded)" in html
     assert "'Show fewer'" in html
+    # After a filter cycle, collapsed-row class must be restored in the guidanceExpanded
+    # branch so "Show fewer" can find rows to hide.
+    assert "classList.add('collapsed-row')" in html
 
 
 def test_guidance_filter_panel_visible_for_small_workspace(
