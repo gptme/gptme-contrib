@@ -220,27 +220,34 @@ Rather than a separate org config file, gptme-webui uses the servers it already 
 1. For each connected server, gptme-webui calls `GET /api/config` (from gptme-server)
 2. The response includes `[agent.urls]` from `gptme.toml`:
    ```json
-   { "agent": { "urls": { "dashboard": "...", "dashboard-api": "http://host:8042" } } }
+   { "agent": { "urls": { "dashboard": "...", "dashboard-api": "http://localhost:8042" } } }
    ```
-3. If `dashboard-api` is present, gptme-webui can query gptme-dashboard endpoints on that host
+3. If `dashboard-api` is present, gptme-server proxies `/api/dashboard-proxy/*` → `http://localhost:8042/*`
+4. gptme-webui fetches agent data via the gptme-server proxy (same-origin, no CORS/mixed-content)
 
 This is **discovery-based** — no separate org.toml or manual URL configuration. The connection
 between multi-host gptme-server and per-agent gptme-dashboard is automatic.
 
+**Why proxy through gptme-server instead of direct browser→dashboard-api calls:**
+- The browser would need to make cross-origin requests to `http://host:8042` (CORS headers required)
+- If gptme-webui is served over HTTPS, direct `http://` dashboard-api calls are blocked by
+  mixed-content browser policy
+- Proxying through gptme-server avoids both issues: the browser only ever talks to gptme-server
+  (already trusted, same-origin relative to gptme-webui), and gptme-server connects to
+  `http://localhost:8042` on the same host — a local call that has no TLS or CORS constraint
+
 ```
 gptme-webui (user's browser)
-    │
+    │  (all requests are same-origin — no CORS, no mixed-content)
     ├── Server: bob-vm:8140  (gptme-server)
-    │   GET /api/config → agent.urls.dashboard-api = "http://bob-vm:8042"
-    │   │
-    │   └── Dashboard API: bob-vm:8042  (gptme-dashboard serve)
-    │       GET /api/status, /api/sessions, /api/tasks, /api/services
+    │   GET /api/config → { agent.urls.dashboard-api: "http://localhost:8042" }
+    │   GET /api/dashboard-proxy/status  ──proxy──▶  localhost:8042/api/status
+    │   GET /api/dashboard-proxy/sessions ─proxy──▶  localhost:8042/api/sessions
     │
     └── Server: alice-vm:8140  (gptme-server)
-        GET /api/config → agent.urls.dashboard-api = "http://alice-vm:8042"
-        │
-        └── Dashboard API: alice-vm:8042  (gptme-dashboard serve)
-            GET /api/status, /api/sessions, /api/tasks, /api/services
+        GET /api/config → { agent.urls.dashboard-api: "http://localhost:8042" }
+        GET /api/dashboard-proxy/status  ──proxy──▶  localhost:8042/api/status
+        GET /api/dashboard-proxy/sessions ─proxy──▶  localhost:8042/api/sessions
 ```
 
 ### Agent Card (Fleet View)
@@ -295,18 +302,21 @@ This is achievable with the existing `/api/*` endpoints. The main new piece is t
 
 **Step 3** (gptme/gptme): Add "Org" tab to gptme-webui
 - For each configured server, probe `GET /api/config` for `agent.urls.dashboard-api`
-- If present, render agent card by calling that server's gptme-dashboard API
+- If present, fetch agent data via gptme-server's `/api/dashboard-proxy/*` route
 - Card renders: status, last activity, active tasks, service health
 - "Open dashboard" button links to `agent.urls.dashboard`
 
-**Step 4** (optional, later): Bearer token auth for cross-VM dashboard-api calls
-- `org.toml` can carry per-agent tokens as a fallback when gptme-server is unavailable
+**Step 4** (optional, later): Auth for dashboard-proxy route
+- gptme-server's existing auth mechanism covers the proxy route — no new config file needed
+- If gptme-server requires a bearer token, that same token authenticates dashboard-proxy calls
 
 ### What We're NOT Doing
 
 - Not running gptme-dashboard on every agent that doesn't want fleet visibility
-- Not requiring a central coordinator/server — it's peer-to-peer (browser → each agent's API)
+- Not requiring a central coordinator/server — each gptme-server proxies only its own agent's API
+- Not making the browser talk directly to dashboard-api (avoids CORS and mixed-content issues)
 - Not replacing gptme-webui's existing session/conversation view — the "Org" tab is additive
+- Not introducing a separate org.toml for discovery — gptme-webui's existing server list is enough
 
 ---
 
