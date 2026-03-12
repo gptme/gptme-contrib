@@ -2944,6 +2944,72 @@ def test_guidance_collapses_at_five_rows(workspace: Path, tmp_path: Path):
     assert "Browse all" in html
 
 
+def test_guidance_filter_panel_hidden_by_default(workspace: Path, tmp_path: Path):
+    """Filter controls for guidance section are hidden until the section is expanded."""
+    # Need >5 guidance items to trigger the show-more button with data-controls
+    for i in range(6):
+        skill_dir = workspace / "skills" / f"filter-skill-{i}"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            name: Filter Skill {i}
+            description: Skill {i} for filter panel test
+            ---
+            # Filter Skill {i}
+            Content.
+            """)
+        )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Advanced filter panel should be present but hidden
+    assert 'id="guidance-adv-filters"' in html
+    assert 'id="guidance-adv-filters" style="display:none"' in html
+
+    # Show-more button should reference the filter panel via data-controls
+    assert 'data-controls="guidance-adv-filters"' in html
+
+
+def test_guidance_filter_panel_visible_for_small_workspace(
+    tmp_path: Path,
+):
+    """Filter controls are always visible when guidance items ≤ 5 (no show-more button)."""
+    # Create a minimal workspace with only 3 guidance items (below collapse threshold)
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "SmallAgent"\n')
+    lessons_dir = tmp_path / "lessons" / "workflow"
+    lessons_dir.mkdir(parents=True)
+    for i in range(3):
+        (lessons_dir / f"lesson-{i}.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            match:
+              keywords: ["kw{i}"]
+            status: active
+            ---
+            # Lesson {i}
+            Content.
+            """)
+        )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(tmp_path, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Filter panel must exist
+    assert 'id="guidance-adv-filters"' in html
+    # Must NOT be hidden — no show-more button exists for ≤5 items
+    assert 'id="guidance-adv-filters" style="display:none"' not in html
+    # No show-more button (nothing to expand)
+    assert 'id="guidance-show-more"' not in html
+
+
 # --- Atom feed tests ---
 
 

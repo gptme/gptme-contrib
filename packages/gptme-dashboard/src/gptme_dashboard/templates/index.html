@@ -787,29 +787,32 @@ tr:hover { background: var(--accent-dim); }
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
-  <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
-  <!-- Kind chips (Lessons / Skills) -->
-  <div class="filter-row" id="kind-filters">
-    <button class="filter-btn active" data-kind="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
-    <button class="filter-btn" data-kind="lesson">Lessons <span class="chip-count">{{ stats.total_lessons }}</span></button>
-    <button class="filter-btn" data-kind="skill">Skills <span class="chip-count">{{ stats.total_skills }}</span></button>
+  <!-- Advanced filters: hidden until section is expanded (only when >5 items with a show-more button) -->
+  <div id="guidance-adv-filters"{% if guidance | length > 5 %} style="display:none"{% endif %}>
+    <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
+    <!-- Kind chips (Lessons / Skills) -->
+    <div class="filter-row" id="kind-filters">
+      <button class="filter-btn active" data-kind="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+      <button class="filter-btn" data-kind="lesson">Lessons <span class="chip-count">{{ stats.total_lessons }}</span></button>
+      <button class="filter-btn" data-kind="skill">Skills <span class="chip-count">{{ stats.total_skills }}</span></button>
+    </div>
+    <!-- Category chips -->
+    <div class="cat-chart" id="guidance-filters">
+      <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+      {% for cat, count in stats.lesson_categories.items() %}
+      <button class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></button>
+      {% endfor %}
+    </div>
+    {% if sources %}
+    <div class="filter-row" id="source-filters">
+      <button class="filter-btn active" data-source="all">All sources</button>
+      <button class="filter-btn" data-source="_local">Local</button>
+      {% for src in sources %}
+      <button class="filter-btn" data-source="{{ src }}">{{ src }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
   </div>
-  <!-- Category chips -->
-  <div class="cat-chart" id="guidance-filters">
-    <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
-    {% for cat, count in stats.lesson_categories.items() %}
-    <button class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></button>
-    {% endfor %}
-  </div>
-  {% if sources %}
-  <div class="filter-row" id="source-filters">
-    <button class="filter-btn active" data-source="all">All sources</button>
-    <button class="filter-btn" data-source="_local">Local</button>
-    {% for src in sources %}
-    <button class="filter-btn" data-source="{{ src }}">{{ src }}</button>
-    {% endfor %}
-  </div>
-  {% endif %}
   <table id="guidance-table">
     <thead>
       <tr><th>Title</th><th>Kind</th><th>Category</th><th>Status</th><th>Keywords</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr>
@@ -829,7 +832,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if guidance | length > 5 %}
-  <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
+  <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" data-controls="guidance-adv-filters" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
   {% endif %}
 </section>
 {% endblock %}
@@ -846,6 +849,17 @@ function toggleRows(btn, tableId) {
   const noun = btn.dataset.noun || 'items';
   const collapsedLabel = btn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
   btn.textContent = showing ? collapsedLabel : 'Show fewer';
+  // Toggle associated controls panel (e.g. filter bar)
+  const controlsId = btn.dataset.controls;
+  if (controlsId) {
+    // Track expanded state unconditionally so applyFilters stays in sync
+    // even if the DOM element is temporarily absent.
+    btn.dataset.expanded = showing ? '' : 'true';
+    const controls = document.getElementById(controlsId);
+    if (controls) {
+      controls.style.display = showing ? 'none' : '';
+    }
+  }
 }
 
 // Guidance (lessons + skills) filtering
@@ -863,15 +877,32 @@ let activeSource = 'all';
 function applyFilters() {
   const query = (searchBox ? searchBox.value : '').toLowerCase();
   const isFiltering = activeCategory !== 'all' || activeKind !== 'all' || activeSource !== 'all' || query;
+  // Read expanded state from DOM (set by toggleRows via btn.dataset.expanded)
+  const guidanceExpanded = showMoreBtn && showMoreBtn.dataset.expanded === 'true';
 
   // When filtering, show all rows (override collapse)
   if (showMoreBtn) {
     showMoreBtn.style.display = isFiltering ? 'none' : '';
     if (!isFiltering) {
-      // Reset button text when collapse is restored after a filter cycle
-      const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
-      const noun = showMoreBtn.dataset.noun || 'items';
-      showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
+      if (guidanceExpanded) {
+        // User explicitly expanded the section — keep it expanded: "Show fewer" label, controls visible.
+        showMoreBtn.textContent = 'Show fewer';
+        const controlsId = showMoreBtn.dataset.controls;
+        if (controlsId) {
+          const controlsEl = document.getElementById(controlsId);
+          if (controlsEl) controlsEl.style.display = '';
+        }
+      } else {
+        // Restore collapsed label and hide controls when user hasn't expanded.
+        const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
+        const noun = showMoreBtn.dataset.noun || 'items';
+        showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
+        const controlsId = showMoreBtn.dataset.controls;
+        if (controlsId) {
+          const controlsEl = document.getElementById(controlsId);
+          if (controlsEl) controlsEl.style.display = 'none';
+        }
+      }
     }
   }
 
@@ -892,8 +923,18 @@ function applyFilters() {
     if (isFiltering) {
       row.style.display = match ? '' : 'none';
       row.classList.remove('collapsed-row');
+    } else if (guidanceExpanded) {
+      // Section is explicitly expanded — show all rows.
+      // Re-add collapsed-row for rows >5 (stripped by isFiltering branch) so
+      // "Show fewer" can find and hide them. Defensively remove it for rows ≤5
+      // to keep state clean if ever entered via an unexpected path.
+      // Note: match is always true here (!isFiltering means all filters are at 'all').
+      idx++;
+      if (idx > 5) row.classList.add('collapsed-row');
+      else row.classList.remove('collapsed-row');
+      row.style.display = '';
     } else {
-      // Restore collapse state
+      // Restore collapse state (≤5 rows visible).
       idx++;
       if (idx > 5) {
         row.classList.add('collapsed-row');
