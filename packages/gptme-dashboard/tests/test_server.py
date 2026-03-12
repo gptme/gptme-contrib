@@ -703,6 +703,7 @@ def test_api_summaries_invalid_type_returns_400(tmp_path: Path):
 
 def test_api_activity_uses_session_store(client):
     """Test /api/activity uses SessionStore records when available."""
+    pytest.importorskip("gptme_sessions")
     resp = client.get("/api/activity?days=30")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -722,6 +723,7 @@ def test_api_activity_uses_session_store(client):
 
 def test_api_activity_ordered_oldest_first(client):
     """Test /api/activity returns days ordered oldest → newest."""
+    pytest.importorskip("gptme_sessions")
     resp = client.get("/api/activity?days=7")
     assert resp.status_code == 200
     dates = [e["date"] for e in resp.get_json()["days"]]
@@ -730,6 +732,7 @@ def test_api_activity_ordered_oldest_first(client):
 
 def test_api_activity_default_365_days(client):
     """Test /api/activity defaults to 365 days."""
+    pytest.importorskip("gptme_sessions")
     resp = client.get("/api/activity")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -738,6 +741,7 @@ def test_api_activity_default_365_days(client):
 
 def test_api_activity_days_clamped(client):
     """Test /api/activity clamps days to [7, 730]."""
+    pytest.importorskip("gptme_sessions")
     resp = client.get("/api/activity?days=9999")
     assert resp.status_code == 200
     assert len(resp.get_json()["days"]) == 730

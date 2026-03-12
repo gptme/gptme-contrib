@@ -1467,6 +1467,7 @@ def create_app(
             # exist at all — if the store exists but has no records in this window
             # we should return zeros, not mix in stale journal counts.
             store_dir = ws / "state" / "sessions"
+            date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
             store_result = _load_sessions_from_store(ws, days)
             if store_result is not None:
                 records, _store = store_result
@@ -1474,12 +1475,12 @@ def create_app(
                     ts = r.timestamp if hasattr(r, "timestamp") else r.get("timestamp", "")
                     if ts:
                         ts_str = str(ts)[:10]  # handles both str and datetime objects
-                        daily[ts_str] += 1
+                        if date_pat.match(ts_str):
+                            daily[ts_str] += 1
             elif not store_dir.exists() or not _store_importable:
                 # No SessionStore (or package not installed) — fall back to journal subdirectory scan.
                 journal_dir = ws / "journal"
                 if journal_dir.exists():
-                    date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
                     for d in journal_dir.iterdir():
                         if d.is_dir() and date_pat.match(d.name) and d.name >= start_date_str:
                             count = sum(1 for f in d.iterdir() if f.suffix == ".md")
