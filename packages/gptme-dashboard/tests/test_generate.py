@@ -3871,3 +3871,40 @@ def test_scan_tasks_depends_as_string_in_gptodo_path(tmp_path: Path):
     )
     tasks = {t["id"]: t for t in scan_tasks(tmp_path)}
     assert tasks["my-task"]["depends"] == ["blocker-task"]
+
+
+def test_task_detail_today_age_no_ago_suffix(workspace: Path, tmp_path: Path):
+    """age_label 'today' must not produce 'today ago' in the rendered page."""
+    from datetime import date
+
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    today = date.today().isoformat()
+    (tasks_dir / "new-task.md").write_text(
+        f"---\nstate: active\ncreated: {today}\n---\n# New Task\n"
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    page = (output / "tasks" / "new-task.html").read_text()
+
+    assert "today ago" not in page
+    assert "today" in page
+
+
+def test_task_detail_no_empty_meta_row_when_waiting_since_not_waiting(
+    workspace: Path, tmp_path: Path
+):
+    """task-meta-row must not render when waiting_since is set but state is not 'waiting'."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    # Task has waiting_since but state is 'backlog' (not 'waiting') and no created date
+    (tasks_dir / "odd-task.md").write_text(
+        "---\nstate: backlog\nwaiting_since: 2026-01-01\n---\n# Odd Task\n"
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    page = (output / "tasks" / "odd-task.html").read_text()
+
+    # The meta row div element must not appear (CSS class definition is always present in <style>)
+    assert '<div class="task-meta-row">' not in page
+    assert "Waiting since" not in page

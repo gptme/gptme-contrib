@@ -142,9 +142,9 @@ header h1 {
     {% if task.assigned_to %}<span class="tag">{{ task.assigned_to }}</span>{% endif %}
     {% if task.gh_url %}<a href="{{ task.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
-  {% if task.created or task.waiting_since %}
+  {% if task.created or (task.waiting_since and task.state == 'waiting') %}
   <div class="task-meta-row">
-    {% if task.created %}<span>Created <strong>{{ task.created }}</strong>{% if task.age_label %} · {{ task.age_label }} ago{% endif %}</span>{% endif %}
+    {% if task.created %}<span>Created <strong>{{ task.created }}</strong>{% if task.age_label %} · {% if task.age_label == 'today' %}today{% else %}{{ task.age_label }} ago{% endif %}{% endif %}</span>{% endif %}
     {% if task.waiting_since and task.state == 'waiting' %}<span>Waiting since <strong>{{ task.waiting_since }}</strong></span>{% endif %}
   </div>
   {% endif %}
