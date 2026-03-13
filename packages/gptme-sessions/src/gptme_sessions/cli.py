@@ -1399,6 +1399,165 @@ def judge(
             )
 
 
+@cli.command()
+@click.option(
+    "--journal-dir",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Path to journal directory (default: ./journal)",
+)
+@click.option("--last", type=int, default=20, help="Classify last N sessions (default: 20)")
+@click.option(
+    "--llm/--no-llm", default=True, help="Use LLM classifier (default: yes, keyword fallback)"
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--update-store",
+    is_flag=True,
+    help="Write categories back to session-records.jsonl (matching by session_id)",
+)
+@click.option(
+    "--judge",
+    "also_judge",
+    is_flag=True,
+    help="Also score goal-alignment in same LLM call (requires --llm)",
+)
+@click.option("--goals", default=None, help="Agent goals for judge scoring (with --judge)")
+@click.pass_context
+def classify(
+    ctx: click.Context,
+    journal_dir: Path | None,
+    last: int,
+    llm: bool,
+    as_json: bool,
+    update_store: bool,
+    also_judge: bool,
+    goals: str | None,
+) -> None:
+    """Classify sessions by work category (code, infrastructure, triage, etc.).
+
+    Reads autonomous session journal entries and classifies each into a
+    work category. Uses LLM classification by default with keyword fallback.
+
+    With --judge, also scores goal-alignment in the same LLM call (cheaper
+    than separate classify + judge calls).
+    """
+    from .classification import (
+        classify_by_keywords,
+        classify_by_llm,
+        judge_and_classify,
+    )
+
+    if also_judge and not llm:
+        raise click.UsageError("--judge requires --llm (cannot judge without LLM)")
+
+    if journal_dir is None:
+        journal_dir = Path.cwd() / "journal"
+    if not journal_dir.is_dir():
+        raise click.BadParameter(f"{journal_dir} is not a directory", param_hint="'--journal-dir'")
+
+    # Discover autonomous session entries
+    entries: list[Path] = []
+    for day_dir in sorted(journal_dir.iterdir()):
+        if day_dir.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
+            entries.extend(sorted(day_dir.glob("autonomous-session-*.md")))
+    if last <= 0:
+        raise click.UsageError("--last must be a positive integer")
+    entries = entries[-last:]
+
+    if not entries:
+        click.echo("No autonomous session journal entries found.", err=True)
+        return
+
+    click.echo(f"Classifying {len(entries)} session(s)...", err=True)
+
+    def extract_sid(p: Path) -> str:
+        m = re.match(r"autonomous-session-(\w+)", p.stem)
+        return m.group(1) if m else p.stem
+
+    results: list[dict] = []
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Skipping %s: %s", entry, e)
+            continue
+
+        sid = extract_sid(entry)
+        entry_date = entry.parent.name
+
+        try:
+            if also_judge:
+                classification, judge_result = judge_and_classify(text, goals=goals)
+                if classification is None:
+                    classification = classify_by_keywords(text)
+            elif llm:
+                classification = classify_by_llm(text)
+                if classification is None:
+                    classification = classify_by_keywords(text)
+                judge_result = None
+            else:
+                classification = classify_by_keywords(text)
+                judge_result = None
+
+            row: dict = {
+                "session_id": sid,
+                "date": entry_date,
+                **classification.to_dict(),
+                "journal_path": str(entry),
+            }
+            if judge_result:
+                row["llm_judge_score"] = judge_result["score"]
+                row["llm_judge_reason"] = judge_result["reason"]
+                row["llm_judge_model"] = judge_result["model"]
+
+            results.append(row)
+
+            if not as_json:
+                score_str = f"  {judge_result['score']:.2f}" if judge_result else ""
+                click.echo(
+                    f"  {sid:<12} {entry_date}  {classification.category:<16} "
+                    f"conf={classification.confidence:.2f}  "
+                    f"[{classification.classifier}]{score_str}"
+                )
+        except Exception as e:
+            logger.warning("Error processing %s: %s", entry, e)
+            continue
+
+    # Write categories back to store if requested
+    if update_store:
+        store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+        records = store.load_all()
+        cat_map = {r["session_id"]: r for r in results}
+        updated = 0
+        for rec in records:
+            if rec.session_id in cat_map:
+                r = cat_map[rec.session_id]
+                rec.category = r["category"]
+                if r.get("llm_judge_score") is not None:
+                    rec.llm_judge_score = r["llm_judge_score"]
+                    rec.llm_judge_reason = r["llm_judge_reason"]
+                    rec.llm_judge_model = r["llm_judge_model"]
+                updated += 1
+        if updated:
+            store.rewrite(records)
+            click.echo(f"\nUpdated {updated} record(s) in {store.path}", err=True)
+        else:
+            click.echo("\nNo matching records found in store to update.", err=True)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        # Summary stats
+        from collections import Counter
+
+        cats = Counter(r["category"] for r in results)
+        productive = sum(1 for r in results if r.get("productive"))
+        click.echo(f"\nClassified: {len(results)} sessions  ({productive} productive)")
+        for cat, count in cats.most_common():
+            click.echo(f"  {cat:<16} {count}")
+
+
 def main() -> int:
     """Entry point for console_scripts (backward-compatible wrapper).
 
