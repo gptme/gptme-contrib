@@ -9,7 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from gptme_dashboard.generate import (
+    _age_days,
+    _format_age,
+    _parse_date_field,
     _parse_toml,
+    _task_to_dict,
     collect_workspace_data,
     detect_github_url,
     detect_submodules,
@@ -3704,8 +3708,6 @@ def test_scan_tasks_includes_created_and_depends(tmp_path: Path):
 
 def test_format_age_output():
     """_format_age returns human-readable strings for a range of day counts."""
-    from gptme_dashboard.generate import _format_age
-
     assert _format_age(None) == ""
     assert _format_age(0) == "today"
     assert _format_age(1) == "1d"
@@ -3720,7 +3722,6 @@ def test_format_age_output():
 def test_parse_date_field_handles_types():
     """_parse_date_field normalises datetime/date/str to YYYY-MM-DD."""
     from datetime import date, datetime, timezone
-    from gptme_dashboard.generate import _parse_date_field
 
     assert _parse_date_field(None) == ""
     assert _parse_date_field("") == ""
@@ -3803,3 +3804,70 @@ def test_task_index_shows_age_hint(workspace: Path, tmp_path: Path):
     # Exact label varies but the task hint div should be present for it
     old_task_idx = html.index("Old Task")
     assert "task-hint" in html[old_task_idx : old_task_idx + 400]
+
+
+def test_parse_date_field_whitespace_returns_empty():
+    """_parse_date_field returns '' for a whitespace-only string (line 518)."""
+    # A non-empty but whitespace-only object that is truthy before strip
+    # — the "if s:" branch after strip evaluates to False.
+    assert _parse_date_field("   ") == ""
+
+
+def test_age_days_invalid_string_returns_none():
+    """_age_days returns None for an unparseable date string (lines 531-532)."""
+    assert _age_days("not-a-date") is None
+    assert _age_days("9999-99-99") is None  # OverflowError / ValueError
+
+
+def test_task_to_dict_extracts_new_metadata(tmp_path: Path):
+    """_task_to_dict (manual fallback) extracts created, depends, task_type, waiting_since."""
+    task_file = tmp_path / "my-task.md"
+    task_file.write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2025-06-01
+        task_type: project
+        waiting_since: 2025-07-01
+        depends: other-task
+        ---
+        # My Task
+        """)
+    )
+    result = _task_to_dict(task_file)
+    assert result is not None
+    assert result["created"] == "2025-06-01"
+    assert result["task_type"] == "project"
+    assert result["waiting_since"] == "2025-07-01"
+    assert result["depends"] == ["other-task"]  # str normalised to list
+    assert isinstance(result["age_days"], int)
+    assert result["age_days"] > 0
+    assert result["age_label"] != ""
+
+
+def test_task_to_dict_depends_non_list(tmp_path: Path):
+    """_task_to_dict normalises non-list/non-str depends to empty list (line 576-577)."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("---\nstate: backlog\ndepends: 42\n---\n# Task\n")
+    result = _task_to_dict(task_file)
+    assert result is not None
+    # int 42 is not str and not list → normalised to []
+    assert result["depends"] == []
+
+
+def test_scan_tasks_depends_as_string_in_gptodo_path(tmp_path: Path):
+    """scan_tasks normalises a string depends field to a list (gptodo path, line 648)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2026-01-01
+        depends: "blocker-task"
+        ---
+        # My Task
+        """)
+    )
+    tasks = {t["id"]: t for t in scan_tasks(tmp_path)}
+    assert tasks["my-task"]["depends"] == ["blocker-task"]
