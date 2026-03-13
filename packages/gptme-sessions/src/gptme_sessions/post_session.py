@@ -113,8 +113,10 @@ def post_session(
     end_commit:
         Git HEAD SHA *after* the session completed.
     deliverables:
-        Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``,
-        deliverables are extracted from the trajectory signals.
+        Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``
+        or empty, deliverables are extracted from the trajectory signals.
+        If non-empty, they are *merged* with trajectory-derived deliverables
+        (duplicates removed).
     journal_path:
         Path to the journal entry written during the session, if any.
     session_id:
