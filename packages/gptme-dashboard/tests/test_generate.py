@@ -3030,6 +3030,26 @@ def test_generate_dashboard_navigation_sidebar(workspace: Path, tmp_path: Path):
     assert "Quick navigation" in html
 
 
+def test_generate_dashboard_navigation_sidebar_journals_guard(workspace: Path, tmp_path: Path):
+    """#dynamic-journals nav link is absent from Live dashboard when static journals exist."""
+    # Add a journal entry so the template renders static journals
+    journal_day = workspace / "journal" / "2026-01-10"
+    journal_day.mkdir(parents=True)
+    (journal_day / "session.md").write_text("# Session\n\nWorking on the dashboard.\n")
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Static journals present: #dynamic-journals element and nav link should both be absent
+    assert 'href="#dynamic-journals"' not in html
+    assert 'id="dynamic-journals"' not in html
+    # But the static journals nav link should be present
+    assert 'href="#journals"' in html
+
+
 def test_generate_dashboard_navigation_sidebar_with_sessions(workspace: Path, tmp_path: Path):
     """Sidebar shows #sessions link under Workspace assets when static sessions are present."""
     output = tmp_path / "out"
