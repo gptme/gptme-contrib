@@ -3135,6 +3135,42 @@ def test_generate_dashboard_multiview_home_precedes_nav_groups(workspace: Path, 
     assert home_pos < group_pos, "nav-home must appear before the first nav group"
 
 
+def test_generate_dashboard_multiview_js_dynamic_clears_section_hidden(
+    workspace: Path, tmp_path: Path
+):
+    """DYNAMIC branch in showSection restores full overview (no section-hidden left behind)."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # The DYNAMIC branch must call classList.remove('section-hidden') on all sections
+    # (not just scroll) so that a prior focused view is cleared.
+    assert "DYNAMIC.has(id)" in html, "DYNAMIC.has(id) check missing"
+    assert "classList.remove('section-hidden')" in html, "section-hidden removal missing from JS"
+    # Verify the DYNAMIC branch now restores the full overview before scrolling
+    dynamic_idx = html.index("DYNAMIC.has(id)")
+    remove_idx = html.index("classList.remove('section-hidden')")
+    assert (
+        remove_idx < dynamic_idx + 300
+    ), "section-hidden removal should appear in the DYNAMIC branch, not only in the overview branch"
+
+
+def test_generate_dashboard_multiview_js_coupled_sections(workspace: Path, tmp_path: Path):
+    """COUPLED map keeps packages/plugins shown together in focused view."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert "COUPLED" in html, "COUPLED map missing from multi-view JS"
+    assert "'packages': 'plugins'" in html, "packages->plugins coupling missing"
+    assert "'plugins': 'packages'" in html, "plugins->packages coupling missing"
+    assert "coupled = COUPLED[id]" in html, "coupled variable assignment missing"
+
+
 # --- Atom feed tests ---
 
 

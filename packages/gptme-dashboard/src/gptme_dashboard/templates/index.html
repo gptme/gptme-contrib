@@ -1826,6 +1826,9 @@ document.addEventListener('keydown', function(e) {
     'service-logs', 'dynamic-journals'
   ]);
 
+  // Sections that must always be shown together (e.g. two-col layout siblings)
+  var COUPLED = { 'packages': 'plugins', 'plugins': 'packages' };
+
   function showSection(id) {
     var homeLink = document.getElementById('nav-home');
     var navLinks = document.querySelectorAll('.dashboard-nav-links a');
@@ -1839,7 +1842,10 @@ document.addEventListener('keydown', function(e) {
       if (homeLink) homeLink.classList.add('nav-active');
       sections.forEach(function (s) { s.classList.remove('section-hidden'); });
     } else if (DYNAMIC.has(id)) {
-      // Dynamic panel: scroll to it if visible (API-controlled)
+      // Dynamic panel: restore full overview so any hidden static sections are
+      // revealed, then scroll to the panel if it's currently visible.
+      if (homeLink) homeLink.classList.add('nav-active');
+      sections.forEach(function (s) { s.classList.remove('section-hidden'); });
       var el = document.getElementById(id);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
@@ -1848,9 +1854,10 @@ document.addEventListener('keydown', function(e) {
       if (homeLink) homeLink.classList.add('nav-active');
       sections.forEach(function (s) { s.classList.remove('section-hidden'); });
     } else {
-      // Focused view: show only the target static section
+      // Focused view: show only the target static section (+ any coupled siblings)
+      var coupled = COUPLED[id] || null;
       sections.forEach(function (s) {
-        if (s.id === id) {
+        if (s.id === id || s.id === coupled) {
           s.classList.remove('section-hidden');
         } else if (!DYNAMIC.has(s.id)) {
           s.classList.add('section-hidden');
