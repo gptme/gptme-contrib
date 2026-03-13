@@ -922,7 +922,7 @@ tr:hover { background: var(--accent-dim); }
         {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
         <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
         {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
-        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% else %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
+        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
       </div>
     </div>
@@ -939,6 +939,7 @@ tr:hover { background: var(--accent-dim); }
     <div class="dashboard-nav-group">
       <div class="dashboard-nav-group-title">Live dashboard</div>
       <div class="dashboard-nav-links">
+        <a href="#dynamic-journals"><span>Journal entries</span></a>
         <a href="#recent-sessions"><span>Recent sessions</span></a>
         <a href="#session-stats"><span>Session stats</span></a>
         <a href="#activity-heatmap"><span>Activity</span></a>
