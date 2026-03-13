@@ -358,7 +358,7 @@ tr:hover { background: var(--accent-dim); }
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.search-result-excerpt { font-size: 0.82rem; color: var(--text-dim); }
+.search-result-excerpt { font-size: 0.82rem; color: var(--text-dim); white-space: pre-line; }
 #search-footer {
   padding: 0.5rem 1rem;
   font-size: 0.75rem;
@@ -943,6 +943,12 @@ tr:hover { background: var(--accent-dim); }
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
+  {% if guidance | length > 5 %}
+  <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+    Reference catalog —
+    {% for cat, count in stats.lesson_categories.items() %}{{ cat }} ({{ count }}){% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
   <!-- Advanced filters: hidden until section is expanded (only when >5 items with a show-more button) -->
   <div id="guidance-adv-filters"{% if guidance | length > 5 %} style="display:none"{% endif %}>
     <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
@@ -1276,7 +1282,7 @@ async function loadRecentSessions(offset) {
       tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:1.5rem">'
         + (hasFilter
           ? 'No sessions match the selected filters.'
-          : 'No sessions found. Run <code>gptme-dashboard generate --sessions</code> or use the session store to populate.')
+          : 'No sessions found. For full session data install <code>pip install gptme-dashboard[sessions]</code>; basic session history from <code>~/.local/share/gptme/logs/</code> is auto-scanned.')
         + '</td></tr>';
       document.getElementById('sessions-pagination').style.display = 'none';
       return;

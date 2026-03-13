@@ -452,6 +452,7 @@ def test_workspace_no_sessions(tmp_path: Path):
     with (
         app.test_client() as c,
         unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+        unittest.mock.patch("gptme_dashboard.server._scan_gptme_logs_basic", return_value=[]),
     ):
         resp = c.get("/api/sessions/stats")
         assert resp.status_code == 200
@@ -463,6 +464,45 @@ def test_workspace_no_sessions(tmp_path: Path):
         data = resp.get_json()
         assert data["sessions"] == []
         assert data["total"] == 0
+
+
+def test_scan_gptme_logs_basic_no_logs_dir(tmp_path: Path):
+    """_scan_gptme_logs_basic returns empty list when logs dir does not exist."""
+    from gptme_dashboard.server import _scan_gptme_logs_basic
+    import unittest.mock
+
+    with unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=tmp_path):
+        result = _scan_gptme_logs_basic(tmp_path)
+    assert result == []
+
+
+def test_scan_gptme_logs_basic_with_sessions(tmp_path: Path):
+    """_scan_gptme_logs_basic returns sessions from gptme logs dir."""
+    from gptme_dashboard.server import _scan_gptme_logs_basic
+    from datetime import date
+
+    # Create a fake ~/.local/share/gptme/logs directory structure
+    fake_home = tmp_path / "home"
+    logs_dir = fake_home / ".local" / "share" / "gptme" / "logs"
+    logs_dir.mkdir(parents=True)
+
+    today = date.today().isoformat()
+    session_dir = logs_dir / f"{today}-test-session"
+    session_dir.mkdir()
+    (session_dir / "conversation.jsonl").write_text('{"role":"user","content":"hi"}\n')
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    import unittest.mock
+
+    with unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home):
+        result = _scan_gptme_logs_basic(workspace, days=30)
+
+    assert len(result) == 1
+    assert result[0]["harness"] == "gptme"
+    assert result[0]["outcome"] == "unknown"
+    assert result[0]["timestamp"].startswith(today)
 
 
 def test_api_journals_empty(client):
@@ -2567,3 +2607,38 @@ def test_api_search_indexes_submodule_lessons(tmp_path: Path):
         data = resp.get_json()
         assert data["total"] >= 1, "Submodule lessons should be indexed and searchable"
         assert any(r["type"] == "lesson" for r in data["results"])
+
+
+def test_make_excerpt_via_search(tmp_path: Path):
+    """Search result excerpts should not start with markdown heading markers."""
+    from gptme_dashboard.server import create_app
+
+    ws = tmp_path
+    (ws / "gptme.toml").write_text('[agent]\nname = "test"\n')
+    lessons_dir = ws / "lessons" / "patterns"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "my-lesson.md").write_text(
+        "---\nmatch:\n  keywords: [uniquexyz]\nstatus: active\n---\n"
+        "# My Lesson\n\n"
+        "## Rule\n"
+        "Do the uniquexyz thing.\n\n"
+        "## Context\n"
+        "When context arises.\n"
+    )
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=uniquexyz")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1
+        result = next(r for r in data["results"] if r.get("type") == "lesson")
+        excerpt = result.get("excerpt", "")
+        # Excerpt should not start with a heading marker
+        assert not excerpt.startswith("#"), f"Excerpt should not start with '#': {excerpt!r}"
+        # Should contain the Rule content
+        assert (
+            "uniquexyz" in excerpt or "Rule" in excerpt or excerpt == ""
+        ), f"Unexpected excerpt: {excerpt!r}"

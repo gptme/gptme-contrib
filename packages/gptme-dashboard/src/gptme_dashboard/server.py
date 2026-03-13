@@ -156,6 +156,80 @@ def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
     return card
 
 
+def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
+    """Lightweight session scan: reads gptme log dirs without gptme-sessions package.
+
+    Scans ``~/.local/share/gptme/logs/`` for session directories whose names
+    start with a valid ISO date.  Filters by workspace when a ``config.toml``
+    is present and readable.  Returns basic session dicts (timestamp, harness,
+    model, outcome) without signal extraction — used when gptme_sessions is
+    not installed.
+    """
+    logs_dir = Path.home() / ".local" / "share" / "gptme" / "logs"
+    if not logs_dir.is_dir():
+        return []
+
+    try:
+        import tomllib as _tl
+    except ImportError:
+        try:
+            import tomli as _tl  # type: ignore[import-not-found,no-redef]
+        except ImportError:
+            _tl = None  # type: ignore[assignment]
+
+    cutoff = date.today() - timedelta(days=days)
+    workspace_resolved = ws.resolve()
+    sessions: list[dict[str, Any]] = []
+
+    for session_dir in sorted(logs_dir.iterdir(), reverse=True):
+        if not session_dir.is_dir():
+            continue
+        try:
+            session_date = date.fromisoformat(session_dir.name[:10])
+        except ValueError:
+            continue
+        if session_date < cutoff:
+            break  # Dirs are date-sorted; stop early
+
+        # Filter by workspace when config.toml is readable
+        config_toml = session_dir / "config.toml"
+        if config_toml.exists() and _tl is not None:
+            try:
+                with open(config_toml, "rb") as _f:
+                    cfg = _tl.load(_f)
+                session_ws = cfg.get("workspace", "")
+                if session_ws:
+                    session_ws_path = Path(session_ws).resolve()
+                    if not (
+                        session_ws_path == workspace_resolved
+                        or session_ws_path.is_relative_to(workspace_resolved)
+                        or workspace_resolved.is_relative_to(session_ws_path)
+                    ):
+                        continue
+            except Exception:
+                pass  # Include session if config is unreadable
+
+        # Only include sessions with a conversation file
+        jsonl = session_dir / "conversation.jsonl"
+        if not jsonl.exists():
+            continue
+
+        sessions.append(
+            {
+                "timestamp": session_dir.name[:10] + "T00:00:00",
+                "harness": "gptme",
+                "model": "",
+                "category": "",
+                "outcome": "unknown",
+                "duration_seconds": 0,
+            }
+        )
+        if len(sessions) >= 100:
+            break
+
+    return sessions
+
+
 def create_app(
     workspace: Path, site_dir: Path | None = None, org_config: Path | None = None
 ) -> Any:
@@ -300,14 +374,25 @@ def create_app(
     _scan_cache: dict[str, Any] = {"data": None, "days": None, "expires": 0.0}
 
     def _get_scanned_sessions(ws: Path, days: int = 30) -> list[dict[str, Any]]:
-        """Fallback: discover sessions from gptme/CC log directories."""
+        """Fallback: discover sessions from gptme/CC log directories.
+
+        First tries ``scan_recent_sessions`` (requires gptme-sessions for full
+        signal extraction), then falls back to the lightweight
+        ``_scan_gptme_logs_basic`` scan that works without any extra packages.
+        """
         now = time.monotonic()
         if (
             _scan_cache["data"] is None
             or _scan_cache["days"] != days
             or now >= _scan_cache["expires"]
         ):
-            _scan_cache["data"] = list(_gen_mod.scan_recent_sessions(ws, days=days))
+            result = list(_gen_mod.scan_recent_sessions(ws, days=days))
+            if not result:
+                # gptme-sessions not installed or no sessions found via it;
+                # fall back to lightweight log scan so the sessions panel isn't
+                # always empty for users without gptme-sessions.
+                result = _scan_gptme_logs_basic(ws, days=days)
+            _scan_cache["data"] = result
             _scan_cache["days"] = days
             _scan_cache["expires"] = now + _SCAN_CACHE_TTL
         return _scan_cache["data"]  # type: ignore[no-any-return]
@@ -1226,6 +1311,44 @@ def create_app(
     _search_cache: dict[str, Any] = {"data": None, "expires": 0.0}
     _search_cache_lock = threading.Lock()
 
+    def _make_excerpt(body: str, max_chars: int = 300) -> str:
+        """Extract a readable plain-text excerpt from a markdown body.
+
+        Skips leading heading lines and blank lines, then returns a cleaned
+        plain-text representation of the first meaningful content paragraph.
+        Returns at most *max_chars* characters.
+        """
+        import re as _re
+
+        lines = body.splitlines()
+        # Skip leading heading lines, horizontal rules, and blank lines
+        start = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and not stripped.startswith(("#", "---", "```")):
+                start = i
+                break
+        useful_lines = lines[start : start + 20]  # cap to avoid huge bodies
+
+        cleaned: list[str] = []
+        for line in useful_lines:
+            # Strip markdown headings
+            line = _re.sub(r"^#+\s+", "", line)
+            # Strip fenced code block markers
+            if line.strip().startswith("```"):
+                continue
+            # Convert list markers to bullet characters for readability
+            line = _re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
+            line = _re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
+            # Strip bold/italic markers
+            line = _re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+            line = _re.sub(r"\*(.+?)\*", r"\1", line)
+            # Strip inline code backticks
+            line = _re.sub(r"`(.+?)`", r"\1", line)
+            cleaned.append(line)
+
+        return "\n".join(cleaned).strip()[:max_chars]
+
     def _build_search_index(ws: Path) -> "list[dict[str, Any]]":
         """Build a unified list of searchable items from the workspace."""
         items: list[dict[str, Any]] = []
@@ -1239,7 +1362,7 @@ def create_app(
                         "category": lesson.get("category", ""),
                         "keywords": lesson.get("all_keywords", []),
                         "tags": [],
-                        "excerpt": lesson.get("body", "")[:600],
+                        "excerpt": _make_excerpt(lesson.get("body", "")),
                         "url": "/" + lesson.get("page_url", ""),
                         "path": lesson.get("path", ""),
                     }
@@ -1254,9 +1377,9 @@ def create_app(
                         "category": skill.get("category", ""),
                         "keywords": skill.get("keywords", []),
                         "tags": skill.get("tags", []),
-                        "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[
-                            :600
-                        ],
+                        "excerpt": _make_excerpt(
+                            skill.get("description", "") + "\n" + skill.get("body", "")
+                        ),
                         "url": "/" + skill.get("page_url", ""),
                         "path": skill.get("path", ""),
                     }
