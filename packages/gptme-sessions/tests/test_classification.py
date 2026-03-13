@@ -262,6 +262,7 @@ class TestClassifyByKeywords:
         result = classify_by_keywords(SAMPLE_CODE_JOURNAL)
         # Code session with deliverables should be productive
         assert result.category == "code"
+        assert result.productive is True
 
     def test_returns_classification_result(self) -> None:
         result = classify_by_keywords(SAMPLE_CODE_JOURNAL)
@@ -270,6 +271,65 @@ class TestClassifyByKeywords:
         assert "category" in d
         assert "confidence" in d
         assert "classifier" in d
+
+    def test_productive_without_deliverables_section(self) -> None:
+        """Code session with no structured Deliverables/Summary is still productive."""
+        # This journal has strong code keywords but no "### Summary"/"### Deliverables"
+        text = """\
+## Session — fix auth regression
+
+### Work: Auth fix
+
+Opened PR gptme#500 to fix the authentication regression.
+Reviewed the failing tests and identified the root cause in the auth middleware.
+Pushed a fix commit. Tests all pass. CI is green. PR merged successfully.
+The session involved code changes to the authentication layer and test suite.
+Several files were modified including auth.py and test_auth.py.
+"""
+        result = classify_by_keywords(text)
+        assert result.category == "code"
+        assert result.productive is True
+
+    def test_secondary_category_not_equal_category_after_promotion(self) -> None:
+        """secondary_category must not equal category when promotion changes best_cat."""
+        # Give code a non-zero score so it appears as secondary
+        # Then make noop-soft win by having minimal content with a few code keywords
+        # but also deliverables so promotion fires
+        text = """\
+## Session — noop-soft with code deliverable
+
+noop no signal keywords here today
+
+### Deliverables
+- fix: resolved auth regression (PR #500)
+"""
+        result = classify_by_keywords(text)
+        # Either no secondary, or secondary != category
+        if result.secondary_category is not None:
+            assert result.secondary_category != result.category
+
+    def test_short_keyword_no_false_positive(self) -> None:
+        """'feat' keyword should not match 'features', 'fix' should not match 'prefix'."""
+        # Text has "features" and "prefix" but not the standalone words "feat"/"fix"
+        text = """\
+## Session — analysis
+
+Reviewed features of the new API.
+Used a prefix to namespace the calls.
+No actual feat or fix committed.
+"""
+        classify_by_keywords(text)  # standalone "feat"/"fix" at end do appear; just verify no crash
+        # The point is "features" and "prefix" alone shouldn't inflate the score.
+        # We verify by checking a text with ONLY the substring forms:
+        text_only_substrings = """\
+## Session
+
+Reviewed the features of the new API. Used a prefix to namespace calls.
+Explored the infrastructure configuration.
+"""
+        result2 = classify_by_keywords(text_only_substrings)
+        # Should be infrastructure (from "infrastructure configuration"), not boosted code
+        assert result2.category != "code" or result2.confidence < 0.5
 
 
 # ──────────────────────────────────────────────────────────────────────

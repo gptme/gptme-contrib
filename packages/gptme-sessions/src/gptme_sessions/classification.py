@@ -549,11 +549,19 @@ def _extract_sections(text: str) -> dict[str, str]:
 
 
 def _score_text(text: str, keywords: list[str]) -> float:
-    """Count keyword matches in text (case-insensitive)."""
+    """Count keyword matches in text (case-insensitive, whole-word).
+
+    Uses look-ahead/look-behind to avoid false positives from short tokens
+    (e.g. "feat" should not match "features", "fix" should not match "prefix").
+    """
     if not text or not keywords:
         return 0.0
     text_lower = text.lower()
-    return sum(1.0 for kw in keywords if kw.lower() in text_lower)
+    return sum(
+        1.0
+        for kw in keywords
+        if re.search(r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)", text_lower)
+    )
 
 
 def _extract_deliverables(text: str) -> list[str]:
@@ -696,9 +704,10 @@ def classify_by_keywords(
     else:
         confidence = 0.3
 
-    # Determine productivity
+    # Determine productivity — any non-noop category is productive by definition;
+    # deliverables presence is not required (sessions may lack a structured section).
     productive_cats = cat_names - {"noop-hard", "noop-soft"}
-    productive = best_cat in productive_cats and bool(deliverables)
+    productive = best_cat in productive_cats
 
     # Promotion: noop-soft with deliverables → infer real category
     if not productive and deliverables:
@@ -727,7 +736,7 @@ def classify_by_keywords(
         classifier="keyword",
         deliverables=deliverables,
         blockers=blockers,
-        secondary_category=secondary[0] if secondary else None,
+        secondary_category=secondary[0] if secondary and secondary[0] != best_cat else None,
     )
 
 
