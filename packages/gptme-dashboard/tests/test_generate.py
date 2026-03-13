@@ -2399,13 +2399,36 @@ def test_task_detail_renders_next_action(workspace: Path, tmp_path: Path):
         # Blocked Task
         """)
     )
-    generate(workspace, tmp_path)
-    task_page = (tmp_path / "tasks" / "my-task.html").read_text()
+    output = tmp_path / "site"
+    generate(workspace, output)
+    task_page = (output / "tasks" / "my-task.html").read_text()
     assert "Implement the feature" in task_page
     assert "Next:" in task_page
-    blocked_page = (tmp_path / "tasks" / "blocked.html").read_text()
+    blocked_page = (output / "tasks" / "blocked.html").read_text()
     assert "CI to pass" in blocked_page
     assert "Waiting for:" in blocked_page
+
+
+def test_task_detail_hides_stale_callouts_on_done(workspace: Path, tmp_path: Path):
+    """Completed tasks should not show stale next_action/waiting_for callouts."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "done-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: done
+        next_action: "Stale next action"
+        waiting_for: "Stale waiting for"
+        created: 2026-03-01
+        ---
+        # Done Task
+        """)
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    task_page = (output / "tasks" / "done-task.html").read_text()
+    assert "Stale next action" not in task_page
+    assert "Stale waiting for" not in task_page
 
 
 def test_generate_index_shows_task_hints(workspace: Path, tmp_path: Path):
@@ -2442,8 +2465,9 @@ def test_generate_index_shows_task_hints(workspace: Path, tmp_path: Path):
         # Waiting Task
         """)
     )
-    generate(workspace, tmp_path)
-    index = (tmp_path / "index.html").read_text()
+    output = tmp_path / "site"
+    generate(workspace, output)
+    index = (output / "index.html").read_text()
     assert "Write tests" in index
     assert "Await maintainer feedback" in index
     assert "Upstream merge" in index
