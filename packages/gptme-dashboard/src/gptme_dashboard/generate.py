@@ -511,11 +511,16 @@ def _parse_date_field(value: object) -> str:
         return value.date().isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    # String fallback — accept "2026-03-12" or "2026-03-12T00:00:00+00:00"
+    # String fallback — accept "2026-03-12" or "2026-03-12T00:00:00+00:00".
+    # Validate via date.fromisoformat so non-ISO strings return "" instead of
+    # silently passing garbage to the template.
     s = str(value).strip()
-    if s:
-        return s[:10]  # take the date portion only
-    return ""
+    candidate = s[:10]
+    try:
+        date.fromisoformat(candidate)
+        return candidate
+    except (ValueError, OverflowError):
+        return ""
 
 
 def _age_days(created_str: str) -> int | None:

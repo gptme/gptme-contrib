@@ -3730,6 +3730,9 @@ def test_parse_date_field_handles_types():
     assert _parse_date_field(date(2026, 3, 12)) == "2026-03-12"
     dt = datetime(2026, 3, 12, 10, 30, tzinfo=timezone.utc)
     assert _parse_date_field(dt) == "2026-03-12"
+    # Non-ISO strings must return "" (not silently return garbage to the template)
+    assert _parse_date_field("not-a-date") == ""
+    assert _parse_date_field("hello world") == ""
 
 
 def test_task_detail_shows_created_and_depends(workspace: Path, tmp_path: Path):
