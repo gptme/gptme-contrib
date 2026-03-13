@@ -3274,6 +3274,25 @@ def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path:
         )
 
 
+def test_generate_dashboard_content_nav_group_hidden_when_no_content(
+    workspace: Path, tmp_path: Path
+):
+    """Content nav group is omitted when workspace has no readme/tasks/sessions/journals/summaries."""
+    # Base workspace fixture has no readme, tasks, sessions, journals, or summaries
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # The "Content" nav group heading must not appear
+    assert (
+        "Content</h3>" not in html
+    ), "Content nav group should be hidden on a sparse workspace with no content data"
+    # The Workspace group is always present (packages/plugins/guidance are unconditional)
+    assert "Workspace</h3>" in html
+
+
 # --- Atom feed tests ---
 
 

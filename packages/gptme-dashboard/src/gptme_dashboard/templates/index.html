@@ -590,6 +590,7 @@ tr:hover { background: var(--accent-dim); }
     <h2>Quick navigation</h2>
     <a href="#" id="nav-home" class="nav-home-link" aria-label="Show all sections">⊞ All sections</a>
 
+    {% if readme_html or tasks or sessions or journals or summaries %}
     <div class="dashboard-nav-group">
       <h3 class="dashboard-nav-group-title">Content</h3>
       <div class="dashboard-nav-links">
@@ -599,6 +600,7 @@ tr:hover { background: var(--accent-dim); }
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
       </div>
     </div>
+    {% endif %}
 
     <div class="dashboard-nav-group">
       <h3 class="dashboard-nav-group-title">Workspace</h3>
