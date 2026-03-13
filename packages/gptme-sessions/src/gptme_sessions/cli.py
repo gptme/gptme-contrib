@@ -1492,7 +1492,7 @@ def classify(
                 if classification is None:
                     logger.warning(
                         "judge_and_classify failed for %s; falling back to keyword classification",
-                        entry.name,
+                        sid,
                     )
                     classification = classify_by_keywords(text)
             elif llm:

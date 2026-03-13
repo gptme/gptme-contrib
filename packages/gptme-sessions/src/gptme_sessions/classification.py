@@ -864,12 +864,12 @@ _JUDGE_CLASSIFY_SYSTEM = """\
 You are evaluating AND classifying an AI agent's work session.
 Return ONLY a JSON object with keys:
   "category" (string — one of the valid categories),
+  "confidence" (float 0.0-1.0 — how certain you are of the category),
   "score" (float 0.0-1.0 — strategic goal-alignment score),
   "reason" (string — 1-sentence scoring explanation),
   "productive" (boolean),
   "deliverables" (list of strings),
-  "blockers" (list of strings),
-  "confidence" (float 0.0-1.0 — how clearly the session fits the chosen category).
+  "blockers" (list of strings).
 Do not wrap in markdown code blocks."""
 
 _JUDGE_CLASSIFY_PROMPT = """\
@@ -894,7 +894,7 @@ _JUDGE_CLASSIFY_PROMPT = """\
 
 Key: ONE impactful deliverable > FIVE small deliverables.
 
-Return JSON: {{"category": "<cat>", "score": <float>, "reason": "<1 sentence>", "productive": <bool>, "deliverables": [...], "blockers": [...], "confidence": <float>}}"""
+Return JSON: {{"category": "<cat>", "confidence": <float>, "score": <float>, "reason": "<1 sentence>", "productive": <bool>, "deliverables": [...], "blockers": [...]}}"""
 
 
 def judge_and_classify(
@@ -908,8 +908,9 @@ def judge_and_classify(
     """Classify AND score a session in a single LLM call.
 
     Returns a tuple of (ClassificationResult, judge_dict) where judge_dict
-    has keys ``score``, ``reason``, ``model``. Either or both may be None
-    on failure.
+    has keys ``score``, ``reason``, ``model``. ClassificationResult may be None
+    when the LLM returns an unknown category; judge_dict is preserved in that
+    case so the caller can still use the score/reason. Both are None on exception.
     """
     try:
         import anthropic
