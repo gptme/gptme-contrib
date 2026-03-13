@@ -3214,7 +3214,7 @@ def test_generate_dashboard_live_nav_group_hidden_in_static_mode(workspace: Path
 
 
 def test_generate_dashboard_readme_section_label(workspace: Path, tmp_path: Path):
-    """#about section heading and nav link show 'README.md', not generic 'About'."""
+    """#about section shows 'Core Files' in nav with README.md in a collapsible details."""
     workspace_readme = workspace / "README.md"
     workspace_readme.write_text("# My Agent\n\nAgent description here.\n")
 
@@ -3224,12 +3224,15 @@ def test_generate_dashboard_readme_section_label(workspace: Path, tmp_path: Path
 
     html = (output / "index.html").read_text()
 
-    # Section heading must say README.md
+    # Section must exist and contain README.md in a <details>
     assert "README.md" in html, "README.md label missing from rendered output"
-    # Nav link must reference #about and show README.md label
+    assert "<details>" in html, "README.md should be in a collapsible <details>"
+    # Nav link must reference #about and show "Core Files" label
     about_nav_idx = html.index('href="#about"')
     nav_snippet = html[about_nav_idx : about_nav_idx + 60]
-    assert "README.md" in nav_snippet, f"Nav link for #about should show README.md: {nav_snippet!r}"
+    assert (
+        "Core Files" in nav_snippet
+    ), f"Nav link for #about should show Core Files: {nav_snippet!r}"
 
 
 def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path: Path):
@@ -3251,9 +3254,9 @@ def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path:
     html = (output / "index.html").read_text()
 
     # Static sections must appear in sidebar nav order:
-    # about → tasks → sessions → journals → summaries → packages → plugins → guidance
+    # tasks → sessions → journals → summaries → packages → plugins → guidance → about
     # (tasks/sessions may be absent but the rest are always present)
-    expected_order = ["about", "journals", "summaries", "packages", "plugins", "guidance"]
+    expected_order = ["journals", "summaries", "packages", "plugins", "guidance", "about"]
     positions = []
     for section_id in expected_order:
         marker = f'<section id="{section_id}"'
