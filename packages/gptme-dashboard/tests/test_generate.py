@@ -3208,8 +3208,7 @@ def test_generate_dashboard_live_nav_group_hidden_in_static_mode(workspace: Path
     # The element must have display:none
     snippet = html[live_idx : live_idx + 60]
     assert 'style="display:none"' in snippet, f"live-nav-group not hidden by default: {snippet!r}"
-    # initDynamic must reveal it when API connects
-    assert "live-nav-group" in html, "live-nav-group not referenced in JS"
+    # initDynamic must reference the group by JS variable name
     assert "liveGroup" in html, "liveGroup JS variable missing from initDynamic"
 
 
