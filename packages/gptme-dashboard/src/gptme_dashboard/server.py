@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
 import platform
 import re
 import subprocess
@@ -156,16 +157,28 @@ def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
     return card
 
 
+def _gptme_logs_dir() -> Path:
+    """Return the platform-appropriate gptme logs directory.
+
+    Respects ``XDG_DATA_HOME`` on Linux/other and falls back to
+    ``~/.local/share`` (XDG default).  On macOS the XDG env var is also
+    honoured when set; otherwise returns the XDG default path which is where
+    gptme writes on macOS too (gptme uses platformdirs internally).
+    """
+    xdg_data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return xdg_data_home / "gptme" / "logs"
+
+
 def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
     """Lightweight session scan: reads gptme log dirs without gptme-sessions package.
 
-    Scans ``~/.local/share/gptme/logs/`` for session directories whose names
-    start with a valid ISO date.  Filters by workspace when a ``config.toml``
-    is present and readable.  Returns basic session dicts (timestamp, harness,
-    model, outcome) without signal extraction — used when gptme_sessions is
-    not installed.
+    Scans the gptme logs directory (via ``_gptme_logs_dir()``) for session
+    directories whose names start with a valid ISO date.  Filters by workspace
+    when a ``config.toml`` is present and readable.  Returns basic session
+    dicts (timestamp, harness, model, outcome) without signal extraction —
+    used when gptme_sessions is not installed.
     """
-    logs_dir = Path.home() / ".local" / "share" / "gptme" / "logs"
+    logs_dir = _gptme_logs_dir()
     if not logs_dir.is_dir():
         return []
 

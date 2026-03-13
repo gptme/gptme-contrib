@@ -610,17 +610,16 @@ def test_scan_gptme_logs_basic_out_of_range_does_not_break_early(tmp_path: Path)
     in_range = (today - timedelta(days=5)).isoformat()
     out_of_range = (today - timedelta(days=60)).isoformat()
 
-    # Set up three dirs so that a `break` on out-of-range would prematurely stop scanning.
-    # In reverse lexicographic order:
-    #   1. "zz-notes"           (non-date, sorts after digits; skipped via continue/ValueError)
-    #   2. {out_of_range}-...   (old date, outside 30-day window)
-    #   3. {in_range}-session   (recent, should be found)
-    # A `break` when session_date < cutoff would fire at step 2 and never reach step 3.
-    # A `continue` at step 2 correctly proceeds to step 3 and finds the in-range session.
+    # Two date-prefixed dirs (in_range sorts before out_of_range in reverse because
+    # it is more recent) plus one non-date dir.  The non-date dir tests that ValueError
+    # is handled gracefully.  Note: with ISO-date prefixes a `break` on out_of_range
+    # cannot skip in_range because newer dates always appear first in reverse sort —
+    # this test verifies that out-of-range sessions are *excluded*, not that `continue`
+    # is used rather than `break` (which cannot be distinguished with valid ISO dates).
     for name, has_conv in [
         (f"{in_range}-session", True),
         (f"{out_of_range}-old-session", False),
-        ("zz-notes", False),  # non-date dir that sorts first in reverse; forces full traversal
+        ("zz-notes", False),  # non-date dir; verifies ValueError is handled with continue
     ]:
         d = logs_dir / name
         d.mkdir()
