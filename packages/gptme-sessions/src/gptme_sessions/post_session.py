@@ -113,8 +113,10 @@ def post_session(
     end_commit:
         Git HEAD SHA *after* the session completed.
     deliverables:
-        Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``,
-        deliverables are extracted from the trajectory signals.
+        Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``
+        or empty, deliverables are extracted from the trajectory signals.
+        If non-empty, they are *merged* with trajectory-derived deliverables
+        (duplicates removed).
     journal_path:
         Path to the journal entry written during the session, if any.
     session_id:
@@ -154,12 +156,16 @@ def post_session(
             logger.warning("Signal extraction from %s failed: %s", trajectory_path, e)
 
     # --- Resolve deliverables ---
-    if deliverables is None:
-        if signals is not None:
-            # Trajectory deliverables: commit messages + file write paths
-            deliverables = signals.get("deliverables", [])
-        else:
-            deliverables = []
+    # Merge shell-provided deliverables (bare SHAs) with trajectory-derived
+    # ones (commit messages, file write paths).  The shell always passes a
+    # list (possibly empty), so we treat empty the same as None.
+    traj_deliverables = signals.get("deliverables", []) if signals else []
+    if not deliverables:
+        deliverables = traj_deliverables
+    elif traj_deliverables:
+        # Add trajectory items not already present (e.g. file write paths)
+        existing = set(deliverables)
+        deliverables = deliverables + [d for d in traj_deliverables if d not in existing]
 
     # --- Determine outcome ---
     # Priority order (highest → lowest):
@@ -210,6 +216,8 @@ def post_session(
         record_kwargs["category"] = actual_category
     if recommended_category is not None:
         record_kwargs["recommended_category"] = recommended_category
+    if trajectory_path is not None:
+        record_kwargs["trajectory_path"] = str(trajectory_path)
     if journal_path is not None:
         record_kwargs["journal_path"] = journal_path
     if session_id is not None:

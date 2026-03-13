@@ -2022,8 +2022,8 @@ def test_post_session_partial_commit_pair_timeout_is_noop(tmp_path: Path):
     assert result.record.outcome == "noop"
 
 
-def test_post_session_explicit_deliverables_override(tmp_path: Path):
-    """Explicit deliverables take priority over trajectory deliverables."""
+def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Path):
+    """Explicit deliverables are merged with trajectory deliverables."""
     import json as _json
 
     traj = tmp_path / "session.jsonl"
@@ -2061,7 +2061,64 @@ def test_post_session_explicit_deliverables_override(tmp_path: Path):
         trajectory_path=traj,
         deliverables=explicit,
     )
-    assert result.record.deliverables == explicit
+    # Shell-provided SHAs merged with trajectory file paths
+    assert result.record.deliverables == ["abc123def456", "/tmp/foo.py"]
+
+
+def test_post_session_empty_deliverables_uses_trajectory(tmp_path: Path):
+    """Empty deliverables list (from shell with no commits) falls through to trajectory."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Write",
+                        "input": {"file_path": "/tmp/bar.py", "content": "y"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    # Shell passes [] when no commits — trajectory deliverables should be used
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        deliverables=[],
+    )
+    assert result.record.deliverables == ["/tmp/bar.py"]
+
+
+def test_post_session_trajectory_path_stored(tmp_path: Path):
+    """trajectory_path is stored on the SessionRecord when provided."""
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    traj = tmp_path / "session.jsonl"
+    traj.write_text("")  # empty trajectory (no signals)
+
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert result.record.trajectory_path == str(traj)
 
 
 def test_post_session_deliverables_from_trajectory(tmp_path: Path):
