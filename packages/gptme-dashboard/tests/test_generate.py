@@ -3076,6 +3076,19 @@ def test_generate_dashboard_navigation_sidebar_with_sessions(workspace: Path, tm
     assert 'href="#recent-sessions"' in html
 
 
+def test_generate_dashboard_navigation_sidebar_dom_order(workspace: Path, tmp_path: Path):
+    """Sidebar <aside> precedes <div class="dashboard-main"> in DOM for accessible tab order."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    aside_pos = html.index('class="dashboard-nav"')
+    main_pos = html.index('class="dashboard-main"')
+    assert aside_pos < main_pos, "aside.dashboard-nav must precede div.dashboard-main in DOM"
+
+
 # --- Atom feed tests ---
 
 

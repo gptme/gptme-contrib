@@ -55,6 +55,7 @@ header p { color: var(--text-dim); margin-top: 0.25rem; }
   min-width: 0;
 }
 .dashboard-nav {
+  order: 2;
   position: sticky;
   top: 1.5rem;
   background: var(--surface);
@@ -426,7 +427,7 @@ tr:hover { background: var(--accent-dim); }
   }
   .dashboard-nav {
     position: static;
-    order: -1;
+    order: unset;
   }
   .dashboard-nav-links {
     display: grid;
@@ -561,6 +562,43 @@ tr:hover { background: var(--accent-dim); }
 </div>
 
 <div class="dashboard-layout">
+  <aside class="dashboard-nav" aria-label="Dashboard navigation">
+    <h2>Quick navigation</h2>
+
+    <div class="dashboard-nav-group">
+      <div class="dashboard-nav-group-title">Overview</div>
+      <div class="dashboard-nav-links">
+        {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
+        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
+        {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
+        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
+        {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
+      </div>
+    </div>
+
+    <div class="dashboard-nav-group">
+      <div class="dashboard-nav-group-title">Workspace assets</div>
+      <div class="dashboard-nav-links">
+        <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
+        <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
+        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
+      </div>
+    </div>
+
+    <div class="dashboard-nav-group">
+      <div class="dashboard-nav-group-title">Live dashboard</div>
+      <div class="dashboard-nav-links">
+        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
+        <a href="#recent-sessions"><span>Recent sessions</span></a>
+        <a href="#session-stats"><span>Session stats</span></a>
+        <a href="#activity-heatmap"><span>Activity</span></a>
+        <a href="#agent-services"><span>Services</span></a>
+        <a href="#agent-schedule"><span>Schedule</span></a>
+        <a href="#service-health"><span>Service health</span></a>
+        <a href="#service-logs"><span>Service logs</span></a>
+      </div>
+    </div>
+  </aside>
   <div class="dashboard-main">
 {% if readme_html %}
 <!-- About (README) -->
@@ -912,44 +950,6 @@ tr:hover { background: var(--accent-dim); }
   {% endif %}
 </section>
   </div>
-
-  <aside class="dashboard-nav" aria-label="Dashboard navigation">
-    <h2>Quick navigation</h2>
-
-    <div class="dashboard-nav-group">
-      <div class="dashboard-nav-group-title">Overview</div>
-      <div class="dashboard-nav-links">
-        {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
-        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
-        {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
-        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
-        {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
-      </div>
-    </div>
-
-    <div class="dashboard-nav-group">
-      <div class="dashboard-nav-group-title">Workspace assets</div>
-      <div class="dashboard-nav-links">
-        <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
-        <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
-        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
-      </div>
-    </div>
-
-    <div class="dashboard-nav-group">
-      <div class="dashboard-nav-group-title">Live dashboard</div>
-      <div class="dashboard-nav-links">
-        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
-        <a href="#recent-sessions"><span>Recent sessions</span></a>
-        <a href="#session-stats"><span>Session stats</span></a>
-        <a href="#activity-heatmap"><span>Activity</span></a>
-        <a href="#agent-services"><span>Services</span></a>
-        <a href="#agent-schedule"><span>Schedule</span></a>
-        <a href="#service-health"><span>Service health</span></a>
-        <a href="#service-logs"><span>Service logs</span></a>
-      </div>
-    </div>
-  </aside>
 </div>
 {% endblock %}
 
