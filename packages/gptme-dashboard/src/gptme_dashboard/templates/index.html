@@ -579,7 +579,7 @@ tr:hover { background: var(--accent-dim); }
   <aside class="dashboard-nav" aria-label="Dashboard navigation">
     <h2>Quick navigation</h2>
 
-    {% if readme_html or tasks or sessions or journals or summaries %}
+    {% if tasks or sessions or journals or summaries or readme_html or core_files %}
     <div class="dashboard-nav-group">
       <h3 class="dashboard-nav-group-title">Content</h3>
       <div class="dashboard-nav-links">
@@ -587,7 +587,7 @@ tr:hover { background: var(--accent-dim); }
         {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
         {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
-        {% if readme_html or core_files %}<a href="#about"><span>Core Files</span><span class="nav-count">{{ core_files | length }}</span></a>{% endif %}
+        {% if readme_html or core_files %}<a href="#about"><span>Core Files</span>{% if core_files %}<span class="nav-count">{{ core_files | length }}</span>{% endif %}</a>{% endif %}
       </div>
     </div>
     {% endif %}
@@ -882,7 +882,7 @@ tr:hover { background: var(--accent-dim); }
     {% for f in core_files %}
       <tr>
         <td><code>{{ f }}</code></td>
-        {% if gh_repo_url %}<td><a href="{{ gh_repo_url }}/blob/master/{{ f }}" class="gh-link">src</a></td>{% endif %}
+        {% if gh_repo_url %}<td><a href="{{ gh_repo_url }}/blob/HEAD/{{ f }}" class="gh-link">src</a></td>{% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -1887,7 +1887,7 @@ document.addEventListener('keydown', function(e) {
       navLinks.forEach(function (a) {
         var id = a.getAttribute('href').slice(1);
         var el = document.getElementById(id);
-        if (el && el.getBoundingClientRect().top <= 120) best = id;
+        if (el && el.offsetParent !== null && el.getBoundingClientRect().top <= 120) best = id;
       });
       if (best) setActive(best);
     });
