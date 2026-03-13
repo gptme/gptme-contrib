@@ -943,7 +943,7 @@ tr:hover { background: var(--accent-dim); }
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
   <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
-  {% if guidance | length > 5 %}
+  {% if guidance | length > 5 and stats.lesson_categories %}
   <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
     Reference catalog —
     {% for cat, count in stats.lesson_categories.items() %}{{ cat }} ({{ count }}){% if not loop.last %}, {% endif %}{% endfor %}

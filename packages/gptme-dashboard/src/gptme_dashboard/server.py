@@ -1318,8 +1318,6 @@ def create_app(
         plain-text representation of the first meaningful content paragraph.
         Returns at most *max_chars* characters.
         """
-        import re as _re
-
         lines = body.splitlines()
         # Skip leading heading lines, horizontal rules, and blank lines
         start = 0
@@ -1333,18 +1331,18 @@ def create_app(
         cleaned: list[str] = []
         for line in useful_lines:
             # Strip markdown headings
-            line = _re.sub(r"^#+\s+", "", line)
+            line = re.sub(r"^#+\s+", "", line)
             # Strip fenced code block markers
             if line.strip().startswith("```"):
                 continue
             # Convert list markers to bullet characters for readability
-            line = _re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
-            line = _re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
+            line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
+            line = re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
             # Strip bold/italic markers
-            line = _re.sub(r"\*\*(.+?)\*\*", r"\1", line)
-            line = _re.sub(r"\*(.+?)\*", r"\1", line)
+            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+            line = re.sub(r"\*(.+?)\*", r"\1", line)
             # Strip inline code backticks
-            line = _re.sub(r"`(.+?)`", r"\1", line)
+            line = re.sub(r"`(.+?)`", r"\1", line)
             cleaned.append(line)
 
         return "\n".join(cleaned).strip()[:max_chars]
