@@ -3232,6 +3232,45 @@ def test_generate_dashboard_readme_section_label(workspace: Path, tmp_path: Path
     assert "README.md" in nav_snippet, f"Nav link for #about should show README.md: {nav_snippet!r}"
 
 
+def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path: Path):
+    """Content sections appear in the same order as sidebar navigation links."""
+    # Create enough content so all sections render
+    workspace_readme = workspace / "README.md"
+    workspace_readme.write_text("# Agent\n\nDescription.\n")
+    (workspace / "journal" / "2026-03-13").mkdir(parents=True)
+    (workspace / "journal" / "2026-03-13" / "session.md").write_text("## Work\nDid things.\n")
+    (workspace / "knowledge" / "summaries" / "weekly").mkdir(parents=True, exist_ok=True)
+    (workspace / "knowledge" / "summaries" / "weekly" / "2026-W11.md").write_text(
+        "# Weekly Summary\nStuff happened this week.\n"
+    )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Static sections must appear in sidebar nav order:
+    # about → tasks → sessions → journals → summaries → packages → plugins → guidance
+    # (tasks/sessions may be absent but the rest are always present)
+    expected_order = ["about", "journals", "summaries", "packages", "plugins", "guidance"]
+    positions = []
+    for section_id in expected_order:
+        marker = f'<section id="{section_id}"'
+        try:
+            positions.append((section_id, html.index(marker)))
+        except ValueError:
+            pass  # section not rendered (conditional)
+
+    for i in range(len(positions) - 1):
+        current_id, current_pos = positions[i]
+        next_id, next_pos = positions[i + 1]
+        assert current_pos < next_pos, (
+            f"Section #{current_id} (pos {current_pos}) must appear before "
+            f"#{next_id} (pos {next_pos}) to match sidebar nav order"
+        )
+
+
 # --- Atom feed tests ---
 
 
