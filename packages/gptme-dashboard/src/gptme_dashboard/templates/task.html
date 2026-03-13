@@ -108,6 +108,21 @@ header h1 {
   font-size: 0.9rem;
   color: var(--text-dim);
 }
+.task-meta-row {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+}
+.task-meta-row span strong { color: var(--text); }
+.depends-list {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+.depends-list a { color: var(--accent); }
 {% endblock %}
 
 {% block content %}
@@ -122,12 +137,24 @@ header h1 {
   <div class="meta">
     <span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span>
     {% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}
+    {% if task.task_type %}<span class="tag">{{ task.task_type }}</span>{% endif %}
     {% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}
     {% if task.assigned_to %}<span class="tag">{{ task.assigned_to }}</span>{% endif %}
     {% if task.gh_url %}<a href="{{ task.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
+  {% if task.created or (task.waiting_since and task.state == 'waiting') %}
+  <div class="task-meta-row">
+    {% if task.created %}<span>Created <strong>{{ task.created }}</strong>{% if task.age_label %} · {% if task.age_label == 'today' %}today{% else %}{{ task.age_label }} ago{% endif %}{% endif %}</span>{% endif %}
+    {% if task.waiting_since and task.state == 'waiting' %}<span>Waiting since <strong>{{ task.waiting_since }}</strong></span>{% endif %}
+  </div>
+  {% endif %}
   {% if task.state in ('active', 'ready_for_review') and task.next_action %}<p class="task-callout">→ <strong>Next:</strong> {{ task.next_action }}</p>{% endif %}
   {% if task.state == 'waiting' and task.waiting_for %}<p class="task-callout">⏳ <strong>Waiting for:</strong> {{ task.waiting_for }}</p>{% endif %}
+  {% if task.depends %}
+  <p class="depends-list">Depends on:
+    {% for dep in task.depends %}<a href="{{ root_prefix }}tasks/{{ dep }}.html">{{ dep }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
 </header>
 
 <div class="content">

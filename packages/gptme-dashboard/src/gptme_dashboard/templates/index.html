@@ -769,6 +769,7 @@ tr:hover { background: var(--accent-dim); }
           <strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong>
           {% if task.state in ('active', 'ready_for_review') and task.next_action %}<div class="task-hint">→ {{ task.next_action }}</div>{% endif %}
           {% if task.state == 'waiting' and task.waiting_for %}<div class="task-hint">⏳ {{ task.waiting_for }}</div>{% endif %}
+          {% if task.age_label %}<div class="task-hint">{{ task.age_label }}</div>{% endif %}
         </td>
         <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
         <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>

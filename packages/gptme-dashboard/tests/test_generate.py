@@ -9,7 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from gptme_dashboard.generate import (
+    _age_days,
+    _format_age,
+    _parse_date_field,
     _parse_toml,
+    _task_to_dict,
     collect_workspace_data,
     detect_github_url,
     detect_submodules,
@@ -3638,3 +3642,272 @@ def test_generate_task_rows_have_data_state(workspace: Path, tmp_path: Path):
 
     html = (output / "index.html").read_text()
     assert '<tr data-state="active"' in html
+
+
+# ─── Task metadata: created, depends, task_type, waiting_since, age ───────────
+
+
+def test_scan_tasks_includes_created_and_depends(tmp_path: Path):
+    """scan_tasks extracts created, waiting_since, task_type, depends, age_days, age_label."""
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "rich-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2020-01-01
+        task_type: project
+        depends:
+          - other-task
+          - another-task
+        ---
+        # Rich Task
+        """)
+    )
+    (tasks_dir / "waiting-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: waiting
+        created: 2026-01-15
+        waiting_since: 2026-02-01
+        ---
+        # Waiting Task
+        """)
+    )
+    (tasks_dir / "bare-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: backlog
+        ---
+        # Bare Task
+        """)
+    )
+    tasks = {t["id"]: t for t in scan_tasks(tmp_path)}
+
+    rich = tasks["rich-task"]
+    assert rich["created"] == "2020-01-01"
+    assert rich["task_type"] == "project"
+    assert rich["depends"] == ["other-task", "another-task"]
+    # age_days should be a large positive number (created in 2020)
+    assert isinstance(rich["age_days"], int)
+    assert rich["age_days"] > 365 * 5
+    assert rich["age_label"] != ""
+
+    waiting = tasks["waiting-task"]
+    assert waiting["waiting_since"] == "2026-02-01"
+    assert waiting["created"] == "2026-01-15"
+
+    bare = tasks["bare-task"]
+    assert bare["created"] == ""
+    assert bare["depends"] == []
+    assert bare["task_type"] == ""
+    assert bare["age_days"] is None
+    assert bare["age_label"] == ""
+
+
+def test_format_age_output():
+    """_format_age returns human-readable strings for a range of day counts."""
+    assert _format_age(None) == ""
+    assert _format_age(0) == "today"
+    assert _format_age(1) == "1d"
+    assert _format_age(7) == "7d"
+    assert _format_age(14) == "2w"
+    assert _format_age(30) == "4w"
+    assert _format_age(60) == "2mo"
+    assert _format_age(365) == "1y"
+    assert _format_age(-1) == ""
+
+
+def test_parse_date_field_handles_types():
+    """_parse_date_field normalises datetime/date/str to YYYY-MM-DD."""
+    from datetime import date, datetime, timezone
+
+    assert _parse_date_field(None) == ""
+    assert _parse_date_field("") == ""
+    assert _parse_date_field("2026-03-12") == "2026-03-12"
+    assert _parse_date_field("2026-03-12T10:30:00+02:00") == "2026-03-12"
+    assert _parse_date_field(date(2026, 3, 12)) == "2026-03-12"
+    dt = datetime(2026, 3, 12, 10, 30, tzinfo=timezone.utc)
+    assert _parse_date_field(dt) == "2026-03-12"
+    # Non-ISO strings must return "" (not silently return garbage to the template)
+    assert _parse_date_field("not-a-date") == ""
+    assert _parse_date_field("hello world") == ""
+
+
+def test_task_detail_shows_created_and_depends(workspace: Path, tmp_path: Path):
+    """Task detail page renders created date, age, depends list, and task_type."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2025-01-01
+        task_type: project
+        depends:
+          - other-task
+        ---
+        # My Task
+
+        Body here.
+        """)
+    )
+    # Also create the dependency page so the link target exists
+    (tasks_dir / "other-task.md").write_text(
+        "---\nstate: backlog\ncreated: 2025-01-01\n---\n# Other Task\n"
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    page = (output / "tasks" / "my-task.html").read_text()
+
+    assert "2025-01-01" in page  # created date
+    assert "ago" in page  # age label
+    assert "project" in page  # task_type badge
+    assert "other-task" in page  # depends link text
+    assert "Depends on" in page
+
+
+def test_task_detail_shows_waiting_since(workspace: Path, tmp_path: Path):
+    """Task detail page shows waiting_since when task is in waiting state."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "blocked.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: waiting
+        created: 2026-02-01
+        waiting_since: 2026-02-15
+        waiting_for: "Upstream merge"
+        ---
+        # Blocked Task
+        """)
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    page = (output / "tasks" / "blocked.html").read_text()
+
+    assert "2026-02-15" in page  # waiting_since
+    assert "Waiting since" in page
+
+
+def test_task_index_shows_age_hint(workspace: Path, tmp_path: Path):
+    """Index task table shows age hint for tasks with a created date."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "old-task.md").write_text(
+        "---\nstate: active\ncreated: 2020-01-01\n---\n# Old Task\n"
+    )
+    (tasks_dir / "no-date-task.md").write_text("---\nstate: backlog\n---\n# No Date Task\n")
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+
+    # Old task should have a non-empty age label (years old)
+    # Exact label varies but the task hint div should be present for it
+    old_task_idx = html.index("Old Task")
+    assert "task-hint" in html[old_task_idx : old_task_idx + 400]
+
+
+def test_parse_date_field_whitespace_returns_empty():
+    """_parse_date_field returns '' for a whitespace-only string (line 518)."""
+    # A non-empty but whitespace-only object that is truthy before strip
+    # — the "if s:" branch after strip evaluates to False.
+    assert _parse_date_field("   ") == ""
+
+
+def test_age_days_invalid_string_returns_none():
+    """_age_days returns None for an unparseable date string (lines 531-532)."""
+    assert _age_days("not-a-date") is None
+    assert _age_days("9999-99-99") is None  # OverflowError / ValueError
+
+
+def test_task_to_dict_extracts_new_metadata(tmp_path: Path):
+    """_task_to_dict (manual fallback) extracts created, depends, task_type, waiting_since."""
+    task_file = tmp_path / "my-task.md"
+    task_file.write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2025-06-01
+        task_type: project
+        waiting_since: 2025-07-01
+        depends: other-task
+        ---
+        # My Task
+        """)
+    )
+    result = _task_to_dict(task_file)
+    assert result is not None
+    assert result["created"] == "2025-06-01"
+    assert result["task_type"] == "project"
+    assert result["waiting_since"] == "2025-07-01"
+    assert result["depends"] == ["other-task"]  # str normalised to list
+    assert isinstance(result["age_days"], int)
+    assert result["age_days"] > 0
+    assert result["age_label"] != ""
+
+
+def test_task_to_dict_depends_non_list(tmp_path: Path):
+    """_task_to_dict normalises non-list/non-str depends to empty list (line 576-577)."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("---\nstate: backlog\ndepends: 42\n---\n# Task\n")
+    result = _task_to_dict(task_file)
+    assert result is not None
+    # int 42 is not str and not list → normalised to []
+    assert result["depends"] == []
+
+
+def test_scan_tasks_depends_as_string_in_gptodo_path(tmp_path: Path):
+    """scan_tasks normalises a string depends field to a list (gptodo path, line 648)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        created: 2026-01-01
+        depends: "blocker-task"
+        ---
+        # My Task
+        """)
+    )
+    tasks = {t["id"]: t for t in scan_tasks(tmp_path)}
+    assert tasks["my-task"]["depends"] == ["blocker-task"]
+
+
+def test_task_detail_today_age_no_ago_suffix(workspace: Path, tmp_path: Path):
+    """age_label 'today' must not produce 'today ago' in the rendered page."""
+    from datetime import date
+
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    today = date.today().isoformat()
+    (tasks_dir / "new-task.md").write_text(
+        f"---\nstate: active\ncreated: {today}\n---\n# New Task\n"
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    page = (output / "tasks" / "new-task.html").read_text()
+
+    assert "today ago" not in page
+    assert "today" in page
+
+
+def test_task_detail_no_empty_meta_row_when_waiting_since_not_waiting(
+    workspace: Path, tmp_path: Path
+):
+    """task-meta-row must not render when waiting_since is set but state is not 'waiting'."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    # Task has waiting_since but state is 'backlog' (not 'waiting') and no created date
+    (tasks_dir / "odd-task.md").write_text(
+        "---\nstate: backlog\nwaiting_since: 2026-01-01\n---\n# Odd Task\n"
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    page = (output / "tasks" / "odd-task.html").read_text()
+
+    # The meta row div element must not appear (CSS class definition is always present in <style>)
+    assert '<div class="task-meta-row">' not in page
+    assert "Waiting since" not in page
