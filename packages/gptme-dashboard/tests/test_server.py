@@ -546,6 +546,10 @@ def test_api_sessions_basic_fallback_timestamp(tmp_path: Path):
         # Verify timestamp is non-empty (the bug was: s.get("date","") when key was "timestamp")
         assert session["timestamp"] != "", "timestamp must not be empty when using basic fallback"
         assert session["timestamp"].startswith(today)
+        # Verify outcome is preserved from basic fallback (not overwritten to "noop" via grade=0)
+        assert (
+            session["outcome"] == "unknown"
+        ), "basic fallback outcome must be preserved, not overridden"
 
 
 def test_api_journals_empty(client):

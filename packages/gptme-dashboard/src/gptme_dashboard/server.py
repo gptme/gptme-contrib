@@ -508,7 +508,8 @@ def create_app(
                         "harness": s.get("harness", ""),
                         "model": s.get("model", ""),
                         "category": s.get("category", ""),
-                        "outcome": "productive" if s.get("grade", 0) >= 0.4 else "noop",
+                        "outcome": s.get("outcome")
+                        or ("productive" if s.get("grade", 0) >= 0.4 else "noop"),
                         "duration_seconds": 0,
                     }
                 )
