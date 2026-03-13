@@ -838,43 +838,6 @@ tr:hover { background: var(--accent-dim); }
 </section>
 {% endif %}
 
-<!-- Packages & Plugins (short, infrastructure overview) -->
-<div class="two-col">
-  <section id="packages">
-    <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
-    <table>
-      <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-      <tbody>
-      {% for pkg in packages %}
-        <tr>
-          <td><strong>{% if pkg.body %}<a href="{{ pkg.page_url }}">{{ pkg.name }}</a>{% else %}{{ pkg.name }}{% endif %}</strong></td>
-          <td>{{ pkg.version }}</td>
-          <td>{{ pkg.description }}</td>
-          {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </section>
-
-  <section id="plugins">
-    <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
-    <table>
-      <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-      <tbody>
-      {% for plugin in plugins %}
-        <tr>
-          <td><strong>{% if plugin.body %}<a href="{{ plugin.page_url }}">{{ plugin.name }}</a>{% else %}{{ plugin.name }}{% endif %}</strong></td>
-          <td>{{ plugin.description }}</td>
-          <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
-          {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </section>
-</div>
-
 {% if journals %}
 <!-- Recent Journal Entries -->
 <section id="journals">
@@ -922,6 +885,43 @@ tr:hover { background: var(--accent-dim); }
   {% endif %}
 </section>
 {% endif %}
+
+<!-- Packages & Plugins (short, infrastructure overview) -->
+<div class="two-col">
+  <section id="packages">
+    <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for pkg in packages %}
+        <tr>
+          <td><strong>{% if pkg.body %}<a href="{{ pkg.page_url }}">{{ pkg.name }}</a>{% else %}{{ pkg.name }}{% endif %}</strong></td>
+          <td>{{ pkg.version }}</td>
+          <td>{{ pkg.description }}</td>
+          {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="plugins">
+    <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for plugin in plugins %}
+        <tr>
+          <td><strong>{% if plugin.body %}<a href="{{ plugin.page_url }}">{{ plugin.name }}</a>{% else %}{{ plugin.name }}{% endif %}</strong></td>
+          <td>{{ plugin.description }}</td>
+          <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
+          {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
 
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
