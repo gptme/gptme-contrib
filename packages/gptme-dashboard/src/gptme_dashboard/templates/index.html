@@ -922,7 +922,7 @@ tr:hover { background: var(--accent-dim); }
         {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
         <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
         {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
-        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% elif not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
+        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% else %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
       </div>
     </div>
@@ -932,13 +932,14 @@ tr:hover { background: var(--accent-dim); }
       <div class="dashboard-nav-links">
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
-        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% else %}<a href="#recent-sessions"><span>Recent sessions</span></a>{% endif %}
+        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
       </div>
     </div>
 
     <div class="dashboard-nav-group">
       <div class="dashboard-nav-group-title">Live dashboard</div>
       <div class="dashboard-nav-links">
+        <a href="#recent-sessions"><span>Recent sessions</span></a>
         <a href="#session-stats"><span>Session stats</span></a>
         <a href="#activity-heatmap"><span>Activity</span></a>
         <a href="#agent-services"><span>Services</span></a>

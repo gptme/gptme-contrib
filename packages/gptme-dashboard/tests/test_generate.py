@@ -3030,6 +3030,32 @@ def test_generate_dashboard_navigation_sidebar(workspace: Path, tmp_path: Path):
     assert "Quick navigation" in html
 
 
+def test_generate_dashboard_navigation_sidebar_with_sessions(workspace: Path, tmp_path: Path):
+    """Sidebar shows #sessions link under Workspace assets when static sessions are present."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    fake_session = {
+        "name": "2026-01-10-work",
+        "date": "2026-01-10",
+        "harness": "gptme",
+        "commits": 2,
+        "edits": 3,
+        "errors": 0,
+        "grade": 0.78,
+        "productive": True,
+        "category": "code",
+    }
+    with patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[fake_session]):
+        generate(workspace, output, template_dir, include_sessions=True)
+
+    html = (output / "index.html").read_text()
+
+    # Static sessions: link in Workspace assets group
+    assert 'href="#sessions"' in html
+    # Dynamic sessions panel: link still present in Live dashboard group
+    assert 'href="#recent-sessions"' in html
+
+
 # --- Atom feed tests ---
 
 
