@@ -165,7 +165,7 @@ def _gptme_logs_dir() -> Path:
     honoured when set; otherwise returns the XDG default path which is where
     gptme writes on macOS too (gptme uses platformdirs internally).
     """
-    xdg_data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    xdg_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
     return xdg_data_home / "gptme" / "logs"
 
 
@@ -281,6 +281,9 @@ def _make_excerpt(body: str, max_chars: int = 300) -> str:
             inside_fence = not inside_fence
             continue
         if inside_fence:
+            continue
+        # Skip thematic breaks
+        if line.strip() in ("---", "***", "___"):
             continue
         # Strip markdown headings
         line = re.sub(r"^#+\s+", "", line)

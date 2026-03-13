@@ -471,7 +471,10 @@ def test_scan_gptme_logs_basic_no_logs_dir(tmp_path: Path):
     from gptme_dashboard.server import _scan_gptme_logs_basic
     import unittest.mock
 
-    with unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=tmp_path):
+    with (
+        unittest.mock.patch.dict("os.environ", {"XDG_DATA_HOME": ""}),
+        unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=tmp_path),
+    ):
         result = _scan_gptme_logs_basic(tmp_path)
     assert result == []
 
@@ -496,7 +499,10 @@ def test_scan_gptme_logs_basic_with_sessions(tmp_path: Path):
 
     import unittest.mock
 
-    with unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home):
+    with (
+        unittest.mock.patch.dict("os.environ", {"XDG_DATA_HOME": ""}),
+        unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home),
+    ):
         result = _scan_gptme_logs_basic(workspace, days=30)
 
     assert len(result) == 1
@@ -629,7 +635,10 @@ def test_scan_gptme_logs_basic_out_of_range_does_not_break_early(tmp_path: Path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    with unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home):
+    with (
+        unittest.mock.patch.dict("os.environ", {"XDG_DATA_HOME": ""}),
+        unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home),
+    ):
         result = _scan_gptme_logs_basic(workspace, days=30)
 
     # in-range session must be found even though out-of-range dir is also present
@@ -2820,3 +2829,13 @@ def test_make_excerpt_via_search(tmp_path: Path):
         assert (
             "uniquexyz" in excerpt or "Rule" in excerpt or excerpt == ""
         ), f"Unexpected excerpt: {excerpt!r}"
+
+
+def test_make_excerpt_strips_thematic_breaks():
+    """Thematic break lines (---) must not appear in the excerpt."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = "First prose paragraph.\n\n" "---\n\n" "Second prose paragraph.\n"
+    excerpt = _make_excerpt(body)
+    assert "---" not in excerpt, f"Thematic break leaked into excerpt: {excerpt!r}"
+    assert "First prose" in excerpt, f"Prose missing from excerpt: {excerpt!r}"
