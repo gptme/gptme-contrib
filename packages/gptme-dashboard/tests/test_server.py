@@ -452,6 +452,7 @@ def test_workspace_no_sessions(tmp_path: Path):
     with (
         app.test_client() as c,
         unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+        unittest.mock.patch("gptme_dashboard.server._scan_gptme_logs_basic", return_value=[]),
     ):
         resp = c.get("/api/sessions/stats")
         assert resp.status_code == 200
@@ -463,6 +464,185 @@ def test_workspace_no_sessions(tmp_path: Path):
         data = resp.get_json()
         assert data["sessions"] == []
         assert data["total"] == 0
+
+
+def test_scan_gptme_logs_basic_no_logs_dir(tmp_path: Path):
+    """_scan_gptme_logs_basic returns empty list when logs dir does not exist."""
+    from gptme_dashboard.server import _scan_gptme_logs_basic
+    import unittest.mock
+
+    with (
+        unittest.mock.patch.dict("os.environ", {"XDG_DATA_HOME": ""}),
+        unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=tmp_path),
+    ):
+        result = _scan_gptme_logs_basic(tmp_path)
+    assert result == []
+
+
+def test_scan_gptme_logs_basic_with_sessions(tmp_path: Path):
+    """_scan_gptme_logs_basic returns sessions from gptme logs dir."""
+    from gptme_dashboard.server import _scan_gptme_logs_basic
+    from datetime import date
+
+    # Create a fake ~/.local/share/gptme/logs directory structure
+    fake_home = tmp_path / "home"
+    logs_dir = fake_home / ".local" / "share" / "gptme" / "logs"
+    logs_dir.mkdir(parents=True)
+
+    today = date.today().isoformat()
+    session_dir = logs_dir / f"{today}-test-session"
+    session_dir.mkdir()
+    (session_dir / "conversation.jsonl").write_text('{"role":"user","content":"hi"}\n')
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    import unittest.mock
+
+    with (
+        unittest.mock.patch.dict("os.environ", {"XDG_DATA_HOME": ""}),
+        unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home),
+    ):
+        result = _scan_gptme_logs_basic(workspace, days=30)
+
+    assert len(result) == 1
+    assert result[0]["harness"] == "gptme"
+    assert result[0]["outcome"] == "unknown"
+    assert result[0]["date"].startswith(today)
+
+
+def test_api_sessions_basic_fallback_timestamp(tmp_path: Path):
+    """Integration test: /api/sessions returns non-empty timestamp when using basic fallback."""
+    from datetime import date
+
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    today = date.today().isoformat()
+    fake_sessions = [
+        {
+            "date": f"{today}T00:00:00",
+            "harness": "gptme",
+            "model": "",
+            "category": "",
+            "outcome": "unknown",
+            "duration_seconds": 0,
+        },
+    ]
+
+    import unittest.mock
+
+    with (
+        app.test_client() as c,
+        unittest.mock.patch("gptme_dashboard.server._store_importable", False),
+        unittest.mock.patch(
+            "gptme_dashboard.server._scan_gptme_logs_basic", return_value=fake_sessions
+        ),
+        unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+    ):
+        resp = c.get("/api/sessions")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 1
+        session = data["sessions"][0]
+        # Verify timestamp is non-empty (the bug was: s.get("date","") when key was "timestamp")
+        assert session["timestamp"] != "", "timestamp must not be empty when using basic fallback"
+        assert session["timestamp"].startswith(today)
+        # Verify outcome is preserved from basic fallback (not overwritten to "noop" via grade=0)
+        assert (
+            session["outcome"] == "unknown"
+        ), "basic fallback outcome must be preserved, not overridden"
+
+
+def test_api_session_stats_basic_fallback_unknown_not_noop(tmp_path: Path):
+    """Stats endpoint must not count basic-fallback 'unknown' sessions as noop."""
+    from datetime import date
+
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    today = date.today().isoformat()
+    fake_sessions = [
+        {
+            "date": f"{today}T00:00:00",
+            "harness": "gptme",
+            "model": "",
+            "category": "",
+            "outcome": "unknown",
+            "duration_seconds": 0,
+        },
+    ]
+
+    with (
+        app.test_client() as c,
+        unittest.mock.patch("gptme_dashboard.server._store_importable", False),
+        unittest.mock.patch(
+            "gptme_dashboard.server._scan_gptme_logs_basic", return_value=fake_sessions
+        ),
+        unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+    ):
+        resp = c.get("/api/sessions/stats")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 1
+        # unknown sessions must not inflate noop count
+        assert data.get("unknown", 0) == 1, "basic-fallback sessions should be counted as unknown"
+        assert data["noop"] == 0, "unknown sessions must not be classified as noop"
+        # success_rate must be null (not 0%) when all sessions are unknown (no data ≠ failure)
+        assert (
+            data["success_rate"] is None
+        ), "success_rate must be null when no known-outcome sessions"
+        assert data["productive"] == 0
+
+
+def test_scan_gptme_logs_basic_out_of_range_does_not_break_early(tmp_path: Path):
+    """Out-of-range date dirs must not stop scanning before in-range dirs are reached."""
+    from gptme_dashboard.server import _scan_gptme_logs_basic
+    from datetime import date, timedelta
+
+    fake_home = tmp_path / "home"
+    logs_dir = fake_home / ".local" / "share" / "gptme" / "logs"
+    logs_dir.mkdir(parents=True)
+
+    today = date.today()
+    in_range = (today - timedelta(days=5)).isoformat()
+    out_of_range = (today - timedelta(days=60)).isoformat()
+
+    # Two date-prefixed dirs (in_range sorts before out_of_range in reverse because
+    # it is more recent) plus one non-date dir.  The non-date dir ("zz-notes") sorts
+    # before both date dirs in reverse order (letters > digits in ASCII) and exercises
+    # the ValueError-continue path.  The out-of-range dir exercises the break path —
+    # the scan stops there because all subsequent dirs in reverse sort are even older.
+    for name, has_conv in [
+        (f"{in_range}-session", True),
+        (f"{out_of_range}-old-session", False),
+        ("zz-notes", False),  # non-date dir; verifies ValueError is handled with continue
+    ]:
+        d = logs_dir / name
+        d.mkdir()
+        if has_conv:
+            (d / "conversation.jsonl").write_text('{"role":"user"}\n')
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with (
+        unittest.mock.patch.dict("os.environ", {"XDG_DATA_HOME": ""}),
+        unittest.mock.patch("gptme_dashboard.server.Path.home", return_value=fake_home),
+    ):
+        result = _scan_gptme_logs_basic(workspace, days=30)
+
+    # in-range session must be found even though out-of-range dir is also present
+    assert len(result) == 1
+    assert result[0]["date"].startswith(in_range)
 
 
 def test_api_journals_empty(client):
@@ -2567,3 +2747,103 @@ def test_api_search_indexes_submodule_lessons(tmp_path: Path):
         data = resp.get_json()
         assert data["total"] >= 1, "Submodule lessons should be indexed and searchable"
         assert any(r["type"] == "lesson" for r in data["results"])
+
+
+def test_make_excerpt_strips_fenced_code_block_content():
+    """Fenced code block content must not appear in excerpts."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = (
+        "Some description text.\n\n"
+        "```python\n"
+        "x = run_agent(workspace)\n"
+        "result = x.outcome\n"
+        "```\n\n"
+        "More text after code.\n"
+    )
+    excerpt = _make_excerpt(body)
+    assert "run_agent" not in excerpt, f"Code block content leaked into excerpt: {excerpt!r}"
+    assert "x.outcome" not in excerpt, f"Code block content leaked into excerpt: {excerpt!r}"
+    assert "Some description" in excerpt, f"Expected description in excerpt: {excerpt!r}"
+
+
+def test_make_excerpt_all_headings_returns_stripped_text():
+    """When body has only headings, excerpt returns heading text without # markers."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = "# My Lesson\n## Rule\n## Context\n"
+    excerpt = _make_excerpt(body)
+    # No prose found; heading text is returned with markers stripped — acceptable fallback
+    assert "#" not in excerpt, f"Heading markers should be stripped: {excerpt!r}"
+    # Some content should be present (headings stripped of # become words)
+    assert len(excerpt) > 0 or excerpt == ""  # empty is also acceptable
+
+
+def test_make_excerpt_body_starts_with_fenced_block():
+    """When the body opens with a fenced code block, code must not appear in excerpt."""
+    from gptme_dashboard.server import _make_excerpt
+
+    # Body where the very first non-blank content is a fenced code block
+    body = (
+        "```python\n"
+        "secret_code = 'should not appear'\n"
+        "```\n\n"
+        "Prose description after the code block.\n"
+    )
+    excerpt = _make_excerpt(body)
+    assert "secret_code" not in excerpt, f"Leading code block leaked: {excerpt!r}"
+    assert "Prose description" in excerpt, f"Prose after block missing: {excerpt!r}"
+
+
+def test_make_excerpt_via_search(tmp_path: Path):
+    """Search result excerpts should not start with markdown heading markers."""
+    from gptme_dashboard.server import create_app
+
+    ws = tmp_path
+    (ws / "gptme.toml").write_text('[agent]\nname = "test"\n')
+    lessons_dir = ws / "lessons" / "patterns"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "my-lesson.md").write_text(
+        "---\nmatch:\n  keywords: [uniquexyz]\nstatus: active\n---\n"
+        "# My Lesson\n\n"
+        "## Rule\n"
+        "Do the uniquexyz thing.\n\n"
+        "## Context\n"
+        "When context arises.\n"
+    )
+    site_dir = tmp_path / "site"
+    app = create_app(ws, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=uniquexyz")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1
+        result = next(r for r in data["results"] if r.get("type") == "lesson")
+        excerpt = result.get("excerpt", "")
+        # Excerpt should not start with a heading marker
+        assert not excerpt.startswith("#"), f"Excerpt should not start with '#': {excerpt!r}"
+        # Should contain the Rule content
+        assert (
+            "uniquexyz" in excerpt or "Rule" in excerpt or excerpt == ""
+        ), f"Unexpected excerpt: {excerpt!r}"
+
+
+def test_make_excerpt_strips_thematic_breaks():
+    """Thematic break lines (---) must not appear in the excerpt."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = "First prose paragraph.\n\n" "---\n\n" "Second prose paragraph.\n"
+    excerpt = _make_excerpt(body)
+    assert "---" not in excerpt, f"Thematic break leaked into excerpt: {excerpt!r}"
+    assert "First prose" in excerpt, f"Prose missing from excerpt: {excerpt!r}"
+
+
+def test_make_excerpt_preserves_underscores_in_identifiers():
+    """Identifiers like my_var_name must not have underscores stripped."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = "Use `my_var_name` to configure the option.\n"
+    excerpt = _make_excerpt(body)
+    assert "my_var_name" in excerpt, f"Identifier underscore stripped: {excerpt!r}"

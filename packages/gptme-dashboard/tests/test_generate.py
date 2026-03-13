@@ -3156,6 +3156,35 @@ def test_guidance_filter_panel_visible_for_small_workspace(
     assert 'id="guidance-show-more"' not in html
 
 
+def test_guidance_summary_skills_only_shows_category(tmp_path: Path):
+    """Guidance summary for a skills-only workspace shows 'skill (N)' — not a bare 'Reference catalog —'."""
+    # Workspace with skills only (no lessons/ dir)
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "SkillsOnly"\n')
+    skills_dir = tmp_path / "skills"
+    for i in range(8):  # >5 to trigger the summary paragraph
+        d = skills_dir / f"skill-{i}"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            name: Skill {i}
+            description: Skill number {i}
+            ---
+            # Skill {i}
+            Content.
+            """)
+        )
+
+    output = tmp_path / "out"
+    generate(tmp_path, output)
+
+    html = (output / "index.html").read_text()
+    # Skills get "skill" category in lesson_categories, so the summary must show it
+    assert "skill (8)" in html
+    # Guidance summary paragraph must exist (>5 items)
+    assert "Reference catalog" in html
+
+
 def test_generate_dashboard_navigation_sidebar(workspace: Path, tmp_path: Path):
     """Dashboard includes a quick-navigation sidebar for major sections."""
     output = tmp_path / "out"

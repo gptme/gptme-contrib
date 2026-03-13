@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
 import platform
 import re
 import subprocess
@@ -32,6 +33,15 @@ try:
     _store_importable = True
 except Exception:
     _store_importable = False
+
+# TOML parser: tomllib (stdlib, Python 3.11+) or tomli (backport); None if unavailable.
+try:
+    import tomllib as _tomllib
+except ImportError:
+    try:
+        import tomli as _tomllib  # type: ignore[import-not-found,no-redef]
+    except ImportError:
+        _tomllib = None  # type: ignore[assignment]
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -154,6 +164,151 @@ def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
         card["last_session"] = None
 
     return card
+
+
+def _gptme_logs_dir() -> Path:
+    """Return the platform-appropriate gptme logs directory.
+
+    Respects ``XDG_DATA_HOME`` when set (non-empty).  On macOS, if the XDG
+    path does not exist, falls back to the native platformdirs location
+    (``~/Library/Application Support/gptme/logs``) before returning the
+    candidate so callers get the right directory even when ``XDG_DATA_HOME``
+    is not set on macOS.
+    """
+    xdg_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    candidate = xdg_data_home / "gptme" / "logs"
+    if not candidate.is_dir() and platform.system() == "Darwin":
+        mac_candidate = Path.home() / "Library" / "Application Support" / "gptme" / "logs"
+        if mac_candidate.is_dir():
+            return mac_candidate
+    return candidate
+
+
+def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
+    """Lightweight session scan: reads gptme log dirs without gptme-sessions package.
+
+    Scans the gptme logs directory (via ``_gptme_logs_dir()``) for session
+    directories whose names start with a valid ISO date.  Filters by workspace
+    when a ``config.toml`` is present and readable.  Returns basic session
+    dicts (timestamp, harness, model, outcome) without signal extraction —
+    used when gptme_sessions is not installed.
+    """
+    logs_dir = _gptme_logs_dir()
+    if not logs_dir.is_dir():
+        return []
+
+    cutoff = date.today() - timedelta(days=days)
+    workspace_resolved = ws.resolve()
+    sessions: list[dict[str, Any]] = []
+
+    for session_dir in sorted(logs_dir.iterdir(), reverse=True):
+        if not session_dir.is_dir():
+            continue
+        try:
+            session_date = date.fromisoformat(session_dir.name[:10])
+        except ValueError:
+            continue
+        if session_date < cutoff:
+            break  # Dirs are reverse-sorted; once past cutoff all remaining are older
+
+        # Filter by workspace when config.toml is readable.
+        # When no TOML parser is available (Python < 3.11 without tomli) or
+        # when the session predates config.toml, workspace isolation is
+        # best-effort: all sessions are included rather than dropped.
+        config_toml = session_dir / "config.toml"
+        if _tomllib is None:
+            pass  # No TOML parser available — include all sessions (best-effort)
+        elif config_toml.exists():
+            try:
+                with open(config_toml, "rb") as _f:
+                    cfg = _tomllib.load(_f)
+                session_ws = cfg.get("workspace", "")
+                if session_ws:
+                    session_ws_path = Path(session_ws).resolve()
+                    if not (
+                        session_ws_path == workspace_resolved
+                        or session_ws_path.is_relative_to(workspace_resolved)
+                        or workspace_resolved.is_relative_to(session_ws_path)
+                    ):
+                        continue
+            except Exception:
+                pass  # Include session if config is unreadable
+
+        # Only include sessions with a conversation file
+        jsonl = session_dir / "conversation.jsonl"
+        if not jsonl.exists():
+            continue
+
+        sessions.append(
+            {
+                "date": session_dir.name[:10] + "T00:00:00",
+                "harness": "gptme",
+                "model": "",
+                "category": "",
+                "outcome": "unknown",
+                "duration_seconds": 0,
+            }
+        )
+        if len(sessions) >= 100:
+            break
+
+    return sessions
+
+
+def _make_excerpt(body: str, max_chars: int = 300) -> str:
+    """Extract a readable plain-text excerpt from a markdown body.
+
+    Skips leading heading lines and blank lines, then returns a cleaned
+    plain-text representation of the first meaningful content paragraph.
+    Fenced code block contents are excluded. Returns at most *max_chars* characters.
+    """
+    lines = body.splitlines()
+    # Find the first meaningful non-code, non-heading line.
+    # Fence state is tracked so that content inside a leading fenced block is
+    # never mistaken for prose (e.g. a body that opens with ```python\ncode\n```).
+    start = 0
+    in_fence = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if stripped and not stripped.startswith(("#", "---")):
+            start = i
+            break
+    useful_lines = lines[start : start + 20]  # cap to avoid huge bodies
+
+    cleaned: list[str] = []
+    inside_fence = False
+    for line in useful_lines:
+        # Track fenced code blocks and skip their contents
+        if line.strip().startswith("```"):
+            inside_fence = not inside_fence
+            continue
+        if inside_fence:
+            continue
+        # Skip thematic breaks
+        if line.strip() in ("---", "***", "___"):
+            continue
+        # Strip markdown headings
+        line = re.sub(r"^#+\s+", "", line)
+        # Convert list markers to bullet characters for readability
+        line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
+        line = re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
+        # Strip bold/italic markers.  Underscore variants use word-boundary
+        # guards ((?<!\w) / (?!\w)) so identifiers like my_var_name are not
+        # corrupted — markdown only treats _x_ as italic at word boundaries.
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"\1", line)
+        line = re.sub(r"\*(.+?)\*", r"\1", line)
+        line = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", line)
+        # Strip inline code backticks
+        line = re.sub(r"`(.+?)`", r"\1", line)
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip()[:max_chars]
 
 
 def create_app(
@@ -300,17 +455,36 @@ def create_app(
     _scan_cache: dict[str, Any] = {"data": None, "days": None, "expires": 0.0}
 
     def _get_scanned_sessions(ws: Path, days: int = 30) -> list[dict[str, Any]]:
-        """Fallback: discover sessions from gptme/CC log directories."""
+        """Fallback: discover sessions from gptme/CC log directories.
+
+        First tries ``scan_recent_sessions`` (requires gptme-sessions for full
+        signal extraction), then falls back to the lightweight
+        ``_scan_gptme_logs_basic`` scan that works without any extra packages.
+        """
         now = time.monotonic()
         if (
             _scan_cache["data"] is None
             or _scan_cache["days"] != days
             or now >= _scan_cache["expires"]
         ):
-            _scan_cache["data"] = list(_gen_mod.scan_recent_sessions(ws, days=days))
+            result = list(_gen_mod.scan_recent_sessions(ws, days=days))
+            if not result and not _store_importable:
+                # gptme-sessions not installed; fall back to lightweight log
+                # scan so the sessions panel isn't always empty for users
+                # without gptme-sessions.
+                result = _scan_gptme_logs_basic(ws, days=days)
+            _scan_cache["data"] = result
             _scan_cache["days"] = days
             _scan_cache["expires"] = now + _SCAN_CACHE_TTL
         return _scan_cache["data"]  # type: ignore[no-any-return]
+
+    def _is_productive(s: dict[str, Any]) -> bool:
+        if s.get("grade") is not None:
+            return float(s["grade"]) >= 0.4
+        return s.get("outcome") == "productive"
+
+    def _is_unknown(s: dict[str, Any]) -> bool:
+        return s.get("grade") is None and s.get("outcome") == "unknown"
 
     @app.route("/api/sessions/stats")
     def api_session_stats() -> Any:
@@ -330,9 +504,12 @@ def create_app(
                 return jsonify({"total": 0})
 
             total = len(scanned)
-            productive = sum(1 for s in scanned if s.get("grade", 0) >= 0.4)
-            noop = total - productive
-            success_rate = productive / total if total > 0 else 0
+
+            productive = sum(1 for s in scanned if _is_productive(s))
+            unknown = sum(1 for s in scanned if _is_unknown(s))
+            noop = total - productive - unknown
+            known = total - unknown
+            success_rate = productive / known if known > 0 else None
 
             by_model: dict[str, dict] = {}
             by_harness: dict[str, dict] = {}
@@ -344,7 +521,7 @@ def create_app(
                     if key not in bucket:
                         bucket[key] = {"total": 0, "productive": 0}
                     bucket[key]["total"] += 1
-                    if s.get("grade", 0) >= 0.4:
+                    if _is_productive(s):
                         bucket[key]["productive"] += 1
             for bucket in (by_model, by_harness):
                 for m in bucket.values():
@@ -355,6 +532,7 @@ def create_app(
                     "total": total,
                     "productive": productive,
                     "noop": noop,
+                    "unknown": unknown,
                     "success_rate": success_rate,
                     "by_model": by_model,
                     "by_harness": by_harness,
@@ -423,7 +601,8 @@ def create_app(
                         "harness": s.get("harness", ""),
                         "model": s.get("model", ""),
                         "category": s.get("category", ""),
-                        "outcome": "productive" if s.get("grade", 0) >= 0.4 else "noop",
+                        "outcome": s.get("outcome")
+                        or ("productive" if _is_productive(s) else "noop"),
                         "duration_seconds": 0,
                     }
                 )
@@ -1239,7 +1418,7 @@ def create_app(
                         "category": lesson.get("category", ""),
                         "keywords": lesson.get("all_keywords", []),
                         "tags": [],
-                        "excerpt": lesson.get("body", "")[:600],
+                        "excerpt": _make_excerpt(lesson.get("body", "")),
                         "url": "/" + lesson.get("page_url", ""),
                         "path": lesson.get("path", ""),
                     }
@@ -1254,9 +1433,9 @@ def create_app(
                         "category": skill.get("category", ""),
                         "keywords": skill.get("keywords", []),
                         "tags": skill.get("tags", []),
-                        "excerpt": (skill.get("description", "") + " " + skill.get("body", ""))[
-                            :600
-                        ],
+                        "excerpt": _make_excerpt(
+                            skill.get("description", "") + "\n" + skill.get("body", "")
+                        ),
                         "url": "/" + skill.get("page_url", ""),
                         "path": skill.get("path", ""),
                     }

@@ -302,7 +302,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
     sessions: list[dict] = []
 
-    print("Scanning sessions...", end="", flush=True, file=sys.stderr)
+    print(f"Scanning sessions (last {days} days)...", end="", flush=True, file=sys.stderr)
     gptme_count = 0
     cc_count = 0
 
@@ -336,8 +336,8 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             continue  # Directory name doesn't start with a valid ISO date — skip
 
         gptme_count += 1
-        if gptme_count % 50 == 0:
-            print(f" {gptme_count} gptme", end="", flush=True, file=sys.stderr)
+        if gptme_count % 20 == 0:
+            print(".", end="", flush=True, file=sys.stderr)
 
         sessions.append(
             {
@@ -376,8 +376,8 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             signals = {}
 
         cc_count += 1
-        if cc_count % 50 == 0:
-            print(f" {cc_count} cc", end="", flush=True, file=sys.stderr)
+        if cc_count % 20 == 0:
+            print(".", end="", flush=True, file=sys.stderr)
 
         sessions.append(
             {
