@@ -216,7 +216,7 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
 
         sessions.append(
             {
-                "timestamp": session_dir.name[:10] + "T00:00:00",
+                "date": session_dir.name[:10] + "T00:00:00",
                 "harness": "gptme",
                 "model": "",
                 "category": "",
@@ -387,10 +387,10 @@ def create_app(
             or now >= _scan_cache["expires"]
         ):
             result = list(_gen_mod.scan_recent_sessions(ws, days=days))
-            if not result:
-                # gptme-sessions not installed or no sessions found via it;
-                # fall back to lightweight log scan so the sessions panel isn't
-                # always empty for users without gptme-sessions.
+            if not result and not _store_importable:
+                # gptme-sessions not installed; fall back to lightweight log
+                # scan so the sessions panel isn't always empty for users
+                # without gptme-sessions.
                 result = _scan_gptme_logs_basic(ws, days=days)
             _scan_cache["data"] = result
             _scan_cache["days"] = days

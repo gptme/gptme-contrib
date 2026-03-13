@@ -502,7 +502,50 @@ def test_scan_gptme_logs_basic_with_sessions(tmp_path: Path):
     assert len(result) == 1
     assert result[0]["harness"] == "gptme"
     assert result[0]["outcome"] == "unknown"
-    assert result[0]["timestamp"].startswith(today)
+    assert result[0]["date"].startswith(today)
+
+
+def test_api_sessions_basic_fallback_timestamp(tmp_path: Path):
+    """Integration test: /api/sessions returns non-empty timestamp when using basic fallback."""
+    from datetime import date
+
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    (tmp_path / "lessons").mkdir()
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    today = date.today().isoformat()
+    fake_sessions = [
+        {
+            "date": f"{today}T00:00:00",
+            "harness": "gptme",
+            "model": "",
+            "category": "",
+            "outcome": "unknown",
+            "duration_seconds": 0,
+        },
+    ]
+
+    import unittest.mock
+
+    with (
+        app.test_client() as c,
+        unittest.mock.patch("gptme_dashboard.server._store_importable", False),
+        unittest.mock.patch(
+            "gptme_dashboard.server._scan_gptme_logs_basic", return_value=fake_sessions
+        ),
+        unittest.mock.patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[]),
+    ):
+        resp = c.get("/api/sessions")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 1
+        session = data["sessions"][0]
+        # Verify timestamp is non-empty (the bug was: s.get("date","") when key was "timestamp")
+        assert session["timestamp"] != "", "timestamp must not be empty when using basic fallback"
+        assert session["timestamp"].startswith(today)
 
 
 def test_api_journals_empty(client):
