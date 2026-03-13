@@ -1283,7 +1283,7 @@ async function loadRecentSessions(offset) {
       tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:1.5rem">'
         + (hasFilter
           ? 'No sessions match the selected filters.'
-          : 'No sessions found. For full session data install <code>pip install gptme-dashboard[sessions]</code>; basic session history from <code>~/.local/share/gptme/logs/</code> is auto-scanned.')
+          : 'No sessions found. For full session data install <code>pip install gptme-dashboard[sessions]</code>; basic session history from the gptme logs directory is auto-scanned.')
         + '</td></tr>';
       document.getElementById('sessions-pagination').style.display = 'none';
       return;

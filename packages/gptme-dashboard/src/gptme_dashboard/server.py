@@ -208,7 +208,7 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
         except ValueError:
             continue
         if session_date < cutoff:
-            continue  # Skip out-of-range dirs; can't break (non-date dirs may sort between date dirs)
+            break  # Dirs are reverse-sorted; once past cutoff all remaining are older
 
         # Filter by workspace when config.toml is readable.
         # When no TOML parser is available (Python < 3.11 without tomli) or
@@ -296,9 +296,11 @@ def _make_excerpt(body: str, max_chars: int = 300) -> str:
         # Convert list markers to bullet characters for readability
         line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
         line = re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
-        # Strip bold/italic markers
+        # Strip bold/italic markers (asterisk and underscore styles)
         line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = re.sub(r"__(.+?)__", r"\1", line)
         line = re.sub(r"\*(.+?)\*", r"\1", line)
+        line = re.sub(r"_(.+?)_", r"\1", line)
         # Strip inline code backticks
         line = re.sub(r"`(.+?)`", r"\1", line)
         cleaned.append(line)

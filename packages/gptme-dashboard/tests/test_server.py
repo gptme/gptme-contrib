@@ -617,11 +617,10 @@ def test_scan_gptme_logs_basic_out_of_range_does_not_break_early(tmp_path: Path)
     out_of_range = (today - timedelta(days=60)).isoformat()
 
     # Two date-prefixed dirs (in_range sorts before out_of_range in reverse because
-    # it is more recent) plus one non-date dir.  The non-date dir tests that ValueError
-    # is handled gracefully.  Note: with ISO-date prefixes a `break` on out_of_range
-    # cannot skip in_range because newer dates always appear first in reverse sort —
-    # this test verifies that out-of-range sessions are *excluded*, not that `continue`
-    # is used rather than `break` (which cannot be distinguished with valid ISO dates).
+    # it is more recent) plus one non-date dir.  The non-date dir ("zz-notes") sorts
+    # before both date dirs in reverse order (letters > digits in ASCII) and exercises
+    # the ValueError-continue path.  The out-of-range dir exercises the break path —
+    # the scan stops there because all subsequent dirs in reverse sort are even older.
     for name, has_conv in [
         (f"{in_range}-session", True),
         (f"{out_of_range}-old-session", False),
