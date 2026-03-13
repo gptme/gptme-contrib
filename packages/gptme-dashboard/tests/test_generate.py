@@ -3010,6 +3010,190 @@ def test_guidance_filter_panel_visible_for_small_workspace(
     assert 'id="guidance-show-more"' not in html
 
 
+def test_generate_dashboard_navigation_sidebar(workspace: Path, tmp_path: Path):
+    """Dashboard includes a quick-navigation sidebar for major sections."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'class="dashboard-layout"' in html
+    assert 'class="dashboard-nav"' in html
+    assert 'aria-label="Dashboard navigation"' in html
+    assert 'href="#guidance"' in html
+    assert 'href="#packages"' in html
+    assert 'href="#plugins"' in html
+    assert 'href="#recent-sessions"' in html
+    assert 'href="#activity-heatmap"' in html
+    assert 'href="#service-health"' in html
+    assert "Quick navigation" in html
+    # Positive direction of the {% if not journals %} guard: no static journals → link present
+    assert 'href="#dynamic-journals"' in html
+
+
+def test_generate_dashboard_navigation_sidebar_journals_guard(workspace: Path, tmp_path: Path):
+    """#dynamic-journals nav link is absent from Live dashboard when static journals exist."""
+    # Add a journal entry so the template renders static journals
+    journal_day = workspace / "journal" / "2026-01-10"
+    journal_day.mkdir(parents=True)
+    (journal_day / "session.md").write_text("# Session\n\nWorking on the dashboard.\n")
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Static journals present: #dynamic-journals element and nav link should both be absent
+    assert 'href="#dynamic-journals"' not in html
+    assert 'id="dynamic-journals"' not in html
+    # But the static journals nav link should be present
+    assert 'href="#journals"' in html
+
+
+def test_generate_dashboard_navigation_sidebar_with_sessions(workspace: Path, tmp_path: Path):
+    """Sidebar shows #sessions link under Workspace assets when static sessions are present."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    fake_session = {
+        "name": "2026-01-10-work",
+        "date": "2026-01-10",
+        "harness": "gptme",
+        "commits": 2,
+        "edits": 3,
+        "errors": 0,
+        "grade": 0.78,
+        "productive": True,
+        "category": "code",
+    }
+    with patch("gptme_dashboard.generate.scan_recent_sessions", return_value=[fake_session]):
+        generate(workspace, output, template_dir, include_sessions=True)
+
+    html = (output / "index.html").read_text()
+
+    # Static sessions: link in Workspace assets group
+    assert 'href="#sessions"' in html
+    # Dynamic sessions panel: link still present in Live dashboard group
+    assert 'href="#recent-sessions"' in html
+
+
+def test_generate_dashboard_navigation_sidebar_dom_order(workspace: Path, tmp_path: Path):
+    """Sidebar <aside> precedes <div class="dashboard-main"> in DOM for accessible tab order."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'class="dashboard-nav"' in html, "aside.dashboard-nav missing from rendered output"
+    assert 'class="dashboard-main"' in html, "div.dashboard-main missing from rendered output"
+    aside_pos = html.index('class="dashboard-nav"')
+    main_pos = html.index('class="dashboard-main"')
+    assert aside_pos < main_pos, "aside.dashboard-nav must precede div.dashboard-main in DOM"
+
+
+def test_generate_dashboard_multiview_home_button(workspace: Path, tmp_path: Path):
+    """Dashboard includes a multi-view home button in the sidebar nav."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'id="nav-home"' in html, "nav-home home link missing"
+    assert 'class="nav-home-link"' in html, "nav-home-link class missing"
+    assert "All sections" in html, "All sections label missing"
+
+
+def test_generate_dashboard_multiview_js(workspace: Path, tmp_path: Path):
+    """Dashboard includes multi-view section navigation JS."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert "section-hidden" in html, "section-hidden CSS class missing"
+    assert "showSection" in html, "showSection JS function missing"
+    assert "DYNAMIC" in html, "DYNAMIC set missing from multi-view JS"
+    assert "nav-active" in html, "nav-active CSS class missing"
+
+
+def test_generate_dashboard_multiview_home_precedes_nav_groups(workspace: Path, tmp_path: Path):
+    """Home link appears before the first nav group in the sidebar."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'id="nav-home"' in html, "nav-home home link missing"
+    assert 'class="dashboard-nav-group"' in html, "dashboard-nav-group missing"
+    home_pos = html.index('id="nav-home"')
+    group_pos = html.index('class="dashboard-nav-group"')
+    assert home_pos < group_pos, "nav-home must appear before the first nav group"
+
+
+def test_generate_dashboard_multiview_js_dynamic_clears_section_hidden(
+    workspace: Path, tmp_path: Path
+):
+    """DYNAMIC branch in showSection restores full overview (no section-hidden left behind)."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # The DYNAMIC branch must call classList.remove('section-hidden') on all sections
+    # (not just scroll) so that a prior focused view is cleared.
+    assert "DYNAMIC.has(id)" in html, "DYNAMIC.has(id) check missing"
+    assert "classList.remove('section-hidden')" in html, "section-hidden removal missing from JS"
+    # Verify the DYNAMIC branch itself contains the section-hidden removal.
+    # Search for the removal *after* the DYNAMIC.has(id) check so we find the
+    # occurrence inside that branch, not the earlier overview-branch occurrence.
+    dynamic_idx = html.index("DYNAMIC.has(id)")
+    remove_after_dynamic_idx = html.index("classList.remove('section-hidden')", dynamic_idx)
+    assert (
+        remove_after_dynamic_idx < dynamic_idx + 300
+    ), "section-hidden removal should appear inside the DYNAMIC branch (within 300 chars of DYNAMIC.has(id))"
+
+
+def test_generate_dashboard_multiview_js_coupled_sections(workspace: Path, tmp_path: Path):
+    """COUPLED map keeps packages/plugins shown together in focused view."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert "COUPLED" in html, "COUPLED map missing from multi-view JS"
+    assert "'packages': 'plugins'" in html, "packages->plugins coupling missing"
+    assert "'plugins': 'packages'" in html, "plugins->packages coupling missing"
+    assert "coupled = COUPLED[id]" in html, "coupled variable assignment missing"
+
+
+def test_generate_dashboard_multiview_dynamic_links_call_show_section(
+    workspace: Path, tmp_path: Path
+):
+    """DYNAMIC nav links get a click handler that calls showSection to clear stale nav-active."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # The click handler setup loop must NOT bail out early for DYNAMIC links.
+    # If "DYNAMIC.has(id)) return" is present, dynamic links skip showSection
+    # and leave a stale nav-active indicator on the previously-active static link.
+    assert "DYNAMIC.has(id)) return" not in html, (
+        "DYNAMIC links must not skip the click handler — they need showSection() "
+        "to clear the stale nav-active indicator from previously-active static links"
+    )
+    # All nav links (static and dynamic) should go through the same addEventListener path.
+    assert "a.addEventListener('click'" in html, "click handler missing from nav link setup"
+
+
 # --- Atom feed tests ---
 
 
