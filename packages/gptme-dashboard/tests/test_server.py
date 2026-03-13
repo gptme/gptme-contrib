@@ -590,8 +590,10 @@ def test_api_session_stats_basic_fallback_unknown_not_noop(tmp_path: Path):
         # unknown sessions must not inflate noop count
         assert data.get("unknown", 0) == 1, "basic-fallback sessions should be counted as unknown"
         assert data["noop"] == 0, "unknown sessions must not be classified as noop"
-        # success_rate must not be 0% when all sessions are unknown (no data, not failure)
-        assert data["success_rate"] == 0, "success_rate is 0 when no known-outcome sessions"
+        # success_rate must be null (not 0%) when all sessions are unknown (no data ≠ failure)
+        assert (
+            data["success_rate"] is None
+        ), "success_rate must be null when no known-outcome sessions"
         assert data["productive"] == 0
 
 

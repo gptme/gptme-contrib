@@ -428,7 +428,7 @@ def create_app(
             unknown = sum(1 for s in scanned if _is_unknown(s))
             noop = total - productive - unknown
             known = total - unknown
-            success_rate = productive / known if known > 0 else 0
+            success_rate = productive / known if known > 0 else None
 
             by_model: dict[str, dict] = {}
             by_harness: dict[str, dict] = {}
