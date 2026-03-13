@@ -102,6 +102,12 @@ header h1 {
 @media (max-width: 600px) {
   .content { padding: 1rem; }
 }
+
+.next-action {
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
 {% endblock %}
 
 {% block content %}
@@ -120,6 +126,8 @@ header h1 {
     {% if task.assigned_to %}<span class="tag">{{ task.assigned_to }}</span>{% endif %}
     {% if task.gh_url %}<a href="{{ task.gh_url }}" style="color: var(--text-dim); font-size: 0.85rem;">View on GitHub</a>{% endif %}
   </div>
+  {% if task.next_action %}<p class="next-action">→ <strong>Next:</strong> {{ task.next_action }}</p>{% endif %}
+  {% if task.waiting_for %}<p class="next-action">⏳ <strong>Waiting for:</strong> {{ task.waiting_for }}</p>{% endif %}
 </header>
 
 <div class="content">
