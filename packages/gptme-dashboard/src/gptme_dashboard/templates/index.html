@@ -579,6 +579,20 @@ tr:hover { background: var(--accent-dim); }
   <aside class="dashboard-nav" aria-label="Dashboard navigation">
     <h2>Quick navigation</h2>
 
+    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
+      <h3 class="dashboard-nav-group-title">Live dashboard</h3>
+      <div class="dashboard-nav-links">
+        <a href="#session-stats"><span>Session stats</span></a>
+        <a href="#activity-heatmap"><span>Activity</span></a>
+        <a href="#recent-sessions"><span>Recent sessions</span></a>
+        <a href="#agent-services"><span>Services</span></a>
+        <a href="#agent-schedule"><span>Schedule</span></a>
+        <a href="#service-health"><span>Service health</span></a>
+        <a href="#service-logs" style="display:none"><span>Service logs</span></a>
+        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
+      </div>
+    </div>
+
     {% if tasks or sessions or journals or summaries or readme_html or core_files %}
     <div class="dashboard-nav-group">
       <h3 class="dashboard-nav-group-title">Content</h3>
@@ -598,20 +612,6 @@ tr:hover { background: var(--accent-dim); }
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
         <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
-      </div>
-    </div>
-
-    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
-      <h3 class="dashboard-nav-group-title">Live dashboard</h3>
-      <div class="dashboard-nav-links">
-        <a href="#session-stats"><span>Session stats</span></a>
-        <a href="#activity-heatmap"><span>Activity</span></a>
-        <a href="#recent-sessions"><span>Recent sessions</span></a>
-        <a href="#agent-services"><span>Services</span></a>
-        <a href="#agent-schedule"><span>Schedule</span></a>
-        <a href="#service-health"><span>Service health</span></a>
-        <a href="#service-logs"><span>Service logs</span></a>
-        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
       </div>
     </div>
   </aside>
@@ -1582,14 +1582,14 @@ let _logsService = '';
 function showServiceLogs(serviceName) {
   _logsService = serviceName;
   document.getElementById('logs-service-name').textContent = '(' + serviceName + ')';
-  document.getElementById('service-logs').style.display = '';
+  show('service-logs');
   document.getElementById('service-logs').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   loadServiceLogs();
 }
 
 function hideServiceLogs() {
   _logsService = '';
-  document.getElementById('service-logs').style.display = 'none';
+  hide('service-logs');
 }
 
 async function loadServiceLogs() {
