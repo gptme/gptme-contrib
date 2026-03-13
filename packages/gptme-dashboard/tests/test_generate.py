@@ -3093,105 +3093,21 @@ def test_generate_dashboard_navigation_sidebar_dom_order(workspace: Path, tmp_pa
     assert aside_pos < main_pos, "aside.dashboard-nav must precede div.dashboard-main in DOM"
 
 
-def test_generate_dashboard_multiview_home_button(workspace: Path, tmp_path: Path):
-    """Dashboard includes a multi-view home button in the sidebar nav."""
+def test_generate_dashboard_nav_scroll_js(workspace: Path, tmp_path: Path):
+    """Dashboard includes smooth-scroll section navigation JS with scroll-spy."""
     output = tmp_path / "out"
     template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
     generate(workspace, output, template_dir)
 
     html = (output / "index.html").read_text()
 
-    assert 'id="nav-home"' in html, "nav-home home link missing"
-    assert 'class="nav-home-link"' in html, "nav-home-link class missing"
-    assert "All sections" in html, "All sections label missing"
-
-
-def test_generate_dashboard_multiview_js(workspace: Path, tmp_path: Path):
-    """Dashboard includes multi-view section navigation JS."""
-    output = tmp_path / "out"
-    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
-    generate(workspace, output, template_dir)
-
-    html = (output / "index.html").read_text()
-
-    assert "section-hidden" in html, "section-hidden CSS class missing"
-    assert "showSection" in html, "showSection JS function missing"
-    assert "DYNAMIC" in html, "DYNAMIC set missing from multi-view JS"
     assert "nav-active" in html, "nav-active CSS class missing"
-
-
-def test_generate_dashboard_multiview_home_precedes_nav_groups(workspace: Path, tmp_path: Path):
-    """Home link appears before the first nav group in the sidebar."""
-    output = tmp_path / "out"
-    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
-    generate(workspace, output, template_dir)
-
-    html = (output / "index.html").read_text()
-
-    assert 'id="nav-home"' in html, "nav-home home link missing"
-    assert 'class="dashboard-nav-group"' in html, "dashboard-nav-group missing"
-    home_pos = html.index('id="nav-home"')
-    group_pos = html.index('class="dashboard-nav-group"')
-    assert home_pos < group_pos, "nav-home must appear before the first nav group"
-
-
-def test_generate_dashboard_multiview_js_dynamic_clears_section_hidden(
-    workspace: Path, tmp_path: Path
-):
-    """DYNAMIC branch in showSection restores full overview (no section-hidden left behind)."""
-    output = tmp_path / "out"
-    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
-    generate(workspace, output, template_dir)
-
-    html = (output / "index.html").read_text()
-
-    # The DYNAMIC branch must call classList.remove('section-hidden') on all sections
-    # (not just scroll) so that a prior focused view is cleared.
-    assert "DYNAMIC.has(id)" in html, "DYNAMIC.has(id) check missing"
-    assert "classList.remove('section-hidden')" in html, "section-hidden removal missing from JS"
-    # Verify the DYNAMIC branch itself contains the section-hidden removal.
-    # Search for the removal *after* the DYNAMIC.has(id) check so we find the
-    # occurrence inside that branch, not the earlier overview-branch occurrence.
-    dynamic_idx = html.index("DYNAMIC.has(id)")
-    remove_after_dynamic_idx = html.index("classList.remove('section-hidden')", dynamic_idx)
-    assert (
-        remove_after_dynamic_idx < dynamic_idx + 300
-    ), "section-hidden removal should appear inside the DYNAMIC branch (within 300 chars of DYNAMIC.has(id))"
-
-
-def test_generate_dashboard_multiview_js_coupled_sections(workspace: Path, tmp_path: Path):
-    """COUPLED map keeps packages/plugins shown together in focused view."""
-    output = tmp_path / "out"
-    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
-    generate(workspace, output, template_dir)
-
-    html = (output / "index.html").read_text()
-
-    assert "COUPLED" in html, "COUPLED map missing from multi-view JS"
-    assert "'packages': 'plugins'" in html, "packages->plugins coupling missing"
-    assert "'plugins': 'packages'" in html, "plugins->packages coupling missing"
-    assert "coupled = COUPLED[id]" in html, "coupled variable assignment missing"
-
-
-def test_generate_dashboard_multiview_dynamic_links_call_show_section(
-    workspace: Path, tmp_path: Path
-):
-    """DYNAMIC nav links get a click handler that calls showSection to clear stale nav-active."""
-    output = tmp_path / "out"
-    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
-    generate(workspace, output, template_dir)
-
-    html = (output / "index.html").read_text()
-
-    # The click handler setup loop must NOT bail out early for DYNAMIC links.
-    # If "DYNAMIC.has(id)) return" is present, dynamic links skip showSection
-    # and leave a stale nav-active indicator on the previously-active static link.
-    assert "DYNAMIC.has(id)) return" not in html, (
-        "DYNAMIC links must not skip the click handler — they need showSection() "
-        "to clear the stale nav-active indicator from previously-active static links"
-    )
-    # All nav links (static and dynamic) should go through the same addEventListener path.
-    assert "a.addEventListener('click'" in html, "click handler missing from nav link setup"
+    assert "scrollIntoView" in html, "scrollIntoView call missing from nav JS"
+    assert "setActive" in html, "setActive function missing from nav JS"
+    # Click handlers attached to nav links
+    assert "addEventListener('click'" in html, "click handler missing from nav links"
+    # Scroll-spy for updating active nav link
+    assert "addEventListener('scroll'" in html, "scroll event listener missing"
 
 
 def test_generate_dashboard_live_nav_group_hidden_in_static_mode(workspace: Path, tmp_path: Path):
@@ -3253,9 +3169,9 @@ def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path:
     html = (output / "index.html").read_text()
 
     # Static sections must appear in sidebar nav order:
-    # tasks → sessions → journals → summaries → packages → plugins → guidance → about
+    # tasks → sessions → journals → summaries → about → packages → plugins → guidance
     # (tasks/sessions may be absent but the rest are always present)
-    expected_order = ["journals", "summaries", "packages", "plugins", "guidance", "about"]
+    expected_order = ["journals", "summaries", "about", "packages", "plugins", "guidance"]
     positions = []
     for section_id in expected_order:
         marker = f'<section id="{section_id}"'

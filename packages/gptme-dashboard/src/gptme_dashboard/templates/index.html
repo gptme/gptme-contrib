@@ -105,28 +105,12 @@ header p { color: var(--text-dim); margin-top: 0.25rem; }
   font-size: 0.8rem;
 }
 
-/* Multi-view navigation */
+/* Active nav link */
 .dashboard-nav-links a.nav-active {
   background: var(--accent-dim);
   color: var(--accent);
   font-weight: 500;
 }
-.section-hidden {
-  display: none !important;
-}
-.nav-home-link {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  text-decoration: none;
-  color: var(--text-dim);
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.9rem;
-  margin-bottom: 0.25rem;
-}
-.nav-home-link:hover { background: var(--accent-dim); color: var(--text); }
-.nav-home-link.nav-active { background: var(--accent-dim); color: var(--accent); font-weight: 500; }
 
 /* Sections */
 section {
@@ -470,24 +454,30 @@ tr:hover { background: var(--accent-dim); }
 }
 
 /* Activity heatmap */
-.heatmap-wrap { overflow-x: auto; }
+.heatmap-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .heatmap-month-labels {
   display: flex;
-  gap: 3px;
-  margin-bottom: 3px;
+  gap: var(--hm-gap, 3px);
+  margin-bottom: var(--hm-gap, 3px);
   font-size: 0.7rem;
   color: var(--text-dim);
 }
-.heatmap-month-label { width: 12px; flex-shrink: 0; white-space: nowrap; overflow: visible; }
-.heatmap-grid { display: flex; gap: 3px; }
-.heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+.heatmap-month-label { width: var(--hm-size, 12px); flex-shrink: 0; white-space: nowrap; overflow: visible; }
+.heatmap-grid { display: flex; gap: var(--hm-gap, 3px); }
+.heatmap-col { display: flex; flex-direction: column; gap: var(--hm-gap, 3px); }
 .heatmap-cell {
-  width: 12px;
-  height: 12px;
+  width: var(--hm-size, 12px);
+  height: var(--hm-size, 12px);
   border-radius: 2px;
   background: var(--border);
   flex-shrink: 0;
   cursor: default;
+}
+@media (max-width: 900px) {
+  .heatmap-wrap { --hm-size: 8px; --hm-gap: 2px; }
+}
+@media (max-width: 600px) {
+  .heatmap-wrap { --hm-size: 6px; --hm-gap: 1px; }
 }
 .heatmap-cell[data-level="1"] { background: #0e4429; }
 .heatmap-cell[data-level="2"] { background: #006d32; }
@@ -588,9 +578,22 @@ tr:hover { background: var(--accent-dim); }
 <div class="dashboard-layout">
   <aside class="dashboard-nav" aria-label="Dashboard navigation">
     <h2>Quick navigation</h2>
-    <a href="#" id="nav-home" class="nav-home-link" aria-label="Show all sections">⊞ All sections</a>
 
-    {% if readme_html or tasks or sessions or journals or summaries %}
+    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
+      <h3 class="dashboard-nav-group-title">Live dashboard</h3>
+      <div class="dashboard-nav-links">
+        <a href="#session-stats"><span>Session stats</span></a>
+        <a href="#activity-heatmap"><span>Activity</span></a>
+        <a href="#recent-sessions"><span>Recent sessions</span></a>
+        <a href="#agent-services"><span>Services</span></a>
+        <a href="#agent-schedule"><span>Schedule</span></a>
+        <a href="#service-health"><span>Service health</span></a>
+        <a href="#service-logs" style="display:none"><span>Service logs</span></a>
+        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
+      </div>
+    </div>
+
+    {% if tasks or sessions or journals or summaries or readme_html or core_files %}
     <div class="dashboard-nav-group">
       <h3 class="dashboard-nav-group-title">Content</h3>
       <div class="dashboard-nav-links">
@@ -598,6 +601,7 @@ tr:hover { background: var(--accent-dim); }
         {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
         {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
+        {% if readme_html or core_files %}<a href="#about"><span>Core Files</span>{% if core_files %}<span class="nav-count">{{ core_files | length }}</span>{% endif %}</a>{% endif %}
       </div>
     </div>
     {% endif %}
@@ -608,21 +612,6 @@ tr:hover { background: var(--accent-dim); }
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
         <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
-        {% if readme_html or core_files %}<a href="#about"><span>Core Files</span><span class="nav-count">{{ core_files | length }}</span></a>{% endif %}
-      </div>
-    </div>
-
-    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
-      <h3 class="dashboard-nav-group-title">Live dashboard</h3>
-      <div class="dashboard-nav-links">
-        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
-        <a href="#recent-sessions"><span>Recent sessions</span></a>
-        <a href="#session-stats"><span>Session stats</span></a>
-        <a href="#activity-heatmap"><span>Activity</span></a>
-        <a href="#agent-services"><span>Services</span></a>
-        <a href="#agent-schedule"><span>Schedule</span></a>
-        <a href="#service-health"><span>Service health</span></a>
-        <a href="#service-logs"><span>Service logs</span></a>
       </div>
     </div>
   </aside>
@@ -881,6 +870,33 @@ tr:hover { background: var(--accent-dim); }
 </section>
 {% endif %}
 
+{% if readme_html or core_files %}
+<!-- Core Files (README + gptme.toml prompt files) -->
+<section id="about">
+  <h2>Core Files {% if core_files %}<span class="count-badge">({{ core_files | length }})</span>{% endif %}</h2>
+  {% if core_files %}
+  <p style="color:var(--text-dim);margin-bottom:1rem">Files auto-included in every agent session via <code>gptme.toml</code>:</p>
+  <table>
+    <thead><tr><th>File</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for f in core_files %}
+      <tr>
+        <td><code>{{ f }}</code></td>
+        {% if gh_repo_url %}<td><a href="{{ gh_repo_url }}/blob/HEAD/{{ f }}" class="gh-link">src</a></td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if readme_html %}
+  <details>
+    <summary style="cursor:pointer;margin-top:1rem"><strong>README.md</strong></summary>
+    <div class="content" style="margin-top:0.5rem">{{ readme_html | safe }}</div>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
 <!-- Packages & Plugins (short, infrastructure overview) -->
 <div class="two-col">
   <section id="packages">
@@ -969,33 +985,6 @@ tr:hover { background: var(--accent-dim); }
   <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" data-controls="guidance-adv-filters" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
   {% endif %}
 </section>
-
-{% if readme_html or core_files %}
-<!-- Core Files (README + gptme.toml prompt files) -->
-<section id="about">
-  <h2>Core Files {% if core_files %}<span class="count-badge">({{ core_files | length }})</span>{% endif %}</h2>
-  {% if core_files %}
-  <p style="color:var(--text-dim);margin-bottom:1rem">Files auto-included in every agent session via <code>gptme.toml</code>:</p>
-  <table>
-    <thead><tr><th>File</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-    <tbody>
-    {% for f in core_files %}
-      <tr>
-        <td><code>{{ f }}</code></td>
-        {% if gh_repo_url %}<td><a href="{{ gh_repo_url }}/blob/master/{{ f }}" class="gh-link">src</a></td>{% endif %}
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-  {% if readme_html %}
-  <details>
-    <summary style="cursor:pointer;margin-top:1rem"><strong>README.md</strong></summary>
-    <div class="content" style="margin-top:0.5rem">{{ readme_html | safe }}</div>
-  </details>
-  {% endif %}
-</section>
-{% endif %}
 
   </div>
 </div>
@@ -1181,14 +1170,13 @@ if (taskStateBtns.length > 0 && tasksTable) {
 }
 
 // Dynamic dashboard — progressive enhancement
-// Tries /api/status; if it responds, activates dynamic panels.
+// Tries /api/status; if it responds, each loader shows its own section.
 async function initDynamic() {
   try {
     const resp = await fetch('/api/status');
     if (!resp.ok) return;
-    document.querySelectorAll('.dynamic-panel').forEach(el => el.style.display = '');
-    const liveGroup = document.getElementById('live-nav-group');
-    if (liveGroup) liveGroup.style.display = '';
+    // Each load* function calls show()/hide() for its own section.
+    // The live nav group is shown automatically by show() when a child link appears.
     loadSessionStats();
     loadActivityHeatmap();
     loadRecentSessions();
@@ -1222,6 +1210,7 @@ async function loadSessionStats() {
       card(rate, 'Success Rate'),
       card(dur, 'Total Time'),
     ].join('');
+    show('session-stats');
 
     const models = stats.by_model;
     if (models && Object.keys(models).length > 0) {
@@ -1269,6 +1258,8 @@ async function loadRecentSessions(offset) {
 
     const tbody = document.querySelector('#dynamic-sessions-table tbody');
     if (!tbody) { hide('recent-sessions'); return; }
+
+    show('recent-sessions');
 
     // Update count badge
     const countEl = document.getElementById('sessions-count');
@@ -1358,6 +1349,7 @@ async function loadServices() {
         + '<td>' + esc(s.description) + '</td>'
         + '</tr>';
     }).join('');
+    show('agent-services');
   } catch (e) { hide('agent-services'); }
 }
 
@@ -1404,6 +1396,7 @@ async function loadSchedule() {
         + '<td>' + fmtTime(t.next) + '</td>'
         + '</tr>';
     }).join('');
+    show('agent-schedule');
   } catch (e) { hide('agent-schedule'); }
 }
 
@@ -1500,11 +1493,7 @@ async function loadServiceHealth() {
     const data = await resp.json();
     const services = data.services || [];
     const tbody = document.querySelector('#health-table tbody');
-    if (services.length === 0) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="opacity:0.6">No gptme services found</td></tr>';
-      document.getElementById('service-health').style.display = '';
-      return;
-    }
+    if (services.length === 0) { hide('service-health'); return; }
     if (!tbody) { hide('service-health'); return; }
 
     // Summary counts
@@ -1538,7 +1527,7 @@ async function loadServiceHealth() {
         + '</tr>';
     }).join('');
 
-    document.getElementById('service-health').style.display = '';
+    show('service-health');
   } catch (e) { hide('service-health'); }
 }
 
@@ -1557,10 +1546,33 @@ async function loadJournals() {
       + '<td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.preview || '') + '</td>'
       + '</tr>'
     ).join('');
+    show('dynamic-journals');
   } catch (e) { hide('dynamic-journals'); }
 }
 
-function hide(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
+function hide(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'none';
+  // Also hide the corresponding nav link
+  const link = document.querySelector('.dashboard-nav-links a[href="#' + id + '"]');
+  if (link) link.style.display = 'none';
+  // Auto-hide live nav group if all its links are hidden
+  const liveGroup = document.getElementById('live-nav-group');
+  if (liveGroup) {
+    const visibleLinks = liveGroup.querySelectorAll('.dashboard-nav-links a:not([style*="display: none"])');
+    if (visibleLinks.length === 0) liveGroup.style.display = 'none';
+  }
+}
+function show(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = '';
+  // Also show the corresponding nav link
+  const link = document.querySelector('.dashboard-nav-links a[href="#' + id + '"]');
+  if (link) link.style.display = '';
+  // Show live nav group when a child becomes visible
+  const liveGroup = document.getElementById('live-nav-group');
+  if (liveGroup && liveGroup.contains(link)) liveGroup.style.display = '';
+}
 function card(v, l) { return '<div class="stat-card"><div class="number">' + v + '</div><div class="label">' + l + '</div></div>'; }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
@@ -1570,14 +1582,14 @@ let _logsService = '';
 function showServiceLogs(serviceName) {
   _logsService = serviceName;
   document.getElementById('logs-service-name').textContent = '(' + serviceName + ')';
-  document.getElementById('service-logs').style.display = '';
+  show('service-logs');
   document.getElementById('service-logs').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   loadServiceLogs();
 }
 
 function hideServiceLogs() {
   _logsService = '';
-  document.getElementById('service-logs').style.display = 'none';
+  hide('service-logs');
 }
 
 async function loadServiceLogs() {
@@ -1698,7 +1710,7 @@ async function loadActivityHeatmap() {
       gridEl.appendChild(colEl);
     });
 
-    // Panel already visible via initDynamic; nothing more to do on success.
+    show('activity-heatmap');
   } catch (e) { hide('activity-heatmap'); }
 }
 
@@ -1835,103 +1847,60 @@ document.addEventListener('keydown', function(e) {
 </script>
 
 <script>
-/* === Multi-view section navigation ===
- * Clicking a static-section nav link shows only that section (focused view).
- * The "All sections" home link restores the full overview.
- * Dynamic panels (live API) are left untouched — they appear/hide based on API
- * availability and are not affected by the focused-view toggle.
+/* === Section navigation ===
+ * Nav links smooth-scroll to the target section and highlight the active link.
+ * Scroll-spy updates the highlight as the user scrolls.
  */
 (function () {
   'use strict';
 
-  // IDs of sections controlled by the live API (style.display managed by initDynamic)
-  var DYNAMIC = new Set([
-    'session-stats', 'activity-heatmap', 'recent-sessions',
-    'agent-services', 'agent-schedule', 'service-health',
-    'service-logs', 'dynamic-journals'
-  ]);
+  var navLinks = document.querySelectorAll('.dashboard-nav-links a[href^="#"]');
 
-  // Sections that must always be shown together (e.g. two-col layout siblings)
-  var COUPLED = { 'packages': 'plugins', 'plugins': 'packages' };
+  // Highlight the nav link matching the given section id
+  function setActive(id) {
+    navLinks.forEach(function (a) {
+      a.classList.toggle('nav-active', a.getAttribute('href') === '#' + id);
+    });
+  }
 
-  function showSection(id) {
-    var homeLink = document.getElementById('nav-home');
-    var navLinks = document.querySelectorAll('.dashboard-nav-links a');
-    var sections = document.querySelectorAll('.dashboard-main section');
-
-    navLinks.forEach(function (a) { a.classList.remove('nav-active'); });
-    if (homeLink) homeLink.classList.remove('nav-active');
-
-    if (!id) {
-      // Overview: show all static sections
-      if (homeLink) homeLink.classList.add('nav-active');
-      sections.forEach(function (s) { s.classList.remove('section-hidden'); });
-    } else if (DYNAMIC.has(id)) {
-      // Dynamic panel: restore full overview so any hidden static sections are
-      // revealed, then scroll to the panel if it's currently visible.
-      if (homeLink) homeLink.classList.add('nav-active');
-      sections.forEach(function (s) { s.classList.remove('section-hidden'); });
+  // Click → smooth scroll + highlight
+  navLinks.forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      var id = a.getAttribute('href').slice(1);
       var el = document.getElementById(id);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      return;
-    } else if (!document.getElementById(id)) {
-      // Unknown hash: fall back to full overview instead of blank content area
-      if (homeLink) homeLink.classList.add('nav-active');
-      sections.forEach(function (s) { s.classList.remove('section-hidden'); });
-    } else {
-      // Focused view: show only the target static section (+ any coupled siblings)
-      var coupled = COUPLED[id] || null;
-      sections.forEach(function (s) {
-        if (s.id === id || s.id === coupled) {
-          s.classList.remove('section-hidden');
-        } else if (!DYNAMIC.has(s.id)) {
-          s.classList.add('section-hidden');
-        }
-        // Dynamic sections are left as-is (API manages their visibility)
+      if (!el) return;  // let browser handle missing targets
+      e.preventDefault();
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      history.replaceState(null, '', '#' + id);
+      setActive(id);
+    });
+  });
+
+  // Scroll-spy: update active link as user scrolls
+  var ticking = false;
+  window.addEventListener('scroll', function () {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(function () {
+      ticking = false;
+      var best = '';
+      navLinks.forEach(function (a) {
+        var id = a.getAttribute('href').slice(1);
+        var el = document.getElementById(id);
+        if (el && el.offsetParent !== null && el.getBoundingClientRect().top <= 120) best = id;
       });
-      var escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/[^\w-]/g, '\\$&');
-      var activeLink = document.querySelector('.dashboard-nav-links a[href="#' + escaped + '"]');
-      if (activeLink) activeLink.classList.add('nav-active');
-      window.scrollTo(0, 0);
+      if (best) setActive(best);
+    });
+  });
+
+  // On load: scroll to hash target if present
+  if (location.hash) {
+    var el = document.getElementById(location.hash.slice(1));
+    if (el) {
+      el.scrollIntoView({ block: 'start' });
+      setActive(location.hash.slice(1));
     }
   }
-
-  // Intercept nav link clicks — static sections get focused view; dynamic panels
-  // get showSection() too so the stale nav-active indicator is cleared.
-  document.querySelectorAll('.dashboard-nav-links a').forEach(function (a) {
-    var href = a.getAttribute('href') || '';
-    if (!href.startsWith('#')) return;
-    var id = href.slice(1);
-    a.addEventListener('click', function (e) {
-      e.preventDefault();
-      history.pushState({ section: id }, '', '#' + id);
-      showSection(id);
-    });
-  });
-
-  // Home link restores full overview
-  var homeLink = document.getElementById('nav-home');
-  if (homeLink) {
-    homeLink.addEventListener('click', function (e) {
-      e.preventDefault();
-      history.pushState({ section: null }, '', location.pathname + location.search);
-      showSection(null);
-    });
-  }
-
-  // Restore view from URL hash on page load
-  var initial = location.hash ? location.hash.slice(1) : null;
-  showSection(initial || null);
-
-  // Handle browser back / forward
-  // Distinguish e.state === null (no state pushed yet, use hash)
-  // from e.state = { section: null } (home button, which explicitly clears section)
-  window.addEventListener('popstate', function (e) {
-    var id = (e.state !== null && e.state !== undefined)
-      ? e.state.section
-      : (location.hash ? location.hash.slice(1) : null);
-    showSection(id || null);
-  });
 }());
 </script>
 {% endblock %}
