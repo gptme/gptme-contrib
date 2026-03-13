@@ -516,6 +516,8 @@ def _task_to_dict(md_file: Path) -> dict | None:
         tags = []
     tags = [str(t) for t in tags]
     assigned_to = str(fm.get("assigned_to", "") or "")
+    next_action = str(fm.get("next_action", "") or "")
+    waiting_for = str(fm.get("waiting_for", "") or "")
 
     return {
         "id": md_file.stem,
@@ -524,6 +526,8 @@ def _task_to_dict(md_file: Path) -> dict | None:
         "priority": priority,
         "tags": tags[:5],
         "assigned_to": assigned_to,
+        "next_action": next_action,
+        "waiting_for": waiting_for,
         "path": f"tasks/{md_file.name}",
         "body": body,
         "page_url": task_page_path(md_file.stem),
@@ -538,8 +542,8 @@ def scan_tasks(workspace: Path) -> list[dict]:
     manual YAML parsing when gptodo is not installed.
 
     Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
-    ``tags``, ``assigned_to``, ``path``, ``body``, and ``page_url`` keys,
-    sorted by state priority then title.
+    ``tags``, ``assigned_to``, ``next_action``, ``waiting_for``, ``path``,
+    ``body``, and ``page_url`` keys, sorted by state priority then title.
     """
     tasks_dir = workspace / "tasks"
     if not tasks_dir.is_dir():
@@ -569,6 +573,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
             if isinstance(raw_tags, str):
                 raw_tags = [raw_tags]
             tags = [str(tag) for tag in raw_tags][:5]
+            meta = t.metadata or {}
             tasks.append(
                 {
                     "id": t.name,
@@ -577,6 +582,8 @@ def scan_tasks(workspace: Path) -> list[dict]:
                     "priority": (t.priority or "").lower(),
                     "tags": tags,
                     "assigned_to": t.assigned_to or "",
+                    "next_action": str(meta.get("next_action", "") or ""),
+                    "waiting_for": str(meta.get("waiting_for", "") or ""),
                     "path": f"tasks/{t.path.name}",
                     "body": body,
                     "page_url": task_page_path(t.name),

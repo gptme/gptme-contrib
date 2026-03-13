@@ -149,6 +149,7 @@ th {
   letter-spacing: 0.05em;
 }
 tr:hover { background: var(--accent-dim); }
+.task-hint { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.2rem; }
 
 /* Tags */
 .tag {
@@ -764,7 +765,11 @@ tr:hover { background: var(--accent-dim); }
     <tbody>
     {% for task in tasks %}
       <tr data-state="{{ task.state }}"{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
-        <td><strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong></td>
+        <td>
+          <strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong>
+          {% if task.state in ('active', 'ready_for_review') and task.next_action %}<div class="task-hint">→ {{ task.next_action }}</div>{% endif %}
+          {% if task.state == 'waiting' and task.waiting_for %}<div class="task-hint">⏳ {{ task.waiting_for }}</div>{% endif %}
+        </td>
         <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
         <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>
         <td>{% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}</td>

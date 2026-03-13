@@ -81,7 +81,7 @@ def load_org_config(org_config: Path) -> list[dict[str, str]]:
             import tomli as tomllib  # type: ignore[import-not-found,no-redef]
         except ImportError:
             raise ImportError(
-                "tomli is required for org config on Python < 3.11: " "pip install tomli"
+                "tomli is required for org config on Python < 3.11: pip install tomli"
             )
 
     with open(org_config, "rb") as f:

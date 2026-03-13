@@ -2331,6 +2331,148 @@ def test_scan_tasks_includes_body(tmp_path: Path):
     assert "Do something useful" in tasks[0]["body"]
 
 
+def test_scan_tasks_includes_next_action(tmp_path: Path):
+    """scan_tasks extracts next_action and waiting_for from task frontmatter."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "active-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        next_action: "Write the implementation"
+        created: 2026-03-01
+        ---
+        # Active Task
+        """)
+    )
+    (tasks_dir / "waiting-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: waiting
+        waiting_for: "Erik's review"
+        created: 2026-03-01
+        ---
+        # Waiting Task
+        """)
+    )
+    (tasks_dir / "plain-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: backlog
+        created: 2026-03-01
+        ---
+        # Plain Task
+        """)
+    )
+    tasks = {t["id"]: t for t in scan_tasks(tmp_path)}
+    assert tasks["active-task"]["next_action"] == "Write the implementation"
+    assert tasks["active-task"]["waiting_for"] == ""
+    assert tasks["waiting-task"]["waiting_for"] == "Erik's review"
+    assert tasks["waiting-task"]["next_action"] == ""
+    assert tasks["plain-task"]["next_action"] == ""
+    assert tasks["plain-task"]["waiting_for"] == ""
+
+
+def test_task_detail_renders_next_action(workspace: Path, tmp_path: Path):
+    """Task detail page shows next_action and waiting_for when present."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        next_action: "Implement the feature"
+        created: 2026-03-01
+        ---
+        # My Task
+
+        Do something.
+        """)
+    )
+    (tasks_dir / "blocked.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: waiting
+        waiting_for: "CI to pass"
+        created: 2026-03-01
+        ---
+        # Blocked Task
+        """)
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    task_page = (output / "tasks" / "my-task.html").read_text()
+    assert "Implement the feature" in task_page
+    assert "Next:" in task_page
+    blocked_page = (output / "tasks" / "blocked.html").read_text()
+    assert "CI to pass" in blocked_page
+    assert "Waiting for:" in blocked_page
+
+
+def test_task_detail_hides_stale_callouts_on_done(workspace: Path, tmp_path: Path):
+    """Completed tasks should not show stale next_action/waiting_for callouts."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "done-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: done
+        next_action: "Stale next action"
+        waiting_for: "Stale waiting for"
+        created: 2026-03-01
+        ---
+        # Done Task
+        """)
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    task_page = (output / "tasks" / "done-task.html").read_text()
+    assert "Stale next action" not in task_page
+    assert "Stale waiting for" not in task_page
+
+
+def test_generate_index_shows_task_hints(workspace: Path, tmp_path: Path):
+    """Index task table shows next_action hint for active/ready_for_review, waiting_for for waiting."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "active-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        next_action: "Write tests"
+        created: 2026-03-01
+        ---
+        # Active Task
+        """)
+    )
+    (tasks_dir / "review-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: ready_for_review
+        next_action: "Await maintainer feedback"
+        created: 2026-03-01
+        ---
+        # Review Task
+        """)
+    )
+    (tasks_dir / "waiting-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: waiting
+        waiting_for: "Upstream merge"
+        created: 2026-03-01
+        ---
+        # Waiting Task
+        """)
+    )
+    output = tmp_path / "site"
+    generate(workspace, output)
+    index = (output / "index.html").read_text()
+    assert "Write tests" in index
+    assert "Await maintainer feedback" in index
+    assert "Upstream merge" in index
+
+
 def test_scan_tasks_includes_page_url(tmp_path: Path):
     """scan_tasks includes page_url in each task entry."""
     tasks_dir = tmp_path / "tasks"
