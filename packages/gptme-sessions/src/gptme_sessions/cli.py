@@ -1490,6 +1490,10 @@ def classify(
             if also_judge:
                 classification, judge_result = judge_and_classify(text, goals=goals)
                 if classification is None:
+                    logger.warning(
+                        "judge_and_classify failed for %s; falling back to keyword classification",
+                        entry.name,
+                    )
                     classification = classify_by_keywords(text)
             elif llm:
                 classification = classify_by_llm(text)

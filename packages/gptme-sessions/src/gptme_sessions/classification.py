@@ -868,7 +868,8 @@ Return ONLY a JSON object with keys:
   "reason" (string — 1-sentence scoring explanation),
   "productive" (boolean),
   "deliverables" (list of strings),
-  "blockers" (list of strings).
+  "blockers" (list of strings),
+  "confidence" (float 0.0-1.0 — how clearly the session fits the chosen category).
 Do not wrap in markdown code blocks."""
 
 _JUDGE_CLASSIFY_PROMPT = """\
@@ -893,7 +894,7 @@ _JUDGE_CLASSIFY_PROMPT = """\
 
 Key: ONE impactful deliverable > FIVE small deliverables.
 
-Return JSON: {{"category": "<cat>", "score": <float>, "reason": "<1 sentence>", "productive": <bool>, "deliverables": [...], "blockers": [...]}}"""
+Return JSON: {{"category": "<cat>", "score": <float>, "reason": "<1 sentence>", "productive": <bool>, "deliverables": [...], "blockers": [...], "confidence": <float>}}"""
 
 
 def judge_and_classify(
@@ -959,11 +960,23 @@ def judge_and_classify(
 
         verdict = json.loads(text)
 
-        # Extract classification
+        # Extract judge score first — it's independent of category validity
+        score = max(0.0, min(1.0, float(verdict.get("score", 0.5))))
+        judge_result: dict | None = {
+            "score": score,
+            "reason": str(verdict.get("reason", "")),
+            "model": model,
+        }
+
+        # Extract classification — return judge score even if category is invalid
         category = str(verdict.get("category", ""))
         if category not in cat_names:
-            logger.warning("LLM returned unknown category %r", category)
-            return None, None
+            logger.warning(
+                "LLM returned unknown category %r; classification falls back to keywords"
+                " (judge score preserved)",
+                category,
+            )
+            return None, judge_result
 
         classification = ClassificationResult(
             category=category,
@@ -973,14 +986,6 @@ def judge_and_classify(
             deliverables=list(verdict.get("deliverables", [])),
             blockers=list(verdict.get("blockers", [])),
         )
-
-        # Extract judge score
-        score = max(0.0, min(1.0, float(verdict.get("score", 0.5))))
-        judge_result = {
-            "score": score,
-            "reason": str(verdict.get("reason", "")),
-            "model": model,
-        }
 
         return classification, judge_result
 

@@ -408,6 +408,63 @@ class TestJudgeAndClassify:
         assert classification is None
         assert judge_result is None
 
+    def test_confidence_comes_from_llm_not_hardcoded(self) -> None:
+        """LLM-returned confidence should be used, not the 0.7 default."""
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "category": "code",
+                        "score": 0.8,
+                        "reason": "Good code work",
+                        "productive": True,
+                        "deliverables": ["PR #1"],
+                        "blockers": [],
+                        "confidence": 0.95,
+                    }
+                )
+            )
+        ]
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+
+        with patch.dict("sys.modules", {"anthropic": mock_anthropic}):
+            classification, _ = judge_and_classify("test text", api_key="fake-key")
+
+        assert classification is not None
+        assert classification.confidence == 0.95  # Should use LLM value, not 0.7 default
+
+    def test_preserves_judge_score_on_unknown_category(self) -> None:
+        """If LLM returns an unrecognised category, judge score should still be returned."""
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "category": "NOT_A_VALID_CATEGORY",
+                        "score": 0.72,
+                        "reason": "Solid output",
+                        "productive": True,
+                        "deliverables": [],
+                        "blockers": [],
+                        "confidence": 0.5,
+                    }
+                )
+            )
+        ]
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+
+        with patch.dict("sys.modules", {"anthropic": mock_anthropic}):
+            classification, judge_result = judge_and_classify("test text", api_key="fake-key")
+
+        # Classification should be None (unknown category), but judge score preserved
+        assert classification is None
+        assert judge_result is not None
+        assert judge_result["score"] == 0.72
+        assert judge_result["reason"] == "Solid output"
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Tests: hybrid classify_session
