@@ -3084,8 +3084,8 @@ def test_generate_dashboard_navigation_sidebar_dom_order(workspace: Path, tmp_pa
 
     html = (output / "index.html").read_text()
 
-    assert 'class="dashboard-nav"' in html, "aside.dashboard-nav not found in rendered output"
-    assert 'class="dashboard-main"' in html, "div.dashboard-main not found in rendered output"
+    assert 'class="dashboard-nav"' in html, "aside.dashboard-nav missing from rendered output"
+    assert 'class="dashboard-main"' in html, "div.dashboard-main missing from rendered output"
     aside_pos = html.index('class="dashboard-nav"')
     main_pos = html.index('class="dashboard-main"')
     assert aside_pos < main_pos, "aside.dashboard-nav must precede div.dashboard-main in DOM"
