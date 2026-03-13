@@ -3149,12 +3149,14 @@ def test_generate_dashboard_multiview_js_dynamic_clears_section_hidden(
     # (not just scroll) so that a prior focused view is cleared.
     assert "DYNAMIC.has(id)" in html, "DYNAMIC.has(id) check missing"
     assert "classList.remove('section-hidden')" in html, "section-hidden removal missing from JS"
-    # Verify the DYNAMIC branch now restores the full overview before scrolling
+    # Verify the DYNAMIC branch itself contains the section-hidden removal.
+    # Search for the removal *after* the DYNAMIC.has(id) check so we find the
+    # occurrence inside that branch, not the earlier overview-branch occurrence.
     dynamic_idx = html.index("DYNAMIC.has(id)")
-    remove_idx = html.index("classList.remove('section-hidden')")
+    remove_after_dynamic_idx = html.index("classList.remove('section-hidden')", dynamic_idx)
     assert (
-        remove_idx < dynamic_idx + 300
-    ), "section-hidden removal should appear in the DYNAMIC branch, not only in the overview branch"
+        remove_after_dynamic_idx < dynamic_idx + 300
+    ), "section-hidden removal should appear inside the DYNAMIC branch (within 300 chars of DYNAMIC.has(id))"
 
 
 def test_generate_dashboard_multiview_js_coupled_sections(workspace: Path, tmp_path: Path):
