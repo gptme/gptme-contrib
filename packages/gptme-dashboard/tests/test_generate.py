@@ -3173,6 +3173,27 @@ def test_generate_dashboard_multiview_js_coupled_sections(workspace: Path, tmp_p
     assert "coupled = COUPLED[id]" in html, "coupled variable assignment missing"
 
 
+def test_generate_dashboard_multiview_dynamic_links_call_show_section(
+    workspace: Path, tmp_path: Path
+):
+    """DYNAMIC nav links get a click handler that calls showSection to clear stale nav-active."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # The click handler setup loop must NOT bail out early for DYNAMIC links.
+    # If "DYNAMIC.has(id)) return" is present, dynamic links skip showSection
+    # and leave a stale nav-active indicator on the previously-active static link.
+    assert "DYNAMIC.has(id)) return" not in html, (
+        "DYNAMIC links must not skip the click handler — they need showSection() "
+        "to clear the stale nav-active indicator from previously-active static links"
+    )
+    # All nav links (static and dynamic) should go through the same addEventListener path.
+    assert "a.addEventListener('click'" in html, "click handler missing from nav link setup"
+
+
 # --- Atom feed tests ---
 
 

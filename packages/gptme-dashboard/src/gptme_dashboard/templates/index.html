@@ -1871,12 +1871,12 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
-  // Intercept nav link clicks for static sections only
+  // Intercept nav link clicks — static sections get focused view; dynamic panels
+  // get showSection() too so the stale nav-active indicator is cleared.
   document.querySelectorAll('.dashboard-nav-links a').forEach(function (a) {
     var href = a.getAttribute('href') || '';
     if (!href.startsWith('#')) return;
     var id = href.slice(1);
-    if (DYNAMIC.has(id)) return; // dynamic panel links keep default anchor behavior
     a.addEventListener('click', function (e) {
       e.preventDefault();
       history.pushState({ section: id }, '', '#' + id);
