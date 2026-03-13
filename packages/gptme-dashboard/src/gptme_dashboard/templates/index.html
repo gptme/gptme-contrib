@@ -946,7 +946,11 @@ tr:hover { background: var(--accent-dim); }
   {% if guidance | length > 5 and stats.lesson_categories %}
   <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
     Reference catalog —
+    {% if stats.lesson_categories %}
     {% for cat, count in stats.lesson_categories.items() %}{{ cat }} ({{ count }}){% if not loop.last %}, {% endif %}{% endfor %}
+    {% else %}
+    {{ stats.total_skills }} skill{{ "s" if stats.total_skills != 1 else "" }}
+    {% endif %}
   </p>
   {% endif %}
   <!-- Advanced filters: hidden until section is expanded (only when >5 items with a show-more button) -->
