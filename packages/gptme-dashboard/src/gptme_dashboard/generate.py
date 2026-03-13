@@ -500,6 +500,55 @@ def scan_journals(workspace: Path, limit: int = 30) -> list[dict]:
     return entries
 
 
+def _parse_date_field(value: object) -> str:
+    """Normalise a YAML date/datetime/str value to an ISO date string (YYYY-MM-DD).
+
+    Returns an empty string when the value is absent, None, or unparseable.
+    """
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    # String fallback — accept "2026-03-12" or "2026-03-12T00:00:00+00:00"
+    s = str(value).strip()
+    if s:
+        return s[:10]  # take the date portion only
+    return ""
+
+
+def _age_days(created_str: str) -> int | None:
+    """Return the number of calendar days since *created_str* (YYYY-MM-DD).
+
+    Returns ``None`` when *created_str* is empty or unparseable.
+    """
+    if not created_str:
+        return None
+    try:
+        created = date.fromisoformat(created_str[:10])
+        return (date.today() - created).days
+    except (ValueError, OverflowError):
+        return None
+
+
+def _format_age(days: int | None) -> str:
+    """Human-readable age string from day count, e.g. "3d", "2w", "4mo"."""
+    if days is None:
+        return ""
+    if days < 0:
+        return ""
+    if days == 0:
+        return "today"
+    if days < 14:
+        return f"{days}d"
+    if days < 60:
+        return f"{days // 7}w"
+    if days < 365:
+        return f"{days // 30}mo"
+    return f"{days // 365}y"
+
+
 def _task_to_dict(md_file: Path) -> dict | None:
     """Parse a single task file into a dashboard dict (manual fallback)."""
     fm, body = parse_frontmatter(md_file)
@@ -518,7 +567,17 @@ def _task_to_dict(md_file: Path) -> dict | None:
     assigned_to = str(fm.get("assigned_to", "") or "")
     next_action = str(fm.get("next_action", "") or "")
     waiting_for = str(fm.get("waiting_for", "") or "")
+    created = _parse_date_field(fm.get("created"))
+    waiting_since = _parse_date_field(fm.get("waiting_since"))
+    task_type = str(fm.get("task_type", "") or "").lower()
+    raw_depends = fm.get("depends", [])
+    if isinstance(raw_depends, str):
+        raw_depends = [raw_depends]
+    elif not isinstance(raw_depends, list):
+        raw_depends = []
+    depends = [str(d) for d in raw_depends]
 
+    age_days = _age_days(created)
     return {
         "id": md_file.stem,
         "title": title,
@@ -528,6 +587,12 @@ def _task_to_dict(md_file: Path) -> dict | None:
         "assigned_to": assigned_to,
         "next_action": next_action,
         "waiting_for": waiting_for,
+        "created": created,
+        "waiting_since": waiting_since,
+        "task_type": task_type,
+        "depends": depends,
+        "age_days": age_days,
+        "age_label": _format_age(age_days),
         "path": f"tasks/{md_file.name}",
         "body": body,
         "page_url": task_page_path(md_file.stem),
@@ -542,8 +607,9 @@ def scan_tasks(workspace: Path) -> list[dict]:
     manual YAML parsing when gptodo is not installed.
 
     Returns a list of dicts with ``id``, ``title``, ``state``, ``priority``,
-    ``tags``, ``assigned_to``, ``next_action``, ``waiting_for``, ``path``,
-    ``body``, and ``page_url`` keys, sorted by state priority then title.
+    ``tags``, ``assigned_to``, ``next_action``, ``waiting_for``, ``created``,
+    ``waiting_since``, ``task_type``, ``depends``, ``age_days``, ``age_label``,
+    ``path``, ``body``, and ``page_url`` keys, sorted by state priority then title.
     """
     tasks_dir = workspace / "tasks"
     if not tasks_dir.is_dir():
@@ -574,6 +640,16 @@ def scan_tasks(workspace: Path) -> list[dict]:
                 raw_tags = [raw_tags]
             tags = [str(tag) for tag in raw_tags][:5]
             meta = t.metadata or {}
+            created = _parse_date_field(meta.get("created"))
+            waiting_since = _parse_date_field(meta.get("waiting_since"))
+            task_type = str(meta.get("task_type", "") or "").lower()
+            raw_depends = meta.get("depends", [])
+            if isinstance(raw_depends, str):
+                raw_depends = [raw_depends]
+            elif not isinstance(raw_depends, list):
+                raw_depends = []
+            depends = [str(d) for d in raw_depends]
+            age_days = _age_days(created)
             tasks.append(
                 {
                     "id": t.name,
@@ -584,6 +660,12 @@ def scan_tasks(workspace: Path) -> list[dict]:
                     "assigned_to": t.assigned_to or "",
                     "next_action": str(meta.get("next_action", "") or ""),
                     "waiting_for": str(meta.get("waiting_for", "") or ""),
+                    "created": created,
+                    "waiting_since": waiting_since,
+                    "task_type": task_type,
+                    "depends": depends,
+                    "age_days": age_days,
+                    "age_label": _format_age(age_days),
                     "path": f"tasks/{t.path.name}",
                     "body": body,
                     "page_url": task_page_path(t.name),

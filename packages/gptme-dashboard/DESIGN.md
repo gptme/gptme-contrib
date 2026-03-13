@@ -348,7 +348,8 @@ The status/task/session fields are achievable with the existing `/api/*` endpoin
 | 6d | gptme-webui Agent Links sidebar | ✅ merged (gptme/gptme#1657) |
 | 7a | UX: filter controls hidden until guidance section expanded | ✅ merged (#467) |
 | 7b | gptme-webui "Org" tab (fleet-wide view via discovery) | 📋 planned |
-| 7c | Sidebar nav + multi-view section navigation | 🔄 PR #469 |
+| 7c | Sidebar nav + scroll-spy navigation | ✅ merged (#469, #473) |
+| 7d | Task metadata: created date, age, depends, task_type | ✅ merged |
 
 ---
 
