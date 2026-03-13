@@ -365,6 +365,30 @@ Lots of planning and thinking happened here.
         # Should stay strategic or planning, not be promoted to "code"
         assert result.category != "code"
 
+    def test_noop_explicit_label_with_deliverables_stays_noop(self) -> None:
+        """elif scores: fallback must not set productive=True when only scored entry is noop.
+
+        Regression for: explicit 'category: noop-hard' YAML label inserts noop-hard into
+        scores with +10.0 boost. If the session also has a deliverables section that doesn't
+        match any specific keyword guard, the elif scores: fallback would pick sorted_cats[0][0]
+        (= "noop-hard") and incorrectly set productive=True.
+        """
+        text = """\
+category: noop-hard
+## Session — blocked day
+
+Spent the day waiting. Nothing happened.
+
+### Deliverables
+- Checked some things
+- Looked at a few items
+"""
+        result = classify_by_keywords(text)
+        # Even with deliverables present, an explicit noop-hard label should NOT
+        # be promoted to productive=True by the generic elif scores: fallback.
+        assert result.productive is False
+        assert result.category in ("noop-hard", "noop-soft")
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Tests: LLM classifier

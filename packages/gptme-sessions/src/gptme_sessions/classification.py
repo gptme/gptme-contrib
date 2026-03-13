@@ -744,9 +744,11 @@ def classify_by_keywords(
             best_cat = "infrastructure"
             productive = True
         elif scores:
-            # Generic evidence of work
-            best_cat = sorted_cats[0][0]
-            productive = True
+            # Generic evidence of work — but only promote to a non-noop category
+            non_noop = [(cat, s) for cat, s in sorted_cats if cat in productive_cats]
+            if non_noop:
+                best_cat = non_noop[0][0]
+                productive = True
 
     return ClassificationResult(
         category=best_cat,
