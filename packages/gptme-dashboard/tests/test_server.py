@@ -2838,3 +2838,12 @@ def test_make_excerpt_strips_thematic_breaks():
     excerpt = _make_excerpt(body)
     assert "---" not in excerpt, f"Thematic break leaked into excerpt: {excerpt!r}"
     assert "First prose" in excerpt, f"Prose missing from excerpt: {excerpt!r}"
+
+
+def test_make_excerpt_preserves_underscores_in_identifiers():
+    """Identifiers like my_var_name must not have underscores stripped."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = "Use `my_var_name` to configure the option.\n"
+    excerpt = _make_excerpt(body)
+    assert "my_var_name" in excerpt, f"Identifier underscore stripped: {excerpt!r}"

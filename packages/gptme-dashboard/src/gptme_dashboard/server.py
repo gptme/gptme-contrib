@@ -296,11 +296,13 @@ def _make_excerpt(body: str, max_chars: int = 300) -> str:
         # Convert list markers to bullet characters for readability
         line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
         line = re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
-        # Strip bold/italic markers (asterisk and underscore styles)
+        # Strip bold/italic markers.  Underscore variants use word-boundary
+        # guards ((?<!\w) / (?!\w)) so identifiers like my_var_name are not
+        # corrupted — markdown only treats _x_ as italic at word boundaries.
         line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
-        line = re.sub(r"__(.+?)__", r"\1", line)
+        line = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"\1", line)
         line = re.sub(r"\*(.+?)\*", r"\1", line)
-        line = re.sub(r"_(.+?)_", r"\1", line)
+        line = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", line)
         # Strip inline code backticks
         line = re.sub(r"`(.+?)`", r"\1", line)
         cleaned.append(line)
