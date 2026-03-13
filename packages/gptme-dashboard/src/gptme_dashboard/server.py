@@ -238,11 +238,19 @@ def _make_excerpt(body: str, max_chars: int = 300) -> str:
     Fenced code block contents are excluded. Returns at most *max_chars* characters.
     """
     lines = body.splitlines()
-    # Skip leading heading lines, horizontal rules, and blank lines
+    # Find the first meaningful non-code, non-heading line.
+    # Fence state is tracked so that content inside a leading fenced block is
+    # never mistaken for prose (e.g. a body that opens with ```python\ncode\n```).
     start = 0
+    in_fence = False
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped and not stripped.startswith(("#", "---", "```")):
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if stripped and not stripped.startswith(("#", "---")):
             start = i
             break
     useful_lines = lines[start : start + 20]  # cap to avoid huge bodies

@@ -2760,6 +2760,22 @@ def test_make_excerpt_strips_fenced_code_block_content():
     assert "Some description" in excerpt, f"Expected description in excerpt: {excerpt!r}"
 
 
+def test_make_excerpt_body_starts_with_fenced_block():
+    """When the body opens with a fenced code block, code must not appear in excerpt."""
+    from gptme_dashboard.server import _make_excerpt
+
+    # Body where the very first non-blank content is a fenced code block
+    body = (
+        "```python\n"
+        "secret_code = 'should not appear'\n"
+        "```\n\n"
+        "Prose description after the code block.\n"
+    )
+    excerpt = _make_excerpt(body)
+    assert "secret_code" not in excerpt, f"Leading code block leaked: {excerpt!r}"
+    assert "Prose description" in excerpt, f"Prose after block missing: {excerpt!r}"
+
+
 def test_make_excerpt_via_search(tmp_path: Path):
     """Search result excerpts should not start with markdown heading markers."""
     from gptme_dashboard.server import create_app
