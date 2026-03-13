@@ -1843,6 +1843,10 @@ document.addEventListener('keydown', function(e) {
       var el = document.getElementById(id);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
+    } else if (!document.getElementById(id)) {
+      // Unknown hash: fall back to full overview instead of blank content area
+      if (homeLink) homeLink.classList.add('nav-active');
+      sections.forEach(function (s) { s.classList.remove('section-hidden'); });
     } else {
       // Focused view: show only the target static section
       sections.forEach(function (s) {
@@ -1853,7 +1857,8 @@ document.addEventListener('keydown', function(e) {
         }
         // Dynamic sections are left as-is (API manages their visibility)
       });
-      var activeLink = document.querySelector('.dashboard-nav-links a[href="#' + id + '"]');
+      var escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/[^\w-]/g, '\\$&');
+      var activeLink = document.querySelector('.dashboard-nav-links a[href="#' + escaped + '"]');
       if (activeLink) activeLink.classList.add('nav-active');
       window.scrollTo(0, 0);
     }
@@ -1887,8 +1892,11 @@ document.addEventListener('keydown', function(e) {
   showSection(initial || null);
 
   // Handle browser back / forward
+  // Distinguish e.state === null (no state pushed yet, use hash)
+  // from e.state = { section: null } (home button, which explicitly clears section)
   window.addEventListener('popstate', function (e) {
-    var id = (e.state && e.state.section) ? e.state.section
+    var id = (e.state !== null && e.state !== undefined)
+      ? e.state.section
       : (location.hash ? location.hash.slice(1) : null);
     showSection(id || null);
   });
