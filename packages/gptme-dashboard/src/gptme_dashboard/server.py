@@ -160,13 +160,19 @@ def _fetch_agent_card(agent: "dict[str, str]") -> "dict[str, Any]":
 def _gptme_logs_dir() -> Path:
     """Return the platform-appropriate gptme logs directory.
 
-    Respects ``XDG_DATA_HOME`` on Linux/other and falls back to
-    ``~/.local/share`` (XDG default).  On macOS the XDG env var is also
-    honoured when set; otherwise returns the XDG default path which is where
-    gptme writes on macOS too (gptme uses platformdirs internally).
+    Respects ``XDG_DATA_HOME`` when set (non-empty).  On macOS, if the XDG
+    path does not exist, falls back to the native platformdirs location
+    (``~/Library/Application Support/gptme/logs``) before returning the
+    candidate so callers get the right directory even when ``XDG_DATA_HOME``
+    is not set on macOS.
     """
     xdg_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
-    return xdg_data_home / "gptme" / "logs"
+    candidate = xdg_data_home / "gptme" / "logs"
+    if not candidate.is_dir() and platform.system() == "Darwin":
+        mac_candidate = Path.home() / "Library" / "Application Support" / "gptme" / "logs"
+        if mac_candidate.is_dir():
+            return mac_candidate
+    return candidate
 
 
 def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:

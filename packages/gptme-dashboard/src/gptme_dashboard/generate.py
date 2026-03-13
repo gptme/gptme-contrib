@@ -305,7 +305,6 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
     print(f"Scanning sessions (last {days} days)...", end="", flush=True, file=sys.stderr)
     gptme_count = 0
     cc_count = 0
-    scanned_count = 0
 
     # --- gptme sessions ---
     for session_dir in discover_gptme_sessions(start, end):
@@ -337,8 +336,7 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             continue  # Directory name doesn't start with a valid ISO date — skip
 
         gptme_count += 1
-        scanned_count += 1
-        if scanned_count % 20 == 0:
+        if gptme_count % 20 == 0:
             print(".", end="", flush=True, file=sys.stderr)
 
         sessions.append(
