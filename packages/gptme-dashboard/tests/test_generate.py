@@ -3194,6 +3194,104 @@ def test_generate_dashboard_multiview_dynamic_links_call_show_section(
     assert "a.addEventListener('click'" in html, "click handler missing from nav link setup"
 
 
+def test_generate_dashboard_live_nav_group_hidden_in_static_mode(workspace: Path, tmp_path: Path):
+    """Live dashboard nav group is hidden by default; only revealed when API connects."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # live-nav-group must be present but hidden in static output
+    assert 'id="live-nav-group"' in html, "live-nav-group element missing"
+    live_idx = html.index('id="live-nav-group"')
+    # The element must have display:none
+    snippet = html[live_idx : live_idx + 60]
+    assert 'style="display:none"' in snippet, f"live-nav-group not hidden by default: {snippet!r}"
+    # initDynamic must reference the group by JS variable name
+    assert "liveGroup" in html, "liveGroup JS variable missing from initDynamic"
+
+
+def test_generate_dashboard_readme_section_label(workspace: Path, tmp_path: Path):
+    """#about section shows 'Core Files' in nav with README.md in a collapsible details."""
+    workspace_readme = workspace / "README.md"
+    workspace_readme.write_text("# My Agent\n\nAgent description here.\n")
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Section must exist and contain README.md in a <details>
+    assert "README.md" in html, "README.md label missing from rendered output"
+    assert "<details>" in html, "README.md should be in a collapsible <details>"
+    # Nav link must reference #about and show "Core Files" label
+    about_nav_idx = html.index('href="#about"')
+    nav_snippet = html[about_nav_idx : about_nav_idx + 60]
+    assert (
+        "Core Files" in nav_snippet
+    ), f"Nav link for #about should show Core Files: {nav_snippet!r}"
+
+
+def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path: Path):
+    """Content sections appear in the same order as sidebar navigation links."""
+    # Create enough content so all sections render
+    workspace_readme = workspace / "README.md"
+    workspace_readme.write_text("# Agent\n\nDescription.\n")
+    (workspace / "journal" / "2026-03-13").mkdir(parents=True)
+    (workspace / "journal" / "2026-03-13" / "session.md").write_text("## Work\nDid things.\n")
+    (workspace / "knowledge" / "summaries" / "weekly").mkdir(parents=True, exist_ok=True)
+    (workspace / "knowledge" / "summaries" / "weekly" / "2026-W11.md").write_text(
+        "# Weekly Summary\nStuff happened this week.\n"
+    )
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Static sections must appear in sidebar nav order:
+    # tasks → sessions → journals → summaries → packages → plugins → guidance → about
+    # (tasks/sessions may be absent but the rest are always present)
+    expected_order = ["journals", "summaries", "packages", "plugins", "guidance", "about"]
+    positions = []
+    for section_id in expected_order:
+        marker = f'<section id="{section_id}"'
+        try:
+            positions.append((section_id, html.index(marker)))
+        except ValueError:
+            pass  # section not rendered (conditional)
+
+    for i in range(len(positions) - 1):
+        current_id, current_pos = positions[i]
+        next_id, next_pos = positions[i + 1]
+        assert current_pos < next_pos, (
+            f"Section #{current_id} (pos {current_pos}) must appear before "
+            f"#{next_id} (pos {next_pos}) to match sidebar nav order"
+        )
+
+
+def test_generate_dashboard_content_nav_group_hidden_when_no_content(
+    workspace: Path, tmp_path: Path
+):
+    """Content nav group is omitted when workspace has no readme/tasks/sessions/journals/summaries."""
+    # Base workspace fixture has no readme, tasks, sessions, journals, or summaries
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # The "Content" nav group heading must not appear
+    assert (
+        "Content</h3>" not in html
+    ), "Content nav group should be hidden on a sparse workspace with no content data"
+    # The Workspace group is always present (packages/plugins/guidance are unconditional)
+    assert "Workspace</h3>" in html
+
+
 # --- Atom feed tests ---
 
 

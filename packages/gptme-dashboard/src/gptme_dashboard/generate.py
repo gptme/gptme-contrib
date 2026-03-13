@@ -984,6 +984,10 @@ def read_workspace_config(workspace: Path, _data: dict | None = None) -> dict:
     if isinstance(plugins, dict) and plugins.get("enabled"):
         config["plugins_enabled"] = list(plugins["enabled"])
 
+    prompt = _data.get("prompt", {})
+    if isinstance(prompt, dict) and prompt.get("files"):
+        config["prompt_files"] = list(prompt["files"])
+
     return config
 
 
@@ -1361,6 +1365,7 @@ def collect_workspace_data(
         "summaries": summaries,
         "stats": stats,
         "lesson_categories": lesson_categories,
+        "core_files": config.get("prompt_files", []),
         "submodules": submodule_names,
         "sources": sources,
     }

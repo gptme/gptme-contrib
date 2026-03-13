@@ -590,27 +590,29 @@ tr:hover { background: var(--accent-dim); }
     <h2>Quick navigation</h2>
     <a href="#" id="nav-home" class="nav-home-link" aria-label="Show all sections">⊞ All sections</a>
 
+    {% if readme_html or tasks or sessions or journals or summaries %}
     <div class="dashboard-nav-group">
-      <h3 class="dashboard-nav-group-title">Overview</h3>
+      <h3 class="dashboard-nav-group-title">Content</h3>
       <div class="dashboard-nav-links">
-        {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
-        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
         {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
+        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
         {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
       </div>
     </div>
+    {% endif %}
 
     <div class="dashboard-nav-group">
-      <h3 class="dashboard-nav-group-title">Workspace assets</h3>
+      <h3 class="dashboard-nav-group-title">Workspace</h3>
       <div class="dashboard-nav-links">
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
-        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
+        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
+        {% if readme_html or core_files %}<a href="#about"><span>Core Files</span><span class="nav-count">{{ core_files | length }}</span></a>{% endif %}
       </div>
     </div>
 
-    <div class="dashboard-nav-group">
+    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
       <h3 class="dashboard-nav-group-title">Live dashboard</h3>
       <div class="dashboard-nav-links">
         {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
@@ -625,13 +627,6 @@ tr:hover { background: var(--accent-dim); }
     </div>
   </aside>
   <div class="dashboard-main">
-{% if readme_html %}
-<!-- About (README) -->
-<section id="about">
-  <h2>About</h2>
-  <div class="content">{{ readme_html | safe }}</div>
-</section>
-{% endif %}
 
 <!-- Dynamic: Session Stats (shown when serve API is available) -->
 <section id="session-stats" class="dynamic-panel" style="display:none">
@@ -838,43 +833,6 @@ tr:hover { background: var(--accent-dim); }
 </section>
 {% endif %}
 
-<!-- Packages & Plugins (short, infrastructure overview) -->
-<div class="two-col">
-  <section id="packages">
-    <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
-    <table>
-      <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-      <tbody>
-      {% for pkg in packages %}
-        <tr>
-          <td><strong>{% if pkg.body %}<a href="{{ pkg.page_url }}">{{ pkg.name }}</a>{% else %}{{ pkg.name }}{% endif %}</strong></td>
-          <td>{{ pkg.version }}</td>
-          <td>{{ pkg.description }}</td>
-          {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </section>
-
-  <section id="plugins">
-    <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
-    <table>
-      <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
-      <tbody>
-      {% for plugin in plugins %}
-        <tr>
-          <td><strong>{% if plugin.body %}<a href="{{ plugin.page_url }}">{{ plugin.name }}</a>{% else %}{{ plugin.name }}{% endif %}</strong></td>
-          <td>{{ plugin.description }}</td>
-          <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
-          {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </section>
-</div>
-
 {% if journals %}
 <!-- Recent Journal Entries -->
 <section id="journals">
@@ -922,6 +880,43 @@ tr:hover { background: var(--accent-dim); }
   {% endif %}
 </section>
 {% endif %}
+
+<!-- Packages & Plugins (short, infrastructure overview) -->
+<div class="two-col">
+  <section id="packages">
+    <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for pkg in packages %}
+        <tr>
+          <td><strong>{% if pkg.body %}<a href="{{ pkg.page_url }}">{{ pkg.name }}</a>{% else %}{{ pkg.name }}{% endif %}</strong></td>
+          <td>{{ pkg.version }}</td>
+          <td>{{ pkg.description }}</td>
+          {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="plugins">
+    <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for plugin in plugins %}
+        <tr>
+          <td><strong>{% if plugin.body %}<a href="{{ plugin.page_url }}">{{ plugin.name }}</a>{% else %}{{ plugin.name }}{% endif %}</strong></td>
+          <td>{{ plugin.description }}</td>
+          <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
+          {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
 
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">
@@ -974,6 +969,34 @@ tr:hover { background: var(--accent-dim); }
   <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" data-controls="guidance-adv-filters" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
   {% endif %}
 </section>
+
+{% if readme_html or core_files %}
+<!-- Core Files (README + gptme.toml prompt files) -->
+<section id="about">
+  <h2>Core Files {% if core_files %}<span class="count-badge">({{ core_files | length }})</span>{% endif %}</h2>
+  {% if core_files %}
+  <p style="color:var(--text-dim);margin-bottom:1rem">Files auto-included in every agent session via <code>gptme.toml</code>:</p>
+  <table>
+    <thead><tr><th>File</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for f in core_files %}
+      <tr>
+        <td><code>{{ f }}</code></td>
+        {% if gh_repo_url %}<td><a href="{{ gh_repo_url }}/blob/master/{{ f }}" class="gh-link">src</a></td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if readme_html %}
+  <details>
+    <summary style="cursor:pointer;margin-top:1rem"><strong>README.md</strong></summary>
+    <div class="content" style="margin-top:0.5rem">{{ readme_html | safe }}</div>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
   </div>
 </div>
 {% endblock %}
@@ -1164,6 +1187,8 @@ async function initDynamic() {
     const resp = await fetch('/api/status');
     if (!resp.ok) return;
     document.querySelectorAll('.dynamic-panel').forEach(el => el.style.display = '');
+    const liveGroup = document.getElementById('live-nav-group');
+    if (liveGroup) liveGroup.style.display = '';
     loadSessionStats();
     loadActivityHeatmap();
     loadRecentSessions();
