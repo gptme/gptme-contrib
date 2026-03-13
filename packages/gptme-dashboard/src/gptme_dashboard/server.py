@@ -189,7 +189,7 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
         except ValueError:
             continue
         if session_date < cutoff:
-            break  # Dirs are date-sorted; stop early
+            continue  # Skip out-of-range dirs; can't break (non-date dirs may sort between date dirs)
 
         # Filter by workspace when config.toml is readable
         config_toml = session_dir / "config.toml"
@@ -415,9 +415,20 @@ def create_app(
                 return jsonify({"total": 0})
 
             total = len(scanned)
-            productive = sum(1 for s in scanned if s.get("grade", 0) >= 0.4)
-            noop = total - productive
-            success_rate = productive / total if total > 0 else 0
+
+            def _is_productive(s: dict[str, Any]) -> bool:
+                if s.get("grade") is not None:
+                    return float(s["grade"]) >= 0.4
+                return s.get("outcome") == "productive"
+
+            def _is_unknown(s: dict[str, Any]) -> bool:
+                return s.get("grade") is None and s.get("outcome") == "unknown"
+
+            productive = sum(1 for s in scanned if _is_productive(s))
+            unknown = sum(1 for s in scanned if _is_unknown(s))
+            noop = total - productive - unknown
+            known = total - unknown
+            success_rate = productive / known if known > 0 else 0
 
             by_model: dict[str, dict] = {}
             by_harness: dict[str, dict] = {}
@@ -429,7 +440,7 @@ def create_app(
                     if key not in bucket:
                         bucket[key] = {"total": 0, "productive": 0}
                     bucket[key]["total"] += 1
-                    if s.get("grade", 0) >= 0.4:
+                    if _is_productive(s):
                         bucket[key]["productive"] += 1
             for bucket in (by_model, by_harness):
                 for m in bucket.values():
@@ -440,6 +451,7 @@ def create_app(
                     "total": total,
                     "productive": productive,
                     "noop": noop,
+                    "unknown": unknown,
                     "success_rate": success_rate,
                     "by_model": by_model,
                     "by_harness": by_harness,
