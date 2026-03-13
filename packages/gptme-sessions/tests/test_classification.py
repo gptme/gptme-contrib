@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 
@@ -330,6 +331,39 @@ Explored the infrastructure configuration.
         result2 = classify_by_keywords(text_only_substrings)
         # Should be infrastructure (from "infrastructure configuration"), not boosted code
         assert result2.category != "code" or result2.confidence < 0.5
+
+    def test_paren_terminated_keywords_match_conventional_commits(self) -> None:
+        """Keywords like 'fix(' should match conventional-commit subject lines."""
+        # "fix(" ends with non-word char: (?!\w) must NOT be appended or it breaks
+        # matching "fix(auth): resolve regression" where 'a' follows '('.
+        from gptme_sessions.classification import _kw_pattern
+
+        pattern = _kw_pattern("fix(")
+        assert re.search(pattern, "fix(auth): resolve regression")
+        assert not re.search(pattern, "prefix(something)")  # no false positive
+
+        pattern_feat = _kw_pattern("feat(")
+        assert re.search(pattern_feat, "feat(sessions): add classifier")
+        assert not re.search(pattern_feat, "notafeat(sessions)")  # embedded: no word boundary
+
+    def test_promotion_block_uses_word_boundary_matching(self) -> None:
+        """Promotion block must not false-positive on substrings like 'pr' in 'priority'."""
+        # Journal with "priority" and "prefix" but no standalone PR or fix
+        text = """\
+## Session — strategic planning
+
+Reviewed the priority backlog and updated the prefix configuration.
+Explored options for the next quarter. Wrote strategic notes.
+Lots of planning and thinking happened here.
+
+### Deliverables
+- Updated priority ranking document
+- Notes on prefix-based routing strategy
+"""
+        result = classify_by_keywords(text)
+        # "priority" should NOT trigger code promotion (contains "pr" as substring)
+        # Should stay strategic or planning, not be promoted to "code"
+        assert result.category != "code"
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -548,20 +548,35 @@ def _extract_sections(text: str) -> dict[str, str]:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _kw_pattern(kw: str) -> str:
+    """Build a whole-word regex pattern for a keyword.
+
+    For keywords that end with a non-word character (e.g. ``"fix("``,
+    ``"pr gptme/"``), the trailing non-word char itself prevents
+    word-collision so no lookahead is needed — adding ``(?!\\w)`` after
+    ``(`` or ``/`` would break matches like ``"fix(auth): ..."``.
+
+    For keywords that end with a word character (e.g. ``"feat"``,
+    ``"commit"``), ``(?!\\w)`` is appended to prevent ``"feat"`` from
+    matching ``"features"``.
+    """
+    escaped = re.escape(kw.lower())
+    trailing = r"(?!\w)" if re.search(r"\w\Z", kw) else ""
+    return r"(?<!\w)" + escaped + trailing
+
+
 def _score_text(text: str, keywords: list[str]) -> float:
     """Count keyword matches in text (case-insensitive, whole-word).
 
     Uses look-ahead/look-behind to avoid false positives from short tokens
     (e.g. "feat" should not match "features", "fix" should not match "prefix").
+    Keywords ending with a non-word character (e.g. "fix(") use only the
+    leading lookbehind so they still match conventional-commit style text.
     """
     if not text or not keywords:
         return 0.0
     text_lower = text.lower()
-    return sum(
-        1.0
-        for kw in keywords
-        if re.search(r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)", text_lower)
-    )
+    return sum(1.0 for kw in keywords if re.search(_kw_pattern(kw), text_lower))
 
 
 def _extract_deliverables(text: str) -> list[str]:
@@ -712,16 +727,20 @@ def classify_by_keywords(
     # Promotion: noop-soft with deliverables → infer real category
     if not productive and deliverables:
         deliv_text = " ".join(deliverables).lower()
-        if any(kw in deliv_text for kw in ("pr", "fix", "bug", "commit", "code")):
+
+        def _any_kw(*kws: str) -> bool:
+            return any(re.search(_kw_pattern(kw), deliv_text) for kw in kws)
+
+        if _any_kw("pr", "fix", "bug", "commit", "code"):
             best_cat = "code"
             productive = True
-        elif any(kw in deliv_text for kw in ("triage", "issue", "close")):
+        elif _any_kw("triage", "issue", "close"):
             best_cat = "triage"
             productive = True
-        elif any(kw in deliv_text for kw in ("blog", "post", "article", "content")):
+        elif _any_kw("blog", "post", "article", "content"):
             best_cat = "content"
             productive = True
-        elif any(kw in deliv_text for kw in ("ci", "infra", "deploy", "monitor", "config")):
+        elif _any_kw("ci", "infra", "deploy", "monitor", "config"):
             best_cat = "infrastructure"
             productive = True
         elif scores:
