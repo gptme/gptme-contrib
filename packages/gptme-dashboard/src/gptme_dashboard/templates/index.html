@@ -939,7 +939,7 @@ tr:hover { background: var(--accent-dim); }
     <div class="dashboard-nav-group">
       <div class="dashboard-nav-group-title">Live dashboard</div>
       <div class="dashboard-nav-links">
-        <a href="#dynamic-journals"><span>Journal entries</span></a>
+        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
         <a href="#recent-sessions"><span>Recent sessions</span></a>
         <a href="#session-stats"><span>Session stats</span></a>
         <a href="#activity-heatmap"><span>Activity</span></a>
