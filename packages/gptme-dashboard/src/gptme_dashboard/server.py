@@ -34,6 +34,15 @@ try:
 except Exception:
     _store_importable = False
 
+# TOML parser: tomllib (stdlib, Python 3.11+) or tomli (backport); None if unavailable.
+try:
+    import tomllib as _tomllib
+except ImportError:
+    try:
+        import tomli as _tomllib  # type: ignore[import-not-found,no-redef]
+    except ImportError:
+        _tomllib = None  # type: ignore[assignment]
+
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Block all HTTP redirects to prevent SSRF via open redirects."""
@@ -188,14 +197,6 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
     if not logs_dir.is_dir():
         return []
 
-    try:
-        import tomllib as _tl
-    except ImportError:
-        try:
-            import tomli as _tl  # type: ignore[import-not-found,no-redef]
-        except ImportError:
-            _tl = None  # type: ignore[assignment]
-
     cutoff = date.today() - timedelta(days=days)
     workspace_resolved = ws.resolve()
     sessions: list[dict[str, Any]] = []
@@ -215,12 +216,12 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
         # when the session predates config.toml, workspace isolation is
         # best-effort: all sessions are included rather than dropped.
         config_toml = session_dir / "config.toml"
-        if _tl is None:
+        if _tomllib is None:
             pass  # No TOML parser available — include all sessions (best-effort)
         elif config_toml.exists():
             try:
                 with open(config_toml, "rb") as _f:
-                    cfg = _tl.load(_f)
+                    cfg = _tomllib.load(_f)
                 session_ws = cfg.get("workspace", "")
                 if session_ws:
                     session_ws_path = Path(session_ws).resolve()
@@ -477,6 +478,14 @@ def create_app(
             _scan_cache["expires"] = now + _SCAN_CACHE_TTL
         return _scan_cache["data"]  # type: ignore[no-any-return]
 
+    def _is_productive(s: dict[str, Any]) -> bool:
+        if s.get("grade") is not None:
+            return float(s["grade"]) >= 0.4
+        return s.get("outcome") == "productive"
+
+    def _is_unknown(s: dict[str, Any]) -> bool:
+        return s.get("grade") is None and s.get("outcome") == "unknown"
+
     @app.route("/api/sessions/stats")
     def api_session_stats() -> Any:
         ws = Path(app.config["WORKSPACE"])
@@ -495,14 +504,6 @@ def create_app(
                 return jsonify({"total": 0})
 
             total = len(scanned)
-
-            def _is_productive(s: dict[str, Any]) -> bool:
-                if s.get("grade") is not None:
-                    return float(s["grade"]) >= 0.4
-                return s.get("outcome") == "productive"
-
-            def _is_unknown(s: dict[str, Any]) -> bool:
-                return s.get("grade") is None and s.get("outcome") == "unknown"
 
             productive = sum(1 for s in scanned if _is_productive(s))
             unknown = sum(1 for s in scanned if _is_unknown(s))
@@ -601,7 +602,7 @@ def create_app(
                         "model": s.get("model", ""),
                         "category": s.get("category", ""),
                         "outcome": s.get("outcome")
-                        or ("productive" if s.get("grade", 0) >= 0.4 else "noop"),
+                        or ("productive" if _is_productive(s) else "noop"),
                         "duration_seconds": 0,
                     }
                 )

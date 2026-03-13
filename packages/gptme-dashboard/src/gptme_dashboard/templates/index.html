@@ -1800,7 +1800,7 @@ async function runSearch(q, typeFilter) {
     document.getElementById('search-results-area').innerHTML = results.map((r) => {
       const title = esc(r.title || r.path || '(untitled)');
       const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
-      const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim().slice(0, 120)) + '</div>' : '';
+      const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim()) + '</div>' : '';
       const url = safeUrl(r.url);
       return '<a href="' + esc(url) + '" class="search-result">'
         + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span></div>'
