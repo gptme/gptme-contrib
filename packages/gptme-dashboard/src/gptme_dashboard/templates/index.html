@@ -767,7 +767,7 @@ tr:hover { background: var(--accent-dim); }
       <tr data-state="{{ task.state }}"{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
         <td>
           <strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong>
-          {% if task.state == 'active' and task.next_action %}<div class="task-hint">→ {{ task.next_action }}</div>{% endif %}
+          {% if task.state in ('active', 'ready_for_review') and task.next_action %}<div class="task-hint">→ {{ task.next_action }}</div>{% endif %}
           {% if task.state == 'waiting' and task.waiting_for %}<div class="task-hint">⏳ {{ task.waiting_for }}</div>{% endif %}
         </td>
         <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>

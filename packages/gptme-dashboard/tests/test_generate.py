@@ -2409,7 +2409,7 @@ def test_task_detail_renders_next_action(workspace: Path, tmp_path: Path):
 
 
 def test_generate_index_shows_task_hints(workspace: Path, tmp_path: Path):
-    """Index task table shows next_action hint for active tasks, waiting_for for waiting tasks."""
+    """Index task table shows next_action hint for active/ready_for_review, waiting_for for waiting."""
     tasks_dir = workspace / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "active-task.md").write_text(
@@ -2420,6 +2420,16 @@ def test_generate_index_shows_task_hints(workspace: Path, tmp_path: Path):
         created: 2026-03-01
         ---
         # Active Task
+        """)
+    )
+    (tasks_dir / "review-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: ready_for_review
+        next_action: "Await maintainer feedback"
+        created: 2026-03-01
+        ---
+        # Review Task
         """)
     )
     (tasks_dir / "waiting-task.md").write_text(
@@ -2435,6 +2445,7 @@ def test_generate_index_shows_task_hints(workspace: Path, tmp_path: Path):
     generate(workspace, tmp_path)
     index = (tmp_path / "index.html").read_text()
     assert "Write tests" in index
+    assert "Await maintainer feedback" in index
     assert "Upstream merge" in index
 
 
