@@ -36,10 +36,26 @@ from .signals import (
     grade_signals,
     is_productive,
 )
+from .classification import (
+    Category,
+    ClassificationResult,
+    DEFAULT_CATEGORIES,
+    classify_by_keywords,
+    classify_by_llm,
+    classify_session,
+    judge_and_classify,
+)
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 
 __all__ = [
+    "Category",
+    "ClassificationResult",
+    "DEFAULT_CATEGORIES",
+    "classify_by_keywords",
+    "classify_by_llm",
+    "classify_session",
+    "judge_and_classify",
     "SessionRecord",
     "SessionStore",
     "MODEL_ALIASES",
