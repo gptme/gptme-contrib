@@ -3093,6 +3093,48 @@ def test_generate_dashboard_navigation_sidebar_dom_order(workspace: Path, tmp_pa
     assert aside_pos < main_pos, "aside.dashboard-nav must precede div.dashboard-main in DOM"
 
 
+def test_generate_dashboard_multiview_home_button(workspace: Path, tmp_path: Path):
+    """Dashboard includes a multi-view home button in the sidebar nav."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'id="nav-home"' in html, "nav-home home link missing"
+    assert 'class="nav-home-link"' in html, "nav-home-link class missing"
+    assert "All sections" in html, "All sections label missing"
+
+
+def test_generate_dashboard_multiview_js(workspace: Path, tmp_path: Path):
+    """Dashboard includes multi-view section navigation JS."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert "section-hidden" in html, "section-hidden CSS class missing"
+    assert "showSection" in html, "showSection JS function missing"
+    assert "DYNAMIC" in html, "DYNAMIC set missing from multi-view JS"
+    assert "nav-active" in html, "nav-active CSS class missing"
+
+
+def test_generate_dashboard_multiview_home_precedes_nav_groups(workspace: Path, tmp_path: Path):
+    """Home link appears before the first nav group in the sidebar."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    assert 'id="nav-home"' in html, "nav-home home link missing"
+    assert 'class="dashboard-nav-group"' in html, "dashboard-nav-group missing"
+    home_pos = html.index('id="nav-home"')
+    group_pos = html.index('class="dashboard-nav-group"')
+    assert home_pos < group_pos, "nav-home must appear before the first nav group"
+
+
 # --- Atom feed tests ---
 
 
