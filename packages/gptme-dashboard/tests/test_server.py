@@ -610,16 +610,17 @@ def test_scan_gptme_logs_basic_out_of_range_does_not_break_early(tmp_path: Path)
     in_range = (today - timedelta(days=5)).isoformat()
     out_of_range = (today - timedelta(days=60)).isoformat()
 
-    # Create a non-date directory that sorts lexicographically between the two date dirs
-    # In reverse sort: out_of_range (e.g. "2026-01-11") < in_range (e.g. "2026-03-08")
-    # so reverse order is: in_range first, then out_of_range
-    # A break on out_of_range would NOT skip in_range here (in_range comes first in reverse).
-    # The real risk is a non-date dir between them — e.g. "zz-notes" sorts BEFORE in_range in
-    # reverse (z > digit), causing it to be skipped with continue, and then out_of_range triggers
-    # the original break before in_range is reached. Test that continue avoids this.
+    # Set up three dirs so that a `break` on out-of-range would prematurely stop scanning.
+    # In reverse lexicographic order:
+    #   1. "zz-notes"           (non-date, sorts after digits; skipped via continue/ValueError)
+    #   2. {out_of_range}-...   (old date, outside 30-day window)
+    #   3. {in_range}-session   (recent, should be found)
+    # A `break` when session_date < cutoff would fire at step 2 and never reach step 3.
+    # A `continue` at step 2 correctly proceeds to step 3 and finds the in-range session.
     for name, has_conv in [
         (f"{in_range}-session", True),
         (f"{out_of_range}-old-session", False),
+        ("zz-notes", False),  # non-date dir that sorts first in reverse; forces full traversal
     ]:
         d = logs_dir / name
         d.mkdir()
@@ -2739,6 +2740,24 @@ def test_api_search_indexes_submodule_lessons(tmp_path: Path):
         data = resp.get_json()
         assert data["total"] >= 1, "Submodule lessons should be indexed and searchable"
         assert any(r["type"] == "lesson" for r in data["results"])
+
+
+def test_make_excerpt_strips_fenced_code_block_content():
+    """Fenced code block content must not appear in excerpts."""
+    from gptme_dashboard.server import _make_excerpt
+
+    body = (
+        "Some description text.\n\n"
+        "```python\n"
+        "x = run_agent(workspace)\n"
+        "result = x.outcome\n"
+        "```\n\n"
+        "More text after code.\n"
+    )
+    excerpt = _make_excerpt(body)
+    assert "run_agent" not in excerpt, f"Code block content leaked into excerpt: {excerpt!r}"
+    assert "x.outcome" not in excerpt, f"Code block content leaked into excerpt: {excerpt!r}"
+    assert "Some description" in excerpt, f"Expected description in excerpt: {excerpt!r}"
 
 
 def test_make_excerpt_via_search(tmp_path: Path):

@@ -230,6 +230,47 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
     return sessions
 
 
+def _make_excerpt(body: str, max_chars: int = 300) -> str:
+    """Extract a readable plain-text excerpt from a markdown body.
+
+    Skips leading heading lines and blank lines, then returns a cleaned
+    plain-text representation of the first meaningful content paragraph.
+    Fenced code block contents are excluded. Returns at most *max_chars* characters.
+    """
+    lines = body.splitlines()
+    # Skip leading heading lines, horizontal rules, and blank lines
+    start = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("#", "---", "```")):
+            start = i
+            break
+    useful_lines = lines[start : start + 20]  # cap to avoid huge bodies
+
+    cleaned: list[str] = []
+    inside_fence = False
+    for line in useful_lines:
+        # Track fenced code blocks and skip their contents
+        if line.strip().startswith("```"):
+            inside_fence = not inside_fence
+            continue
+        if inside_fence:
+            continue
+        # Strip markdown headings
+        line = re.sub(r"^#+\s+", "", line)
+        # Convert list markers to bullet characters for readability
+        line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
+        line = re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
+        # Strip bold/italic markers
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = re.sub(r"\*(.+?)\*", r"\1", line)
+        # Strip inline code backticks
+        line = re.sub(r"`(.+?)`", r"\1", line)
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip()[:max_chars]
+
+
 def create_app(
     workspace: Path, site_dir: Path | None = None, org_config: Path | None = None
 ) -> Any:
@@ -1323,42 +1364,6 @@ def create_app(
     _SEARCH_CACHE_TTL = 300
     _search_cache: dict[str, Any] = {"data": None, "expires": 0.0}
     _search_cache_lock = threading.Lock()
-
-    def _make_excerpt(body: str, max_chars: int = 300) -> str:
-        """Extract a readable plain-text excerpt from a markdown body.
-
-        Skips leading heading lines and blank lines, then returns a cleaned
-        plain-text representation of the first meaningful content paragraph.
-        Returns at most *max_chars* characters.
-        """
-        lines = body.splitlines()
-        # Skip leading heading lines, horizontal rules, and blank lines
-        start = 0
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped and not stripped.startswith(("#", "---", "```")):
-                start = i
-                break
-        useful_lines = lines[start : start + 20]  # cap to avoid huge bodies
-
-        cleaned: list[str] = []
-        for line in useful_lines:
-            # Strip markdown headings
-            line = re.sub(r"^#+\s+", "", line)
-            # Strip fenced code block markers
-            if line.strip().startswith("```"):
-                continue
-            # Convert list markers to bullet characters for readability
-            line = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", line)
-            line = re.sub(r"^(\s*)\d+\.\s+", r"\1• ", line)
-            # Strip bold/italic markers
-            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
-            line = re.sub(r"\*(.+?)\*", r"\1", line)
-            # Strip inline code backticks
-            line = re.sub(r"`(.+?)`", r"\1", line)
-            cleaned.append(line)
-
-        return "\n".join(cleaned).strip()[:max_chars]
 
     def _build_search_index(ws: Path) -> "list[dict[str, Any]]":
         """Build a unified list of searchable items from the workspace."""
