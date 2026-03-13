@@ -204,9 +204,14 @@ def _scan_gptme_logs_basic(ws: Path, days: int = 30) -> list[dict[str, Any]]:
         if session_date < cutoff:
             continue  # Skip out-of-range dirs; can't break (non-date dirs may sort between date dirs)
 
-        # Filter by workspace when config.toml is readable
+        # Filter by workspace when config.toml is readable.
+        # When no TOML parser is available (Python < 3.11 without tomli) or
+        # when the session predates config.toml, workspace isolation is
+        # best-effort: all sessions are included rather than dropped.
         config_toml = session_dir / "config.toml"
-        if config_toml.exists() and _tl is not None:
+        if _tl is None:
+            pass  # No TOML parser available — include all sessions (best-effort)
+        elif config_toml.exists():
             try:
                 with open(config_toml, "rb") as _f:
                     cfg = _tl.load(_f)

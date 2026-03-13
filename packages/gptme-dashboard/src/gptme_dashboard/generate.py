@@ -309,10 +309,6 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
 
     # --- gptme sessions ---
     for session_dir in discover_gptme_sessions(start, end):
-        scanned_count += 1
-        if scanned_count % 20 == 0:
-            print(".", end="", flush=True, file=sys.stderr)
-
         config = parse_gptme_config(session_dir)
         session_ws = config.get("workspace", "")
         # Include when workspace matches or when no workspace metadata is available.
@@ -341,6 +337,9 @@ def scan_recent_sessions(workspace: Path, days: int = 30) -> list[dict]:
             continue  # Directory name doesn't start with a valid ISO date — skip
 
         gptme_count += 1
+        scanned_count += 1
+        if scanned_count % 20 == 0:
+            print(".", end="", flush=True, file=sys.stderr)
 
         sessions.append(
             {
