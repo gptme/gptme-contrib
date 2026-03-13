@@ -3028,6 +3028,8 @@ def test_generate_dashboard_navigation_sidebar(workspace: Path, tmp_path: Path):
     assert 'href="#activity-heatmap"' in html
     assert 'href="#service-health"' in html
     assert "Quick navigation" in html
+    # Positive direction of the {% if not journals %} guard: no static journals → link present
+    assert 'href="#dynamic-journals"' in html
 
 
 def test_generate_dashboard_navigation_sidebar_journals_guard(workspace: Path, tmp_path: Path):

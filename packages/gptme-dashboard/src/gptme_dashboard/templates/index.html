@@ -566,7 +566,7 @@ tr:hover { background: var(--accent-dim); }
     <h2>Quick navigation</h2>
 
     <div class="dashboard-nav-group">
-      <div class="dashboard-nav-group-title">Overview</div>
+      <h3 class="dashboard-nav-group-title">Overview</h3>
       <div class="dashboard-nav-links">
         {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
         <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
@@ -577,7 +577,7 @@ tr:hover { background: var(--accent-dim); }
     </div>
 
     <div class="dashboard-nav-group">
-      <div class="dashboard-nav-group-title">Workspace assets</div>
+      <h3 class="dashboard-nav-group-title">Workspace assets</h3>
       <div class="dashboard-nav-links">
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
@@ -586,7 +586,7 @@ tr:hover { background: var(--accent-dim); }
     </div>
 
     <div class="dashboard-nav-group">
-      <div class="dashboard-nav-group-title">Live dashboard</div>
+      <h3 class="dashboard-nav-group-title">Live dashboard</h3>
       <div class="dashboard-nav-links">
         {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
         <a href="#recent-sessions"><span>Recent sessions</span></a>
