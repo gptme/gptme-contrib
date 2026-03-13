@@ -3194,6 +3194,44 @@ def test_generate_dashboard_multiview_dynamic_links_call_show_section(
     assert "a.addEventListener('click'" in html, "click handler missing from nav link setup"
 
 
+def test_generate_dashboard_live_nav_group_hidden_in_static_mode(workspace: Path, tmp_path: Path):
+    """Live dashboard nav group is hidden by default; only revealed when API connects."""
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # live-nav-group must be present but hidden in static output
+    assert 'id="live-nav-group"' in html, "live-nav-group element missing"
+    live_idx = html.index('id="live-nav-group"')
+    # The element must have display:none
+    snippet = html[live_idx : live_idx + 60]
+    assert 'style="display:none"' in snippet, f"live-nav-group not hidden by default: {snippet!r}"
+    # initDynamic must reveal it when API connects
+    assert "live-nav-group" in html, "live-nav-group not referenced in JS"
+    assert "liveGroup" in html, "liveGroup JS variable missing from initDynamic"
+
+
+def test_generate_dashboard_readme_section_label(workspace: Path, tmp_path: Path):
+    """#about section heading and nav link show 'README.md', not generic 'About'."""
+    workspace_readme = workspace / "README.md"
+    workspace_readme.write_text("# My Agent\n\nAgent description here.\n")
+
+    output = tmp_path / "out"
+    template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
+    generate(workspace, output, template_dir)
+
+    html = (output / "index.html").read_text()
+
+    # Section heading must say README.md
+    assert "README.md" in html, "README.md label missing from rendered output"
+    # Nav link must reference #about and show README.md label
+    about_nav_idx = html.index('href="#about"')
+    nav_snippet = html[about_nav_idx : about_nav_idx + 60]
+    assert "README.md" in nav_snippet, f"Nav link for #about should show README.md: {nav_snippet!r}"
+
+
 # --- Atom feed tests ---
 
 

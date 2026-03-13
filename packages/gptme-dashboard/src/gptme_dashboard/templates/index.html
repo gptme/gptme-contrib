@@ -591,26 +591,26 @@ tr:hover { background: var(--accent-dim); }
     <a href="#" id="nav-home" class="nav-home-link" aria-label="Show all sections">⊞ All sections</a>
 
     <div class="dashboard-nav-group">
-      <h3 class="dashboard-nav-group-title">Overview</h3>
+      <h3 class="dashboard-nav-group-title">Content</h3>
       <div class="dashboard-nav-links">
-        {% if readme_html %}<a href="#about"><span>About</span></a>{% endif %}
-        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
+        {% if readme_html %}<a href="#about"><span>📄 README.md</span></a>{% endif %}
         {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
+        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
         {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
         {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
       </div>
     </div>
 
     <div class="dashboard-nav-group">
-      <h3 class="dashboard-nav-group-title">Workspace assets</h3>
+      <h3 class="dashboard-nav-group-title">Workspace</h3>
       <div class="dashboard-nav-links">
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
-        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
+        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
       </div>
     </div>
 
-    <div class="dashboard-nav-group">
+    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
       <h3 class="dashboard-nav-group-title">Live dashboard</h3>
       <div class="dashboard-nav-links">
         {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
@@ -628,7 +628,7 @@ tr:hover { background: var(--accent-dim); }
 {% if readme_html %}
 <!-- About (README) -->
 <section id="about">
-  <h2>About</h2>
+  <h2>📄 README.md</h2>
   <div class="content">{{ readme_html | safe }}</div>
 </section>
 {% endif %}
@@ -1164,6 +1164,8 @@ async function initDynamic() {
     const resp = await fetch('/api/status');
     if (!resp.ok) return;
     document.querySelectorAll('.dynamic-panel').forEach(el => el.style.display = '');
+    const liveGroup = document.getElementById('live-nav-group');
+    if (liveGroup) liveGroup.style.display = '';
     loadSessionStats();
     loadActivityHeatmap();
     loadRecentSessions();
