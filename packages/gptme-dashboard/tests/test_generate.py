@@ -3169,9 +3169,9 @@ def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path:
     html = (output / "index.html").read_text()
 
     # Static sections must appear in sidebar nav order:
-    # tasks → sessions → journals → summaries → packages → plugins → guidance → about
+    # tasks → sessions → journals → summaries → about → packages → plugins → guidance
     # (tasks/sessions may be absent but the rest are always present)
-    expected_order = ["journals", "summaries", "packages", "plugins", "guidance", "about"]
+    expected_order = ["journals", "summaries", "about", "packages", "plugins", "guidance"]
     positions = []
     for section_id in expected_order:
         marker = f'<section id="{section_id}"'
