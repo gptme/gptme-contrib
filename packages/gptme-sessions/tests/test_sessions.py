@@ -2245,6 +2245,33 @@ def test_post_session_noop_overridden_by_deliverables(tmp_path: Path):
     assert result.record.deliverables == ["abc123", "def456"]
 
 
+def test_post_session_single_file_write_stays_noop(tmp_path: Path):
+    """Trajectory with exactly 1 file write stays noop without caller deliverables.
+
+    Regression test: is_productive() requires ≥2 unique file writes for a
+    commit-free session to be productive.  A single-file-write session is
+    deliberately classified as noop.  The noop→productive override must NOT
+    fire just because that file path appears in traj_deliverables (merged list)
+    — it should only fire when the *caller* supplies explicit deliverables.
+    """
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = _make_cc_msgs(writes=1)  # exactly 1 file write → noop per is_productive()
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        # No caller-supplied deliverables — override must NOT fire
+    )
+    # is_productive() says noop (1 write < 2 threshold); no caller deliverables
+    # → outcome must stay noop, not be bumped to productive by traj_deliverables
+    assert result.record.outcome == "noop"
+
+
 def test_post_session_trajectory_grade_stored(tmp_path: Path):
     """Trajectory grade is persisted in SessionRecord.trajectory_grade.
 

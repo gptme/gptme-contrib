@@ -173,6 +173,10 @@ def post_session(
     # Merge shell-provided deliverables (bare SHAs) with trajectory-derived
     # ones (commit messages, file write paths).  The shell always passes a
     # list (possibly empty), so we treat empty the same as None.
+    # Capture caller-supplied deliverables *before* the merge so the noop
+    # override below can check only caller-provided items (not traj-derived
+    # ones that is_productive() may have deliberately excluded).
+    caller_deliverables: list[str] = list(deliverables) if deliverables else []
     traj_deliverables = signals.get("deliverables", []) if signals else []
     if not deliverables:
         deliverables = traj_deliverables
@@ -210,12 +214,15 @@ def post_session(
     else:
         outcome = "productive"
 
-    # Override noop → productive if deliverables exist.
+    # Override noop → productive if *caller-supplied* deliverables exist.
     # Trajectory signals may miss commits detected by the caller via git diff.
-    if outcome == "noop" and deliverables:
+    # Use caller_deliverables (pre-merge) so trajectory-derived items (e.g. a
+    # single file write that is_productive() deliberately classifies as noop)
+    # do not trigger this override.
+    if outcome == "noop" and caller_deliverables:
         logger.info(
-            "Overriding outcome noop→productive: %d deliverable(s) present",
-            len(deliverables),
+            "Overriding outcome noop→productive: %d caller-supplied deliverable(s)",
+            len(caller_deliverables),
         )
         outcome = "productive"
 
