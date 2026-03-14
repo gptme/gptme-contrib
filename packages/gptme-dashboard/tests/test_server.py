@@ -2689,7 +2689,7 @@ def test_api_search_response_structure(tmp_path: Path):
 
 def test_api_search_valid_types(client):
     """Test /api/search accepts all documented type values."""
-    for t in ("lesson", "skill", "task", "journal", "summary"):
+    for t in ("lesson", "skill", "task", "journal", "summary", "package", "plugin"):
         resp = client.get(f"/api/search?q=test&type={t}")
         # Empty workspace → 0 results, but valid request
         assert resp.status_code == 200, f"type={t} should be valid"
@@ -2860,3 +2860,108 @@ def test_make_excerpt_preserves_underscores_in_identifiers():
     body = "Use `my_var_name` to configure the option.\n"
     excerpt = _make_excerpt(body)
     assert "my_var_name" in excerpt, f"Identifier underscore stripped: {excerpt!r}"
+
+
+def test_api_search_finds_package(tmp_path: Path):
+    """Test /api/search indexes packages by name and description."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    pkg_dir = tmp_path / "packages" / "gptme-frobnicate"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text(
+        '[project]\nname = "gptme-frobnicate"\nversion = "0.1.0"\n'
+        'description = "Frobnicate widgets for gptme"\n'
+    )
+    (pkg_dir / "README.md").write_text("# gptme-frobnicate\n\nFrobnicate widgets.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=frobnicate")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1, "Package should be indexed and searchable"
+        pkg_results = [r for r in data["results"] if r["type"] == "package"]
+        assert pkg_results, "Expected at least one package result"
+        assert any("frobnicate" in r["title"].lower() for r in pkg_results)
+
+
+def test_api_search_finds_plugin(tmp_path: Path):
+    """Test /api/search indexes plugins by name and README body."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    plugin_dir = tmp_path / "plugins" / "gptme-xyzzy"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text("# gptme-xyzzy\n\nThe xyzzy plugin teleports context.\n")
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=xyzzy")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] >= 1, "Plugin should be indexed and searchable"
+        plugin_results = [r for r in data["results"] if r["type"] == "plugin"]
+        assert plugin_results, "Expected at least one plugin result"
+        assert any("xyzzy" in r["title"].lower() for r in plugin_results)
+
+
+def test_api_search_type_filter_package(tmp_path: Path):
+    """Test /api/search?type=package returns only packages."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    # Create a package and a lesson both matching the query
+    pkg_dir = tmp_path / "packages" / "gptme-deploy"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "pyproject.toml").write_text(
+        '[project]\nname = "gptme-deploy"\nversion = "0.1.0"\n'
+        'description = "Deploy helpers for gptme"\n'
+    )
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "deploy-lesson.md").write_text(
+        "---\nmatch:\n  keywords: [deploy]\nstatus: active\n---\n"
+        "# Deploy Lesson\n\nHow to deploy.\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=deploy&type=package")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["type_filter"] == "package"
+        assert data["results"], "Expected at least one package result for 'deploy' query"
+        for result in data["results"]:
+            assert result["type"] == "package", f"Expected only packages, got {result['type']}"
+
+
+def test_api_search_type_filter_plugin(tmp_path: Path):
+    """Test /api/search?type=plugin returns only plugins."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    # Create a plugin and a lesson both matching the query
+    plugin_dir = tmp_path / "plugins" / "gptme-notify"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text("# gptme-notify\n\nSend notifications from gptme.\n")
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "notify-lesson.md").write_text(
+        "---\nmatch:\n  keywords: [notify]\nstatus: active\n---\n"
+        "# Notify Lesson\n\nHow to send notifications.\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=notify&type=plugin")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["type_filter"] == "plugin"
+        assert data["results"], "Expected at least one plugin result for 'notify' query"
+        for result in data["results"]:
+            assert result["type"] == "plugin", f"Expected only plugins, got {result['type']}"
