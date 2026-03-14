@@ -1193,7 +1193,7 @@ async function initDynamic() {
     const resp = await fetch('/api/status');
     if (!resp.ok) {
       _apiAvailable = false;
-      _loadStaticSearchIndex();
+      await _loadStaticSearchIndex();
       return;
     }
     _apiAvailable = true;
@@ -1212,7 +1212,7 @@ async function initDynamic() {
   } catch (e) {
     // No backend — load static index for client-side search
     _apiAvailable = false;
-    _loadStaticSearchIndex();
+    await _loadStaticSearchIndex();
   }
 }
 
@@ -1814,7 +1814,7 @@ function _clientSearch(q, typeFilter, limit) {
   const scored = [];
   for (const item of _staticSearchIndex) {
     if (typeFilter && item.type !== typeFilter) continue;
-    const haystack = [item.title, item.category, item.excerpt, ...item.keywords].join(' ').toLowerCase();
+    const haystack = [item.title, item.category, item.excerpt, item.source, ...item.keywords].join(' ').toLowerCase();
     const score = words.reduce((n, w) => n + (haystack.includes(w) ? 1 : 0), 0);
     if (score > 0) scored.push({ score, item });
   }

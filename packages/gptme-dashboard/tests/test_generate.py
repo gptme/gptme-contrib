@@ -3977,3 +3977,23 @@ def test_search_button_always_present(workspace: Path, tmp_path: Path):
     generate(workspace, output)
     html = (output / "index.html").read_text()
     assert 'id="search-btn"' in html, "Search button must always be in the HTML"
+
+
+def test_static_search_initdynamic_awaits_load(workspace: Path, tmp_path: Path):
+    """_loadStaticSearchIndex must be awaited in initDynamic to prevent search-before-load race."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Both failure paths in initDynamic must await the loader
+    assert (
+        "await _loadStaticSearchIndex()" in html
+    ), "initDynamic must await _loadStaticSearchIndex() to avoid race window"
+
+
+def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path):
+    """_clientSearch haystack must include item.source so source-filtered search works."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The haystack array must join item.source alongside title/category/excerpt/keywords
+    assert "item.source" in html, "_clientSearch haystack must include item.source"
