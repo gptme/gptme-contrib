@@ -58,6 +58,7 @@ def post_session(
     store: SessionStore,
     harness: str,
     model: str | None = None,
+    context_tier: str | None = None,
     run_type: str | None = None,
     trigger: str | None = None,
     category: str | None = None,
@@ -81,6 +82,9 @@ def post_session(
         Runtime that ran the session (e.g. ``"claude-code"``, ``"gptme"``).
     model:
         Model string as reported by the harness (e.g. ``"claude-opus-4-6"``).
+    context_tier:
+        Context tier used for this session (e.g. ``"standard"``, ``"massive"``).
+        Enables A/B comparison of context inclusion strategies.
     run_type:
         Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
         Kept for backward compatibility; prefer ``trigger`` going forward.
@@ -210,6 +214,8 @@ def post_session(
         "duration_seconds": duration_seconds,
         "deliverables": deliverables,
     }
+    if context_tier is not None:
+        record_kwargs["context_tier"] = context_tier
     if trigger is not None:
         record_kwargs["trigger"] = trigger
     if actual_category is not None:

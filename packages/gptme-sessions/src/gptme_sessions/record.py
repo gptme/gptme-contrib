@@ -103,6 +103,7 @@ class SessionRecord:
     # Operational context
     harness: str | None = "unknown"  # claude-code, gptme, codex
     model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
+    context_tier: str | None = None  # standard, extended, large, massive
     run_type: str | None = "unknown"  # deprecated: use trigger instead
     trigger: str | None = None  # how session started: timer, dispatch, manual, spawn
 
