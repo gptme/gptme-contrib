@@ -4028,3 +4028,37 @@ def test_static_search_plugin_enabled_nullable(workspace: Path, tmp_path: Path):
     assert (
         "p.enabled == null" in html
     ), "_buildClientIndex must treat absent p.enabled as empty string, not 'disabled'"
+
+
+def test_static_search_broken_url_guard(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must not produce '/undefined' URLs when page_url and path are both absent."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "pageUrl" in html, "_buildClientIndex must use a pageUrl() helper"
+    assert "'/undefined'" not in html, "pageUrl must not concatenate '/undefined' for absent fields"
+
+
+def test_static_search_failed_load_sentinel(workspace: Path, tmp_path: Path):
+    """runSearch must show a user-visible error when data.json load fails (_staticSearchIndex===false)."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert (
+        "_staticSearchIndex = false" in html
+    ), "_loadStaticSearchIndex must set false sentinel on failure"
+    assert "_staticSearchIndex === false" in html, "runSearch must branch on false sentinel"
+    assert (
+        "Search unavailable" in html
+    ), "user must see an error message when static index load failed"
+
+
+def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
+    """initDynamic must re-trigger runSearch if overlay is open when API probe completes."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The re-trigger must appear after initDynamic's catch block, inside the function body
+    init_idx = html.index("async function initDynamic()")
+    retrigger_idx = html.index("classList.contains('open')", init_idx)
+    assert retrigger_idx > init_idx, "initDynamic must re-trigger search after probing"

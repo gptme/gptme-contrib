@@ -1214,6 +1214,12 @@ async function initDynamic() {
     _apiAvailable = false;
     await _loadStaticSearchIndex();
   }
+  // Re-trigger any search typed while we were probing (the null guard showed "Loading…")
+  const overlay = document.getElementById('search-overlay');
+  if (overlay && overlay.classList.contains('open')) {
+    const pending = document.getElementById('global-search-input').value.trim();
+    if (pending && pending.length >= 2) runSearch(pending, document.getElementById('search-type-filter').value);
+  }
 }
 
 async function loadSessionStats() {
@@ -1779,29 +1785,31 @@ function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s)
 /** Build a flat search index from data.json for client-side search on static sites. */
 function _buildClientIndex(data) {
   const items = [];
+  // Returns '/path' when page_url or path is present; null when both absent (avoids broken links)
+  const pageUrl = (x) => (x.page_url || x.path) ? '/' + (x.page_url || x.path) : null;
   const addItem = (type, title, category, source, keywords, excerpt, url) => {
     if (url) items.push({ type, title: title || '', category: category || '',
       source: source || '', keywords: keywords || [], excerpt: excerpt || '', url });
   };
   for (const g of (data.guidance || [])) {
     addItem(g.kind || 'lesson', g.title || g.name, g.category, g.source,
-      g.keywords, g.description, '/' + (g.page_url || g.path));
+      g.keywords, g.description, pageUrl(g));
   }
   for (const t of (data.tasks || [])) {
-    addItem('task', t.title || t.id, t.state, '', t.tags, '', '/' + (t.page_url || t.path));
+    addItem('task', t.title || t.id, t.state, '', t.tags, '', pageUrl(t));
   }
   for (const j of (data.journals || [])) {
-    addItem('journal', j.name || j.date, j.date, '', [], j.preview, '/' + (j.page_url || j.path));
+    addItem('journal', j.name || j.date, j.date, '', [], j.preview, pageUrl(j));
   }
   for (const s of (data.summaries || [])) {
-    addItem('summary', s.title || s.period, s.type, '', [], '', '/' + (s.page_url || s.path));
+    addItem('summary', s.title || s.period, s.type, '', [], '', pageUrl(s));
   }
   for (const p of (data.packages || [])) {
-    addItem('package', p.name, '', p.source, [], p.description, '/' + (p.page_url || p.path));
+    addItem('package', p.name, '', p.source, [], p.description, pageUrl(p));
   }
   for (const p of (data.plugins || [])) {
     addItem('plugin', p.name, p.enabled == null ? '' : (p.enabled ? 'enabled' : 'disabled'), p.source, [], p.description,
-      '/' + (p.page_url || p.path));
+      pageUrl(p));
   }
   return items;
 }
@@ -1822,18 +1830,20 @@ function _clientSearch(q, typeFilter, limit) {
   return { results: scored.slice(0, limit).map(r => r.item), total: scored.length };
 }
 
-/** Load data.json and build the static search index (called once when API is unavailable). */
+/** Load data.json and build the static search index (called once when API is unavailable).
+ *  Sets _staticSearchIndex to an array on success or false on failure (never stays null). */
 async function _loadStaticSearchIndex() {
-  if (_staticSearchIndex !== null) return;  // already loaded
+  if (_staticSearchIndex !== null) return;  // already loaded (or failed)
   try {
     const resp = await fetch('/data.json');
     if (!resp.ok) {
       console.warn('gptme-dashboard: /data.json fetch failed (' + resp.status + ') — static search unavailable');
+      _staticSearchIndex = false;
       return;
     }
     const data = await resp.json();
     _staticSearchIndex = _buildClientIndex(data);
-  } catch (_) { /* static search unavailable */ }
+  } catch (_) { _staticSearchIndex = false; }
 }
 
 /** Render a list of result objects into the search results area. */
@@ -1877,6 +1887,12 @@ async function runSearch(q, typeFilter) {
 
   // Static mode: use client-side index built from data.json
   if (_apiAvailable === false) {
+    if (_staticSearchIndex === false) {
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">Search unavailable — could not load static index</div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
     const { results, total } = _clientSearch(q, typeFilter, 20);
     _renderResults(results, total, q);
     return;
