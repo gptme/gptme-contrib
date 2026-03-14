@@ -1477,12 +1477,18 @@ def create_app(
                         }
                     )
             if sub.get("has_plugins"):
-                for plugin in scan_plugins(sub_path, source=sub_name)[:100]:
+                sub_config = read_workspace_config(sub_path)
+                sub_enabled_plugins = sub_config.get("plugins_enabled")
+                for plugin in scan_plugins(
+                    sub_path, source=sub_name, enabled_plugins=sub_enabled_plugins
+                )[:100]:
                     items.append(
                         {
                             "type": "plugin",
                             "title": plugin.get("name", ""),
-                            "category": sub_name,
+                            "category": "enabled"
+                            if plugin.get("enabled")
+                            else ("disabled" if "enabled" in plugin else sub_name),
                             "keywords": [],
                             "tags": [],
                             "excerpt": _make_excerpt(
