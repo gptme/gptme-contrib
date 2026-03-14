@@ -2937,3 +2937,31 @@ def test_api_search_type_filter_package(tmp_path: Path):
         assert data["results"], "Expected at least one package result for 'deploy' query"
         for result in data["results"]:
             assert result["type"] == "package", f"Expected only packages, got {result['type']}"
+
+
+def test_api_search_type_filter_plugin(tmp_path: Path):
+    """Test /api/search?type=plugin returns only plugins."""
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "TestBot"\n')
+    # Create a plugin and a lesson both matching the query
+    plugin_dir = tmp_path / "plugins" / "gptme-notify"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "README.md").write_text("# gptme-notify\n\nSend notifications from gptme.\n")
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "notify-lesson.md").write_text(
+        "---\nmatch:\n  keywords: [notify]\nstatus: active\n---\n"
+        "# Notify Lesson\n\nHow to send notifications.\n"
+    )
+
+    site_dir = tmp_path / "site"
+    app = create_app(tmp_path, site_dir=site_dir)
+    app.config["TESTING"] = True
+
+    with app.test_client() as c:
+        resp = c.get("/api/search?q=notify&type=plugin")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["type_filter"] == "plugin"
+        assert data["results"], "Expected at least one plugin result for 'notify' query"
+        for result in data["results"]:
+            assert result["type"] == "plugin", f"Expected only plugins, got {result['type']}"
