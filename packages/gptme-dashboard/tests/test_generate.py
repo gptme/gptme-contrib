@@ -3959,16 +3959,20 @@ def test_static_search_js_present(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_initdynamic_sets_api_flag(workspace: Path, tmp_path: Path):
-    """initDynamic must set _apiAvailable and call _loadStaticSearchIndex on API failure."""
+    """initDynamic's catch block must set _apiAvailable=false then await _loadStaticSearchIndex."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
 
-    # The catch/failure path in initDynamic must set _apiAvailable = false
-    assert "_apiAvailable = false" in html, "initDynamic must set _apiAvailable = false on failure"
-    assert (
-        "_loadStaticSearchIndex" in html and "catch" in html
-    ), "initDynamic catch block must call _loadStaticSearchIndex"
+    # Verify the catch block inside initDynamic (identified by its comment) contains both
+    # assignments — not just that the strings appear somewhere in the file.
+    catch_block = re.compile(
+        r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false[^}]*await\s+_loadStaticSearchIndex\(\)",
+        re.DOTALL,
+    )
+    assert catch_block.search(
+        html
+    ), "initDynamic catch block must set _apiAvailable=false and await _loadStaticSearchIndex()"
 
 
 def test_search_button_always_present(workspace: Path, tmp_path: Path):
@@ -4009,3 +4013,15 @@ def test_static_search_null_api_available_shows_loading(workspace: Path, tmp_pat
         "_apiAvailable === null" in html
     ), "runSearch must guard on null to prevent 404 before initDynamic resolves"
     assert "Loading search index" in html, "null guard must show a loading placeholder to the user"
+
+
+def test_static_search_plugin_enabled_nullable(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must not default unconfigured plugins to 'disabled'."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # p.enabled == null ? '' : ... — null check must come first so absent field → ''
+    # A plain p.enabled ? 'enabled' : 'disabled' would make undefined → 'disabled'
+    assert (
+        "p.enabled == null" in html
+    ), "_buildClientIndex must treat absent p.enabled as empty string, not 'disabled'"

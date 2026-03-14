@@ -1800,7 +1800,7 @@ function _buildClientIndex(data) {
     addItem('package', p.name, '', p.source, [], p.description, '/' + (p.page_url || p.path));
   }
   for (const p of (data.plugins || [])) {
-    addItem('plugin', p.name, p.enabled ? 'enabled' : 'disabled', p.source, [], p.description,
+    addItem('plugin', p.name, p.enabled == null ? '' : (p.enabled ? 'enabled' : 'disabled'), p.source, [], p.description,
       '/' + (p.page_url || p.path));
   }
   return items;
