@@ -32,6 +32,10 @@ from .store import SessionStore
 
 logger = logging.getLogger(__name__)
 
+#: Valid values for the ``context_tier`` parameter.  Exported so ``cli.py``
+#: can use a single source of truth for ``click.Choice``.
+VALID_CONTEXT_TIERS: frozenset[str] = frozenset({"standard", "extended", "large", "massive"})
+
 
 @dataclass
 class PostSessionResult:
@@ -142,11 +146,10 @@ def post_session(
        non-empty, upgrade to ``"productive"`` (trajectory may miss commits
        detected by the caller via ``git diff``).
     """
-    _VALID_CONTEXT_TIERS = {"standard", "extended", "large", "massive"}
-    if context_tier is not None and context_tier not in _VALID_CONTEXT_TIERS:
+    if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
             f"Invalid context_tier {context_tier!r}. "
-            f"Expected one of {sorted(_VALID_CONTEXT_TIERS)}"
+            f"Expected one of {sorted(VALID_CONTEXT_TIERS)}"
         )
 
     grade: float | None = None

@@ -28,7 +28,7 @@ from .discovery import (
     parse_gptme_config,
     session_date_from_path,
 )
-from .post_session import post_session
+from .post_session import VALID_CONTEXT_TIERS, post_session
 from .record import SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
@@ -1168,7 +1168,7 @@ def sync(
 @click.option(
     "--context-tier",
     default=None,
-    type=click.Choice(["standard", "extended", "large", "massive"]),
+    type=click.Choice(sorted(VALID_CONTEXT_TIERS)),
     help="Context tier used in this session (standard, extended, large, massive)",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
