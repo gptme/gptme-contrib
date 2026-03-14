@@ -138,7 +138,17 @@ def post_session(
     3. Git HEAD comparison (``start_commit != end_commit``) → productive / noop
     4. ``exit_code == 124`` (timeout, no other evidence) → ``"noop"``
     5. Default: ``"productive"``
+    6. Override: if step 2–5 yielded ``"noop"`` but ``deliverables`` is
+       non-empty, upgrade to ``"productive"`` (trajectory may miss commits
+       detected by the caller via ``git diff``).
     """
+    _VALID_CONTEXT_TIERS = {"standard", "extended", "large", "massive"}
+    if context_tier is not None and context_tier not in _VALID_CONTEXT_TIERS:
+        raise ValueError(
+            f"Invalid context_tier {context_tier!r}. "
+            f"Expected one of {sorted(_VALID_CONTEXT_TIERS)}"
+        )
+
     grade: float | None = None
     signals: dict[str, Any] | None = None
     token_count: int | None = None

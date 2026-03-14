@@ -2321,6 +2321,22 @@ def test_post_session_no_trajectory_no_grade(tmp_path: Path):
     assert result.grade is None
 
 
+def test_post_session_failed_not_overridden_by_deliverables(tmp_path: Path):
+    """A failed session (non-zero exit) stays failed even when deliverables exist.
+
+    Regression guard: the noop→productive override must only fire for noop,
+    never for failed outcomes.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        exit_code=1,
+        deliverables=["abc123"],
+    )
+    assert result.record.outcome == "failed"
+
+
 def test_post_session_cli_basic(tmp_path: Path, capsys, monkeypatch):
     """CLI post-session command records a session."""
     import sys
