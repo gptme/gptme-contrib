@@ -1448,7 +1448,11 @@ def create_app(
         _add_lessons(scan_lessons(ws))
         _add_skills(scan_skills(ws))
 
-        # Submodule lessons and skills (e.g. gptme-contrib, gptme-superuser)
+        # Packages and plugins (config needed for enabled_plugins)
+        config = read_workspace_config(ws)
+        enabled_plugins = config.get("plugins_enabled")
+
+        # Submodule lessons, skills, packages, and plugins (single scan)
         for sub in detect_submodules(ws):
             sub_path = sub["abs_path"]
             sub_name = sub["name"]
@@ -1456,6 +1460,38 @@ def create_app(
                 _add_lessons(scan_lessons(sub_path, source=sub_name))
             if sub.get("has_skills"):
                 _add_skills(scan_skills(sub_path, source=sub_name))
+            if sub.get("has_packages"):
+                for pkg in scan_packages(sub_path, source=sub_name):
+                    items.append(
+                        {
+                            "type": "package",
+                            "title": pkg.get("name", ""),
+                            "category": sub_name,
+                            "keywords": [],
+                            "tags": [],
+                            "excerpt": _make_excerpt(
+                                pkg.get("description", "") + "\n" + pkg.get("body", "")
+                            ),
+                            "url": "/" + pkg.get("page_url", ""),
+                            "path": pkg.get("path", ""),
+                        }
+                    )
+            if sub.get("has_plugins"):
+                for plugin in scan_plugins(sub_path, source=sub_name):
+                    items.append(
+                        {
+                            "type": "plugin",
+                            "title": plugin.get("name", ""),
+                            "category": sub_name,
+                            "keywords": [],
+                            "tags": [],
+                            "excerpt": _make_excerpt(
+                                plugin.get("description", "") + "\n" + plugin.get("body", "")
+                            ),
+                            "url": "/" + plugin.get("page_url", ""),
+                            "path": plugin.get("path", ""),
+                        }
+                    )
 
         # Tasks — limit to 500 to keep index size bounded
         for task in scan_tasks(ws)[:500]:
@@ -1502,9 +1538,7 @@ def create_app(
                 }
             )
 
-        # Packages
-        config = read_workspace_config(ws)
-        enabled_plugins = config.get("plugins_enabled")
+        # Packages (main workspace)
         for pkg in scan_packages(ws):
             items.append(
                 {
@@ -1521,7 +1555,7 @@ def create_app(
                 }
             )
 
-        # Plugins (main workspace + submodules)
+        # Plugins (main workspace)
         for plugin in scan_plugins(ws, enabled_plugins=enabled_plugins):
             items.append(
                 {
@@ -1537,41 +1571,6 @@ def create_app(
                     "path": plugin.get("path", ""),
                 }
             )
-        for sub in detect_submodules(ws):
-            sub_path = sub["abs_path"]
-            sub_name = sub["name"]
-            if sub.get("has_packages"):
-                for pkg in scan_packages(sub_path, source=sub_name):
-                    items.append(
-                        {
-                            "type": "package",
-                            "title": pkg.get("name", ""),
-                            "category": sub_name,
-                            "keywords": [],
-                            "tags": [],
-                            "excerpt": _make_excerpt(
-                                pkg.get("description", "") + "\n" + pkg.get("body", "")
-                            ),
-                            "url": "/" + pkg.get("page_url", ""),
-                            "path": pkg.get("path", ""),
-                        }
-                    )
-            if sub.get("has_plugins"):
-                for plugin in scan_plugins(sub_path, source=sub_name):
-                    items.append(
-                        {
-                            "type": "plugin",
-                            "title": plugin.get("name", ""),
-                            "category": sub_name,
-                            "keywords": [],
-                            "tags": [],
-                            "excerpt": _make_excerpt(
-                                plugin.get("description", "") + "\n" + plugin.get("body", "")
-                            ),
-                            "url": "/" + plugin.get("page_url", ""),
-                            "path": plugin.get("path", ""),
-                        }
-                    )
 
         return items
 
