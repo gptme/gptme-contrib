@@ -1414,35 +1414,37 @@ def create_app(
 
         def _add_lessons(lessons: "list[dict[str, Any]]") -> None:
             for lesson in lessons:
-                items.append(
-                    {
-                        "type": "lesson",
-                        "title": lesson.get("title", ""),
-                        "category": lesson.get("category", ""),
-                        "keywords": lesson.get("all_keywords", []),
-                        "tags": [],
-                        "excerpt": _make_excerpt(lesson.get("body", "")),
-                        "url": "/" + lesson.get("page_url", ""),
-                        "path": lesson.get("path", ""),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "type": "lesson",
+                    "title": lesson.get("title", ""),
+                    "category": lesson.get("category", ""),
+                    "keywords": lesson.get("all_keywords", []),
+                    "tags": [],
+                    "excerpt": _make_excerpt(lesson.get("body", "")),
+                    "url": "/" + lesson.get("page_url", ""),
+                    "path": lesson.get("path", ""),
+                }
+                if lesson.get("source"):
+                    entry["source"] = lesson["source"]
+                items.append(entry)
 
         def _add_skills(skills: "list[dict[str, Any]]") -> None:
             for skill in skills:
-                items.append(
-                    {
-                        "type": "skill",
-                        "title": skill.get("title", "") or skill.get("name", ""),
-                        "category": skill.get("category", ""),
-                        "keywords": skill.get("keywords", []),
-                        "tags": skill.get("tags", []),
-                        "excerpt": _make_excerpt(
-                            skill.get("description", "") + "\n" + skill.get("body", "")
-                        ),
-                        "url": "/" + skill.get("page_url", ""),
-                        "path": skill.get("path", ""),
-                    }
-                )
+                entry = {
+                    "type": "skill",
+                    "title": skill.get("title", "") or skill.get("name", ""),
+                    "category": skill.get("category", ""),
+                    "keywords": skill.get("keywords", []),
+                    "tags": skill.get("tags", []),
+                    "excerpt": _make_excerpt(
+                        skill.get("description", "") + "\n" + skill.get("body", "")
+                    ),
+                    "url": "/" + skill.get("page_url", ""),
+                    "path": skill.get("path", ""),
+                }
+                if skill.get("source"):
+                    entry["source"] = skill["source"]
+                items.append(entry)
 
         # Main workspace lessons and skills
         _add_lessons(scan_lessons(ws))

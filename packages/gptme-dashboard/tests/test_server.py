@@ -2760,6 +2760,16 @@ def test_api_search_indexes_submodule_lessons(tmp_path: Path):
         data = resp.get_json()
         assert data["total"] >= 1, "Submodule lessons should be indexed and searchable"
         assert any(r["type"] == "lesson" for r in data["results"])
+        # Source attribution: submodule lessons must carry the submodule name.
+        # Filter to lessons with source set (not all lessons may be from submodules).
+        all_lesson_results = [r for r in data["results"] if r["type"] == "lesson"]
+        sourced_lessons = [r for r in all_lesson_results if r.get("source")]
+        assert (
+            len(sourced_lessons) >= 1
+        ), "At least one submodule lesson must have source attribution"
+        assert all(
+            r["source"] == "gptme-contrib" for r in sourced_lessons
+        ), "All sourced lessons must carry the correct submodule name"
 
 
 def test_make_excerpt_strips_fenced_code_block_content():
