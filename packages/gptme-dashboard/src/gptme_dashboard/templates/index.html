@@ -1827,7 +1827,10 @@ async function _loadStaticSearchIndex() {
   if (_staticSearchIndex !== null) return;  // already loaded
   try {
     const resp = await fetch('/data.json');
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      console.warn('gptme-dashboard: /data.json fetch failed (' + resp.status + ') — static search unavailable');
+      return;
+    }
     const data = await resp.json();
     _staticSearchIndex = _buildClientIndex(data);
   } catch (_) { /* static search unavailable */ }

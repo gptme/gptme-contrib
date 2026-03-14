@@ -3984,14 +3984,17 @@ def test_search_button_always_present(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_initdynamic_awaits_load(workspace: Path, tmp_path: Path):
-    """_loadStaticSearchIndex must be awaited in initDynamic to prevent search-before-load race."""
+    """_loadStaticSearchIndex must be awaited in BOTH failure paths of initDynamic."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
-    # Both failure paths in initDynamic must await the loader
-    assert (
-        "await _loadStaticSearchIndex()" in html
-    ), "initDynamic must await _loadStaticSearchIndex() to avoid race window"
+    # Both the !resp.ok and catch branches in initDynamic must await the loader —
+    # a single occurrence would mean one branch was missed.
+    count = html.count("await _loadStaticSearchIndex()")
+    assert count >= 2, (
+        f"initDynamic must await _loadStaticSearchIndex() in BOTH failure branches "
+        f"(!resp.ok and catch), found only {count} occurrence(s)"
+    )
 
 
 def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path):
