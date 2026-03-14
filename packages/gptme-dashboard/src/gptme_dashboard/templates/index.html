@@ -1194,21 +1194,21 @@ async function initDynamic() {
     if (!resp.ok) {
       _apiAvailable = false;
       await _loadStaticSearchIndex();
-      return;
+    } else {
+      _apiAvailable = true;
+      // Each load* function calls show()/hide() for its own section.
+      // The live nav group is shown automatically by show() when a child link appears.
+      loadSessionStats();
+      loadActivityHeatmap();
+      loadRecentSessions();
+      loadServices();
+      loadSchedule();
+      await _fetchRestartToken();
+      loadServiceHealth();
+      // Auto-refresh health every 30 seconds — always retry to recover from transient errors
+      setInterval(loadServiceHealth, 30000);
+      if (document.getElementById('dynamic-journals')) loadJournals();
     }
-    _apiAvailable = true;
-    // Each load* function calls show()/hide() for its own section.
-    // The live nav group is shown automatically by show() when a child link appears.
-    loadSessionStats();
-    loadActivityHeatmap();
-    loadRecentSessions();
-    loadServices();
-    loadSchedule();
-    await _fetchRestartToken();
-    loadServiceHealth();
-    // Auto-refresh health every 30 seconds — always retry to recover from transient errors
-    setInterval(loadServiceHealth, 30000);
-    if (document.getElementById('dynamic-journals')) loadJournals();
   } catch (e) {
     // No backend — load static index for client-side search
     _apiAvailable = false;

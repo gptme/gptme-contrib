@@ -4062,3 +4062,10 @@ def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
     init_idx = html.index("async function initDynamic()")
     retrigger_idx = html.index("classList.contains('open')", init_idx)
     assert retrigger_idx > init_idx, "initDynamic must re-trigger search after probing"
+    # The !resp.ok branch must NOT contain a return that skips the re-trigger.
+    # Verify: the re-trigger appears after the catch block closes (not inside if/catch).
+    catch_close_idx = html.index("} catch (e) {", init_idx)
+    assert retrigger_idx > catch_close_idx, (
+        "Re-trigger code must appear after the catch block, not inside !resp.ok or catch — "
+        "otherwise static deployments (404 on /api/status) skip the re-trigger"
+    )
