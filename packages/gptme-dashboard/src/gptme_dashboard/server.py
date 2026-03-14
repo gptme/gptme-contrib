@@ -347,6 +347,8 @@ def create_app(
         read_workspace_config,
         scan_journals,
         scan_lessons,
+        scan_packages,
+        scan_plugins,
         scan_skills,
         scan_summaries,
         scan_tasks,
@@ -1500,6 +1502,77 @@ def create_app(
                 }
             )
 
+        # Packages
+        config = read_workspace_config(ws)
+        enabled_plugins = config.get("plugins_enabled")
+        for pkg in scan_packages(ws):
+            items.append(
+                {
+                    "type": "package",
+                    "title": pkg.get("name", ""),
+                    "category": "",
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": _make_excerpt(
+                        pkg.get("description", "") + "\n" + pkg.get("body", "")
+                    ),
+                    "url": "/" + pkg.get("page_url", ""),
+                    "path": pkg.get("path", ""),
+                }
+            )
+
+        # Plugins (main workspace + submodules)
+        for plugin in scan_plugins(ws, enabled_plugins=enabled_plugins):
+            items.append(
+                {
+                    "type": "plugin",
+                    "title": plugin.get("name", ""),
+                    "category": "enabled" if plugin.get("enabled") else "disabled",
+                    "keywords": [],
+                    "tags": [],
+                    "excerpt": _make_excerpt(
+                        plugin.get("description", "") + "\n" + plugin.get("body", "")
+                    ),
+                    "url": "/" + plugin.get("page_url", ""),
+                    "path": plugin.get("path", ""),
+                }
+            )
+        for sub in detect_submodules(ws):
+            sub_path = sub["abs_path"]
+            sub_name = sub["name"]
+            if sub.get("has_packages"):
+                for pkg in scan_packages(sub_path, source=sub_name):
+                    items.append(
+                        {
+                            "type": "package",
+                            "title": pkg.get("name", ""),
+                            "category": sub_name,
+                            "keywords": [],
+                            "tags": [],
+                            "excerpt": _make_excerpt(
+                                pkg.get("description", "") + "\n" + pkg.get("body", "")
+                            ),
+                            "url": "/" + pkg.get("page_url", ""),
+                            "path": pkg.get("path", ""),
+                        }
+                    )
+            if sub.get("has_plugins"):
+                for plugin in scan_plugins(sub_path, source=sub_name):
+                    items.append(
+                        {
+                            "type": "plugin",
+                            "title": plugin.get("name", ""),
+                            "category": sub_name,
+                            "keywords": [],
+                            "tags": [],
+                            "excerpt": _make_excerpt(
+                                plugin.get("description", "") + "\n" + plugin.get("body", "")
+                            ),
+                            "url": "/" + plugin.get("page_url", ""),
+                            "path": plugin.get("path", ""),
+                        }
+                    )
+
         return items
 
     def _score_item(item: "dict[str, Any]", query_words: "list[str]") -> int:
@@ -1538,7 +1611,9 @@ def create_app(
 
         return score
 
-    _SEARCH_VALID_TYPES = frozenset({"lesson", "skill", "task", "journal", "summary"})
+    _SEARCH_VALID_TYPES = frozenset(
+        {"lesson", "skill", "task", "journal", "summary", "package", "plugin"}
+    )
 
     @app.route("/api/search")
     def api_search() -> Any:
@@ -1547,7 +1622,7 @@ def create_app(
         Query parameters:
             q (str): Search query, minimum 2 characters. Required.
             type (str): Filter to a specific content type.
-                One of: lesson, skill, task, journal, summary.
+                One of: lesson, skill, task, journal, summary, package, plugin.
             limit (int): Maximum results to return (1–100, default 20).
 
         Returns:
