@@ -662,7 +662,7 @@ tr:hover { background: var(--accent-dim); }
   </div>
   <table id="dynamic-sessions-table">
     <thead>
-      <tr><th>Time</th><th>Harness</th><th>Model</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
+      <tr><th>Time</th><th>Harness</th><th>Model</th><th>Context</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -1297,6 +1297,7 @@ async function loadRecentSessions(offset) {
         + '<td>' + esc(time) + '</td>'
         + '<td>' + esc(s.harness || '') + '</td>'
         + '<td>' + esc(s.model || '') + '</td>'
+        + '<td>' + (s.context_tier ? '<span class="tag">' + esc(s.context_tier) + '</span>' : '') + '</td>'
         + '<td>' + esc(s.category || '') + '</td>'
         + '<td><span class="tag ' + cls + '">' + esc(s.outcome || '') + '</span></td>'
         + '<td>' + esc(dur) + '</td>'
