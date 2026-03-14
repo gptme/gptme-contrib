@@ -4107,3 +4107,51 @@ def test_static_search_summary_preview_in_haystack(workspace: Path, tmp_path: Pa
         "_buildClientIndex must pass s.preview as excerpt for summaries "
         "so summary content is searchable"
     )
+
+
+def test_static_search_has_page_skips_bodyless_packages(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must skip packages/plugins that have no generated detail page.
+
+    Packages and plugins without a README body get a page_url in data.json but no HTML
+    file is written. Without has_page filtering, static search results would link to 404s.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The guard must appear in _buildClientIndex before the addItem call for packages
+    build_idx = html.index("_buildClientIndex")
+    pkg_loop_idx = html.index("data.packages", build_idx)
+    assert "p.has_page" in html[pkg_loop_idx : pkg_loop_idx + 200], (
+        "_buildClientIndex must check p.has_page before indexing packages "
+        "to avoid search results pointing to non-existent detail pages"
+    )
+    # Same guard for plugins
+    plugin_loop_idx = html.index("data.plugins", build_idx)
+    assert (
+        "p.has_page" in html[plugin_loop_idx : plugin_loop_idx + 200]
+    ), "_buildClientIndex must check p.has_page before indexing plugins"
+
+
+def test_generate_json_has_page_field(workspace: Path):
+    """generate_json must emit has_page=true/false for packages and plugins.
+
+    has_page is true only when the item has a body (README), meaning a detail HTML page
+    was actually written. The client uses this to skip broken search result links.
+    """
+    import json as json_mod
+
+    data = collect_workspace_data(workspace)
+    json_str = generate_json(workspace, _data=data)
+    parsed = json_mod.loads(json_str)
+    for pkg in parsed.get("packages", []):
+        assert "has_page" in pkg, f"Package {pkg.get('name')} missing has_page field in data.json"
+        assert isinstance(
+            pkg["has_page"], bool
+        ), f"has_page must be a bool, got {type(pkg['has_page'])}"
+    for plugin in parsed.get("plugins", []):
+        assert (
+            "has_page" in plugin
+        ), f"Plugin {plugin.get('name')} missing has_page field in data.json"
+        assert isinstance(
+            plugin["has_page"], bool
+        ), f"has_page must be a bool, got {type(plugin['has_page'])}"

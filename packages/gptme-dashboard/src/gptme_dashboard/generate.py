@@ -1692,13 +1692,16 @@ def generate_json(
         ],
         "plugins": [
             {k: v for k, v in plugin.items() if k not in _JSON_EXCLUDE}
+            | {"has_page": bool(plugin.get("body"))}
             for plugin in data["plugins"]
         ],
         "tasks": [
             {k: v for k, v in task.items() if k not in _JSON_EXCLUDE} for task in data["tasks"]
         ],
         "packages": [
-            {k: v for k, v in pkg.items() if k not in _JSON_EXCLUDE} for pkg in data["packages"]
+            {k: v for k, v in pkg.items() if k not in _JSON_EXCLUDE}
+            | {"has_page": bool(pkg.get("body"))}
+            for pkg in data["packages"]
         ],
         "summaries": [
             {k: v for k, v in s.items() if k not in _JSON_EXCLUDE} for s in data["summaries"]

@@ -1805,9 +1805,11 @@ function _buildClientIndex(data) {
     addItem('summary', s.title || s.period, s.type, '', [], s.preview || '', pageUrl(s));
   }
   for (const p of (data.packages || [])) {
+    if (!p.has_page) continue;
     addItem('package', p.name, '', p.source, [], p.description, pageUrl(p));
   }
   for (const p of (data.plugins || [])) {
+    if (!p.has_page) continue;
     addItem('plugin', p.name, p.enabled == null ? '' : (p.enabled ? 'enabled' : 'disabled'), p.source, [], p.description,
       pageUrl(p));
   }
