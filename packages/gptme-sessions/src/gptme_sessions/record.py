@@ -103,6 +103,7 @@ class SessionRecord:
     # Operational context
     harness: str | None = "unknown"  # claude-code, gptme, codex
     model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
+    context_tier: str | None = None  # standard, extended, large, massive
     run_type: str | None = "unknown"  # deprecated: use trigger instead
     trigger: str | None = None  # how session started: timer, dispatch, manual, spawn
 
@@ -120,6 +121,9 @@ class SessionRecord:
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
     trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
     journal_path: str | None = None  # path to human-written journal entry
+
+    # Trajectory-based grade (from signal extraction, 0.0-1.0)
+    trajectory_grade: float | None = None
 
     # LLM judge evaluation
     llm_judge_score: float | None = None  # 0.0-1.0 goal-alignment score

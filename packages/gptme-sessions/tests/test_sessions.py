@@ -2186,6 +2186,184 @@ def test_post_session_metadata_fields(tmp_path: Path):
     assert r.session_id == "test1234"
 
 
+def test_post_session_noop_overridden_by_deliverables(tmp_path: Path):
+    """Trajectory says noop but explicit deliverables exist → productive.
+
+    Regression test: trajectory signal extraction may miss commits that the
+    caller detected via git diff.  If deliverables are provided, the session
+    produced real work regardless of trajectory analysis.
+    """
+    import json as _json
+
+    # Create trajectory with no commits or writes (trajectory says noop)
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "echo hello"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:00:30Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hello"}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    # Caller provides explicit deliverables (commits found via git diff)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        deliverables=["abc123", "def456"],
+    )
+    # Should be productive because deliverables exist, even though trajectory
+    # had no commits/writes
+    assert result.record.outcome == "productive"
+    assert result.record.deliverables == ["abc123", "def456"]
+
+
+def test_post_session_single_file_write_stays_noop(tmp_path: Path):
+    """Trajectory with exactly 1 file write stays noop without caller deliverables.
+
+    Regression test: is_productive() requires ≥2 unique file writes for a
+    commit-free session to be productive.  A single-file-write session is
+    deliberately classified as noop.  The noop→productive override must NOT
+    fire just because that file path appears in traj_deliverables (merged list)
+    — it should only fire when the *caller* supplies explicit deliverables.
+    """
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = _make_cc_msgs(writes=1)  # exactly 1 file write → noop per is_productive()
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        # No caller-supplied deliverables — override must NOT fire
+    )
+    # is_productive() says noop (1 write < 2 threshold); no caller deliverables
+    # → outcome must stay noop, not be bumped to productive by traj_deliverables
+    assert result.record.outcome == "noop"
+
+
+def test_post_session_trajectory_grade_stored(tmp_path: Path):
+    """Trajectory grade is persisted in SessionRecord.trajectory_grade.
+
+    Regression test: grade was computed by grade_signals() but never stored
+    in the record, making it unavailable for downstream analysis.
+    """
+    import json as _json
+
+    # Create trajectory with a commit (productive, should get a grade)
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": "[master abc1234] feat: add feature\n 1 file changed",
+                    }
+                ],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    # Grade should be computed from trajectory and stored in record
+    assert result.grade is not None
+    assert result.record.trajectory_grade is not None
+    assert result.record.trajectory_grade == result.grade
+
+
+def test_post_session_no_trajectory_no_grade(tmp_path: Path):
+    """Without trajectory, trajectory_grade remains None."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc",
+        end_commit="def",
+    )
+    assert result.record.outcome == "productive"
+    assert result.record.trajectory_grade is None
+    assert result.grade is None
+
+
+def test_post_session_failed_not_overridden_by_deliverables(tmp_path: Path):
+    """A failed session (non-zero exit) stays failed even when deliverables exist.
+
+    Regression guard: the noop→productive override must only fire for noop,
+    never for failed outcomes.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        exit_code=1,
+        deliverables=["abc123"],
+    )
+    assert result.record.outcome == "failed"
+
+
 def test_post_session_cli_basic(tmp_path: Path, capsys, monkeypatch):
     """CLI post-session command records a session."""
     import sys

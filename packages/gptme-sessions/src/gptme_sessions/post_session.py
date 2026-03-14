@@ -32,6 +32,10 @@ from .store import SessionStore
 
 logger = logging.getLogger(__name__)
 
+#: Valid values for the ``context_tier`` parameter.  Exported so ``cli.py``
+#: can use a single source of truth for ``click.Choice``.
+VALID_CONTEXT_TIERS: frozenset[str] = frozenset({"standard", "extended", "large", "massive"})
+
 
 @dataclass
 class PostSessionResult:
@@ -58,6 +62,7 @@ def post_session(
     store: SessionStore,
     harness: str,
     model: str | None = None,
+    context_tier: str | None = None,
     run_type: str | None = None,
     trigger: str | None = None,
     category: str | None = None,
@@ -81,6 +86,9 @@ def post_session(
         Runtime that ran the session (e.g. ``"claude-code"``, ``"gptme"``).
     model:
         Model string as reported by the harness (e.g. ``"claude-opus-4-6"``).
+    context_tier:
+        Context tier used for this session (e.g. ``"standard"``, ``"massive"``).
+        Enables A/B comparison of context inclusion strategies.
     run_type:
         Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
         Kept for backward compatibility; prefer ``trigger`` going forward.
@@ -134,7 +142,16 @@ def post_session(
     3. Git HEAD comparison (``start_commit != end_commit``) → productive / noop
     4. ``exit_code == 124`` (timeout, no other evidence) → ``"noop"``
     5. Default: ``"productive"``
+    6. Override: if step 2–5 yielded ``"noop"`` but ``deliverables`` is
+       non-empty, upgrade to ``"productive"`` (trajectory may miss commits
+       detected by the caller via ``git diff``).
     """
+    if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
+        raise ValueError(
+            f"Invalid context_tier {context_tier!r}. "
+            f"Expected one of {sorted(VALID_CONTEXT_TIERS)}"
+        )
+
     grade: float | None = None
     signals: dict[str, Any] | None = None
     token_count: int | None = None
@@ -159,6 +176,10 @@ def post_session(
     # Merge shell-provided deliverables (bare SHAs) with trajectory-derived
     # ones (commit messages, file write paths).  The shell always passes a
     # list (possibly empty), so we treat empty the same as None.
+    # Capture caller-supplied deliverables *before* the merge so the noop
+    # override below can check only caller-provided items (not traj-derived
+    # ones that is_productive() may have deliberately excluded).
+    caller_deliverables: list[str] = list(deliverables) if deliverables else []
     traj_deliverables = signals.get("deliverables", []) if signals else []
     if not deliverables:
         deliverables = traj_deliverables
@@ -196,6 +217,18 @@ def post_session(
     else:
         outcome = "productive"
 
+    # Override noop → productive if *caller-supplied* deliverables exist.
+    # Trajectory signals may miss commits detected by the caller via git diff.
+    # Use caller_deliverables (pre-merge) so trajectory-derived items (e.g. a
+    # single file write that is_productive() deliberately classifies as noop)
+    # do not trigger this override.
+    if outcome == "noop" and caller_deliverables:
+        logger.info(
+            "Overriding outcome noop→productive: %d caller-supplied deliverable(s)",
+            len(caller_deliverables),
+        )
+        outcome = "productive"
+
     # --- Category: inferred (actual) vs recommended (intended) ---
     inferred_category = signals.get("inferred_category") if signals else None
     # Actual category: explicit override > inferred from signals
@@ -210,6 +243,8 @@ def post_session(
         "duration_seconds": duration_seconds,
         "deliverables": deliverables,
     }
+    if context_tier is not None:
+        record_kwargs["context_tier"] = context_tier
     if trigger is not None:
         record_kwargs["trigger"] = trigger
     if actual_category is not None:
@@ -224,6 +259,8 @@ def post_session(
         record_kwargs["session_id"] = session_id
     if token_count is not None:
         record_kwargs["token_count"] = token_count
+    if grade is not None:
+        record_kwargs["trajectory_grade"] = grade
 
     record = SessionRecord(**record_kwargs)
     store.append(record)
