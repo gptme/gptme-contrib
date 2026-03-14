@@ -3997,3 +3997,15 @@ def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path)
     html = (output / "index.html").read_text()
     # The haystack array must join item.source alongside title/category/excerpt/keywords
     assert "item.source" in html, "_clientSearch haystack must include item.source"
+
+
+def test_static_search_null_api_available_shows_loading(workspace: Path, tmp_path: Path):
+    """runSearch must handle _apiAvailable === null (still probing) with a loading placeholder."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Guard for the null window must appear before the false guard
+    assert (
+        "_apiAvailable === null" in html
+    ), "runSearch must guard on null to prevent 404 before initDynamic resolves"
+    assert "Loading search index" in html, "null guard must show a loading placeholder to the user"

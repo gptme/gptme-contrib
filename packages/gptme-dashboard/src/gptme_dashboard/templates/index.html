@@ -1824,7 +1824,7 @@ function _clientSearch(q, typeFilter, limit) {
 
 /** Load data.json and build the static search index (called once when API is unavailable). */
 async function _loadStaticSearchIndex() {
-  if (_staticSearchIndex !== null) return;  // already loaded or attempted
+  if (_staticSearchIndex !== null) return;  // already loaded
   try {
     const resp = await fetch('/data.json');
     if (!resp.ok) return;
@@ -1860,6 +1860,14 @@ async function runSearch(q, typeFilter) {
   if (!q || q.length < 2) {
     document.getElementById('search-results-area').innerHTML =
       '<div class="search-empty">Type at least 2 characters to search</div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+
+  // Still probing API availability — show loading placeholder and bail out
+  if (_apiAvailable === null) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Loading search index…</div>';
     document.getElementById('search-result-count').textContent = '';
     return;
   }
