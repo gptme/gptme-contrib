@@ -3940,3 +3940,40 @@ def test_task_detail_no_empty_meta_row_when_waiting_since_not_waiting(
     # The meta row div element must not appear (CSS class definition is always present in <style>)
     assert '<div class="task-meta-row">' not in page
     assert "Waiting since" not in page
+
+
+def test_static_search_js_present(workspace: Path, tmp_path: Path):
+    """Generated index.html must contain the client-side search fallback JS."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+
+    # Core variables and functions for static search
+    assert "_apiAvailable" in html, "Missing _apiAvailable flag"
+    assert "_staticSearchIndex" in html, "Missing _staticSearchIndex variable"
+    assert "_buildClientIndex" in html, "Missing _buildClientIndex function"
+    assert "_clientSearch" in html, "Missing _clientSearch function"
+    assert "_loadStaticSearchIndex" in html, "Missing _loadStaticSearchIndex function"
+    # data.json must be fetched for static index
+    assert "/data.json" in html, "Missing data.json fetch in static search"
+
+
+def test_static_search_initdynamic_sets_api_flag(workspace: Path, tmp_path: Path):
+    """initDynamic must set _apiAvailable and call _loadStaticSearchIndex on API failure."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+
+    # The catch/failure path in initDynamic must set _apiAvailable = false
+    assert "_apiAvailable = false" in html, "initDynamic must set _apiAvailable = false on failure"
+    assert (
+        "_loadStaticSearchIndex" in html and "catch" in html
+    ), "initDynamic catch block must call _loadStaticSearchIndex"
+
+
+def test_search_button_always_present(workspace: Path, tmp_path: Path):
+    """Search button must always be present in the generated HTML (static and live)."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert 'id="search-btn"' in html, "Search button must always be in the HTML"

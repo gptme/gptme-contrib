@@ -1187,10 +1187,16 @@ if (taskStateBtns.length > 0 && tasksTable) {
 
 // Dynamic dashboard — progressive enhancement
 // Tries /api/status; if it responds, each loader shows its own section.
+// On failure, loads data.json for client-side search on static deployments.
 async function initDynamic() {
   try {
     const resp = await fetch('/api/status');
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      _apiAvailable = false;
+      _loadStaticSearchIndex();
+      return;
+    }
+    _apiAvailable = true;
     // Each load* function calls show()/hide() for its own section.
     // The live nav group is shown automatically by show() when a child link appears.
     loadSessionStats();
@@ -1204,7 +1210,9 @@ async function initDynamic() {
     setInterval(loadServiceHealth, 30000);
     if (document.getElementById('dynamic-journals')) loadJournals();
   } catch (e) {
-    // No backend — stay in static mode
+    // No backend — load static index for client-side search
+    _apiAvailable = false;
+    _loadStaticSearchIndex();
   }
 }
 
@@ -1745,6 +1753,10 @@ document.addEventListener('click', function(e) {
 let _searchTimer = null;
 let _searchSelected = -1;
 let _searchAbortController = null;
+// null = unknown, true = live API available, false = static mode (use data.json)
+let _apiAvailable = null;
+// Client-side search index loaded from data.json when API is unavailable
+let _staticSearchIndex = null;
 
 function openSearch() {
   document.getElementById('search-overlay').classList.add('open');
@@ -1764,6 +1776,86 @@ function closeSearch() {
 
 function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) ? s : '#'; }
 
+/** Build a flat search index from data.json for client-side search on static sites. */
+function _buildClientIndex(data) {
+  const items = [];
+  const addItem = (type, title, category, source, keywords, excerpt, url) => {
+    if (url) items.push({ type, title: title || '', category: category || '',
+      source: source || '', keywords: keywords || [], excerpt: excerpt || '', url });
+  };
+  for (const g of (data.guidance || [])) {
+    addItem(g.kind || 'lesson', g.title || g.name, g.category, g.source,
+      g.keywords, g.description, '/' + (g.page_url || g.path));
+  }
+  for (const t of (data.tasks || [])) {
+    addItem('task', t.title || t.id, t.state, '', t.tags, '', '/' + (t.page_url || t.path));
+  }
+  for (const j of (data.journals || [])) {
+    addItem('journal', j.name || j.date, j.date, '', [], j.preview, '/' + (j.page_url || j.path));
+  }
+  for (const s of (data.summaries || [])) {
+    addItem('summary', s.title || s.period, s.type, '', [], '', '/' + (s.page_url || s.path));
+  }
+  for (const p of (data.packages || [])) {
+    addItem('package', p.name, '', p.source, [], p.description, '/' + (p.page_url || p.path));
+  }
+  for (const p of (data.plugins || [])) {
+    addItem('plugin', p.name, p.enabled ? 'enabled' : 'disabled', p.source, [], p.description,
+      '/' + (p.page_url || p.path));
+  }
+  return items;
+}
+
+/** Simple client-side search against the static index built from data.json. */
+function _clientSearch(q, typeFilter, limit) {
+  if (!_staticSearchIndex) return { results: [], total: 0 };
+  const words = q.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return { results: [], total: 0 };
+  const scored = [];
+  for (const item of _staticSearchIndex) {
+    if (typeFilter && item.type !== typeFilter) continue;
+    const haystack = [item.title, item.category, item.excerpt, ...item.keywords].join(' ').toLowerCase();
+    const score = words.reduce((n, w) => n + (haystack.includes(w) ? 1 : 0), 0);
+    if (score > 0) scored.push({ score, item });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { results: scored.slice(0, limit).map(r => r.item), total: scored.length };
+}
+
+/** Load data.json and build the static search index (called once when API is unavailable). */
+async function _loadStaticSearchIndex() {
+  if (_staticSearchIndex !== null) return;  // already loaded or attempted
+  try {
+    const resp = await fetch('/data.json');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    _staticSearchIndex = _buildClientIndex(data);
+  } catch (_) { /* static search unavailable */ }
+}
+
+/** Render a list of result objects into the search results area. */
+function _renderResults(results, total, q) {
+  _searchSelected = -1;
+  if (results.length === 0) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">No results for <strong>' + esc(q) + '</strong></div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+  document.getElementById('search-result-count').textContent =
+    total + ' result' + (total === 1 ? '' : 's') + (total > results.length ? ' (showing ' + results.length + ')' : '');
+  document.getElementById('search-results-area').innerHTML = results.map((r) => {
+    const title = esc(r.title || r.path || '(untitled)');
+    const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
+    const sourceBadge = r.source ? '<span class="search-badge search-badge-source">' + esc(r.source) + '</span>' : '';
+    const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim()) + '</div>' : '';
+    const url = safeUrl(r.url);
+    return '<a href="' + esc(url) + '" class="search-result">'
+      + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span>' + sourceBadge + '</div>'
+      + excerpt + '</a>';
+  }).join('');
+}
+
 async function runSearch(q, typeFilter) {
   if (!q || q.length < 2) {
     document.getElementById('search-results-area').innerHTML =
@@ -1771,6 +1863,14 @@ async function runSearch(q, typeFilter) {
     document.getElementById('search-result-count').textContent = '';
     return;
   }
+
+  // Static mode: use client-side index built from data.json
+  if (_apiAvailable === false) {
+    const { results, total } = _clientSearch(q, typeFilter, 20);
+    _renderResults(results, total, q);
+    return;
+  }
+
   // Abort any in-flight request to prevent stale results overwriting newer ones
   if (_searchAbortController) _searchAbortController.abort();
   _searchAbortController = new AbortController();
@@ -1787,30 +1887,7 @@ async function runSearch(q, typeFilter) {
       return;
     }
     const data = await resp.json().catch(() => ({}));
-    const results = data.results || [];
-    const total = data.total || 0;
-    _searchSelected = -1;
-
-    if (results.length === 0) {
-      document.getElementById('search-results-area').innerHTML =
-        '<div class="search-empty">No results for <strong>' + esc(q) + '</strong></div>';
-      document.getElementById('search-result-count').textContent = '';
-      return;
-    }
-
-    document.getElementById('search-result-count').textContent =
-      total + ' result' + (total === 1 ? '' : 's') + (total > results.length ? ' (showing ' + results.length + ')' : '');
-
-    document.getElementById('search-results-area').innerHTML = results.map((r) => {
-      const title = esc(r.title || r.path || '(untitled)');
-      const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
-      const sourceBadge = r.source ? '<span class="search-badge search-badge-source">' + esc(r.source) + '</span>' : '';
-      const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim()) + '</div>' : '';
-      const url = safeUrl(r.url);
-      return '<a href="' + esc(url) + '" class="search-result">'
-        + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span>' + sourceBadge + '</div>'
-        + excerpt + '</a>';
-    }).join('');
+    _renderResults(data.results || [], data.total || 0, q);
   } catch(e) {
     if (e.name === 'AbortError') return;  // Superseded by newer request
     document.getElementById('search-results-area').innerHTML =
