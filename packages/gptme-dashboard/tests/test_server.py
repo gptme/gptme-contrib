@@ -59,6 +59,7 @@ def workspace(tmp_path: Path) -> Path:
             "model": "claude-opus-4-6",
             "run_type": "autonomous",
             "category": "infrastructure",
+            "context_tier": "massive",
             "outcome": "productive",
             "duration_seconds": 900,
             "deliverables": ["commit:abc123"],
@@ -194,6 +195,18 @@ def test_api_sessions_list(client):
     # Most recent first
     assert data["sessions"][0]["session_id"] == "abc3"
     assert data["sessions"][0]["outcome"] == "productive"
+
+
+def test_api_sessions_includes_context_tier(client):
+    """Test /api/sessions includes context_tier field when present in session record."""
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    sessions_by_id = {s["session_id"]: s for s in data["sessions"]}
+    # abc3 has context_tier="massive" in fixture
+    assert sessions_by_id["abc3"].get("context_tier") == "massive"
+    # abc1 has no context_tier — field should be absent or None
+    assert sessions_by_id["abc1"].get("context_tier") is None
 
 
 def test_api_sessions_limit(client):

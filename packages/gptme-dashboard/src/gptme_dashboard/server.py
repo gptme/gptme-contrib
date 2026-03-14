@@ -600,6 +600,7 @@ def create_app(
                         "timestamp": s.get("date", ""),
                         "harness": s.get("harness", ""),
                         "model": s.get("model", ""),
+                        "context_tier": s.get("context_tier"),
                         "category": s.get("category", ""),
                         "outcome": s.get("outcome")
                         or ("productive" if _is_productive(s) else "noop"),
