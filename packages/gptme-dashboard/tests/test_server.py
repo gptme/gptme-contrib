@@ -2934,5 +2934,6 @@ def test_api_search_type_filter_package(tmp_path: Path):
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["type_filter"] == "package"
+        assert data["results"], "Expected at least one package result for 'deploy' query"
         for result in data["results"]:
             assert result["type"] == "package", f"Expected only packages, got {result['type']}"

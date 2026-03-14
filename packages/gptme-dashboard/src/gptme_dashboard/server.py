@@ -1538,8 +1538,8 @@ def create_app(
                 }
             )
 
-        # Packages (main workspace)
-        for pkg in scan_packages(ws):
+        # Packages (main workspace) — limit to 100 to keep index size bounded
+        for pkg in list(scan_packages(ws))[:100]:
             items.append(
                 {
                     "type": "package",
@@ -1555,8 +1555,8 @@ def create_app(
                 }
             )
 
-        # Plugins (main workspace)
-        for plugin in scan_plugins(ws, enabled_plugins=enabled_plugins):
+        # Plugins (main workspace) — limit to 100 to keep index size bounded
+        for plugin in list(scan_plugins(ws, enabled_plugins=enabled_plugins))[:100]:
             items.append(
                 {
                     "type": "plugin",
