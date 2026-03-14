@@ -4069,3 +4069,41 @@ def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
         "Re-trigger code must appear after the catch block, not inside !resp.ok or catch — "
         "otherwise static deployments (404 on /api/status) skip the re-trigger"
     )
+
+
+def test_static_search_null_static_index_shows_loading(workspace: Path, tmp_path: Path):
+    """runSearch must show 'Loading' when _apiAvailable===false but _staticSearchIndex===null.
+
+    Race window: _apiAvailable is set to false synchronously before _loadStaticSearchIndex
+    resolves. A 250 ms debounce can fire runSearch into the _apiAvailable===false branch
+    while the index is still null, producing misleading "No results".
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The false branch in runSearch must guard null before false:
+    # if (_apiAvailable === false) {
+    #   if (_staticSearchIndex === null) { ... Loading ... }
+    #   if (_static SearchIndex === false) { ... unavailable ... }
+    #   ...
+    runsearch_idx = html.index("async function runSearch(")
+    api_false_idx = html.index("_apiAvailable === false", runsearch_idx)
+    # After the _apiAvailable===false check, there must be a null guard before the false guard
+    null_guard_idx = html.index("_staticSearchIndex === null", api_false_idx)
+    false_guard_idx = html.index("_staticSearchIndex === false", api_false_idx)
+    assert null_guard_idx < false_guard_idx, (
+        "runSearch must check _staticSearchIndex === null (index still loading) "
+        "before _staticSearchIndex === false (load failed)"
+    )
+
+
+def test_static_search_summary_preview_in_haystack(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must pass s.preview as excerpt for summaries."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Summaries must use s.preview (not '') so their content words appear in the search haystack
+    assert "s.preview" in html, (
+        "_buildClientIndex must pass s.preview as excerpt for summaries "
+        "so summary content is searchable"
+    )

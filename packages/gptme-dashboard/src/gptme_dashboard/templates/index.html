@@ -1802,7 +1802,7 @@ function _buildClientIndex(data) {
     addItem('journal', j.name || j.date, j.date, '', [], j.preview, pageUrl(j));
   }
   for (const s of (data.summaries || [])) {
-    addItem('summary', s.title || s.period, s.type, '', [], '', pageUrl(s));
+    addItem('summary', s.title || s.period, s.type, '', [], s.preview || '', pageUrl(s));
   }
   for (const p of (data.packages || [])) {
     addItem('package', p.name, '', p.source, [], p.description, pageUrl(p));
@@ -1887,6 +1887,13 @@ async function runSearch(q, typeFilter) {
 
   // Static mode: use client-side index built from data.json
   if (_apiAvailable === false) {
+    if (_staticSearchIndex === null) {
+      // Index still loading (race: _apiAvailable set false before _loadStaticSearchIndex resolves)
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">Loading search index…</div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
     if (_staticSearchIndex === false) {
       document.getElementById('search-results-area').innerHTML =
         '<div class="search-empty">Search unavailable — could not load static index</div>';
