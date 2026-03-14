@@ -1165,6 +1165,12 @@ def sync(
 )
 @click.option("--journal-path", default=None, help="Path to journal entry for this session")
 @click.option("--session-id", default=None, help="Override auto-generated session ID")
+@click.option(
+    "--context-tier",
+    default=None,
+    type=click.Choice(["standard", "extended", "large", "massive"]),
+    help="Context tier used in this session (standard, extended, large, massive)",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
 @click.pass_context
 def post_session_cmd(
@@ -1182,6 +1188,7 @@ def post_session_cmd(
     deliverables_raw: tuple[str, ...],
     journal_path: str | None,
     session_id: str | None,
+    context_tier: str | None,
     as_json: bool,
 ) -> None:
     """Record a completed session: extract signals, determine outcome, append record."""
@@ -1202,6 +1209,7 @@ def post_session_cmd(
         deliverables=deliverables,
         journal_path=journal_path,
         session_id=session_id,
+        context_tier=context_tier,
     )
     if as_json:
         click.echo(
