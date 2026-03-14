@@ -122,6 +122,9 @@ class SessionRecord:
     trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
     journal_path: str | None = None  # path to human-written journal entry
 
+    # Trajectory-based grade (from signal extraction, 0.0-1.0)
+    trajectory_grade: float | None = None
+
     # LLM judge evaluation
     llm_judge_score: float | None = None  # 0.0-1.0 goal-alignment score
     llm_judge_reason: str | None = None  # 1-sentence explanation

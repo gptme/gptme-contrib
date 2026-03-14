@@ -200,6 +200,15 @@ def post_session(
     else:
         outcome = "productive"
 
+    # Override noop → productive if deliverables exist.
+    # Trajectory signals may miss commits detected by the caller via git diff.
+    if outcome == "noop" and deliverables:
+        logger.info(
+            "Overriding outcome noop→productive: %d deliverable(s) present",
+            len(deliverables),
+        )
+        outcome = "productive"
+
     # --- Category: inferred (actual) vs recommended (intended) ---
     inferred_category = signals.get("inferred_category") if signals else None
     # Actual category: explicit override > inferred from signals
@@ -230,6 +239,8 @@ def post_session(
         record_kwargs["session_id"] = session_id
     if token_count is not None:
         record_kwargs["token_count"] = token_count
+    if grade is not None:
+        record_kwargs["trajectory_grade"] = grade
 
     record = SessionRecord(**record_kwargs)
     store.append(record)
