@@ -1461,7 +1461,7 @@ def create_app(
             if sub.get("has_skills"):
                 _add_skills(scan_skills(sub_path, source=sub_name))
             if sub.get("has_packages"):
-                for pkg in scan_packages(sub_path, source=sub_name):
+                for pkg in scan_packages(sub_path, source=sub_name)[:100]:
                     items.append(
                         {
                             "type": "package",
@@ -1477,7 +1477,7 @@ def create_app(
                         }
                     )
             if sub.get("has_plugins"):
-                for plugin in scan_plugins(sub_path, source=sub_name):
+                for plugin in scan_plugins(sub_path, source=sub_name)[:100]:
                     items.append(
                         {
                             "type": "plugin",
@@ -1561,7 +1561,9 @@ def create_app(
                 {
                     "type": "plugin",
                     "title": plugin.get("name", ""),
-                    "category": "enabled" if plugin.get("enabled") else "disabled",
+                    "category": "enabled"
+                    if plugin.get("enabled")
+                    else ("disabled" if "enabled" in plugin else ""),
                     "keywords": [],
                     "tags": [],
                     "excerpt": _make_excerpt(
