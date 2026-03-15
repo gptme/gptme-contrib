@@ -31,16 +31,21 @@ HOOKS_DIR = (
 
 
 def _clean_git_env() -> dict:
-    """Return a copy of the environment with GIT_DIR and GIT_WORK_TREE stripped.
+    """Return a copy of the environment with all GIT_* variables stripped.
 
     When tests run inside an autonomous session, GIT_DIR may point at the host
     repo's .git directory.  Any ``git config`` call that inherits that env will
     write into the *host* repo instead of the freshly-initialised test repo,
     silently leaking test identity into production git config.
+
+    We strip *all* GIT_* variables (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+    GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, …) for maximum
+    isolation — any inherited git-env var can cause subtle misdirection.
     """
     env = os.environ.copy()
-    env.pop("GIT_DIR", None)
-    env.pop("GIT_WORK_TREE", None)
+    for key in list(env):
+        if key.startswith("GIT_"):
+            del env[key]
     return env
 
 
