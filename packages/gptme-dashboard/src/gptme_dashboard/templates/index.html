@@ -1187,24 +1187,38 @@ if (taskStateBtns.length > 0 && tasksTable) {
 
 // Dynamic dashboard — progressive enhancement
 // Tries /api/status; if it responds, each loader shows its own section.
+// On failure, loads data.json for client-side search on static deployments.
 async function initDynamic() {
   try {
     const resp = await fetch('/api/status');
-    if (!resp.ok) return;
-    // Each load* function calls show()/hide() for its own section.
-    // The live nav group is shown automatically by show() when a child link appears.
-    loadSessionStats();
-    loadActivityHeatmap();
-    loadRecentSessions();
-    loadServices();
-    loadSchedule();
-    await _fetchRestartToken();
-    loadServiceHealth();
-    // Auto-refresh health every 30 seconds — always retry to recover from transient errors
-    setInterval(loadServiceHealth, 30000);
-    if (document.getElementById('dynamic-journals')) loadJournals();
+    if (!resp.ok) {
+      _apiAvailable = false;
+      await _loadStaticSearchIndex();
+    } else {
+      _apiAvailable = true;
+      // Each load* function calls show()/hide() for its own section.
+      // The live nav group is shown automatically by show() when a child link appears.
+      loadSessionStats();
+      loadActivityHeatmap();
+      loadRecentSessions();
+      loadServices();
+      loadSchedule();
+      await _fetchRestartToken();
+      loadServiceHealth();
+      // Auto-refresh health every 30 seconds — always retry to recover from transient errors
+      setInterval(loadServiceHealth, 30000);
+      if (document.getElementById('dynamic-journals')) loadJournals();
+    }
   } catch (e) {
-    // No backend — stay in static mode
+    // No backend — load static index for client-side search
+    _apiAvailable = false;
+    await _loadStaticSearchIndex();
+  }
+  // Re-trigger any search typed while we were probing (the null guard showed "Loading…")
+  const overlay = document.getElementById('search-overlay');
+  if (overlay && overlay.classList.contains('open')) {
+    const pending = document.getElementById('global-search-input').value.trim();
+    if (pending && pending.length >= 2) runSearch(pending, document.getElementById('search-type-filter').value);
   }
 }
 
@@ -1745,6 +1759,10 @@ document.addEventListener('click', function(e) {
 let _searchTimer = null;
 let _searchSelected = -1;
 let _searchAbortController = null;
+// null = unknown, true = live API available, false = static mode (use data.json)
+let _apiAvailable = null;
+// Client-side search index loaded from data.json when API is unavailable
+let _staticSearchIndex = null;
 
 function openSearch() {
   document.getElementById('search-overlay').classList.add('open');
@@ -1764,6 +1782,95 @@ function closeSearch() {
 
 function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) ? s : '#'; }
 
+/** Build a flat search index from data.json for client-side search on static sites. */
+function _buildClientIndex(data) {
+  const items = [];
+  // Returns '/path' when page_url or path is present; null when both absent (avoids broken links)
+  const pageUrl = (x) => (x.page_url || x.path) ? '/' + (x.page_url || x.path) : null;
+  const addItem = (type, title, category, source, keywords, excerpt, url) => {
+    if (url) items.push({ type, title: title || '', category: category || '',
+      source: source || '', keywords: keywords || [], excerpt: excerpt || '', url });
+  };
+  for (const g of (data.guidance || [])) {
+    addItem(g.kind || 'lesson', g.title || g.name, g.category, g.source,
+      g.keywords, g.description, pageUrl(g));
+  }
+  for (const t of (data.tasks || [])) {
+    addItem('task', t.title || t.id, t.state, '', t.tags, '', pageUrl(t));
+  }
+  for (const j of (data.journals || [])) {
+    addItem('journal', j.name || j.date, j.date, '', [], j.preview, pageUrl(j));
+  }
+  for (const s of (data.summaries || [])) {
+    addItem('summary', s.title || s.period, s.type, '', [], s.preview || '', pageUrl(s));
+  }
+  for (const p of (data.packages || [])) {
+    if (!p.has_page) continue;
+    addItem('package', p.name, '', p.source, [], p.description, pageUrl(p));
+  }
+  for (const p of (data.plugins || [])) {
+    if (!p.has_page) continue;
+    addItem('plugin', p.name, p.enabled == null ? '' : (p.enabled ? 'enabled' : 'disabled'), p.source, [], p.description,
+      pageUrl(p));
+  }
+  return items;
+}
+
+/** Simple client-side search against the static index built from data.json. */
+function _clientSearch(q, typeFilter, limit) {
+  if (!_staticSearchIndex) return { results: [], total: 0 };
+  const words = q.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return { results: [], total: 0 };
+  const scored = [];
+  for (const item of _staticSearchIndex) {
+    if (typeFilter && item.type !== typeFilter) continue;
+    const haystack = [item.title, item.category, item.excerpt, item.source, ...item.keywords].join(' ').toLowerCase();
+    const score = words.reduce((n, w) => n + (haystack.includes(w) ? 1 : 0), 0);
+    if (score > 0) scored.push({ score, item });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { results: scored.slice(0, limit).map(r => r.item), total: scored.length };
+}
+
+/** Load data.json and build the static search index (called once when API is unavailable).
+ *  Sets _staticSearchIndex to an array on success or false on failure (never stays null). */
+async function _loadStaticSearchIndex() {
+  if (_staticSearchIndex !== null) return;  // already loaded (or failed)
+  try {
+    const resp = await fetch('/data.json');
+    if (!resp.ok) {
+      console.warn('gptme-dashboard: /data.json fetch failed (' + resp.status + ') — static search unavailable');
+      _staticSearchIndex = false;
+      return;
+    }
+    const data = await resp.json();
+    _staticSearchIndex = _buildClientIndex(data);
+  } catch (_) { _staticSearchIndex = false; }
+}
+
+/** Render a list of result objects into the search results area. */
+function _renderResults(results, total, q) {
+  _searchSelected = -1;
+  if (results.length === 0) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">No results for <strong>' + esc(q) + '</strong></div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+  document.getElementById('search-result-count').textContent =
+    total + ' result' + (total === 1 ? '' : 's') + (total > results.length ? ' (showing ' + results.length + ')' : '');
+  document.getElementById('search-results-area').innerHTML = results.map((r) => {
+    const title = esc(r.title || r.path || '(untitled)');
+    const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
+    const sourceBadge = r.source ? '<span class="search-badge search-badge-source">' + esc(r.source) + '</span>' : '';
+    const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim()) + '</div>' : '';
+    const url = safeUrl(r.url);
+    return '<a href="' + esc(url) + '" class="search-result">'
+      + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span>' + sourceBadge + '</div>'
+      + excerpt + '</a>';
+  }).join('');
+}
+
 async function runSearch(q, typeFilter) {
   if (!q || q.length < 2) {
     document.getElementById('search-results-area').innerHTML =
@@ -1771,6 +1878,35 @@ async function runSearch(q, typeFilter) {
     document.getElementById('search-result-count').textContent = '';
     return;
   }
+
+  // Still probing API availability — show loading placeholder and bail out
+  if (_apiAvailable === null) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Loading search index…</div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+
+  // Static mode: use client-side index built from data.json
+  if (_apiAvailable === false) {
+    if (_staticSearchIndex === null) {
+      // Index still loading (race: _apiAvailable set false before _loadStaticSearchIndex resolves)
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">Loading search index…</div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
+    if (_staticSearchIndex === false) {
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">Search unavailable — could not load static index</div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
+    const { results, total } = _clientSearch(q, typeFilter, 20);
+    _renderResults(results, total, q);
+    return;
+  }
+
   // Abort any in-flight request to prevent stale results overwriting newer ones
   if (_searchAbortController) _searchAbortController.abort();
   _searchAbortController = new AbortController();
@@ -1787,30 +1923,7 @@ async function runSearch(q, typeFilter) {
       return;
     }
     const data = await resp.json().catch(() => ({}));
-    const results = data.results || [];
-    const total = data.total || 0;
-    _searchSelected = -1;
-
-    if (results.length === 0) {
-      document.getElementById('search-results-area').innerHTML =
-        '<div class="search-empty">No results for <strong>' + esc(q) + '</strong></div>';
-      document.getElementById('search-result-count').textContent = '';
-      return;
-    }
-
-    document.getElementById('search-result-count').textContent =
-      total + ' result' + (total === 1 ? '' : 's') + (total > results.length ? ' (showing ' + results.length + ')' : '');
-
-    document.getElementById('search-results-area').innerHTML = results.map((r) => {
-      const title = esc(r.title || r.path || '(untitled)');
-      const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
-      const sourceBadge = r.source ? '<span class="search-badge search-badge-source">' + esc(r.source) + '</span>' : '';
-      const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim()) + '</div>' : '';
-      const url = safeUrl(r.url);
-      return '<a href="' + esc(url) + '" class="search-result">'
-        + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span>' + sourceBadge + '</div>'
-        + excerpt + '</a>';
-    }).join('');
+    _renderResults(data.results || [], data.total || 0, q);
   } catch(e) {
     if (e.name === 'AbortError') return;  // Superseded by newer request
     document.getElementById('search-results-area').innerHTML =

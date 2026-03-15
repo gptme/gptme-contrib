@@ -3940,3 +3940,218 @@ def test_task_detail_no_empty_meta_row_when_waiting_since_not_waiting(
     # The meta row div element must not appear (CSS class definition is always present in <style>)
     assert '<div class="task-meta-row">' not in page
     assert "Waiting since" not in page
+
+
+def test_static_search_js_present(workspace: Path, tmp_path: Path):
+    """Generated index.html must contain the client-side search fallback JS."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+
+    # Core variables and functions for static search
+    assert "_apiAvailable" in html, "Missing _apiAvailable flag"
+    assert "_staticSearchIndex" in html, "Missing _staticSearchIndex variable"
+    assert "_buildClientIndex" in html, "Missing _buildClientIndex function"
+    assert "_clientSearch" in html, "Missing _clientSearch function"
+    assert "_loadStaticSearchIndex" in html, "Missing _loadStaticSearchIndex function"
+    # data.json must be fetched for static index
+    assert "/data.json" in html, "Missing data.json fetch in static search"
+
+
+def test_static_search_initdynamic_sets_api_flag(workspace: Path, tmp_path: Path):
+    """initDynamic's catch block must set _apiAvailable=false then await _loadStaticSearchIndex."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+
+    # Verify the catch block inside initDynamic (identified by its comment) contains both
+    # assignments — not just that the strings appear somewhere in the file.
+    catch_block = re.compile(
+        r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false[^}]*await\s+_loadStaticSearchIndex\(\)",
+        re.DOTALL,
+    )
+    assert catch_block.search(
+        html
+    ), "initDynamic catch block must set _apiAvailable=false and await _loadStaticSearchIndex()"
+
+
+def test_search_button_always_present(workspace: Path, tmp_path: Path):
+    """Search button must always be present in the generated HTML (static and live)."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert 'id="search-btn"' in html, "Search button must always be in the HTML"
+
+
+def test_static_search_initdynamic_awaits_load(workspace: Path, tmp_path: Path):
+    """_loadStaticSearchIndex must be awaited in BOTH failure paths of initDynamic."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Both the !resp.ok and catch branches in initDynamic must await the loader —
+    # a single occurrence would mean one branch was missed.
+    count = html.count("await _loadStaticSearchIndex()")
+    assert count >= 2, (
+        f"initDynamic must await _loadStaticSearchIndex() in BOTH failure branches "
+        f"(!resp.ok and catch), found only {count} occurrence(s)"
+    )
+
+
+def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path):
+    """_clientSearch haystack must include item.source so source-filtered search works."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The haystack array must join item.source alongside title/category/excerpt/keywords
+    assert "item.source" in html, "_clientSearch haystack must include item.source"
+
+
+def test_static_search_null_api_available_shows_loading(workspace: Path, tmp_path: Path):
+    """runSearch must handle _apiAvailable === null (still probing) with a loading placeholder."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Guard for the null window must appear before the false guard
+    assert (
+        "_apiAvailable === null" in html
+    ), "runSearch must guard on null to prevent 404 before initDynamic resolves"
+    assert "Loading search index" in html, "null guard must show a loading placeholder to the user"
+
+
+def test_static_search_plugin_enabled_nullable(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must not default unconfigured plugins to 'disabled'."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # p.enabled == null ? '' : ... — null check must come first so absent field → ''
+    # A plain p.enabled ? 'enabled' : 'disabled' would make undefined → 'disabled'
+    assert (
+        "p.enabled == null" in html
+    ), "_buildClientIndex must treat absent p.enabled as empty string, not 'disabled'"
+
+
+def test_static_search_broken_url_guard(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must not produce '/undefined' URLs when page_url and path are both absent."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "pageUrl" in html, "_buildClientIndex must use a pageUrl() helper"
+    assert "'/undefined'" not in html, "pageUrl must not concatenate '/undefined' for absent fields"
+
+
+def test_static_search_failed_load_sentinel(workspace: Path, tmp_path: Path):
+    """runSearch must show a user-visible error when data.json load fails (_staticSearchIndex===false)."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert (
+        "_staticSearchIndex = false" in html
+    ), "_loadStaticSearchIndex must set false sentinel on failure"
+    assert "_staticSearchIndex === false" in html, "runSearch must branch on false sentinel"
+    assert (
+        "Search unavailable" in html
+    ), "user must see an error message when static index load failed"
+
+
+def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
+    """initDynamic must re-trigger runSearch if overlay is open when API probe completes."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The re-trigger must appear after initDynamic's catch block, inside the function body
+    init_idx = html.index("async function initDynamic()")
+    retrigger_idx = html.index("classList.contains('open')", init_idx)
+    assert retrigger_idx > init_idx, "initDynamic must re-trigger search after probing"
+    # The !resp.ok branch must NOT contain a return that skips the re-trigger.
+    # Verify: the re-trigger appears after the catch block closes (not inside if/catch).
+    catch_close_idx = html.index("} catch (e) {", init_idx)
+    assert retrigger_idx > catch_close_idx, (
+        "Re-trigger code must appear after the catch block, not inside !resp.ok or catch — "
+        "otherwise static deployments (404 on /api/status) skip the re-trigger"
+    )
+
+
+def test_static_search_null_static_index_shows_loading(workspace: Path, tmp_path: Path):
+    """runSearch must show 'Loading' when _apiAvailable===false but _staticSearchIndex===null.
+
+    Race window: _apiAvailable is set to false synchronously before _loadStaticSearchIndex
+    resolves. A 250 ms debounce can fire runSearch into the _apiAvailable===false branch
+    while the index is still null, producing misleading "No results".
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The false branch in runSearch must guard null before false:
+    # if (_apiAvailable === false) {
+    #   if (_staticSearchIndex === null) { ... Loading ... }
+    #   if (_static SearchIndex === false) { ... unavailable ... }
+    #   ...
+    runsearch_idx = html.index("async function runSearch(")
+    api_false_idx = html.index("_apiAvailable === false", runsearch_idx)
+    # After the _apiAvailable===false check, there must be a null guard before the false guard
+    null_guard_idx = html.index("_staticSearchIndex === null", api_false_idx)
+    false_guard_idx = html.index("_staticSearchIndex === false", api_false_idx)
+    assert null_guard_idx < false_guard_idx, (
+        "runSearch must check _staticSearchIndex === null (index still loading) "
+        "before _staticSearchIndex === false (load failed)"
+    )
+
+
+def test_static_search_summary_preview_in_haystack(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must pass s.preview as excerpt for summaries."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Summaries must use s.preview (not '') so their content words appear in the search haystack
+    assert "s.preview" in html, (
+        "_buildClientIndex must pass s.preview as excerpt for summaries "
+        "so summary content is searchable"
+    )
+
+
+def test_static_search_has_page_skips_bodyless_packages(workspace: Path, tmp_path: Path):
+    """_buildClientIndex must skip packages/plugins that have no generated detail page.
+
+    Packages and plugins without a README body get a page_url in data.json but no HTML
+    file is written. Without has_page filtering, static search results would link to 404s.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # The guard must appear in _buildClientIndex before the addItem call for packages
+    build_idx = html.index("_buildClientIndex")
+    pkg_loop_idx = html.index("data.packages", build_idx)
+    assert "p.has_page" in html[pkg_loop_idx : pkg_loop_idx + 200], (
+        "_buildClientIndex must check p.has_page before indexing packages "
+        "to avoid search results pointing to non-existent detail pages"
+    )
+    # Same guard for plugins
+    plugin_loop_idx = html.index("data.plugins", build_idx)
+    assert (
+        "p.has_page" in html[plugin_loop_idx : plugin_loop_idx + 200]
+    ), "_buildClientIndex must check p.has_page before indexing plugins"
+
+
+def test_generate_json_has_page_field(workspace: Path):
+    """generate_json must emit has_page=true/false for packages and plugins.
+
+    has_page is true only when the item has a body (README), meaning a detail HTML page
+    was actually written. The client uses this to skip broken search result links.
+    """
+    import json as json_mod
+
+    data = collect_workspace_data(workspace)
+    json_str = generate_json(workspace, _data=data)
+    parsed = json_mod.loads(json_str)
+    for pkg in parsed.get("packages", []):
+        assert "has_page" in pkg, f"Package {pkg.get('name')} missing has_page field in data.json"
+        assert isinstance(
+            pkg["has_page"], bool
+        ), f"has_page must be a bool, got {type(pkg['has_page'])}"
+    for plugin in parsed.get("plugins", []):
+        assert (
+            "has_page" in plugin
+        ), f"Plugin {plugin.get('name')} missing has_page field in data.json"
+        assert isinstance(
+            plugin["has_page"], bool
+        ), f"has_page must be a bool, got {type(plugin['has_page'])}"
