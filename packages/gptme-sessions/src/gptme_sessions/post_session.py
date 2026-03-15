@@ -63,6 +63,8 @@ def post_session(
     harness: str,
     model: str | None = None,
     context_tier: str | None = None,
+    ab_group: str | None = None,
+    tier_version: str | None = None,
     run_type: str | None = None,
     trigger: str | None = None,
     category: str | None = None,
@@ -89,6 +91,10 @@ def post_session(
     context_tier:
         Context tier used for this session (e.g. ``"standard"``, ``"massive"``).
         Enables A/B comparison of context inclusion strategies.
+    ab_group:
+        A/B group assignment for this session (e.g. ``"treatment"`` or ``"control"``).
+    tier_version:
+        Version of the context tier configuration used for this session.
     run_type:
         Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
         Kept for backward compatibility; prefer ``trigger`` going forward.
@@ -247,6 +253,10 @@ def post_session(
     }
     if context_tier is not None:
         record_kwargs["context_tier"] = context_tier
+    if ab_group is not None:
+        record_kwargs["ab_group"] = ab_group
+    if tier_version is not None:
+        record_kwargs["tier_version"] = tier_version
     if trigger is not None:
         record_kwargs["trigger"] = trigger
     if actual_category is not None:

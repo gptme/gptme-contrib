@@ -48,3 +48,39 @@ def test_post_session_context_tier_standard(tmp_path: Path):
         duration_seconds=90,
     )
     assert result.record.context_tier == "standard"
+
+
+def test_post_session_ab_group_tier_version(tmp_path: Path):
+    """ab_group and tier_version are stored in SessionRecord when passed to post_session."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        context_tier="massive",
+        ab_group="treatment",
+        tier_version="v2",
+        duration_seconds=120,
+    )
+    assert result.record.ab_group == "treatment"
+    assert result.record.tier_version == "v2"
+
+    # Verify they persist through store reload
+    store2 = SessionStore(sessions_dir=tmp_path)
+    records = store2.load_all()
+    assert len(records) == 1
+    assert records[0].ab_group == "treatment"
+    assert records[0].tier_version == "v2"
+
+
+def test_post_session_ab_group_tier_version_none(tmp_path: Path):
+    """ab_group and tier_version default to None when not provided."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        duration_seconds=60,
+    )
+    assert result.record.ab_group is None
+    assert result.record.tier_version is None
