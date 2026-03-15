@@ -16,6 +16,7 @@ Requirements:
 - Write access to /tmp for test repos
 """
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -29,6 +30,25 @@ HOOKS_DIR = (
 )
 
 
+def _clean_git_env() -> dict:
+    """Return a copy of the environment with all GIT_* variables stripped.
+
+    When tests run inside an autonomous session, GIT_DIR may point at the host
+    repo's .git directory.  Any ``git config`` call that inherits that env will
+    write into the *host* repo instead of the freshly-initialised test repo,
+    silently leaking test identity into production git config.
+
+    We strip *all* GIT_* variables (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+    GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, …) for maximum
+    isolation — any inherited git-env var can cause subtle misdirection.
+    """
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("GIT_"):
+            del env[key]
+    return env
+
+
 @pytest.fixture
 def temp_repo():
     """Create a temporary git repository for testing."""
@@ -36,29 +56,54 @@ def temp_repo():
     repo_path = Path(temp_dir) / "test-repo"
     repo_path.mkdir()
 
+    clean_env = _clean_git_env()
+
     # Initialize git repo
-    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
     subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
+        ["git", "init"], cwd=repo_path, check=True, capture_output=True, env=clean_env
+    )
+    # Use --local so config writes stay inside the temp repo even if GIT_DIR
+    # leaks in from an outer context.  The renamed identity makes any accidental
+    # leak immediately obvious in ``git log`` output.
+    subprocess.run(
+        ["git", "config", "--local", "user.email", "test-automation@example.com"],
         cwd=repo_path,
         check=True,
         capture_output=True,
+        env=clean_env,
     )
     subprocess.run(
-        ["git", "config", "user.name", "Test User"],
+        ["git", "config", "--local", "user.name", "Test Automation"],
         cwd=repo_path,
         check=True,
         capture_output=True,
+        env=clean_env,
+    )
+    # Disable global hooks so the host machine's pre-commit setup doesn't
+    # interfere with the test repo's commit operations.
+    subprocess.run(
+        ["git", "config", "--local", "core.hooksPath", "/dev/null"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        env=clean_env,
     )
 
     # Create initial commit (--no-verify to skip pre-commit hooks during test setup)
     (repo_path / "README.md").write_text("# Test Repo")
-    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
     subprocess.run(
         ["git", "commit", "--no-verify", "-m", "Initial commit"],
         cwd=repo_path,
         check=True,
         capture_output=True,
+        env=clean_env,
     )
 
     yield repo_path
@@ -100,20 +145,25 @@ def run_pre_push_hook(
     if not hook_path.exists():
         pytest.skip("pre-push hook not found")
 
-    # Set up fake remote
+    clean_env = _clean_git_env()
+
+    # Set up fake remote (ignore error if already added from a previous call)
     subprocess.run(
         ["git", "remote", "add", "origin", remote_url],
         cwd=repo_path,
         capture_output=True,
+        env=clean_env,
     )
 
-    # Run hook with stdin
+    # Run hook with stdin — env must be clean so the hook's own git calls
+    # don't accidentally operate on the host repo via an inherited GIT_DIR.
     result = subprocess.run(
         [str(hook_path), "origin", remote_url],
         cwd=repo_path,
         input=ref_info,
         text=True,
         capture_output=True,
+        env=clean_env,
     )
 
     return result
