@@ -66,9 +66,10 @@ done < <(systemctl --user show "${AGENT_NAME}-*.service" --property=Id,ExecMainS
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
 
-    # Parse service name and state (column 3 is ACTIVE state)
-    service_name=$(echo "$line" | awk '{print $1}')
-    state=$(echo "$line" | awk '{print $3}')
+    # Parse service name and state
+    # Strip optional status marker prefix (●, *, ○) from systemctl output
+    service_name=$(echo "$line" | awk '{if ($1 ~ /^[*●○]/) print $2; else print $1}')
+    state=$(echo "$line" | awk '{if ($1 ~ /^[*●○]/) print $4; else print $3}')
 
     # Skip if not our agent's service
     [[ ! "$service_name" =~ ^${AGENT_NAME}- ]] && continue
