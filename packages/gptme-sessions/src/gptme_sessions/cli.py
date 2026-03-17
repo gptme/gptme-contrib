@@ -163,17 +163,19 @@ def _show_discovery_fallback(since_days: int = 30) -> None:
     )
 
 
-def _parse_since(since: str | None) -> int | None:
-    """Parse a --since value like '7d' or '30' into days."""
+def _parse_since(since: str | None) -> float | None:
+    """Parse a --since value like '7d', '30d', or '2h' into fractional days."""
     if not since:
         return None
     try:
+        if since.endswith("h"):
+            return int(since[:-1]) / 24
         if since.endswith("d"):
             return int(since[:-1])
         return int(since)
     except ValueError:
         raise click.BadParameter(
-            f"invalid value {since!r} (expected e.g. 7d, 30d)",
+            f"invalid value {since!r} (expected e.g. 7d, 30d, 2h)",
             param_hint="'--since'",
         )
 
@@ -221,7 +223,7 @@ def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
             click.option("--category", default=None, help="Filter by category"),
             click.option("--harness", default=None, help="Filter by harness"),
             click.option("--outcome", default=None, help="Filter by outcome"),
-            click.option("--since", default=None, help="Filter by recency (e.g. 7d, 30d)"),
+            click.option("--since", default=None, help="Filter by recency (e.g. 7d, 30d, 2h)"),
             click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
         ]
     ):
@@ -421,7 +423,7 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
         if store.query():
             click.echo(f"No runs found in the last {since_days or 14} day(s).")
         else:
-            _show_discovery_fallback(since_days=since_days or 14)
+            _show_discovery_fallback(since_days=max(1, round(since_days or 14)))
     else:
         format_run_analytics(analytics)
 
@@ -1004,7 +1006,7 @@ def sync(
     """
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     since_days = _parse_since(since) or 14
-    discovered = _discover_all(since_days=since_days, harness_filter=harness)
+    discovered = _discover_all(since_days=max(1, round(since_days)), harness_filter=harness)
 
     if not discovered:
         click.echo(f"No sessions found in the last {since_days} day(s).")

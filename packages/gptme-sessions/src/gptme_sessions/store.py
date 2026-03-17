@@ -110,7 +110,7 @@ class SessionStore:
         category: str | None = None,
         harness: str | None = None,
         outcome: str | None = None,
-        since_days: int | None = None,
+        since_days: float | None = None,
     ) -> list[SessionRecord]:
         """Filter session records by criteria."""
         records = self.load_all()

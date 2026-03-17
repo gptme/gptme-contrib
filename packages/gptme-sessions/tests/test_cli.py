@@ -449,6 +449,12 @@ class TestParseSince:
         rc, out = _invoke(["runs", "--since", "30"], tmp_path)
         assert rc == 0
 
+    def test_parse_since_hours(self, tmp_path: Path):
+        """--since 2h parses correctly as fractional days."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(["runs", "--since", "2h"], tmp_path)
+        assert rc == 0
+
     def test_parse_since_invalid(self, tmp_path: Path):
         """--since with invalid value fails."""
         _seed_store(tmp_path)
