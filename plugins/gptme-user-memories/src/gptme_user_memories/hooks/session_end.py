@@ -84,7 +84,7 @@ def session_end_user_memories_hook(
 
     sentinel.touch()
 
-    if False:
+    if False:  # makes this function a generator to satisfy Generator return type
         yield Message("system", "")
 
 

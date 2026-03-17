@@ -15,6 +15,7 @@ from gptme_user_memories.extractor import (
     is_cc_autonomous_session,
     load_existing_memories,
     merge_facts,
+    run_batch,
     save_memories,
 )
 
@@ -336,3 +337,62 @@ class TestGetAnthropicApiKey:
         with patch("gptme_user_memories.extractor.Path.home", return_value=tmp_path):
             result = _get_anthropic_api_key()
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# run_batch — regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunBatch:
+    def test_non_dir_entry_in_cc_logs_does_not_halt_iteration(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: break instead of continue for non-dir entries caused
+        all directories *after* a .DS_Store-like file to be silently skipped."""
+        cc_dir = tmp_path / ".claude" / "projects"
+        cc_dir.mkdir(parents=True)
+
+        # Place a non-directory file before valid project dirs (sorted order matters)
+        (cc_dir / ".DS_Store").write_bytes(b"bogus")
+
+        # Two valid project directories, each with a JSONL conversation
+        long_content = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+        for proj_name in ("project-a", "project-b"):
+            proj = cc_dir / proj_name
+            proj.mkdir()
+            conv = proj / "conv.jsonl"
+            conv.write_text(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": long_content,
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+        facts_extracted: list[str] = []
+
+        def fake_extract(text: str, model: str = "") -> list[str]:
+            facts_extracted.append(text)
+            return ["Works at Acme Corp"]
+
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_dir),
+            patch("gptme_user_memories.extractor.LOGS_DIR", tmp_path / "no-gptme-logs"),
+            patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+        ):
+            run_batch(days=9999, limit=10, dry_run=True)
+
+        # Both project dirs must have been visited; without the fix only 0 would be
+        assert len(facts_extracted) == 2, (
+            f"Expected 2 dirs processed, got {len(facts_extracted)}. "
+            "The break-vs-continue bug may have been reintroduced."
+        )
