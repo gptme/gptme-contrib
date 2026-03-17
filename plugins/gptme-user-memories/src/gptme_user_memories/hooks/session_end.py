@@ -52,11 +52,12 @@ def session_end_user_memories_hook(
         logger.debug("user_memories: no conversation.jsonl in %s", logdir)
         return
 
+    sentinel = logdir / SENTINEL_FILENAME
+
     if is_autonomous_session(conv_file):
         logger.debug("user_memories: skipping autonomous session")
+        sentinel.touch()
         return
-
-    sentinel = logdir / SENTINEL_FILENAME
 
     text = get_user_messages(conv_file)
     if len(text) < 50:

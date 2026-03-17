@@ -7,6 +7,7 @@ and stores them in ~/.local/share/gptme/user-memories.md.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
@@ -16,6 +17,8 @@ if sys.version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib  # type: ignore[no-redef]
+
+logger = logging.getLogger(__name__)
 
 LOGS_DIR = Path.home() / ".local/share/gptme/logs"
 CC_LOGS_DIR = Path.home() / ".claude/projects"
@@ -223,7 +226,8 @@ def extract_facts(
         )
         block = response.content[0]
         output = block.text.strip() if hasattr(block, "text") else ""
-    except Exception:
+    except Exception as e:
+        logger.warning("user_memories: API call failed: %s", e)
         return []
 
     if "NO_NEW_FACTS" in output or not output:
