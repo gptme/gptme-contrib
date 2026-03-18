@@ -206,10 +206,27 @@ check)
         exit 2  # Reviewed and 5/5 (or no new commits)
     fi
 
+    # Fresh PR grace period: Greptile auto-reviews new PRs within ~5-20 min.
+    # Don't trigger manually until the auto-review window has passed.
+    INITIAL_REVIEW_GRACE="${INITIAL_REVIEW_GRACE:-1200}"  # 20 min default
     trigger_status=$(_our_trigger_status || echo "in-progress")
     case "$trigger_status" in
-    "none" | "stale")
-        exit 0  # Safe to trigger
+    "none")
+        # No trigger comment exists. Check if the PR is new enough that
+        # Greptile's auto-review might still arrive.
+        local pr_created_at
+        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
+        if [ -n "$pr_created_at" ]; then
+            local pr_age
+            pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
+            if [ "$pr_age" -lt "$INITIAL_REVIEW_GRACE" ]; then
+                exit 1  # Fresh PR — wait for auto-review
+            fi
+        fi
+        exit 0  # Old enough, no auto-review came — safe to trigger
+        ;;
+    "stale")
+        exit 0  # Had a trigger but it's stale — safe to re-trigger
         ;;
     "in-progress")
         exit 1
@@ -258,8 +275,25 @@ trigger)
         echo "  [greptile] Trigger in-flight on $REPO#$PR_NUMBER (recent or bot-acked). Skipping."
         exit 0
         ;;
-    "none" | "stale")
+    "none")
+        # Fresh PR grace: wait for Greptile auto-review before manually triggering
+        local pr_created_at
+        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
+        if [ -n "$pr_created_at" ]; then
+            local pr_age
+            pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
+            if [ "$pr_age" -lt "${INITIAL_REVIEW_GRACE:-1200}" ]; then
+                echo "  [greptile] Fresh PR $REPO#$PR_NUMBER (${pr_age}s old). Waiting for auto-review."
+                exit 0
+            fi
+        fi
         echo "  [greptile] Triggering @greptileai review on $REPO#$PR_NUMBER..."
+        gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@greptileai review" 2>/dev/null \
+            && echo "  [greptile] Triggered successfully." \
+            || echo "  [greptile] Trigger failed (non-fatal)."
+        ;;
+    "stale")
+        echo "  [greptile] Triggering @greptileai review on $REPO#$PR_NUMBER (stale trigger)..."
         gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@greptileai review" 2>/dev/null \
             && echo "  [greptile] Triggered successfully." \
             || echo "  [greptile] Trigger failed (non-fatal)."
@@ -275,7 +309,21 @@ status)
             echo "already-reviewed"
         fi
     else
-        echo "$(_our_trigger_status || echo 'error')"
+        local _ts
+        _ts=$(_our_trigger_status || echo 'error')
+        if [ "$_ts" = "none" ]; then
+            # Check if PR is fresh enough for auto-review
+            local pr_created_at pr_age
+            pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
+            if [ -n "$pr_created_at" ]; then
+                pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
+                if [ "$pr_age" -lt "${INITIAL_REVIEW_GRACE:-1200}" ]; then
+                    echo "awaiting-initial-review"
+                    exit 0
+                fi
+            fi
+        fi
+        echo "$_ts"
     fi
     ;;
 
