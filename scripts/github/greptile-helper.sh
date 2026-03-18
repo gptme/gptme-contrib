@@ -80,15 +80,17 @@ _greptile_review_info() {
         cat "$_REVIEW_CACHE_FILE"
         return
     fi
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq '[.[] | select(.user.login | test("greptile"; "i"))] | sort_by(.updated_at) | last |
+    # Paginate first, then apply jq filter (--paginate + --jq applies per-page,
+    # producing multiple JSON objects that break downstream json.load).
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
+        | jq -s '[.[][] | select(.user.login | test("greptile"; "i"))] | sort_by(.updated_at) | last |
               if . == null then {"has_review": false, "score": null, "reviewed_at": null}
               else {
                 "has_review": true,
                 "reviewed_at": .updated_at,
                 "score": (.body | capture("Score: (?<n>[0-9])/5") | .n | tonumber? // null)
               }
-              end' 2>/dev/null > "$_REVIEW_CACHE_FILE" || echo '{"has_review": false, "score": null, "reviewed_at": null}' > "$_REVIEW_CACHE_FILE"
+              end' > "$_REVIEW_CACHE_FILE" 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}' > "$_REVIEW_CACHE_FILE"
     cat "$_REVIEW_CACHE_FILE"
 }
 
@@ -133,8 +135,9 @@ _our_trigger_status() {
     # On API error: return "in-progress" (fail-safe) rather than "none" (fail-open),
     # to prevent rate-limit-caused spam. See: 2026-03-17 (root cause #1) and 2026-03-18 incidents.
     local comment_info
+    # Paginate first, then filter (--paginate + --jq applies per-page)
     comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq '[.[] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))] | sort_by(.created_at) | last | if . == null then {} else {id: .id, created_at: .created_at} end' \
+        2>/dev/null | jq -s '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))] | sort_by(.created_at) | last | if . == null then {} else {id: .id, created_at: .created_at} end' \
         2>/dev/null) || { echo "in-progress"; return 0; }
 
     if [ -z "$comment_info" ] || [ "$comment_info" = "{}" ]; then
