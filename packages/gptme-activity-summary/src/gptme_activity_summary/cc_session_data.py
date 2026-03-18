@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 def _extract_cc_metadata(msgs: list[dict]) -> dict:
     """Extract CC-specific metadata not covered by gptme-sessions.
 
-    Returns workspace, interactive flag, message count, and duration.
+    Returns workspace, interactive flag, message count, steps, and duration.
     """
     workspace = ""
     is_bypass = False
     message_count = 0
+    assistant_turns = 0
     first_ts: datetime | None = None
     last_ts: datetime | None = None
 
@@ -51,8 +52,11 @@ def _extract_cc_metadata(msgs: list[dict]) -> dict:
             is_bypass = True
 
         # Count user + assistant messages
-        if entry.get("type") in ("assistant", "user"):
+        entry_type = entry.get("type")
+        if entry_type in ("assistant", "user"):
             message_count += 1
+        if entry_type == "assistant":
+            assistant_turns += 1
 
     duration = 0.0
     if first_ts and last_ts:
@@ -62,6 +66,7 @@ def _extract_cc_metadata(msgs: list[dict]) -> dict:
         "workspace": workspace,
         "interactive": not is_bypass,
         "message_count": message_count,
+        "steps": assistant_turns,
         "duration_seconds": duration,
     }
 
@@ -87,13 +92,25 @@ def fetch_cc_session_stats_range(
         # CC-specific metadata
         meta = _extract_cc_metadata(msgs)
 
+        # Skip empty sessions (no assistant response — just initialization artifacts)
+        if meta["steps"] == 0:
+            continue
+
+        # Include cache tokens on input side for accurate totals
+        input_tokens = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_tokens", 0)
+            + usage.get("cache_creation_tokens", 0)
+        )
+
         info = SessionInfo(
             name=jsonl_file.stem,
             harness="claude-code",
             model=usage.get("model") or "",
             workspace=meta["workspace"],
             message_count=meta["message_count"],
-            input_tokens=usage.get("input_tokens", 0),
+            steps=meta["steps"],
+            input_tokens=input_tokens,
             output_tokens=usage.get("output_tokens", 0),
             cost=0.0,  # Subscription model, no per-token cost
             duration_seconds=meta["duration_seconds"],

@@ -6,6 +6,7 @@ keeping only aggregation types and formatting here.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ class SessionInfo:
     harness: str = ""  # "gptme", "claude-code", "codex", etc.
     workspace: str = ""
     message_count: int = 0
+    steps: int = 0  # assistant turns (each = one LLM invocation, 0+ tool calls)
     input_tokens: int = 0
     output_tokens: int = 0
     cost: float = 0.0
@@ -39,6 +41,7 @@ class ModelBreakdown:
     model: str
     harness: str = ""
     sessions: int = 0
+    steps: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cost: float = 0.0
@@ -107,6 +110,7 @@ def _aggregate_session(stats: SessionStats, info: SessionInfo) -> None:
             stats._model_data[key] = ModelBreakdown(model=info.model, harness=info.harness)
         mb = stats._model_data[key]
         mb.sessions += 1
+        mb.steps += info.steps
         mb.input_tokens += info.input_tokens
         mb.output_tokens += info.output_tokens
         mb.cost += info.cost
@@ -115,6 +119,38 @@ def _aggregate_session(stats: SessionStats, info: SessionInfo) -> None:
     stats.total_output_tokens += info.output_tokens
     stats.total_cost += info.cost
     stats.total_duration_seconds += info.duration_seconds
+
+
+def _extract_model_from_eval_dirname(dirname: str) -> str:
+    """Extract model string from gptme eval session dirname.
+
+    E.g. '2026-03-17-gptme-evals-anthropic--claude-haiku-4-5-markdown-1a97c271'
+    → 'anthropic/claude-haiku-4-5'
+
+    The dirname pattern is: DATE-gptme-evals-PROVIDER--MODEL-FORMAT-HASH
+    where '--' separates provider/model segments and FORMAT is one of
+    markdown/tool/xml.
+    """
+    # Strip date prefix
+    name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", dirname)
+    if not name.startswith("gptme-evals-"):
+        return ""
+    name = name[len("gptme-evals-") :]
+
+    # Strip trailing hash (8 hex chars)
+    name = re.sub(r"-[a-f0-9]{8}$", "", name)
+
+    # Strip format suffix (known formats)
+    for fmt in ("markdown", "tool", "xml"):
+        if name.endswith(f"-{fmt}"):
+            name = name[: -len(fmt) - 1]
+            break
+
+    # Split on '--' to get provider/model segments, rejoin with '/'
+    parts = name.split("--")
+    if len(parts) >= 2:
+        return "/".join(parts)
+    return name
 
 
 def fetch_session_stats(
@@ -153,6 +189,9 @@ def fetch_session_stats_range(
             info.message_count = len(msgs)
             info.duration_seconds = _extract_duration(msgs)
 
+            # Count assistant turns as steps (each = one LLM invocation)
+            info.steps = sum(1 for m in msgs if m.get("role") == "assistant")
+
             # Token usage via gptme-sessions
             usage = extract_usage_gptme(msgs)
             if usage:
@@ -160,6 +199,10 @@ def fetch_session_stats_range(
                 info.input_tokens = usage["input_tokens"]
                 info.output_tokens = usage["output_tokens"]
                 info.cost = usage["cost"]
+
+        # Fallback: extract model from eval dirname
+        if not info.model and "evals" in session_dir.name:
+            info.model = _extract_model_from_eval_dirname(session_dir.name)
 
         _aggregate_session(stats, info)
 
@@ -196,6 +239,7 @@ def merge_session_stats(a: SessionStats, b: SessionStats) -> SessionStats:
                 merged._model_data[key] = ModelBreakdown(model=mb.model, harness=mb.harness)
             dest = merged._model_data[key]
             dest.sessions += mb.sessions
+            dest.steps += mb.steps
             dest.input_tokens += mb.input_tokens
             dest.output_tokens += mb.output_tokens
             dest.cost += mb.cost

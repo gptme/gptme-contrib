@@ -72,6 +72,7 @@ def test_extract_cc_metadata_basic():
     assert meta["workspace"] == "/home/bob/bob"
     assert meta["interactive"] is False  # bypassPermissions
     assert meta["message_count"] == 4  # 2 user + 2 assistant
+    assert meta["steps"] == 2  # 2 assistant turns = 2 steps
     assert meta["duration_seconds"] == 180.0  # 3 minutes
 
 
@@ -83,6 +84,26 @@ def test_extract_cc_metadata_interactive():
     ]
     meta = _extract_cc_metadata(msgs)
     assert meta["interactive"] is True
+    assert meta["steps"] == 1
+
+
+def test_empty_session_filtered(tmp_path):
+    """Test that sessions with no assistant turns are filtered out."""
+    empty_msgs = [
+        {"type": "system", "content": "init", "cwd": "/home/bob"},
+        {"type": "system", "content": "config"},
+        _make_user_msg("2026-02-17T10:00:00Z"),
+    ]
+    real_msgs = [
+        _make_user_msg("2026-02-17T10:00:00Z"),
+        _make_assistant_msg("2026-02-17T10:05:00Z", input_tokens=100, output_tokens=50),
+    ]
+    _make_session_jsonl(tmp_path, "-home-bob-bob", "empty-sess", empty_msgs)
+    _make_session_jsonl(tmp_path, "-home-bob-bob", "real-sess", real_msgs)
+
+    stats = fetch_cc_session_stats_range(date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path)
+    assert stats.session_count == 1  # only the real session
+    assert stats.total_input_tokens == 100
 
 
 def test_fetch_cc_session_stats_range(tmp_path):

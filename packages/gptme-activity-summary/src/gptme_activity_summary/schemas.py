@@ -64,6 +64,7 @@ class ModelUsage:
     model: str
     harness: str = ""  # "gptme", "claude-code", etc.
     sessions: int = 0
+    steps: int = 0  # agent turns (each = one LLM invocation, 0+ tool calls)
     tokens: int = 0
     cost: float = 0.0
 
@@ -140,43 +141,57 @@ def _format_model_table(metrics: "Metrics") -> list[str]:
     # Check if we have multiple harnesses (show harness column if so)
     harnesses = {m.harness for m in metrics.model_breakdown if m.harness}
     show_harness = len(harnesses) > 1
+    # Only show steps column if any model has steps data
+    has_steps = any(m.steps > 0 for m in metrics.model_breakdown)
 
+    # Build header
+    cols = []
     if show_harness:
-        lines = [
-            "## Model Usage",
-            "",
-            "| Harness | Model | Sessions | Tokens | Cost |",
-            "|---------|-------|----------|--------|------|",
-        ]
-        for m in metrics.model_breakdown:
-            cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
-            tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
-            harness_str = m.harness or "-"
-            lines.append(
-                f"| {harness_str} | {m.model} | {m.sessions} | {tokens_str} | {cost_str} |"
-            )
-    else:
-        lines = [
-            "## Model Usage",
-            "",
-            "| Model | Sessions | Tokens | Cost |",
-            "|-------|----------|--------|------|",
-        ]
-        for m in metrics.model_breakdown:
-            cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
-            tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
-            lines.append(f"| {m.model} | {m.sessions} | {tokens_str} | {cost_str} |")
+        cols.append("Harness")
+    cols.append("Model")
+    cols.append("Sessions")
+    if has_steps:
+        cols.append("Steps")
+    cols.append("Tokens")
+    cols.append("Cost")
+
+    header = "| " + " | ".join(cols) + " |"
+    sep = "|" + "|".join("-" * (len(c) + 2) for c in cols) + "|"
+    lines = ["## Model Usage", "", header, sep]
+
+    for m in metrics.model_breakdown:
+        cost_str = f"${m.cost:.2f}" if m.cost > 0 else "-"
+        tokens_str = _fmt_tokens(m.tokens) if m.tokens > 0 else "-"
+        steps_str = f"{m.steps:,}" if m.steps > 0 else "-"
+        row = []
+        if show_harness:
+            row.append(m.harness or "-")
+        row.append(m.model)
+        row.append(str(m.sessions))
+        if has_steps:
+            row.append(steps_str)
+        row.append(tokens_str)
+        row.append(cost_str)
+        lines.append("| " + " | ".join(row) + " |")
 
     # Total row
     total_sessions = sum(m.sessions for m in metrics.model_breakdown)
+    total_steps = sum(m.steps for m in metrics.model_breakdown)
     total_tokens = sum(m.tokens for m in metrics.model_breakdown)
     total_cost = sum(m.cost for m in metrics.model_breakdown)
-    cost_str = f"${total_cost:.2f}" if total_cost > 0 else "-"
-    tokens_str = _fmt_tokens(total_tokens) if total_tokens > 0 else "-"
+    cost_str = f"**${total_cost:.2f}**" if total_cost > 0 else "-"
+    tokens_str = f"**{_fmt_tokens(total_tokens)}**" if total_tokens > 0 else "-"
+    steps_str = f"**{total_steps:,}**" if total_steps > 0 else "-"
+    row = []
     if show_harness:
-        lines.append(f"| | **Total** | **{total_sessions}** | **{tokens_str}** | **{cost_str}** |")
-    else:
-        lines.append(f"| **Total** | **{total_sessions}** | **{tokens_str}** | **{cost_str}** |")
+        row.append("")
+    row.append("**Total**")
+    row.append(f"**{total_sessions}**")
+    if has_steps:
+        row.append(steps_str)
+    row.append(tokens_str)
+    row.append(cost_str)
+    lines.append("| " + " | ".join(row) + " |")
     lines.append("")
     return lines
 
