@@ -4,7 +4,8 @@
 # Usage:
 #   greptile-helper.sh check <repo> <pr_number>   # Check status, exit 0=ok-to-trigger 1=skip
 #   greptile-helper.sh trigger <repo> <pr_number> # Trigger once if safe, else skip
-#   greptile-helper.sh status <repo> <pr_number>  # Print human-readable status
+#   greptile-helper.sh status <repo> <pr_number>  # Print status string:
+#     already-reviewed | needs-re-review | in-progress | none | stale | awaiting-initial-review | error
 #
 # Exit codes for 'check':
 #   0 = safe to trigger (no review yet, or re-review needed: not 5/5 + new commits)
@@ -88,7 +89,7 @@ _greptile_review_info() {
               else {
                 "has_review": true,
                 "reviewed_at": .updated_at,
-                "score": (.body | capture("Score: (?<n>[0-9])/5") | .n | tonumber? // null)
+                "score": (.body | capture("Score[*:]*\\s*(?<n>[0-9])/5") | .n | tonumber? // null)
               }
               end' > "$_REVIEW_CACHE_FILE" 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}' > "$_REVIEW_CACHE_FILE"
     cat "$_REVIEW_CACHE_FILE"

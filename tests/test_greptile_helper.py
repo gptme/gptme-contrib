@@ -255,3 +255,60 @@ def test_score_5_is_already_reviewed():
 
     status = _run_helper("status", fixture)
     assert status.stdout.strip() == "already-reviewed"
+
+
+def test_trigger_posts_comment_on_old_unreviewed_pr():
+    """Trigger on old PR with no review → posts @greptileai review comment."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fixture_path = tmp_path / "fixture.json"
+        fixture_path.write_text(json.dumps(fixture))
+
+        fake_gh = tmp_path / "gh"
+        fake_gh.write_text(FAKE_GH)
+        fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+
+        gh_log = tmp_path / "gh-log.json"
+        env = os.environ.copy()
+        env["GH_FIXTURE"] = str(fixture_path)
+        env["GH_LOG"] = str(gh_log)
+        env["GITHUB_AUTHOR"] = "test-user"
+        env["PATH"] = f"{tmp}:{env['PATH']}"
+
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "trigger", "gptme/gptme", "999"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "Triggered successfully" in result.stdout
+
+        # Verify the comment was posted via gh pr comment
+        assert gh_log.exists(), "gh pr comment was never called"
+        logged = json.loads(gh_log.read_text())
+        assert "comment" in logged
+        assert "@greptileai review" in str(logged)
+
+
+def test_trigger_skips_fresh_pr():
+    """Trigger on fresh PR (< 20 min) → skips, waits for auto-review."""
+    fixture = {
+        "pr_number": 888,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=5)},
+        "bot_reaction_count": 0,
+    }
+    result = _run_helper("trigger", fixture)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Waiting for auto-review" in result.stdout
