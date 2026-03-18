@@ -189,7 +189,9 @@ def test_rereview_ignores_old_trigger_from_previous_review_cycle():
     fixture = {
         "pr_number": 123,
         "raw_comments": [
-            _make_greptile_comment(4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at),
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
             _make_trigger_comment("test-user", _iso_ago(minutes=45)),
         ],
         "raw_commits": [
