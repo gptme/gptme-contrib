@@ -121,6 +121,7 @@ def extract_signals(msgs: list[dict]) -> dict:
     error_count = 0
     git_commits: list[str] = []
     file_writes: list[str] = []
+    journal_paths: list[str] = []
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     steps = 0  # number of assistant turns that yielded to await tool results
@@ -162,6 +163,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                             recent_sigs.append(sig)
                             if len(recent_sigs) > 20:
                                 recent_sigs.pop(0)
+                        else:
+                            journal_paths.append(path)
                     # No else: tool calls without extractable paths are not counted as
                     # file writes. Placeholder strings like "<save>" would inflate the
                     # unique-write count used in grade_signals and push unproductive
@@ -203,6 +206,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": retry_count,
         "deliverables": deliverables,
@@ -285,6 +289,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     error_count = 0
     git_commits: list[str] = []
     file_writes: list[str] = []
+    journal_paths: list[str] = []
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     steps = 0  # number of assistant turns that yielded to await tool results
@@ -336,6 +341,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             recent_sigs.append(sig)
                             if len(recent_sigs) > 20:
                                 recent_sigs.pop(0)
+                        else:
+                            journal_paths.append(path)
                     # No else: tool calls without extractable paths are not counted as
                     # file writes — same rationale as the gptme path above.
             if step_has_tool:
@@ -384,6 +391,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
@@ -510,6 +518,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     error_count = 0
     git_commits: list[str] = []
     file_writes: list[str] = []
+    journal_paths: list[str] = []
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     steps = 0
@@ -565,7 +574,11 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                                 cmd,
                             ):
                                 path = write_match.group(1).strip("'\"")
-                                if "/journal/" not in path and not path.startswith("/dev/"):
+                                if path.startswith("/dev/"):
+                                    continue
+                                elif "/journal/" in path:
+                                    journal_paths.append(path)
+                                else:
                                     file_writes.append(path)
                                     sig = f"exec_command:{path}"
                                     if sig in recent_sigs:
@@ -607,6 +620,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
@@ -632,6 +646,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
     error_count = 0
     git_commits: list[str] = []
     file_writes: list[str] = []
+    journal_paths: list[str] = []
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     steps = 0
@@ -675,14 +690,17 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                         path = args.get("path", "") or args.get("file_path", "")
                     else:
                         path = ""
-                    if path and "/journal/" not in path:
-                        file_writes.append(path)
-                        sig = f"{tool}:{path}"
-                        if sig in recent_sigs:
-                            retry_candidates.append(tool)
-                        recent_sigs.append(sig)
-                        if len(recent_sigs) > 20:
-                            recent_sigs.pop(0)
+                    if path:
+                        if "/journal/" not in path:
+                            file_writes.append(path)
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+                        else:
+                            journal_paths.append(path)
 
             if step_has_tool:
                 steps += 1
@@ -720,6 +738,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,

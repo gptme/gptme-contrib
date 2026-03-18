@@ -5557,3 +5557,142 @@ def test_show_displays_llm_judge_fields(tmp_path: Path, capsys, monkeypatch):
     assert "Made good progress on task." in captured.out
     assert "Judge model:" in captured.out
     assert "claude-haiku-4-5" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# journal_paths signal extraction tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_signals_cc_journal_paths_captured():
+    """CC trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": journal_path},
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": code_path},
+                    },
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_gptme_journal_paths_captured():
+    """gptme trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "role": "assistant",
+            "content": f'@save(c0): {{"path": "{journal_path}"}}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": f'@save(c1): {{"path": "{code_path}"}}',
+            "timestamp": "2026-03-01T10:01:00+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_codex_journal_paths_captured():
+    """Codex trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "type": "response_item",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call1",
+                "arguments": json.dumps({"cmd": f"cat > {journal_path} << 'EOF'\nentry\nEOF"}),
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-03-01T10:01:00.000Z",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call2",
+                "arguments": json.dumps({"cmd": f"cat > {code_path} << 'EOF'\ncode\nEOF"}),
+            },
+        },
+    ]
+    sigs = extract_signals_codex(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_copilot_journal_paths_captured():
+    """Copilot trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "type": "assistant.message",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "data": {
+                "toolRequests": [
+                    {
+                        "name": "write",
+                        "toolCallId": "tc1",
+                        "arguments": {"path": journal_path},
+                    },
+                    {
+                        "name": "write",
+                        "toolCallId": "tc2",
+                        "arguments": {"path": code_path},
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_copilot(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_cc_no_journal_paths_empty():
+    """CC trajectory: journal_paths is empty when no journal writes occur."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": "/home/bob/bob/src/main.py"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["journal_paths"] == []
+    assert len(sigs["file_writes"]) == 1
