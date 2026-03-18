@@ -55,9 +55,10 @@
 #   by score + HEAD SHA with 1-hour cooldown. Costs 1 extra REST API call per
 #   open PR (issue comments endpoint). HEAD SHA comes from fetch_pr_data().
 #
-#   Notifications: State-tracked by notification ID. State files accumulate in
-#   STATE_DIR/notif-*.state. GitHub notifications clear when marked as read
-#   upstream, so old state files become inert (matching no current notification).
+#   Notifications: Filters for actionable reasons (review_requested, mention,
+#   assign, author, comment). State-tracked by notification ID. State files
+#   accumulate in STATE_DIR/notif-*.state. GitHub notifications clear when
+#   marked as read upstream, so old state files become inert.
 #
 #   Item grouping: This gate emits one item per event (a PR can produce separate
 #   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
@@ -601,13 +602,13 @@ check_merge_ready() {
     done
 }
 
-# Check for actionable unread notifications (review requests, mentions, assigns)
+# Check for actionable unread notifications (review requests, mentions, assigns, author, comments)
 # State-tracked by notification ID to avoid re-triggering for the same unread notification.
 # Returns individual notification items in jsonl mode, count in markdown mode.
 check_notifications() {
     local notifs
     notifs=$(gh api notifications \
-        --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign")' \
+        --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign" or .reason == "author" or .reason == "comment")' \
         2>/dev/null) || return 0
     [ -z "$notifs" ] && return 0
 
@@ -680,7 +681,7 @@ if [ "$FORMAT" = "jsonl" ]; then
 else
     notif_count=$(check_notifications)
     if [ "$notif_count" -gt 0 ] 2>/dev/null; then
-        all_items+="notifications — $notif_count actionable (review requests, mentions, assigns)"$'\n'
+        all_items+="notifications — $notif_count actionable (review requests, mentions, assigns, author, comments)"$'\n'
     fi
 fi
 
