@@ -80,7 +80,7 @@ _greptile_review_info() {
         cat "$_REVIEW_CACHE_FILE"
         return
     fi
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
         --jq '[.[] | select(.user.login | test("greptile"; "i"))] | sort_by(.updated_at) | last |
               if . == null then {"has_review": false, "score": null, "reviewed_at": null}
               else {
@@ -133,8 +133,8 @@ _our_trigger_status() {
     # On API error: return "in-progress" (fail-safe) rather than "none" (fail-open),
     # to prevent rate-limit-caused spam. See: 2026-03-17 (root cause #1) and 2026-03-18 incidents.
     local comment_info
-    comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
-        --jq '[.[] | select(.user.login == "'"${GITHUB_AUTHOR:-TimeToBuildBob}"'" and (.body | test("greptileai"; "i")))] | sort_by(.created_at) | last | if . == null then {} else {id: .id, created_at: .created_at} end' \
+    comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+        --jq '[.[] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))] | sort_by(.created_at) | last | if . == null then {} else {id: .id, created_at: .created_at} end' \
         2>/dev/null) || { echo "in-progress"; return 0; }
 
     if [ -z "$comment_info" ] || [ "$comment_info" = "{}" ]; then
@@ -221,7 +221,7 @@ trigger)
     # Exclusive file lock — prevents concurrent sessions from racing on the same PR.
     # Root cause of 2026-03-18 spam on gptme-agent-template#72,#73: multiple sessions
     # each called `gh api` for comments, all saw 0, all posted. flock makes check+post
-    # atomic: the second session waits for or immediately loses the lock, then sees the
+    # atomic: the second session immediately fails the lock (-n = non-blocking), then sees the
     # first session's comment via the 15-min age guard and skips.
     # Use md5sum (Linux) or md5 (macOS) for lock file naming
     _LOCK_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5 -q) | cut -c1-12)
