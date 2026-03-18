@@ -77,6 +77,9 @@ PY
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
 trap 'rm -f "$_REVIEW_CACHE_FILE"' EXIT
 _greptile_review_info() {
+    # Reset EXIT trap in subshell context — callers use $() which inherits
+    # the parent trap and would delete the cache file immediately on return.
+    trap - EXIT
     if [ -f "$_REVIEW_CACHE_FILE" ]; then
         cat "$_REVIEW_CACHE_FILE"
         return
@@ -185,7 +188,7 @@ _our_trigger_status() {
         return 0
     }
 
-    if [ "${bot_ack_count:-0}" -gt 0 ] 2>/dev/null && [ "${comment_age_seconds:-9999}" -lt "$ACK_GRACE_SECONDS" ]; then
+    if [ "${bot_ack_count:-0}" -gt 0 ] && [ "${comment_age_seconds:-9999}" -lt "$ACK_GRACE_SECONDS" ]; then
         echo "in-progress"
     else
         # No bot ack, or ack is too old without a review landing → stale, safe to retry.

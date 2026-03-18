@@ -121,8 +121,15 @@ def _make_commit(date: str) -> dict:
 
 
 def _run_helper(
-    command: str, fixture: dict[str, object]
-) -> subprocess.CompletedProcess[str]:
+    command: str,
+    fixture: dict[str, object],
+    *,
+    capture_gh_log: bool = False,
+) -> subprocess.CompletedProcess[str] | tuple[subprocess.CompletedProcess[str], str]:
+    """Run greptile-helper.sh with a fake gh stub.
+
+    When capture_gh_log=True, returns (result, gh_log_content) tuple.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         fixture_path = tmp_path / "fixture.json"
@@ -132,19 +139,24 @@ def _run_helper(
         fake_gh.write_text(FAKE_GH)
         fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
 
+        gh_log = tmp_path / "gh-log.json"
         env = os.environ.copy()
         env["GH_FIXTURE"] = str(fixture_path)
-        env["GH_LOG"] = str(tmp_path / "gh-log.json")
+        env["GH_LOG"] = str(gh_log)
         env["GITHUB_AUTHOR"] = "test-user"
         env["PATH"] = f"{tmp}:{env['PATH']}"
 
-        return subprocess.run(
+        result = subprocess.run(
             ["bash", str(SCRIPT), command, "gptme/gptme", str(fixture["pr_number"])],
             capture_output=True,
             text=True,
             env=env,
             timeout=30,
         )
+        if capture_gh_log:
+            log_content = gh_log.read_text() if gh_log.exists() else ""
+            return result, log_content
+        return result
 
 
 def test_check_blocks_recently_acknowledged_trigger():
@@ -266,38 +278,11 @@ def test_trigger_posts_comment_on_old_unreviewed_pr():
         "raw_pr": {"created_at": _iso_ago(minutes=60)},
         "bot_reaction_count": 0,
     }
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        fixture_path = tmp_path / "fixture.json"
-        fixture_path.write_text(json.dumps(fixture))
-
-        fake_gh = tmp_path / "gh"
-        fake_gh.write_text(FAKE_GH)
-        fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
-
-        gh_log = tmp_path / "gh-log.json"
-        env = os.environ.copy()
-        env["GH_FIXTURE"] = str(fixture_path)
-        env["GH_LOG"] = str(gh_log)
-        env["GITHUB_AUTHOR"] = "test-user"
-        env["PATH"] = f"{tmp}:{env['PATH']}"
-
-        result = subprocess.run(
-            ["bash", str(SCRIPT), "trigger", "gptme/gptme", "999"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=30,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "Triggered successfully" in result.stdout
-
-        # Verify the comment was posted via gh pr comment
-        assert gh_log.exists(), "gh pr comment was never called"
-        logged = json.loads(gh_log.read_text())
-        assert "comment" in logged
-        assert "@greptileai review" in str(logged)
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Triggered successfully" in result.stdout
+    assert gh_log, "gh pr comment was never called"
+    assert "@greptileai review" in gh_log
 
 
 def test_trigger_skips_fresh_pr():
