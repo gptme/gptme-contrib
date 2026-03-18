@@ -41,12 +41,19 @@ if not argv or argv[0] != "api":
 # Parse flags
 endpoint = ""
 jq_expr = ""
+fields: dict = {}
 i = 1
 while i < len(argv):
     arg = argv[i]
     if arg == "--jq":
         jq_expr = argv[i + 1]; i += 2; continue
-    if arg in ("-q", "-H", "-f", "-F"):
+    if arg in ("-f", "-F") and i + 1 < len(argv):
+        kv = argv[i + 1]
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            fields[k] = v
+        i += 2; continue
+    if arg in ("-q", "-H"):
         i += 2; continue
     if arg == "--paginate":
         i += 1; continue
@@ -56,6 +63,11 @@ while i < len(argv):
 
 github_author = os.environ.get("GITHUB_AUTHOR", "test-user")
 pr_number = fixture["pr_number"]
+
+# REST POST to comments endpoint (script uses gh api instead of gh pr comment)
+if "body" in fields and endpoint.endswith(f"/issues/{pr_number}/comments"):
+    Path(os.environ["GH_LOG"]).write_text(json.dumps({"body": fields["body"]}))
+    raise SystemExit(0)
 
 # Route to fixture data
 data = None
@@ -343,5 +355,7 @@ def test_trigger_re_reviews_on_low_score_with_new_commits():
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Re-triggered successfully" in result.stdout
-    assert gh_log, "gh pr comment was never called"
+    assert (
+        gh_log
+    ), "comment was never posted (neither gh pr comment nor gh api REST call)"
     assert "@greptileai review" in gh_log
