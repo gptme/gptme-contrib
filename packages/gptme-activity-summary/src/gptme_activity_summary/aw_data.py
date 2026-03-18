@@ -365,7 +365,8 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
 
     When categories are available (user has configured AW categorization rules),
     the category breakdown is shown first as a high-level summary, followed by
-    the per-app breakdown for detail.
+    the per-app breakdown for detail. Category percentages are relative to
+    total categorized time (sum of all category durations), not total_active_seconds.
     """
     if not activity.available or not activity.top_apps:
         return ""

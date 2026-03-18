@@ -236,16 +236,22 @@ def test_format_aw_activity_only_uncategorized():
 
 
 def test_format_aw_activity_category_percentages():
-    """Category percentages are calculated relative to total active time."""
+    """Category percentages are calculated relative to total categorized time (category_total).
+
+    total_active_seconds (4000) intentionally differs from sum(category durations) (3600)
+    to verify the code uses category_total as the denominator, not total_active_seconds.
+    With category_total=3600: Coding=75%, Other=25%.
+    With total_active_seconds=4000: Coding=67%, Other=22% — would fail this test.
+    """
     activity = AWActivity(
         start_date=date.today(),
         end_date=date.today(),
         available=True,
-        total_active_seconds=3600,
-        top_apps=[AppUsage(app="nvim", duration=3600)],
+        total_active_seconds=4000,  # deliberately != sum(category durations)
+        top_apps=[AppUsage(app="nvim", duration=4000)],
         categories=[
-            CategoryUsage(category=["Coding"], duration=2700),  # 75%
-            CategoryUsage(category=["Other"], duration=900),  # 25%
+            CategoryUsage(category=["Coding"], duration=2700),  # 75% of 3600
+            CategoryUsage(category=["Other"], duration=900),  # 25% of 3600
         ],
     )
     text = format_aw_activity_for_prompt(activity)
