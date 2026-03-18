@@ -12,50 +12,30 @@
 #   2 = skip: reviewed by greptile-apps[bot], score=5/5 or no new commits since review
 #   3 = api error (fail-safe = skip)
 #
-# Environment variables:
-#   GITHUB_AUTHOR  — GitHub username for filtering trigger comments (default: `gh api user --jq .login`)
-#   TRIGGER_GRACE_SECONDS — Grace period for recent trigger comments (default: 900 = 15min)
-#   ACK_GRACE_SECONDS — Grace period for bot-acknowledged triggers (default: 1200 = 20min)
+# Erik's requests (ErikBjare/bob#434):
+#   1. Reduce 30min age guard → 15min (reviews complete in 5-15min)
+#   2. Re-request after addressing feedback: if score < 5/5 AND new commits → trigger
 #
-# Anti-spam design:
-#   Multiple concurrent sessions can each check "any trigger comments?" → all see 0
-#   (due to API latency or concurrent execution) → all trigger, causing spam.
-#   Guards against this:
-#     1. flock-based exclusive lock per PR (prevents concurrent trigger races)
-#     2. Bot ack check: Greptile reacts within ~5-10s of trigger (more reliable than comment check)
-#     3. Age-based grace period: treat recent trigger comments as in-flight
-#     4. API error fail-safe: on error, assume in-progress (fail-closed, not fail-open)
-#
-# Re-review logic:
-#   If score < 5/5 AND new commits exist after review → re-trigger
-#   Uses updated_at (not created_at) for review timestamp because Greptile updates its
-#   review comment in-place on re-reviews. Using created_at caused infinite re-trigger
-#   loops since commits always appeared "new" relative to the original post date.
+# Root cause of spam incidents:
+#   Multiple concurrent sessions each check "any trigger comments?" → all see 0
+#   (due to API latency or concurrent execution) → all trigger.
+#   Bot ack check is more reliable: Greptile reacts within ~5-10s of trigger.
 
 set -euo pipefail
 
 REPO="${2:-}"
 PR_NUMBER="${3:-}"
-TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
-ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
+TRIGGER_GRACE_SECONDS=900
+ACK_GRACE_SECONDS=1200
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
     echo "Usage: $0 <check|trigger|status> <repo> <pr_number>" >&2
     exit 1
 fi
 
-# Resolve the GitHub author for filtering trigger comments.
-# Prefer GITHUB_AUTHOR env var; fall back to the authenticated gh user.
-if [ -z "${GITHUB_AUTHOR:-}" ]; then
-    GITHUB_AUTHOR=$(gh api user --jq .login 2>/dev/null) || {
-        echo "Error: cannot determine GitHub author. Set GITHUB_AUTHOR or authenticate gh." >&2
-        exit 3
-    }
-fi
-
 _json_field() {
     local field="$1"
-    python3 -c "import json, sys; data = json.load(sys.stdin); print(data.get('$field', ''))" 2>/dev/null
+    python3 -c "import json, sys; data = json.load(sys.stdin); v = data.get('$field'); print(v if v is not None else '')" 2>/dev/null
 }
 
 _timestamp_gt() {
@@ -104,7 +84,7 @@ _has_greptile_review() {
     echo "$info" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('has_review') else 1)" 2>/dev/null
 }
 
-# --- Helper: check if re-review is needed (score < 5/5 + new commits since review) ---
+# --- Helper: check if re-review is needed (not 5/5 + new commits since review) ---
 # Returns 0 = re-review needed, 1 = no re-review needed
 _needs_re_review() {
     local info score reviewed_at new_commits
@@ -130,16 +110,16 @@ _needs_re_review() {
 
 # --- Helper: check our last trigger comment + its reactions ---
 # Returns: "none" | "in-progress" | "stale"
-# "in-progress" = recent trigger (< grace period), or Greptile acked it and hasn't reviewed yet
+# "in-progress" = recent trigger (< 15min), or Greptile acked it recently and hasn't reviewed yet
 # "stale" = last trigger is still the latest cycle, but it's older than the grace window
 _our_trigger_status() {
     local review_cutoff="${1:-}"
-    # Get our latest @greptileai trigger comment ID and timestamp.
+    # Get our latest @greptileai trigger comment ID and timestamp
     # On API error: return "in-progress" (fail-safe) rather than "none" (fail-open),
-    # to prevent rate-limit-caused spam.
+    # to prevent rate-limit-caused spam. See: 2026-03-17 (root cause #1) and 2026-03-18 incidents.
     local comment_info
     comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
-        --jq "[.[] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"greptileai\"; \"i\")))] | sort_by(.created_at) | last | {id: .id, created_at: .created_at}" \
+        --jq '[.[] | select(.user.login == "'"${GITHUB_AUTHOR:-TimeToBuildBob}"'" and (.body | test("greptileai"; "i")))] | sort_by(.created_at) | last | if . == null then {} else {id: .id, created_at: .created_at} end' \
         2>/dev/null) || { echo "in-progress"; return 0; }
 
     if [ -z "$comment_info" ] || [ "$comment_info" = "{}" ]; then
@@ -169,7 +149,7 @@ _our_trigger_status() {
     if [ -n "$created_at" ]; then
         comment_age_seconds=$(_age_seconds "$created_at" 2>/dev/null) || comment_age_seconds=9999
 
-        # Comment within grace period → treat as in-progress
+        # Comment < 15 minutes old → treat as in-progress (reviews complete in 5-15min)
         if [ "${comment_age_seconds:-9999}" -lt "$TRIGGER_GRACE_SECONDS" ]; then
             echo "in-progress"
             return 0
@@ -224,9 +204,10 @@ check)
 
 trigger)
     # Exclusive file lock — prevents concurrent sessions from racing on the same PR.
-    # Without this, multiple sessions each call `gh api` for comments, all see 0, all
-    # post. flock makes check+post atomic: the second session waits for or immediately
-    # loses the lock, then sees the first session's comment via the age guard and skips.
+    # Root cause of 2026-03-18 spam on gptme-agent-template#72,#73: multiple sessions
+    # each called `gh api` for comments, all saw 0, all posted. flock makes check+post
+    # atomic: the second session waits for or immediately loses the lock, then sees the
+    # first session's comment via the 15-min age guard and skips.
     _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-$(printf '%s-%s' "$REPO" "$PR_NUMBER" | tr '/' '-').lock"
     exec 9>"$_LOCK_FILE"
     if ! flock -n 9; then
