@@ -49,6 +49,12 @@
 #   Merge conflicts: NOT state-tracked (intentionally). A conflicting PR should
 #   nag every run until resolved.
 #
+#   Greptile score sweep: Proactively finds PRs with low Greptile scores (< 5/5)
+#   that need code fixes. Greptile updates comments in-place, so updatedAt never
+#   bumps — without this sweep, low-scored PRs sit indefinitely. State-tracked
+#   by score + HEAD SHA with 4-hour cooldown. Costs 1 extra REST API call per
+#   open PR (issue comments endpoint). HEAD SHA comes from fetch_pr_data().
+#
 #   Notifications: State-tracked by notification ID. State files accumulate in
 #   STATE_DIR/notif-*.state. GitHub notifications clear when marked as read
 #   upstream, so old state files become inert (matching no current notification).
@@ -96,7 +102,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --state-dir Directory for state tracking files (default: /tmp/github-activity-gate-state)"
             echo "  --format    Output format: 'markdown' (default) or 'jsonl' (one JSON object per item)"
             echo ""
-            echo "JSONL format: {\"type\":\"pr_update|ci_failure|assigned_issue|notification\","
+            echo "JSONL format: {\"type\":\"pr_update|ci_failure|greptile_needs_fix|greptile_needs_improvement|assigned_issue|notification\","
             echo "               \"repo\":\"owner/repo\", \"number\":123, \"title\":\"...\", \"detail\":\"...\"}"
             exit 0
             ;;
@@ -145,8 +151,10 @@ emit_item() {
             assigned_issue)    label="Issue" ;;
             notification)      label="Notification" ;;
             master_ci_failure) label="MASTER CI" ;;
-            merge_conflict)    label="CONFLICT" ;;
-            *)                 label="$type" ;;
+            merge_conflict)        label="CONFLICT" ;;
+            greptile_needs_fix)    label="GREPTILE FIX" ;;
+            greptile_needs_improvement) label="GREPTILE" ;;
+            *)                     label="$type" ;;
         esac
         echo "$repo — $label #$number: $title ($detail)"
     fi
@@ -188,7 +196,7 @@ discover_repos() {
 fetch_pr_data() {
     local repo=$1
     gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus \
+        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid \
         2>/dev/null || echo "[]"
 }
 
@@ -415,6 +423,104 @@ check_merge_conflicts() {
     done
 }
 
+# Sweep open PRs for low Greptile review scores.
+# Greptile updates review comments in-place, so updatedAt doesn't bump when the
+# score changes. This function proactively finds PRs with low scores that need
+# code fixes, even if no other activity has occurred.
+#
+# API cost: 1 REST call per open PR (issue comments endpoint).
+# HEAD SHA comes from fetch_pr_data() (headRefOid) — no extra API call needed.
+#
+# State tracking: $STATE_DIR/${repo_safe}-pr-${number}-greptile.state
+#   Format: "score:timestamp:head_sha"
+#   Re-emits when: (a) first time seeing a low score, or (b) new commits pushed
+#   since last emission (fix attempt may have changed things).
+#   Cooldown: 4 hours — won't re-emit the same PR within that window.
+#
+# Emits:
+#   greptile_needs_fix       — score < 4 (significant findings to address)
+#   greptile_needs_improvement — score = 4 (minor fixes needed)
+check_greptile_scores() {
+    local repo=$1
+    local prs=$2
+    [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
+
+    local repo_safe="${repo//\//-}"
+    local cooldown_seconds=14400  # 4 hours
+
+    echo "$prs" | jq -c '.[]' | while read -r pr_data; do
+        local pr_number pr_title
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+
+        # Fetch issue comments and find Greptile review comment with a score.
+        # Uses --paginate to handle PRs with >30 comments (default page size).
+        # Greptile's bot username contains "greptile" (case-insensitive).
+        # Look for "Score: N/5" pattern, anchored to avoid matching prose/flowcharts.
+        #
+        # Note: --paginate with --jq applies the filter per-page, so if multiple
+        # pages each contain Greptile comments, we'd get multiple lines of output.
+        # We take only the last line (tail -1) to get the most recent score.
+        local greptile_score
+        greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
+            --paginate --jq '
+                [.[] | select(.user.login | test("greptile"; "i"))] | last |
+                .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
+            ' 2>/dev/null | tail -1 || true)
+
+        # No Greptile review or no score found — skip
+        # Guard against both empty string and literal "null" from jq
+        [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
+
+        # Score 5 = clean — nothing to do
+        [ "$greptile_score" -ge 5 ] 2>/dev/null && continue
+
+        # Score >= 4 is minor, < 4 needs fix
+        local item_type
+        if [ "$greptile_score" -lt 4 ]; then
+            item_type="greptile_needs_fix"
+        else
+            item_type="greptile_needs_improvement"
+        fi
+
+        # Get HEAD SHA from pre-fetched data (headRefOid) to detect new commits
+        local head_sha
+        head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
+        [ -z "$head_sha" ] && head_sha="unknown"
+
+        local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+        local now
+        now=$(date +%s)
+
+        if [ -f "$state_file" ]; then
+            local last_state last_score last_timestamp last_sha
+            last_state=$(cat "$state_file")
+            last_score=$(echo "$last_state" | cut -d: -f1)
+            last_timestamp=$(echo "$last_state" | cut -d: -f2)
+            last_sha=$(echo "$last_state" | cut -d: -f3)
+
+            # Same score and same HEAD — check cooldown
+            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ]; then
+                local elapsed=$(( now - last_timestamp ))
+                if [ "$elapsed" -lt "$cooldown_seconds" ]; then
+                    # Within cooldown — skip
+                    continue
+                fi
+                # Cooldown expired — re-emit to nag (score still low, no fix attempted)
+            fi
+            # Otherwise: score changed or new commits pushed — always re-emit
+        else
+            # First time seeing this PR — seed state, don't report
+            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+            continue
+        fi
+
+        # Record state and emit
+        echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "Greptile score: ${greptile_score}/5"
+    done
+}
+
 # Check for actionable unread notifications (review requests, mentions, assigns)
 # State-tracked by notification ID to avoid re-triggering for the same unread notification.
 # Returns individual notification items in jsonl mode, count in markdown mode.
@@ -479,6 +585,9 @@ for repo in $all_repos; do
     [ -n "$items" ] && all_items+="$items"$'\n'
 
     items=$(check_merge_conflicts "$repo" "$pr_data" 2>/dev/null || true)
+    [ -n "$items" ] && all_items+="$items"$'\n'
+
+    items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
 done
 
