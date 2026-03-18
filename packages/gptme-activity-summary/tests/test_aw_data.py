@@ -215,6 +215,26 @@ def test_format_aw_activity_without_categories():
     assert "### Top Applications" in text
 
 
+def test_format_aw_activity_only_uncategorized():
+    """Activity where all time is 'Uncategorized' (no rules configured) skips category section.
+
+    When a user has no AW category rules, categorize(events, []) returns all events
+    as ['Uncategorized']. This should suppress the section rather than showing
+    a meaningless 'Uncategorized: 100%' entry.
+    """
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=3600,
+        top_apps=[AppUsage(app="nvim", duration=3600)],
+        categories=[CategoryUsage(category=["Uncategorized"], duration=3600)],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Time by Category" not in text
+    assert "### Top Applications" in text
+
+
 def test_format_aw_activity_category_percentages():
     """Category percentages are calculated relative to total active time."""
     activity = AWActivity(

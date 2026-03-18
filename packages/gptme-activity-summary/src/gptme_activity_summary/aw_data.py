@@ -373,8 +373,11 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     lines.append(f"- **Total active time**: {total_h:.1f}h ({activity.total_active_seconds:.0f}s)")
     lines.append("")
 
-    # Show category breakdown when configured — more meaningful than raw app list
-    if activity.categories:
+    # Show category breakdown only when user has actual category rules configured.
+    # When no rules exist, AW returns all events as ["Uncategorized"], which would
+    # produce a meaningless "Uncategorized: 100%" section — suppress that case.
+    meaningful_categories = [c for c in activity.categories if c.category != ["Uncategorized"]]
+    if meaningful_categories:
         lines.append("### Time by Category")
         for cat in activity.categories[:12]:  # Top 12 categories
             pct = (
