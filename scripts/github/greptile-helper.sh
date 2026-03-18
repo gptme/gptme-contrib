@@ -273,7 +273,9 @@ trigger)
                 exit 0
             fi
             echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (score < 5/5 + new commits)..."
-            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@greptileai review" 2>/dev/null \
+            # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
+            # separate 5000/hour quota that's rarely exhausted.
+            gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null \
                 && echo "  [greptile] Re-triggered successfully." \
                 || echo "  [greptile] Trigger failed (non-fatal)."
         else
