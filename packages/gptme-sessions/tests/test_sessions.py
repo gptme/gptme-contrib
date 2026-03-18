@@ -5696,3 +5696,85 @@ def test_extract_signals_cc_no_journal_paths_empty():
     sigs = extract_signals_cc(msgs)
     assert sigs["journal_paths"] == []
     assert len(sigs["file_writes"]) == 1
+
+
+def test_extract_signals_cc_bash_heredoc_journal_path(tmp_path: Path):
+    """CC Bash tool: cat heredoc to journal path is detected in journal_paths."""
+    journal_file = tmp_path / "journal" / "2026-03-18" / "session.md"
+    journal_file.parent.mkdir(parents=True)
+    journal_file.write_text("entry")
+    journal_path = str(journal_file)
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-18T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": f"cat >> {journal_path} << 'EOF'\n## Entry\nEOF"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["journal_paths"] == [journal_path]
+    assert sigs["file_writes"] == []
+
+
+def test_extract_signals_cc_bash_heredoc_nonexistent_journal_skipped(tmp_path: Path):
+    """CC Bash tool: journal path that doesn't exist on disk is skipped (false positive guard)."""
+    nonexistent = str(tmp_path / "journal" / "2026-03-18" / "session.md")
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-18T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": f"cat >> {nonexistent} << 'EOF'\n## Entry\nEOF"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["journal_paths"] == []
+
+
+def test_extract_signals_cc_bash_escaped_date_expansion(tmp_path: Path):
+    """CC Bash tool: escaped \\$(date +%Y-%m-%d) in heredoc path is resolved correctly."""
+    journal_dir = tmp_path / "journal" / "2026-03-18"
+    journal_dir.mkdir(parents=True)
+    journal_file = journal_dir / "session.md"
+    journal_file.write_text("entry")
+    journal_path_template = str(tmp_path / "journal" / r"\$(date +%Y-%m-%d)" / "session.md")
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-18T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {
+                            "command": f"cat >> {journal_path_template} << 'EOF'\n## Entry\nEOF"
+                        },
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Escaped \$(date +%Y-%m-%d) should be resolved to 2026-03-18
+    assert sigs["journal_paths"] == [str(journal_file)]
