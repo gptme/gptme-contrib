@@ -638,9 +638,9 @@ check_notifications() {
             notif_id=$(echo "$item" | jq -r '.id')
             state_file="$STATE_DIR/notif-${notif_id}.state"
             if [ ! -f "$state_file" ]; then
-                touch "$state_file"
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
+                    touch "$state_file"
                     # Strip the id field before emitting (consumer doesn't need it)
                     echo "$item" | jq -c 'del(.id)'
                 fi

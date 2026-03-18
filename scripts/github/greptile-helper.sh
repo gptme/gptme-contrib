@@ -301,13 +301,13 @@ trigger)
             fi
         fi
         echo "  [greptile] Triggering @greptileai review on $REPO#$PR_NUMBER..."
-        gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@greptileai review" 2>/dev/null \
+        gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null \
             && echo "  [greptile] Triggered successfully." \
             || echo "  [greptile] Trigger failed (non-fatal)."
         ;;
     "stale")
         echo "  [greptile] Triggering @greptileai review on $REPO#$PR_NUMBER (stale trigger)..."
-        gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@greptileai review" 2>/dev/null \
+        gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null \
             && echo "  [greptile] Triggered successfully." \
             || echo "  [greptile] Trigger failed (non-fatal)."
         ;;
