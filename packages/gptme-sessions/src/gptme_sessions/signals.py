@@ -361,11 +361,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             if "/journal/" not in jpath:
                                 continue
                             # Resolve common shell date expansions using
-                            # trajectory timestamps (more reliable than wall clock)
+                            # trajectory timestamps (more reliable than wall clock).
+                            # Handle both $(date ...) and \$(date ...) (escaped in heredocs).
                             if "$(" in jpath and timestamps:
                                 ts = max(timestamps)
-                                jpath = jpath.replace("$(date +%Y-%m-%d)", ts.strftime("%Y-%m-%d"))
-                                jpath = jpath.replace("$(date +%H%M)", ts.strftime("%H%M"))
+                                for pattern_str, replacement in [
+                                    ("$(date +%Y-%m-%d)", ts.strftime("%Y-%m-%d")),
+                                    ("$(date +%H%M)", ts.strftime("%H%M")),
+                                ]:
+                                    jpath = jpath.replace("\\" + pattern_str, replacement)
+                                    jpath = jpath.replace(pattern_str, replacement)
                             # If unresolved ${VAR} remains, glob for a match
                             if "${" in jpath:
                                 import glob as _glob
@@ -382,6 +387,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                     continue  # no match found
                             elif "$(" in jpath:
                                 continue  # unresolved command substitution
+                            # Only include paths that exist on disk — avoids false
+                            # positives from debug/inspect commands that print templates
+                            if not os.path.isfile(jpath):
+                                continue
                             journal_paths.append(jpath)
             if step_has_tool:
                 steps += 1
