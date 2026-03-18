@@ -454,17 +454,20 @@ check_greptile_scores() {
         pr_title=$(echo "$pr_data" | jq -r '.title')
 
         # Fetch issue comments and find Greptile review comment with a score.
+        # Uses --paginate to handle PRs with >30 comments (default page size).
         # Greptile's bot username contains "greptile" (case-insensitive).
         # Look for "Score: N/5" pattern, anchored to avoid matching prose/flowcharts.
+        # The jq `capture` returns null when no match — we filter that explicitly.
         local greptile_score
         greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
-            --jq '
+            --paginate --jq '
                 [.[] | select(.user.login | test("greptile"; "i"))] | last |
-                .body // "" | capture("Score: (?<n>[0-9])/5") | .n
+                .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
             ' 2>/dev/null || true)
 
         # No Greptile review or no score found — skip
-        [ -z "$greptile_score" ] && continue
+        # Guard against both empty string and literal "null" from jq
+        [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
 
         # Score 5 = clean — nothing to do
         [ "$greptile_score" -ge 5 ] 2>/dev/null && continue
@@ -493,16 +496,20 @@ check_greptile_scores() {
             last_timestamp=$(echo "$last_state" | cut -d: -f2)
             last_sha=$(echo "$last_state" | cut -d: -f3)
 
-            # Same score, same HEAD, within cooldown — skip
-            local elapsed=$(( now - last_timestamp ))
-            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ] && [ "$elapsed" -lt "$cooldown_seconds" ]; then
-                continue
-            fi
-
-            # Score unchanged and no new commits — skip (regardless of cooldown)
+            # Same score and same HEAD — check cooldown
             if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ]; then
-                continue
+                local elapsed=$(( now - last_timestamp ))
+                if [ "$elapsed" -lt "$cooldown_seconds" ]; then
+                    # Within cooldown — skip
+                    continue
+                fi
+                # Cooldown expired — re-emit to nag (score still low, no fix attempted)
             fi
+            # Otherwise: score changed or new commits pushed — always re-emit
+        else
+            # First time seeing this PR — seed state, don't report
+            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+            continue
         fi
 
         # Record state and emit
