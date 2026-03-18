@@ -66,7 +66,7 @@
 #   avoid redundant sessions investigating the same PR/issue independently.
 #
 #   Merge readiness: Finds PRs with CLEAN mergeStateStatus, MERGEABLE status,
-#   and acceptable Greptile score (>= 4 or no review). Unlike other checks,
+#   and acceptable Greptile score (>= 5 or no review). Unlike other checks,
 #   first-time discovery DOES emit immediately — merge-ready PRs are actionable.
 #   State-tracked with 12-hour cooldown; re-emits on HEAD SHA change.
 #
@@ -530,7 +530,7 @@ check_greptile_scores() {
 }
 
 # Find PRs that are ready to merge: CI green, no conflicts, and Greptile score
-# is acceptable (>= 4/5, or no Greptile review at all for simple PRs).
+# is acceptable (>= 5/5, or no Greptile review at all for simple PRs).
 #
 # Unlike most checks, first-time discovery DOES emit — a merge-ready PR should
 # be acted on immediately rather than silently seeded.
@@ -539,8 +539,8 @@ check_greptile_scores() {
 #   Cooldown: 12 hours — merge decisions shouldn't be nagged frequently.
 #   Re-emits when HEAD SHA changes (new commits may change merge readiness).
 #
-# API cost: 1 REST call per qualifying PR (issue comments endpoint for Greptile
-# score check). Only called for PRs with CLEAN mergeStateStatus to minimize cost.
+# API cost: Zero additional API calls. Reads Greptile score from the state file
+# written by check_greptile_scores() instead of re-fetching issue comments.
 check_merge_ready() {
     local repo=$1
     local prs=$2
@@ -557,17 +557,17 @@ check_merge_ready() {
         head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
         [ -z "$head_sha" ] && head_sha="unknown"
 
-        # Check Greptile score — must be >= 4 or absent (no review = simple PR, OK to merge)
-        local greptile_score
-        greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
-            --paginate --jq '
-                [.[] | select(.user.login | test("greptile"; "i"))] | last |
-                .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
-            ' 2>/dev/null | tail -1 || true)
-
-        # If Greptile reviewed and score < 4, not merge-ready
-        if [ -n "$greptile_score" ] && [ "$greptile_score" != "null" ]; then
-            [ "$greptile_score" -lt 4 ] 2>/dev/null && continue
+        # Check Greptile score from state file (written by check_greptile_scores).
+        # No API call needed — reuse the score already fetched.
+        # If no state file exists, there's no Greptile review — OK to merge.
+        local greptile_state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+        local greptile_score=""
+        if [ -f "$greptile_state_file" ]; then
+            greptile_score=$(cut -d: -f1 < "$greptile_state_file")
+            # Must be perfect score (>= 5) to be merge-ready
+            if [ -n "$greptile_score" ] && [ "$greptile_score" -lt 5 ] 2>/dev/null; then
+                continue
+            fi
         fi
 
         # State tracking with cooldown
