@@ -58,6 +58,11 @@
 #   per-item sessions should group items by repo#number before dispatching to
 #   avoid redundant sessions investigating the same PR/issue independently.
 #
+#   API efficiency: PR data is fetched once per repo via fetch_pr_data() and
+#   shared across check_pr_updates, check_ci_failures, and check_merge_conflicts.
+#   This reduces gh pr list calls from 3N to N (where N = number of repos).
+#   The repo list from discover_repos() is cached for 1 hour.
+#
 #   Subshell note: Several checks pipe into `while read` loops, which run in
 #   subshells. Variable modifications inside these loops don't propagate to the
 #   parent. This is fine because output is captured via stdout, not variables.
@@ -148,8 +153,36 @@ emit_item() {
 }
 
 discover_repos() {
-    gh repo list "$ORG" --limit 50 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null || true
+    # Cache repo list for 1 hour — org membership rarely changes
+    local cache_file="$STATE_DIR/repo-list-${ORG}.cache"
+    local cache_max_age=3600  # seconds
+
+    if [ -f "$cache_file" ]; then
+        local cache_age
+        cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0) ))
+        if [ "$cache_age" -lt "$cache_max_age" ]; then
+            cat "$cache_file"
+            for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
+            return
+        fi
+    fi
+
+    local repos
+    repos=$(gh repo list "$ORG" --limit 50 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null || true)
+    if [ -n "$repos" ]; then
+        echo "$repos" > "$cache_file"
+    fi
+    echo "$repos"
     for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
+}
+
+# Fetch all PR data once per repo, with all fields needed by every check function.
+# This replaces 3 separate `gh pr list` calls with a single one.
+fetch_pr_data() {
+    local repo=$1
+    gh pr list --repo "$repo" --author "$AUTHOR" --state open \
+        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus \
+        2>/dev/null || echo "[]"
 }
 
 # Check whether the last activity on a PR was from someone worth responding to.
@@ -216,12 +249,10 @@ has_actionable_update() {
 
 # Check for PR updates since last check (state-tracked via updatedAt timestamps)
 # Filters out self-triggered updates and comments directed at others.
-# Fetches comments + latestReviews in the same query to avoid extra API calls.
+# Accepts pre-fetched PR data from fetch_pr_data() to avoid redundant API calls.
 check_pr_updates() {
     local repo=$1
-    local prs
-    prs=$(gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,updatedAt,comments,latestReviews 2>/dev/null || echo "[]")
+    local prs=$2
     [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
@@ -252,11 +283,10 @@ check_pr_updates() {
 
 # Check for CI failures on open PRs (state-tracked — only triggers on CI state change)
 # Tracks a hash of check conclusions so the same persistent failure doesn't re-trigger.
+# Accepts pre-fetched PR data from fetch_pr_data() to avoid redundant API calls.
 check_ci_failures() {
     local repo=$1
-    local prs
-    prs=$(gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,statusCheckRollup 2>/dev/null || echo "[]")
+    local prs=$2
     [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
@@ -363,11 +393,10 @@ check_master_ci() {
 
 # Check for merge conflicts on open PRs (DIRTY or CONFLICTING status).
 # Intentionally NOT state-tracked — conflicts should nag every run until resolved.
+# Accepts pre-fetched PR data from fetch_pr_data() to avoid redundant API calls.
 check_merge_conflicts() {
     local repo=$1
-    local prs
-    prs=$(gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,mergeable,mergeStateStatus 2>/dev/null || echo "[]")
+    local prs=$2
     [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
 
     echo "$prs" | jq -c '.[] | select(.mergeStateStatus == "DIRTY" or .mergeable == "CONFLICTING")' | while read -r pr_data; do
@@ -426,10 +455,13 @@ all_repos=$(discover_repos)
 all_items=""
 
 for repo in $all_repos; do
-    items=$(check_pr_updates "$repo" 2>/dev/null || true)
+    # Fetch all PR data once per repo (replaces 3 separate gh pr list calls)
+    pr_data=$(fetch_pr_data "$repo")
+
+    items=$(check_pr_updates "$repo" "$pr_data" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
 
-    items=$(check_ci_failures "$repo" 2>/dev/null || true)
+    items=$(check_ci_failures "$repo" "$pr_data" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
 
     items=$(check_assigned_issues "$repo" 2>/dev/null || true)
@@ -438,7 +470,7 @@ for repo in $all_repos; do
     items=$(check_master_ci "$repo" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
 
-    items=$(check_merge_conflicts "$repo" 2>/dev/null || true)
+    items=$(check_merge_conflicts "$repo" "$pr_data" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
 done
 
