@@ -28,7 +28,7 @@ from .discovery import (
     parse_gptme_config,
     session_date_from_path,
 )
-from .post_session import VALID_CONTEXT_TIERS, post_session
+from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
 from .record import SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
@@ -1171,6 +1171,13 @@ def sync(
     type=click.Choice(sorted(VALID_CONTEXT_TIERS)),
     help="Context tier used in this session (standard, extended, large, massive)",
 )
+@click.option(
+    "--ab-group",
+    default=None,
+    type=click.Choice(sorted(VALID_AB_GROUPS)),
+    help="A/B experiment group (control or treatment)",
+)
+@click.option("--tier-version", default=None, help="Context tier config version for this session")
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
 @click.pass_context
 def post_session_cmd(
@@ -1189,6 +1196,8 @@ def post_session_cmd(
     journal_path: str | None,
     session_id: str | None,
     context_tier: str | None,
+    ab_group: str | None,
+    tier_version: str | None,
     as_json: bool,
 ) -> None:
     """Record a completed session: extract signals, determine outcome, append record."""
@@ -1210,6 +1219,8 @@ def post_session_cmd(
         journal_path=journal_path,
         session_id=session_id,
         context_tier=context_tier,
+        ab_group=ab_group,
+        tier_version=tier_version,
     )
     if as_json:
         click.echo(
