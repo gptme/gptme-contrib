@@ -71,14 +71,16 @@ PY
 # IMPORTANT: Uses updated_at (not created_at) because Greptile updates its review
 # comment in-place on re-reviews. Using created_at caused infinite re-trigger loops
 # since commits always appeared "new" relative to the original post date.
-# Cache review info to avoid redundant API calls (called up to 3× per invocation)
-_CACHED_REVIEW_INFO=""
+# Cache review info via temp file to avoid redundant API calls.
+# Shell variable caching doesn't work here because callers use $() subshells.
+_REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
+trap 'rm -f "$_REVIEW_CACHE_FILE"' EXIT
 _greptile_review_info() {
-    if [ -n "$_CACHED_REVIEW_INFO" ]; then
-        echo "$_CACHED_REVIEW_INFO"
+    if [ -f "$_REVIEW_CACHE_FILE" ]; then
+        cat "$_REVIEW_CACHE_FILE"
         return
     fi
-    _CACHED_REVIEW_INFO=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
         --jq '[.[] | select(.user.login | test("greptile"; "i"))] | sort_by(.updated_at) | last |
               if . == null then {"has_review": false, "score": null, "reviewed_at": null}
               else {
@@ -86,8 +88,8 @@ _greptile_review_info() {
                 "reviewed_at": .updated_at,
                 "score": (.body | capture("Score: (?<n>[0-9])/5") | .n | tonumber? // null)
               }
-              end' 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}')
-    echo "$_CACHED_REVIEW_INFO"
+              end' 2>/dev/null > "$_REVIEW_CACHE_FILE" || echo '{"has_review": false, "score": null, "reviewed_at": null}' > "$_REVIEW_CACHE_FILE"
+    cat "$_REVIEW_CACHE_FILE"
 }
 
 # --- Helper: check if greptile-apps[bot] has already reviewed ---
@@ -222,7 +224,7 @@ trigger)
     # atomic: the second session waits for or immediately loses the lock, then sees the
     # first session's comment via the 15-min age guard and skips.
     # Use md5sum (Linux) or md5 (macOS) for lock file naming
-    _LOCK_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5) | cut -c1-12)
+    _LOCK_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5 -q) | cut -c1-12)
     _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-${_LOCK_HASH}.lock"
     exec 9>"$_LOCK_FILE"
     # flock: use flock if available, otherwise skip locking (macOS without GNU coreutils)
