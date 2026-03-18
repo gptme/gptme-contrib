@@ -437,7 +437,7 @@ check_merge_conflicts() {
 # code fixes, even if no other activity has occurred.
 #
 # API cost: 1 REST call per open PR (issue comments endpoint), ONLY when the
-# cached score is stale (> 30 min old) or a new HEAD SHA is detected. On quiet
+# cached score is stale (> 60 min old) or a new HEAD SHA is detected. On quiet
 # runs where no PRs have new commits, 0 API calls are made.
 # HEAD SHA comes from fetch_pr_data() (headRefOid) — no extra API call needed.
 #
@@ -446,8 +446,8 @@ check_merge_conflicts() {
 #   Re-emits when: (a) first time seeing a low score, or (b) new commits pushed
 #   since last emission (fix attempt may have changed things).
 #   Cooldown: 1 hour — won't re-emit the same PR within that window.
-#   Score cache TTL: 30 min — re-fetches after this window even if HEAD unchanged
-#   (covers manual @greptileai triggers via greptile-helper.sh).
+#   Score cache TTL: 60 min (= cooldown) — re-fetches after this window even if
+#   HEAD unchanged (covers manual @greptileai triggers via greptile-helper.sh).
 #
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
@@ -459,7 +459,7 @@ check_greptile_scores() {
 
     local repo_safe="${repo//\//-}"
     local cooldown_seconds=3600  # 1 hour
-    local fetch_cache_ttl=1800   # 30 min — skip API call if score is cached for current HEAD SHA
+    local fetch_cache_ttl=3600   # 60 min (= cooldown) — skip API call if score is cached for current HEAD SHA
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
         local pr_number pr_title
