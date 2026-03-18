@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal, overload
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "github" / "greptile-helper.sh"
@@ -118,6 +119,24 @@ def _make_commit(date: str) -> dict:
             "message": "test commit",
         },
     }
+
+
+@overload
+def _run_helper(
+    command: str,
+    fixture: dict[str, object],
+    *,
+    capture_gh_log: Literal[True],
+) -> tuple[subprocess.CompletedProcess[str], str]: ...
+
+
+@overload
+def _run_helper(
+    command: str,
+    fixture: dict[str, object],
+    *,
+    capture_gh_log: Literal[False] = ...,
+) -> subprocess.CompletedProcess[str]: ...
 
 
 def _run_helper(
