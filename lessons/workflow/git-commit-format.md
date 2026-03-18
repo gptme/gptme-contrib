@@ -20,7 +20,6 @@ When creating git commits in any workspace or repository.
 Observable signals indicating incorrect commit format:
 - Commit message missing type prefix (feat, fix, docs, etc.)
 - Vague descriptions ("update code", "fix stuff")
-- Multiple unrelated changes in single commit
 - Missing scope when relevant (e.g., "fix: bug" instead of "fix(api): bug")
 
 ## Pattern
@@ -49,6 +48,7 @@ Following this pattern ensures:
 
 ## Related
 - [Conventional Commits Specification](https://www.conventionalcommits.org/)
+- [git-workflow.md](./git-workflow.md) - Broader commit hygiene and branch practices
 
 ## Origin
 Extracted from LOO effectiveness analysis in Bob's workspace (Δ=+0.162 session reward, p<0.001).
