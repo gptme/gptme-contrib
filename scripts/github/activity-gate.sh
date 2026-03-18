@@ -619,7 +619,13 @@ check_notifications() {
         2>/dev/null) || return 0
     [ -z "$notifs" ] && return 0
 
+    # Cap emitted notifications per run to avoid flooding the dispatcher when
+    # a filter change (e.g. adding new reasons) unlocks a large backlog.
+    # Remaining items stay unprocessed and will be picked up on the next run.
+    local max_notif_per_run=5
+
     if [ "$FORMAT" = "jsonl" ]; then
+        local _notif_emitted=0
         echo "$notifs" | jq -c '{
             id: .id,
             type: "notification",
@@ -633,8 +639,11 @@ check_notifications() {
             state_file="$STATE_DIR/notif-${notif_id}.state"
             if [ ! -f "$state_file" ]; then
                 touch "$state_file"
-                # Strip the id field before emitting (consumer doesn't need it)
-                echo "$item" | jq -c 'del(.id)'
+                _notif_emitted=$((_notif_emitted + 1))
+                if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
+                    # Strip the id field before emitting (consumer doesn't need it)
+                    echo "$item" | jq -c 'del(.id)'
+                fi
             fi
         done
     else
