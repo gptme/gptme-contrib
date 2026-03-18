@@ -44,6 +44,13 @@ test(tasks): add integration tests for task state machine
 chore: update dependency lockfile
 ```
 
+**Breaking changes** (use `!` suffix and/or `BREAKING CHANGE:` footer):
+```text
+feat(api)!: rename /v1/query to /v1/ask
+
+BREAKING CHANGE: /v1/query endpoint removed; use /v1/ask instead.
+```
+
 **With body** (when context helps):
 ```text
 fix(api): handle rate limit errors gracefully

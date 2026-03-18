@@ -28,18 +28,19 @@ When working across multiple repositories. If you `cd` into an external repo (e.
 ## Pattern
 ```bash
 # ❌ Wrong: relative path, depends on cwd
-echo "..." >> journal/2025-10-14/session.md  # creates in current repo!
+echo "..." >> journal/2025-10-14/session.md  # silently writes to current repo!
 
 # ❌ Wrong: git rev-parse resolves to *current* git root, not workspace
-WORKSPACE=$(git rev-parse --show-toplevel)
-echo "..." >> "$WORKSPACE/journal/..."  # fails when cwd is external repo
+REPO_ROOT=$(git rev-parse --show-toplevel)
+echo "..." >> "$REPO_ROOT/journal/..."  # silently writes to external repo — no error, data goes to wrong location
 
 # ✅ Correct: hardcoded absolute path always works
 echo "..." >> /home/agent/workspace/journal/2025-10-14/session.md
 
 # ✅ Correct: use WORKSPACE env var set at session start
+# Guard against unset: if WORKSPACE is empty, paths expand to /journal/... (wrong!)
+: "${WORKSPACE:?WORKSPACE is not set — export it at session start: export WORKSPACE=/home/agent/workspace}"
 echo "..." >> "$WORKSPACE/journal/2025-10-14/session.md"
-# where WORKSPACE is set once at startup: WORKSPACE=/home/agent/workspace
 ```
 
 For write/save tools, always provide the full absolute path:
