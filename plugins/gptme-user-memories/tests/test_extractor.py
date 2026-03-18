@@ -189,6 +189,33 @@ class TestGetCCUserMessages:
         result = get_cc_user_messages(cc_file)
         assert result == ""
 
+    def test_mixed_content_extracts_text(self, tmp_path: Path) -> None:
+        """Mixed tool_result + text content: text parts should be extracted."""
+        cc_file = _make_cc_jsonl(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "t1",
+                                "content": "ok",
+                            },
+                            {
+                                "type": "text",
+                                "text": "Thanks, that worked great!",
+                            },
+                        ],
+                    },
+                }
+            ],
+        )
+        result = get_cc_user_messages(cc_file)
+        assert "Thanks, that worked great!" in result
+
     def test_skips_non_user_type(self, tmp_path: Path) -> None:
         cc_file = _make_cc_jsonl(
             tmp_path,

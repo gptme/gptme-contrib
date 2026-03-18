@@ -154,18 +154,15 @@ def get_cc_user_messages(jsonl_file: Path) -> str:
                     if msg.get("type") != "user":
                         continue
                     content = msg.get("message", {}).get("content", "")
-                    # Skip tool results
+                    # Skip pure tool-result messages; extract text from mixed-content
                     if isinstance(content, list):
-                        if any(
-                            isinstance(p, dict) and p.get("type") == "tool_result"
-                            for p in content
-                        ):
-                            continue
                         text_parts = [
                             p.get("text", "")
                             for p in content
                             if isinstance(p, dict) and p.get("type") == "text"
                         ]
+                        if not text_parts:
+                            continue  # pure tool-result message, no user text
                         content = " ".join(text_parts)
                     content = str(content).strip()
                     if content and len(content) > 10:
@@ -213,6 +210,9 @@ def extract_facts(
 
     api_key = _get_anthropic_api_key()
     if not api_key:
+        logger.warning(
+            "user_memories: no ANTHROPIC_API_KEY found in env or config.toml — skipping extraction"
+        )
         return []
 
     client = anthropic.Anthropic(api_key=api_key)
