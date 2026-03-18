@@ -82,6 +82,7 @@ def _build_model_breakdown(session_stats):  # type: ignore[no-untyped-def]
             model=mb.model,
             harness=mb.harness,
             sessions=mb.sessions,
+            steps=mb.steps,
             tokens=mb.total_tokens,
             cost=mb.cost,
         )

@@ -9,6 +9,7 @@ from gptme_activity_summary.session_data import (
     SessionInfo,
     SessionStats,
     _extract_duration,
+    _extract_model_from_eval_dirname,
     fetch_session_stats,
     fetch_session_stats_range,
     format_sessions_for_prompt,
@@ -181,6 +182,53 @@ def test_merge_session_stats():
     assert breakdown["opus"].sessions == 3
     assert breakdown["opus"].input_tokens == 1300
     assert breakdown["sonnet"].sessions == 1
+
+
+def test_extract_model_from_eval_dirname():
+    """Test model extraction from gptme eval session dirnames."""
+    assert (
+        _extract_model_from_eval_dirname(
+            "2026-03-17-gptme-evals-anthropic--claude-haiku-4-5-markdown-1a97c271"
+        )
+        == "anthropic/claude-haiku-4-5"
+    )
+    assert (
+        _extract_model_from_eval_dirname(
+            "2026-03-17-gptme-evals-openrouter--google--gemini-2.0-flash-001-tool-abcd1234"
+        )
+        == "openrouter/google/gemini-2.0-flash-001"
+    )
+    assert (
+        _extract_model_from_eval_dirname(
+            "2026-03-17-gptme-evals-openai-subscription--gpt-5.4-xml-deadbeef"
+        )
+        == "openai-subscription/gpt-5.4"
+    )
+    # Non-eval dirnames should return empty
+    assert _extract_model_from_eval_dirname("2026-03-17-climbing-crazy-jellyfish") == ""
+
+
+def test_merge_session_stats_steps():
+    """Test that merge_session_stats merges steps correctly."""
+    a = SessionStats(
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 1),
+        session_count=1,
+        sessions=[SessionInfo(name="s1", model="opus", steps=10)],
+    )
+    a._model_data["opus"] = ModelBreakdown(model="opus", sessions=1, steps=10)
+
+    b = SessionStats(
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 1, 2),
+        session_count=1,
+        sessions=[SessionInfo(name="s2", model="opus", steps=5)],
+    )
+    b._model_data["opus"] = ModelBreakdown(model="opus", sessions=1, steps=5)
+
+    merged = merge_session_stats(a, b)
+    breakdown = {mb.model: mb for mb in merged.model_breakdown}
+    assert breakdown["opus"].steps == 15
 
 
 def test_format_sessions_header():
