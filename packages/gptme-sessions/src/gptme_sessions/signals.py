@@ -15,6 +15,7 @@ ground truth: every tool call, every error, every file write is recorded.
 
 from __future__ import annotations
 
+import glob as _glob
 import json
 import os
 import re
@@ -364,22 +365,24 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             # trajectory timestamps (more reliable than wall clock).
                             # Handle both $(date ...) and \$(date ...) (escaped in heredocs).
                             if "$(" in jpath and timestamps:
-                                ts = max(timestamps)
+                                latest_ts = max(timestamps)
                                 for pattern_str, replacement in [
-                                    ("$(date +%Y-%m-%d)", ts.strftime("%Y-%m-%d")),
-                                    ("$(date +%H%M)", ts.strftime("%H%M")),
+                                    ("$(date +%Y-%m-%d)", latest_ts.strftime("%Y-%m-%d")),
+                                    ("$(date +%H%M)", latest_ts.strftime("%H%M")),
                                 ]:
                                     jpath = jpath.replace("\\" + pattern_str, replacement)
                                     jpath = jpath.replace(pattern_str, replacement)
-                            # If unresolved ${VAR} remains, glob for a match
+                            # If unresolved ${VAR} remains, glob for a match.
+                            # Sort by proximity to session end time (not recency)
+                            # to avoid picking a different session's journal.
                             if "${" in jpath:
-                                import glob as _glob
-
                                 pattern = re.sub(r"\$\{[^}]+\}", "*", jpath)
+                                session_end = max(timestamps).timestamp() if timestamps else 0
                                 matches = sorted(
                                     _glob.glob(pattern),
-                                    key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-                                    reverse=True,
+                                    key=lambda p: abs(os.path.getmtime(p) - session_end)
+                                    if os.path.exists(p)
+                                    else float("inf"),
                                 )
                                 if matches:
                                     jpath = matches[0]
