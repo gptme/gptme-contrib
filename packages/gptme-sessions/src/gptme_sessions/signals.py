@@ -348,9 +348,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # No else: tool calls without extractable paths are not counted as
                     # file writes — same rationale as the gptme path above.
                 elif tool == "Bash":
-                    # Parse Bash commands for journal writes via cat/tee redirects.
+                    # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
                     # rather than the Write tool, so Write/Edit alone misses them.
+                    # Note: tee redirects are not currently handled (intentional scope limit).
                     cmd = item.get("input", {}).get("command", "")
                     if "/journal/" in cmd:
                         for m in re.finditer(
