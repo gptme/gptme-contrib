@@ -165,7 +165,11 @@ def test_fresh_cache_skips_api_call() -> None:
         ts = int(time.time()) - 300
         _state_file(state_dir).write_text(f"4:{ts}:{TEST_HEAD_SHA}")
 
-        _result, call_count = _run_gate(tmp, state_dir)
+        result, call_count = _run_gate(tmp, state_dir)
+        assert result.returncode in (
+            0,
+            1,
+        ), f"Script crashed (rc={result.returncode}): {result.stderr}"
         assert (
             call_count == 0
         ), f"Expected 0 API calls (cache hit, same SHA, fresh), got {call_count}"
@@ -182,24 +186,32 @@ def test_new_head_sha_calls_api() -> None:
         ts = int(time.time()) - 300
         _state_file(state_dir).write_text(f"4:{ts}:oldsha999")
 
-        _result, call_count = _run_gate(tmp, state_dir, head_sha=TEST_HEAD_SHA)
+        result, call_count = _run_gate(tmp, state_dir, head_sha=TEST_HEAD_SHA)
+        assert result.returncode in (
+            0,
+            1,
+        ), f"Script crashed (rc={result.returncode}): {result.stderr}"
         assert (
             call_count >= 1
         ), f"Expected API call (cache miss: SHA mismatch), got {call_count}"
 
 
 def test_stale_cache_calls_api() -> None:
-    """Cache miss: same head_sha but timestamp > 30 min → re-fetch from API."""
+    """Cache miss: same head_sha but timestamp > 60 min → re-fetch from API."""
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         state_dir = tmp / "state"
         state_dir.mkdir()
 
-        # Pre-populate: same head_sha, but 35 minutes ago (> 30-min TTL)
-        ts = int(time.time()) - (35 * 60)
+        # Pre-populate: same head_sha, but 65 minutes ago (> 60-min TTL)
+        ts = int(time.time()) - (65 * 60)
         _state_file(state_dir).write_text(f"4:{ts}:{TEST_HEAD_SHA}")
 
-        _result, call_count = _run_gate(tmp, state_dir)
+        result, call_count = _run_gate(tmp, state_dir)
+        assert result.returncode in (
+            0,
+            1,
+        ), f"Script crashed (rc={result.returncode}): {result.stderr}"
         assert (
             call_count >= 1
         ), f"Expected API call (cache miss: stale TTL), got {call_count}"
@@ -213,7 +225,11 @@ def test_no_state_file_calls_api() -> None:
         state_dir.mkdir()
         # No state file — first-time encounter
 
-        _result, call_count = _run_gate(tmp, state_dir)
+        result, call_count = _run_gate(tmp, state_dir)
+        assert result.returncode in (
+            0,
+            1,
+        ), f"Script crashed (rc={result.returncode}): {result.stderr}"
         assert call_count >= 1, f"Expected API call (no state file), got {call_count}"
         # State file should be seeded now
         assert _state_file(
