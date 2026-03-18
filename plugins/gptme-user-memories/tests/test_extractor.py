@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from gptme_user_memories.extractor import (
+    SENTINEL_FILENAME,
     _get_anthropic_api_key,
     get_cc_user_messages,
     get_user_messages,
@@ -15,6 +16,8 @@ from gptme_user_memories.extractor import (
     is_cc_autonomous_session,
     load_existing_memories,
     merge_facts,
+    process_cc_logfile,
+    process_logdir,
     run_batch,
     save_memories,
 )
@@ -480,3 +483,237 @@ class TestRunBatch:
             f"Expected 2 dirs processed, got {len(facts_extracted)}. "
             "The break-vs-continue bug may have been reintroduced."
         )
+
+
+# ---------------------------------------------------------------------------
+# process_logdir
+# ---------------------------------------------------------------------------
+
+
+class TestProcessLogdir:
+    def _make_logdir(self, tmp_path: Path, messages: list[dict]) -> Path:
+        log_dir = tmp_path / "session1"
+        log_dir.mkdir()
+        (log_dir / "conversation.jsonl").write_text(
+            "\n".join(json.dumps(m) for m in messages) + "\n"
+        )
+        return log_dir
+
+    _LONG_MSG = "I work as a software engineer at Acme Corp and have been coding for over ten years."
+
+    def test_returns_facts_for_personal_session(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": self._LONG_MSG}],
+        )
+        with patch(
+            "gptme_user_memories.extractor.extract_facts",
+            return_value=["Works at Acme Corp"],
+        ):
+            facts = process_logdir(log_dir, dry_run=True)
+        assert facts == ["Works at Acme Corp"]
+
+    def test_skips_sentinel_exists(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": self._LONG_MSG}],
+        )
+        (log_dir / SENTINEL_FILENAME).touch()
+        facts = process_logdir(log_dir)
+        assert facts == []
+
+    def test_force_ignores_sentinel(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": self._LONG_MSG}],
+        )
+        (log_dir / SENTINEL_FILENAME).touch()
+        with patch(
+            "gptme_user_memories.extractor.extract_facts",
+            return_value=["Works at Acme Corp"],
+        ):
+            facts = process_logdir(log_dir, force=True, dry_run=True)
+        assert facts == ["Works at Acme Corp"]
+
+    def test_skips_autonomous_session(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [
+                {
+                    "role": "system",
+                    "content": "You are starting an autonomous work session.",
+                }
+            ],
+        )
+        facts = process_logdir(log_dir, dry_run=True)
+        assert facts == []
+
+    def test_skips_short_conversation(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": "ok"}],
+        )
+        facts = process_logdir(log_dir, dry_run=True)
+        assert facts == []
+
+    def test_touches_sentinel_on_success(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": self._LONG_MSG}],
+        )
+        with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
+            process_logdir(log_dir)
+        assert (log_dir / SENTINEL_FILENAME).exists()
+
+    def test_dry_run_does_not_touch_sentinel(self, tmp_path: Path) -> None:
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": self._LONG_MSG}],
+        )
+        with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
+            process_logdir(log_dir, dry_run=True)
+        assert not (log_dir / SENTINEL_FILENAME).exists()
+
+    def test_missing_conv_file_returns_empty(self, tmp_path: Path) -> None:
+        log_dir = tmp_path / "empty_session"
+        log_dir.mkdir()
+        facts = process_logdir(log_dir)
+        assert facts == []
+
+
+# ---------------------------------------------------------------------------
+# process_cc_logfile
+# ---------------------------------------------------------------------------
+
+
+class TestProcessCCLogfile:
+    _LONG_MSG = "I work as a software engineer at Acme Corp and have been coding for over ten years."
+
+    def _make_cc_file(self, tmp_path: Path, messages: list[dict]) -> Path:
+        jsonl_file = tmp_path / "session.jsonl"
+        jsonl_file.write_text("\n".join(json.dumps(m) for m in messages) + "\n")
+        return jsonl_file
+
+    def test_returns_facts_for_personal_session(self, tmp_path: Path) -> None:
+        jsonl_file = self._make_cc_file(
+            tmp_path,
+            [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
+        )
+        with patch(
+            "gptme_user_memories.extractor.extract_facts",
+            return_value=["Works at Acme Corp"],
+        ):
+            facts = process_cc_logfile(jsonl_file, dry_run=True)
+        assert facts == ["Works at Acme Corp"]
+
+    def test_skips_sentinel_exists(self, tmp_path: Path) -> None:
+        jsonl_file = self._make_cc_file(
+            tmp_path,
+            [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
+        )
+        jsonl_file.with_suffix(".memories-extracted").touch()
+        facts = process_cc_logfile(jsonl_file)
+        assert facts == []
+
+    def test_skips_autonomous_session(self, tmp_path: Path) -> None:
+        jsonl_file = self._make_cc_file(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "You are starting an autonomous work session.",
+                    },
+                }
+            ],
+        )
+        facts = process_cc_logfile(jsonl_file, dry_run=True)
+        assert facts == []
+
+    def test_touches_sentinel_on_success(self, tmp_path: Path) -> None:
+        jsonl_file = self._make_cc_file(
+            tmp_path,
+            [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
+        )
+        with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
+            process_cc_logfile(jsonl_file)
+        assert jsonl_file.with_suffix(".memories-extracted").exists()
+
+    def test_dry_run_does_not_touch_sentinel(self, tmp_path: Path) -> None:
+        jsonl_file = self._make_cc_file(
+            tmp_path,
+            [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
+        )
+        with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
+            process_cc_logfile(jsonl_file, dry_run=True)
+        assert not jsonl_file.with_suffix(".memories-extracted").exists()
+
+
+# ---------------------------------------------------------------------------
+# main (CLI entry point)
+# ---------------------------------------------------------------------------
+
+
+class TestMain:
+    def test_main_saves_new_facts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = tmp_path / "memories.md"
+        monkeypatch.setattr(
+            "sys.argv",
+            ["gptme-user-memories", "--output", str(output)],
+        )
+        with (
+            patch(
+                "gptme_user_memories.extractor.run_batch",
+                return_value=["Works at Acme Corp"],
+            ),
+            patch("gptme_user_memories.extractor.USER_MEMORIES_FILE", output),
+        ):
+            from gptme_user_memories.extractor import main
+
+            main()
+        assert output.exists()
+        assert "Works at Acme Corp" in output.read_text()
+
+    def test_main_dry_run_does_not_save(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:  # type: ignore[type-arg]
+        output = tmp_path / "memories.md"
+        monkeypatch.setattr(
+            "sys.argv",
+            ["gptme-user-memories", "--dry-run", "--output", str(output)],
+        )
+        with patch(
+            "gptme_user_memories.extractor.run_batch",
+            return_value=["Works at Acme Corp"],
+        ):
+            from gptme_user_memories.extractor import main
+
+            main()
+        assert not output.exists()
+        captured = capsys.readouterr()
+        assert "Works at Acme Corp" in captured.out
+
+    def test_main_no_facts_prints_message(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:  # type: ignore[type-arg]
+        output = tmp_path / "memories.md"
+        monkeypatch.setattr(
+            "sys.argv",
+            ["gptme-user-memories", "--output", str(output)],
+        )
+        with patch("gptme_user_memories.extractor.run_batch", return_value=[]):
+            from gptme_user_memories.extractor import main
+
+            main()
+        assert not output.exists()
+        captured = capsys.readouterr()
+        assert "No new facts" in captured.out

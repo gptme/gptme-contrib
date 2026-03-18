@@ -298,7 +298,8 @@ def process_logdir(
 ) -> list[str]:
     """Extract facts from a single gptme conversation log directory.
 
-    Returns list of new facts found (empty if session is autonomous or nothing found).
+    Returns list of new facts found (empty if session is autonomous, too short,
+    or already processed). Does NOT save to the memories file.
     """
     conv_file = logdir / "conversation.jsonl"
     if not conv_file.exists():
@@ -327,6 +328,40 @@ def process_logdir(
     return facts
 
 
+def process_cc_logfile(
+    jsonl_file: Path,
+    force: bool = False,
+    dry_run: bool = False,
+    model: str = DEFAULT_MODEL,
+) -> list[str]:
+    """Extract facts from a single Claude Code session JSONL file.
+
+    Returns list of new facts found (empty if session is autonomous, too short,
+    or already processed). Does NOT save to the memories file.
+    """
+    sentinel = jsonl_file.with_suffix(".memories-extracted")
+    if not force and sentinel.exists():
+        return []
+
+    if is_cc_autonomous_session(jsonl_file):
+        if not force and not dry_run:
+            sentinel.touch()
+        return []
+
+    text = get_cc_user_messages(jsonl_file)
+    if len(text) < 50:
+        if not force and not dry_run:
+            sentinel.touch()
+        return []
+
+    facts = extract_facts(text, model=model)
+
+    if not dry_run:
+        sentinel.touch()
+
+    return facts
+
+
 def run_batch(
     days: int = DEFAULT_DAYS,
     limit: int = 30,
@@ -336,7 +371,7 @@ def run_batch(
 ) -> list[str]:
     """Scan recent gptme and Claude Code sessions and extract user facts.
 
-    Returns list of all new facts found.
+    Returns list of all new facts found. Call save_memories() to persist them.
     """
     cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
     all_new_facts: list[str] = []
@@ -351,30 +386,14 @@ def run_batch(
                 continue
             if log_dir.stat().st_mtime < cutoff_ts:
                 break
-            conv_file = log_dir / "conversation.jsonl"
-            if not conv_file.exists():
+            if not (log_dir / "conversation.jsonl").exists():
                 continue
-            sentinel = log_dir / SENTINEL_FILENAME
-            if not force and sentinel.exists():
-                continue
-
-            if is_autonomous_session(conv_file):
-                if not force and not dry_run:
-                    sentinel.touch()
+            # Pre-check sentinel so sentinel-skipped sessions don't count toward limit
+            if not force and (log_dir / SENTINEL_FILENAME).exists():
                 continue
 
-            text = get_user_messages(conv_file)
-            if len(text) < 50:
-                if not force and not dry_run:
-                    sentinel.touch()
-                continue
-
-            facts = extract_facts(text, model=model)
+            facts = process_logdir(log_dir, force=force, dry_run=dry_run, model=model)
             all_new_facts.extend(facts)
-
-            if not dry_run:
-                sentinel.touch()
-
             processed += 1
             if processed >= limit:
                 break
@@ -397,27 +416,75 @@ def run_batch(
                     break
                 if jsonl_file.stat().st_mtime < cutoff_ts:
                     break  # files sorted newest-first; remaining are all stale
-                sentinel = jsonl_file.with_suffix(".memories-extracted")
-                if not force and sentinel.exists():
+                # Pre-check sentinel so sentinel-skipped sessions don't count toward limit
+                if not force and jsonl_file.with_suffix(".memories-extracted").exists():
                     continue
 
-                if is_cc_autonomous_session(jsonl_file):
-                    if not force and not dry_run:
-                        sentinel.touch()
-                    continue
-
-                text = get_cc_user_messages(jsonl_file)
-                if len(text) < 50:
-                    if not force and not dry_run:
-                        sentinel.touch()
-                    continue
-
-                facts = extract_facts(text, model=model)
+                facts = process_cc_logfile(
+                    jsonl_file, force=force, dry_run=dry_run, model=model
+                )
                 all_new_facts.extend(facts)
-
-                if not dry_run:
-                    sentinel.touch()
-
                 processed += 1
 
     return all_new_facts
+
+
+def main() -> None:
+    """CLI entry point for backfilling user memories from historical sessions."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Extract user facts from past gptme/Claude Code sessions and store them in user-memories.md.",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_DAYS,
+        help="How many days back to scan (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=30,
+        help="Max sessions to process per run (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Extract and print facts but don't save or touch sentinels",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-process sessions that already have a sentinel file",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=USER_MEMORIES_FILE,
+        help="Output memories file (default: %(default)s)",
+    )
+    args = parser.parse_args()
+
+    new_facts = run_batch(
+        days=args.days,
+        limit=args.limit,
+        force=args.force,
+        dry_run=args.dry_run,
+    )
+
+    if not new_facts:
+        print("No new facts found.")
+        return
+
+    if args.dry_run:
+        print(f"Dry run — would add up to {len(new_facts)} facts (before dedup):")
+        for fact in new_facts:
+            print(f"  - {fact}")
+        return
+
+    existing = load_existing_memories(args.output)
+    merged = merge_facts(existing, new_facts)
+    new_count = len(merged) - len(existing)
+    save_memories(args.output, merged)
+    print(f"Added {new_count} new facts (total: {len(merged)}) → {args.output}")
