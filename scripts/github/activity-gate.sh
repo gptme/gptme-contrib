@@ -480,8 +480,15 @@ check_greptile_scores() {
         # Guard against both empty string and literal "null" from jq
         [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
 
-        # Score 5 = clean — nothing to do
-        [ "$greptile_score" -ge 5 ] 2>/dev/null && continue
+        # Score 5 = clean — update state file (so check_merge_ready sees
+        # the perfect score instead of a stale sub-5 entry) and skip.
+        if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
+            local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+            local head_sha
+            head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
+            echo "${greptile_score}:$(date +%s):${head_sha}" > "$state_file"
+            continue
+        fi
 
         # Score >= 4 is minor, < 4 needs fix
         local item_type
