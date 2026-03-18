@@ -32,6 +32,7 @@ REPO="${2:-}"
 PR_NUMBER="${3:-}"
 TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
 ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
+MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cycle before backing off
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
@@ -147,9 +148,18 @@ _our_trigger_status() {
     # On API error: return "in-progress" (fail-safe) rather than "none" (fail-open),
     # to prevent rate-limit-caused spam. See: 2026-03-17 (root cause #1) and 2026-03-18 incidents.
     local comment_info
-    # Paginate first, then filter (--paginate + --jq applies per-page)
+    # Paginate first, then filter (--paginate + --jq applies per-page).
+    # Also compute count_since_review = number of our triggers after review_cutoff (for max-retries guard).
     comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        2>/dev/null | jq -s '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))] | sort_by(.created_at) | last | if . == null then {} else {id: .id, created_at: .created_at} end' \
+        2>/dev/null | jq -s '
+          [.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))]
+          | sort_by(.created_at)
+          | {
+              last: last,
+              count_since_review: ([.[] | select(.created_at > "'"${review_cutoff}"'")] | length)
+            }
+          | if .last == null then {} else {id: .last.id, created_at: .last.created_at, count_since_review: .count_since_review} end
+        ' \
         2>/dev/null) || { echo "in-progress"; return 0; }
 
     if [ -z "$comment_info" ] || [ "$comment_info" = "{}" ]; then
@@ -161,6 +171,8 @@ _our_trigger_status() {
     comment_id=$(echo "$comment_info" | _json_field "id") || comment_id=""
     local created_at
     created_at=$(echo "$comment_info" | _json_field "created_at") || created_at=""
+    local count_since_review
+    count_since_review=$(echo "$comment_info" | _json_field "count_since_review") || count_since_review=0
 
     if [ -z "$comment_id" ]; then
         echo "none"
@@ -173,6 +185,14 @@ _our_trigger_status() {
             echo "none"
             return 0
         fi
+    fi
+
+    # Max-retries guard: if we've already triggered N times since the last Greptile review
+    # without a new review landing, stop retrying. Prevents infinite loops when Greptile
+    # acks (reacts with +1) but never posts a review (e.g., gptme#1651: 7 triggers, 0 reviews).
+    if [ -n "$review_cutoff" ] && [ "${count_since_review:-0}" -ge "${MAX_RE_TRIGGERS:-3}" ]; then
+        echo "in-progress"
+        return 0
     fi
 
     # Check age of trigger comment
@@ -269,7 +289,13 @@ trigger)
 status)
     if _has_greptile_review; then
         if _needs_re_review; then
-            echo "needs-re-review"
+            reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
+            trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
+            if [ "$trigger_status" = "in-progress" ]; then
+                echo "in-progress"
+            else
+                echo "needs-re-review"
+            fi
         else
             echo "already-reviewed"
         fi
