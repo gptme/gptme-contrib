@@ -198,7 +198,7 @@ def test_check_blocks_recently_acknowledged_trigger():
 
 
 def test_check_retries_acknowledged_trigger_after_timeout():
-    """Trigger > 20min with bot ack → stale."""
+    """Stale trigger (> 20min, bot ack, no review) → still awaiting-initial-review; check skips."""
     fixture = {
         "pr_number": 123,
         "raw_comments": [
@@ -209,10 +209,12 @@ def test_check_retries_acknowledged_trigger_after_timeout():
         "bot_reaction_count": 1,
     }
     result = _run_helper("check", fixture)
-    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert (
+        result.returncode == 1
+    ), f"Should skip (no review yet, never trigger initial). stderr: {result.stderr}"
 
     status = _run_helper("status", fixture)
-    assert status.stdout.strip() == "stale"
+    assert status.stdout.strip() == "awaiting-initial-review"
 
 
 def test_rereview_ignores_old_trigger_from_previous_review_cycle():
@@ -255,8 +257,8 @@ def test_fresh_pr_awaits_initial_review():
     assert result.returncode == 1, f"Should skip fresh PR. stderr: {result.stderr}"
 
 
-def test_old_pr_without_review_is_actionable():
-    """Old PR (> 20 min, no review, no trigger) → none (safe to trigger)."""
+def test_old_pr_without_review_awaits_initial_review():
+    """Old PR (> 20 min, no review, no trigger) → awaiting-initial-review (never trigger initial)."""
     fixture = {
         "pr_number": 789,
         "raw_comments": [],
@@ -265,10 +267,12 @@ def test_old_pr_without_review_is_actionable():
         "bot_reaction_count": 0,
     }
     status = _run_helper("status", fixture)
-    assert status.stdout.strip() == "none"
+    assert status.stdout.strip() == "awaiting-initial-review"
 
     result = _run_helper("check", fixture)
-    assert result.returncode == 0, f"Should be actionable. stderr: {result.stderr}"
+    assert (
+        result.returncode == 1
+    ), f"Should skip (never trigger initial review). stderr: {result.stderr}"
 
 
 def test_score_5_is_already_reviewed():
@@ -289,8 +293,8 @@ def test_score_5_is_already_reviewed():
     assert status.stdout.strip() == "already-reviewed"
 
 
-def test_trigger_posts_comment_on_old_unreviewed_pr():
-    """Trigger on old PR with no review → posts @greptileai review comment."""
+def test_trigger_skips_unreviewed_pr_initial_review():
+    """Trigger on old PR with no review → skips (awaiting Greptile auto-review)."""
     fixture = {
         "pr_number": 999,
         "raw_comments": [],
@@ -300,9 +304,8 @@ def test_trigger_posts_comment_on_old_unreviewed_pr():
     }
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "Triggered successfully" in result.stdout
-    assert gh_log, "gh pr comment was never called"
-    assert "@greptileai review" in gh_log
+    assert "Awaiting" in result.stdout
+    assert not gh_log, "gh pr comment should NOT have been called"
 
 
 def test_trigger_skips_fresh_pr():
@@ -316,7 +319,7 @@ def test_trigger_skips_fresh_pr():
     }
     result = _run_helper("trigger", fixture)
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "Waiting for auto-review" in result.stdout
+    assert "Awaiting" in result.stdout
 
 
 def test_trigger_re_reviews_on_low_score_with_new_commits():
