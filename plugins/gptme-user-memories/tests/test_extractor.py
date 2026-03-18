@@ -262,6 +262,56 @@ class TestIsCCAutonomousSession:
         )
         assert is_cc_autonomous_session(cc_file)
 
+    def test_autonomous_pattern_in_mixed_content_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        """Autonomous pattern in the text part of a mixed-content message must be detected."""
+        cc_file = _make_cc_jsonl(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "x",
+                                "content": "some output",
+                            },
+                            {
+                                "type": "text",
+                                "text": "You are starting an autonomous work session.",
+                            },
+                        ],
+                    },
+                }
+            ],
+        )
+        assert is_cc_autonomous_session(cc_file)
+
+    def test_pure_tool_result_skipped(self, tmp_path: Path) -> None:
+        """A message with only tool_result content (no text) is skipped, not mis-classified."""
+        cc_file = _make_cc_jsonl(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "x",
+                                "content": "You are starting an autonomous work session.",
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        assert not is_cc_autonomous_session(cc_file)
+
 
 # ---------------------------------------------------------------------------
 # merge_facts
@@ -318,6 +368,13 @@ class TestMemoriesFile:
         apple_pos = text.index("Apple fact")
         zebra_pos = text.index("Zebra fact")
         assert apple_pos < zebra_pos
+
+    def test_save_no_tmp_file_left_behind(self, tmp_path: Path) -> None:
+        """Atomic write via temp-then-rename should leave no .tmp file."""
+        memories_file = tmp_path / "memories.md"
+        save_memories(memories_file, ["Some fact"])
+        assert memories_file.exists()
+        assert not memories_file.with_suffix(".tmp").exists()
 
 
 # ---------------------------------------------------------------------------

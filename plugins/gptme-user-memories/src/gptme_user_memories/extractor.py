@@ -96,9 +96,18 @@ def is_cc_autonomous_session(jsonl_file: Path) -> bool:
                     if msg.get("type") != "user":
                         continue
                     content = msg.get("message", {}).get("content", "")
+                    # Extract text from mixed-content messages (consistent with get_cc_user_messages)
                     if isinstance(content, list):
-                        continue
-                    content_str = str(content)
+                        text_parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        ]
+                        if not text_parts:
+                            continue  # pure tool-result message, no text to check
+                        content_str = " ".join(text_parts)
+                    else:
+                        content_str = str(content)
                     if any(
                         pat.lower() in content_str.lower()
                         for pat in AUTONOMOUS_PATTERNS
@@ -256,7 +265,7 @@ def load_existing_memories(memories_file: Path) -> list[str]:
 
 
 def save_memories(memories_file: Path, facts: list[str]) -> None:
-    """Save memories to the markdown file."""
+    """Save memories to the markdown file using an atomic write."""
     memories_file.parent.mkdir(parents=True, exist_ok=True)
     header = (
         "# User Memories\n\n"
@@ -264,7 +273,11 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
         f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
     )
     body = "\n".join(f"- {fact}" for fact in sorted(facts))
-    memories_file.write_text(header + body + "\n")
+    # Write to a temp file in the same directory, then atomically rename to avoid
+    # partial writes corrupting the accumulated memories file on interruption.
+    tmp = memories_file.with_suffix(".tmp")
+    tmp.write_text(header + body + "\n")
+    tmp.replace(memories_file)
 
 
 def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
