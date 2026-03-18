@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 #: can use a single source of truth for ``click.Choice``.
 VALID_CONTEXT_TIERS: frozenset[str] = frozenset({"standard", "extended", "large", "massive"})
 
+#: Valid values for the ``ab_group`` parameter.  Exported so ``cli.py``
+#: can use a single source of truth for ``click.Choice``.
+VALID_AB_GROUPS: frozenset[str] = frozenset({"treatment", "control"})
+
 
 @dataclass
 class PostSessionResult:
@@ -158,6 +162,10 @@ def post_session(
         raise ValueError(
             f"Invalid context_tier {context_tier!r}. "
             f"Expected one of {sorted(VALID_CONTEXT_TIERS)}"
+        )
+    if ab_group is not None and ab_group not in VALID_AB_GROUPS:
+        raise ValueError(
+            f"Invalid ab_group {ab_group!r}. " f"Expected one of {sorted(VALID_AB_GROUPS)}"
         )
 
     grade: float | None = None

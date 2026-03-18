@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from gptme_sessions.post_session import post_session
 from gptme_sessions.store import SessionStore
 
@@ -84,3 +86,16 @@ def test_post_session_ab_group_tier_version_none(tmp_path: Path):
     )
     assert result.record.ab_group is None
     assert result.record.tier_version is None
+
+
+def test_post_session_ab_group_invalid(tmp_path: Path):
+    """post_session raises ValueError for invalid ab_group values."""
+    store = SessionStore(sessions_dir=tmp_path)
+    with pytest.raises(ValueError, match="Invalid ab_group"):
+        post_session(
+            store=store,
+            harness="claude-code",
+            model="opus",
+            ab_group="invalid-group",
+            duration_seconds=60,
+        )
