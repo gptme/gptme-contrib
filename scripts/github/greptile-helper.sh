@@ -25,12 +25,18 @@ set -euo pipefail
 
 REPO="${2:-}"
 PR_NUMBER="${3:-}"
-TRIGGER_GRACE_SECONDS=900
-ACK_GRACE_SECONDS=1200
+TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
+ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
+GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
     echo "Usage: $0 <check|trigger|status> <repo> <pr_number>" >&2
     exit 1
+fi
+
+if [ -z "$GITHUB_AUTHOR" ]; then
+    echo "Error: GITHUB_AUTHOR not set and gh api user failed" >&2
+    exit 3
 fi
 
 _json_field() {
@@ -65,8 +71,14 @@ PY
 # IMPORTANT: Uses updated_at (not created_at) because Greptile updates its review
 # comment in-place on re-reviews. Using created_at caused infinite re-trigger loops
 # since commits always appeared "new" relative to the original post date.
+# Cache review info to avoid redundant API calls (called up to 3× per invocation)
+_CACHED_REVIEW_INFO=""
 _greptile_review_info() {
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+    if [ -n "$_CACHED_REVIEW_INFO" ]; then
+        echo "$_CACHED_REVIEW_INFO"
+        return
+    fi
+    _CACHED_REVIEW_INFO=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
         --jq '[.[] | select(.user.login | test("greptile"; "i"))] | sort_by(.updated_at) | last |
               if . == null then {"has_review": false, "score": null, "reviewed_at": null}
               else {
@@ -74,7 +86,8 @@ _greptile_review_info() {
                 "reviewed_at": .updated_at,
                 "score": (.body | capture("Score: (?<n>[0-9])/5") | .n | tonumber? // null)
               }
-              end' 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}'
+              end' 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}')
+    echo "$_CACHED_REVIEW_INFO"
 }
 
 # --- Helper: check if greptile-apps[bot] has already reviewed ---
@@ -191,7 +204,7 @@ check)
         exit 2  # Reviewed and 5/5 (or no new commits)
     fi
 
-    trigger_status=$(_our_trigger_status || echo "none")
+    trigger_status=$(_our_trigger_status || echo "in-progress")
     case "$trigger_status" in
     "none" | "stale")
         exit 0  # Safe to trigger
@@ -208,7 +221,7 @@ trigger)
     # each called `gh api` for comments, all saw 0, all posted. flock makes check+post
     # atomic: the second session waits for or immediately loses the lock, then sees the
     # first session's comment via the 15-min age guard and skips.
-    _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-$(printf '%s-%s' "$REPO" "$PR_NUMBER" | tr '/' '-').lock"
+    _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-$(printf '%s#%s' "$REPO" "$PR_NUMBER" | md5sum | cut -c1-12).lock"
     exec 9>"$_LOCK_FILE"
     if ! flock -n 9; then
         echo "  [greptile] Another session is handling $REPO#$PR_NUMBER trigger. Skipping."
@@ -234,7 +247,7 @@ trigger)
         exit 0
     fi
 
-    trigger_status=$(_our_trigger_status || echo "none")
+    trigger_status=$(_our_trigger_status || echo "in-progress")
     case "$trigger_status" in
     "in-progress")
         echo "  [greptile] Trigger in-flight on $REPO#$PR_NUMBER (recent or bot-acked). Skipping."
