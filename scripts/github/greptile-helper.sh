@@ -72,7 +72,7 @@ _greptile_review_info() {
               else {
                 "has_review": true,
                 "reviewed_at": .updated_at,
-                "score": (.body | capture("(?<n>[0-9])/5") | .n | tonumber? // null)
+                "score": (.body | capture("Score: (?<n>[0-9])/5") | .n | tonumber? // null)
               }
               end' 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}'
 }
