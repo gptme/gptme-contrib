@@ -382,7 +382,9 @@ def run_batch(
 
     # Claude Code logs
     if CC_LOGS_DIR.exists():
-        for proj_dir in sorted(CC_LOGS_DIR.iterdir()):
+        for proj_dir in sorted(
+            CC_LOGS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
+        ):
             if not proj_dir.is_dir():
                 continue  # skip non-directory entries (e.g. .DS_Store)
             if processed >= limit:
