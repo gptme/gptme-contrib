@@ -41,6 +41,9 @@ if [ -z "$GITHUB_AUTHOR" ]; then
 fi
 
 _json_field() {
+    # Reset EXIT trap — this runs in a subshell (right side of pipe) that
+    # inherits the parent's trap, which would delete the cache file.
+    trap - EXIT
     local field="$1"
     python3 -c "import json, sys; data = json.load(sys.stdin); v = data.get('$field'); print(v if v is not None else '')" 2>/dev/null
 }
@@ -222,7 +225,7 @@ check)
     "none")
         # No trigger comment exists. Check if the PR is new enough that
         # Greptile's auto-review might still arrive.
-        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' | tr -d '"' 2>/dev/null) || pr_created_at=""
+        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
         if [ -n "$pr_created_at" ]; then
             pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
             if [ "$pr_age" -lt "$INITIAL_REVIEW_GRACE" ]; then
@@ -235,6 +238,10 @@ check)
         exit 0  # Had a trigger but it's stale — safe to re-trigger
         ;;
     "in-progress")
+        exit 1
+        ;;
+    *)
+        echo "Error: unexpected trigger_status='$trigger_status'" >&2
         exit 1
         ;;
     esac
@@ -283,7 +290,7 @@ trigger)
         ;;
     "none")
         # Fresh PR grace: wait for Greptile auto-review before manually triggering
-        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' | tr -d '"' 2>/dev/null) || pr_created_at=""
+        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
         if [ -n "$pr_created_at" ]; then
             pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
             if [ "$pr_age" -lt "${INITIAL_REVIEW_GRACE:-1200}" ]; then
@@ -302,6 +309,10 @@ trigger)
             && echo "  [greptile] Triggered successfully." \
             || echo "  [greptile] Trigger failed (non-fatal)."
         ;;
+    *)
+        echo "  [greptile] Error: unexpected trigger_status='$trigger_status'" >&2
+        exit 1
+        ;;
     esac
     ;;
 
@@ -316,7 +327,7 @@ status)
         _ts=$(_our_trigger_status || echo 'error')
         if [ "$_ts" = "none" ]; then
             # Check if PR is fresh enough for auto-review
-            pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' | tr -d '"' 2>/dev/null) || pr_created_at=""
+            pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
             if [ -n "$pr_created_at" ]; then
                 pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
                 if [ "$pr_age" -lt "${INITIAL_REVIEW_GRACE:-1200}" ]; then
