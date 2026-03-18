@@ -251,7 +251,11 @@ def _fetch_category_usage(
     """Fetch time per category using AW's user-configured categorization rules.
 
     Uses AW's built-in categorize() function with the user's saved $categories rules.
-    Returns an empty list if AW has no categories configured or the query fails.
+    Returns an empty list only if the query fails.
+
+    When no categories are configured, AW assigns all events to ["Uncategorized"],
+    so this returns [CategoryUsage(["Uncategorized"], total_duration)] rather than [].
+    Use the meaningful_categories filter (top_level != "Uncategorized") to detect this case.
 
     The $category field in results is a list like ["Coding", "Python"] or ["Uncategorized"].
     """
@@ -376,15 +380,14 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     # Show category breakdown only when user has actual category rules configured.
     # When no rules exist, AW returns all events as ["Uncategorized"], which would
     # produce a meaningless "Uncategorized: 100%" section — suppress that case.
-    meaningful_categories = [c for c in activity.categories if c.category != ["Uncategorized"]]
+    meaningful_categories = [c for c in activity.categories if c.top_level != "Uncategorized"]
     if meaningful_categories:
         lines.append("### Time by Category")
+        # Use category total as denominator — avoids dependency on the separate
+        # _fetch_app_usage() total which comes from a different HTTP round-trip.
+        category_total = sum(c.duration for c in activity.categories)
         for cat in activity.categories[:12]:  # Top 12 categories
-            pct = (
-                (cat.duration / activity.total_active_seconds * 100)
-                if activity.total_active_seconds > 0
-                else 0
-            )
+            pct = (cat.duration / category_total * 100) if category_total > 0 else 0
             h = cat.duration / 3600
             lines.append(f"- **{cat.name}**: {h:.1f}h ({pct:.0f}%)")
         lines.append("")
