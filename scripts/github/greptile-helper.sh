@@ -119,8 +119,9 @@ _needs_re_review() {
         return 1
     fi
 
-    new_commits=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" \
-        --jq "[.[] | select(.commit.committer.date > \"$reviewed_at\")] | length" 2>/dev/null) || new_commits="0"
+    new_commits=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate \
+        2>/dev/null | jq -s "[.[][] | select(.commit.committer.date > \"$reviewed_at\")] | length" \
+        2>/dev/null) || new_commits="0"
 
     [ "${new_commits:-0}" -gt 0 ]
 }
@@ -217,7 +218,7 @@ check)
     "none")
         # No trigger comment exists. Check if the PR is new enough that
         # Greptile's auto-review might still arrive.
-        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
+        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' | tr -d '"' 2>/dev/null) || pr_created_at=""
         if [ -n "$pr_created_at" ]; then
             pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
             if [ "$pr_age" -lt "$INITIAL_REVIEW_GRACE" ]; then
@@ -278,7 +279,7 @@ trigger)
         ;;
     "none")
         # Fresh PR grace: wait for Greptile auto-review before manually triggering
-        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
+        pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' | tr -d '"' 2>/dev/null) || pr_created_at=""
         if [ -n "$pr_created_at" ]; then
             pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
             if [ "$pr_age" -lt "${INITIAL_REVIEW_GRACE:-1200}" ]; then
@@ -311,7 +312,7 @@ status)
         _ts=$(_our_trigger_status || echo 'error')
         if [ "$_ts" = "none" ]; then
             # Check if PR is fresh enough for auto-review
-            pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' 2>/dev/null) || pr_created_at=""
+            pr_created_at=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at' | tr -d '"' 2>/dev/null) || pr_created_at=""
             if [ -n "$pr_created_at" ]; then
                 pr_age=$(_age_seconds "$pr_created_at" 2>/dev/null) || pr_age=99999
                 if [ "$pr_age" -lt "${INITIAL_REVIEW_GRACE:-1200}" ]; then
