@@ -27,6 +27,7 @@ SENTINEL_FILENAME = ".memories-extracted"
 DEFAULT_DAYS = 14
 MAX_CONV_CHARS = 8000
 MAX_MSG_CHARS = 400
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 # Patterns that indicate an autonomous agent session (not a personal user session)
 AUTONOMOUS_PATTERNS = [
@@ -208,9 +209,7 @@ def _get_anthropic_api_key() -> str | None:
     return None
 
 
-def extract_facts(
-    conversation_text: str, model: str = "claude-haiku-4-5-20251001"
-) -> list[str]:
+def extract_facts(conversation_text: str, model: str = DEFAULT_MODEL) -> list[str]:
     """Use Claude to extract user facts from conversation text."""
     if len(conversation_text.strip()) < 50:
         return []
@@ -295,7 +294,7 @@ def process_logdir(
     logdir: Path,
     force: bool = False,
     dry_run: bool = False,
-    model: str = "claude-haiku-4-5-20251001",
+    model: str = DEFAULT_MODEL,
 ) -> list[str]:
     """Extract facts from a single gptme conversation log directory.
 
@@ -333,7 +332,7 @@ def run_batch(
     limit: int = 30,
     force: bool = False,
     dry_run: bool = False,
-    model: str = "claude-haiku-4-5-20251001",
+    model: str = DEFAULT_MODEL,
 ) -> list[str]:
     """Scan recent gptme and Claude Code sessions and extract user facts.
 
@@ -387,6 +386,8 @@ def run_batch(
         ):
             if not proj_dir.is_dir():
                 continue  # skip non-directory entries (e.g. .DS_Store)
+            if proj_dir.stat().st_mtime < cutoff_ts:
+                break  # dirs sorted newest-first; remaining are all stale
             if processed >= limit:
                 break
             for jsonl_file in sorted(
