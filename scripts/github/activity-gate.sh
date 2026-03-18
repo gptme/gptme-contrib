@@ -159,11 +159,18 @@ discover_repos() {
 
     if [ -f "$cache_file" ]; then
         local cache_age
-        cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0) ))
-        if [ "$cache_age" -lt "$cache_max_age" ]; then
-            cat "$cache_file"
-            for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
-            return
+        local mtime
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo "")
+        if [ -z "$mtime" ]; then
+            echo "WARN: stat failed on cache file, skipping cache" >&2
+            rm -f "$cache_file"
+        else
+            cache_age=$(( $(date +%s) - mtime ))
+            if [ "$cache_age" -lt "$cache_max_age" ]; then
+                cat "$cache_file"
+                for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
+                return
+            fi
         fi
     fi
 
@@ -451,7 +458,8 @@ check_notifications() {
 
 # --- Main ---
 
-all_repos=$(discover_repos)
+# Deduplicate repos (EXTRA_REPOS may overlap with org repos)
+all_repos=$(discover_repos | sort -u)
 all_items=""
 
 for repo in $all_repos; do
