@@ -116,7 +116,7 @@ _needs_re_review() {
     fi
 
     new_commits=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" \
-        --jq "[.[] | select(.commit.author.date > \"$reviewed_at\")] | length" 2>/dev/null) || new_commits="0"
+        --jq "[.[] | select(.commit.committer.date > \"$reviewed_at\")] | length" 2>/dev/null) || new_commits="0"
 
     [ "${new_commits:-0}" -gt 0 ]
 }
