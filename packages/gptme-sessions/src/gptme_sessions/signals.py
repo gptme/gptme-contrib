@@ -16,6 +16,7 @@ ground truth: every tool call, every error, every file write is recorded.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -345,6 +346,43 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             journal_paths.append(path)
                     # No else: tool calls without extractable paths are not counted as
                     # file writes — same rationale as the gptme path above.
+                elif tool == "Bash":
+                    # Parse Bash commands for journal writes via cat/tee redirects.
+                    # Many CC sessions write journals via heredoc (cat > path << EOF)
+                    # rather than the Write tool, so Write/Edit alone misses them.
+                    cmd = item.get("input", {}).get("command", "")
+                    if "/journal/" in cmd:
+                        for m in re.finditer(
+                            r"cat\s*>>?\s*(.*?\.md)(?:\s+<<|\s*$)",
+                            cmd,
+                            re.MULTILINE,
+                        ):
+                            jpath = m.group(1).strip()
+                            if "/journal/" not in jpath:
+                                continue
+                            # Resolve common shell date expansions using
+                            # trajectory timestamps (more reliable than wall clock)
+                            if "$(" in jpath and timestamps:
+                                ts = max(timestamps)
+                                jpath = jpath.replace("$(date +%Y-%m-%d)", ts.strftime("%Y-%m-%d"))
+                                jpath = jpath.replace("$(date +%H%M)", ts.strftime("%H%M"))
+                            # If unresolved ${VAR} remains, glob for a match
+                            if "${" in jpath:
+                                import glob as _glob
+
+                                pattern = re.sub(r"\$\{[^}]+\}", "*", jpath)
+                                matches = sorted(
+                                    _glob.glob(pattern),
+                                    key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
+                                    reverse=True,
+                                )
+                                if matches:
+                                    jpath = matches[0]
+                                else:
+                                    continue  # no match found
+                            elif "$(" in jpath:
+                                continue  # unresolved command substitution
+                            journal_paths.append(jpath)
             if step_has_tool:
                 steps += 1
 
