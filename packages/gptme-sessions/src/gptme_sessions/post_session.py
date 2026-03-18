@@ -253,6 +253,12 @@ def post_session(
         record_kwargs["recommended_category"] = recommended_category
     if trajectory_path is not None:
         record_kwargs["trajectory_path"] = str(trajectory_path)
+    # Fallback: if caller didn't provide journal_path, use the first
+    # journal path extracted from the trajectory signals.
+    if journal_path is None and signals:
+        traj_journals = signals.get("journal_paths", [])
+        if traj_journals:
+            journal_path = traj_journals[0]
     if journal_path is not None:
         record_kwargs["journal_path"] = journal_path
     if session_id is not None:
