@@ -621,7 +621,7 @@ check_notifications() {
 
     # Cap emitted notifications per run to avoid flooding the dispatcher when
     # a filter change (e.g. adding new reasons) unlocks a large backlog.
-    # Remaining items stay unprocessed and will be picked up on the next run.
+    # Only emitted notifications get state files — unemitted ones retry next run.
     local max_notif_per_run=5
 
     if [ "$FORMAT" = "jsonl" ]; then
