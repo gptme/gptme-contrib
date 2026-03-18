@@ -127,6 +127,8 @@ def post_session(
         (duplicates removed).
     journal_path:
         Path to the journal entry written during the session, if any.
+        When ``None`` and a trajectory is available, auto-detected from
+        the first ``/journal/`` write in the trajectory signals.
     session_id:
         Override the auto-generated session ID.
 
@@ -253,6 +255,14 @@ def post_session(
         record_kwargs["recommended_category"] = recommended_category
     if trajectory_path is not None:
         record_kwargs["trajectory_path"] = str(trajectory_path)
+    # Fallback: if caller didn't provide journal_path, use the first
+    # journal path extracted from the trajectory signals.
+    if journal_path is None and signals:
+        traj_journals = signals.get("journal_paths", [])
+        if traj_journals:
+            # First chronological write is the journal creation (not a later edit)
+            journal_path = traj_journals[0]
+            logger.info("Auto-detected journal_path from trajectory: %s", journal_path)
     if journal_path is not None:
         record_kwargs["journal_path"] = journal_path
     if session_id is not None:
