@@ -52,8 +52,8 @@
 #   Greptile score sweep: Proactively finds PRs with low Greptile scores (< 5/5)
 #   that need code fixes. Greptile updates comments in-place, so updatedAt never
 #   bumps — without this sweep, low-scored PRs sit indefinitely. State-tracked
-#   by score + HEAD SHA with 4-hour cooldown. Costs 1 extra REST API call per
-#   open PR (issue comments endpoint). HEAD SHA comes from fetch_pr_data().
+#   by score + HEAD SHA with 4-hour cooldown. Costs 1+ REST API calls per open
+#   PR (issue comments endpoint, paginated). HEAD SHA from fetch_pr_data().
 #
 #   Notifications: State-tracked by notification ID. State files accumulate in
 #   STATE_DIR/notif-*.state. GitHub notifications clear when marked as read
@@ -428,7 +428,8 @@ check_merge_conflicts() {
 # score changes. This function proactively finds PRs with low scores that need
 # code fixes, even if no other activity has occurred.
 #
-# API cost: 1 REST call per open PR (issue comments endpoint).
+# API cost: 1+ REST calls per open PR (issue comments endpoint, paginated —
+# busy PRs with >30 comments will incur additional page fetches).
 # HEAD SHA comes from fetch_pr_data() (headRefOid) — no extra API call needed.
 #
 # State tracking: $STATE_DIR/${repo_safe}-pr-${number}-greptile.state
