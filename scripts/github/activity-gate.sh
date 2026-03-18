@@ -457,13 +457,16 @@ check_greptile_scores() {
         # Uses --paginate to handle PRs with >30 comments (default page size).
         # Greptile's bot username contains "greptile" (case-insensitive).
         # Look for "Score: N/5" pattern, anchored to avoid matching prose/flowcharts.
-        # The jq `capture` returns null when no match — we filter that explicitly.
+        #
+        # Note: --paginate with --jq applies the filter per-page, so if multiple
+        # pages each contain Greptile comments, we'd get multiple lines of output.
+        # We take only the last line (tail -1) to get the most recent score.
         local greptile_score
         greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
             --paginate --jq '
                 [.[] | select(.user.login | test("greptile"; "i"))] | last |
                 .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
-            ' 2>/dev/null || true)
+            ' 2>/dev/null | tail -1 || true)
 
         # No Greptile review or no score found — skip
         # Guard against both empty string and literal "null" from jq
