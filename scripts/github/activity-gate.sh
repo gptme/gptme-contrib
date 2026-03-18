@@ -52,20 +52,27 @@
 #   Greptile score sweep: Proactively finds PRs with low Greptile scores (< 5/5)
 #   that need code fixes. Greptile updates comments in-place, so updatedAt never
 #   bumps — without this sweep, low-scored PRs sit indefinitely. State-tracked
-#   by score + HEAD SHA with 4-hour cooldown. Costs 1 extra REST API call per
+#   by score + HEAD SHA with 1-hour cooldown. Costs 1 extra REST API call per
 #   open PR (issue comments endpoint). HEAD SHA comes from fetch_pr_data().
 #
-#   Notifications: State-tracked by notification ID. State files accumulate in
-#   STATE_DIR/notif-*.state. GitHub notifications clear when marked as read
-#   upstream, so old state files become inert (matching no current notification).
+#   Notifications: Filters for actionable reasons (review_requested, mention,
+#   assign, author, comment). State-tracked by notification ID. State files
+#   accumulate in STATE_DIR/notif-*.state. GitHub notifications clear when
+#   marked as read upstream, so old state files become inert.
 #
 #   Item grouping: This gate emits one item per event (a PR can produce separate
 #   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
 #   per-item sessions should group items by repo#number before dispatching to
 #   avoid redundant sessions investigating the same PR/issue independently.
 #
+#   Merge readiness: Finds PRs with CLEAN mergeStateStatus, MERGEABLE status,
+#   and acceptable Greptile score (>= 5 or no review). Unlike other checks,
+#   first-time discovery DOES emit immediately — merge-ready PRs are actionable.
+#   State-tracked with 12-hour cooldown; re-emits on HEAD SHA change.
+#
 #   API efficiency: PR data is fetched once per repo via fetch_pr_data() and
-#   shared across check_pr_updates, check_ci_failures, and check_merge_conflicts.
+#   shared across check_pr_updates, check_ci_failures, check_merge_conflicts,
+#   and check_merge_ready.
 #   This reduces gh pr list calls from 3N to N (where N = number of repos).
 #   The repo list from discover_repos() is cached for 1 hour.
 #
@@ -102,7 +109,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --state-dir Directory for state tracking files (default: /tmp/github-activity-gate-state)"
             echo "  --format    Output format: 'markdown' (default) or 'jsonl' (one JSON object per item)"
             echo ""
-            echo "JSONL format: {\"type\":\"pr_update|ci_failure|greptile_needs_fix|greptile_needs_improvement|assigned_issue|notification\","
+            echo "JSONL format: {\"type\":\"pr_update|ci_failure|merge_ready|greptile_needs_fix|greptile_needs_improvement|assigned_issue|notification\","
             echo "               \"repo\":\"owner/repo\", \"number\":123, \"title\":\"...\", \"detail\":\"...\"}"
             exit 0
             ;;
@@ -154,6 +161,7 @@ emit_item() {
             merge_conflict)        label="CONFLICT" ;;
             greptile_needs_fix)    label="GREPTILE FIX" ;;
             greptile_needs_improvement) label="GREPTILE" ;;
+            merge_ready)               label="MERGE READY" ;;
             *)                     label="$type" ;;
         esac
         echo "$repo — $label #$number: $title ($detail)"
@@ -435,7 +443,7 @@ check_merge_conflicts() {
 #   Format: "score:timestamp:head_sha"
 #   Re-emits when: (a) first time seeing a low score, or (b) new commits pushed
 #   since last emission (fix attempt may have changed things).
-#   Cooldown: 4 hours — won't re-emit the same PR within that window.
+#   Cooldown: 1 hour — won't re-emit the same PR within that window.
 #
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
@@ -446,7 +454,7 @@ check_greptile_scores() {
     [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
 
     local repo_safe="${repo//\//-}"
-    local cooldown_seconds=14400  # 4 hours
+    local cooldown_seconds=3600  # 1 hour
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
         local pr_number pr_title
@@ -472,8 +480,15 @@ check_greptile_scores() {
         # Guard against both empty string and literal "null" from jq
         [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
 
-        # Score 5 = clean — nothing to do
-        [ "$greptile_score" -ge 5 ] 2>/dev/null && continue
+        # Score 5 = clean — update state file (so check_merge_ready sees
+        # the perfect score instead of a stale sub-5 entry) and skip.
+        if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
+            local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+            local head_sha
+            head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
+            echo "${greptile_score}:$(date +%s):${head_sha}" > "$state_file"
+            continue
+        fi
 
         # Score >= 4 is minor, < 4 needs fix
         local item_type
@@ -521,13 +536,86 @@ check_greptile_scores() {
     done
 }
 
-# Check for actionable unread notifications (review requests, mentions, assigns)
+# Find PRs that are ready to merge: CI green, no conflicts, and Greptile score
+# is acceptable (>= 5/5, or no Greptile review at all for simple PRs).
+#
+# Unlike most checks, first-time discovery DOES emit — a merge-ready PR should
+# be acted on immediately rather than silently seeded.
+#
+# State tracking: $STATE_DIR/${repo_safe}-pr-${number}-merge-ready.state
+#   Cooldown: 12 hours — merge decisions shouldn't be nagged frequently.
+#   Re-emits when HEAD SHA changes (new commits may change merge readiness).
+#
+# API cost: Zero additional API calls. Reads Greptile score from the state file
+# written by check_greptile_scores() instead of re-fetching issue comments.
+check_merge_ready() {
+    local repo=$1
+    local prs=$2
+    [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
+
+    local repo_safe="${repo//\//-}"
+    local cooldown_seconds=43200  # 12 hours
+
+    # Filter to PRs with CLEAN merge state and MERGEABLE status
+    echo "$prs" | jq -c '.[] | select(.mergeStateStatus == "CLEAN" and .mergeable == "MERGEABLE")' | while read -r pr_data; do
+        local pr_number pr_title head_sha
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+        head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
+        [ -z "$head_sha" ] && head_sha="unknown"
+
+        # Check Greptile score from state file (written by check_greptile_scores).
+        # No API call needed — reuse the score already fetched.
+        # If no state file exists, there's no Greptile review — OK to merge.
+        local greptile_state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+        local greptile_score=""
+        if [ -f "$greptile_state_file" ]; then
+            greptile_score=$(cut -d: -f1 < "$greptile_state_file")
+            # Must be perfect score (>= 5) to be merge-ready
+            if [ -n "$greptile_score" ] && [ "$greptile_score" -lt 5 ] 2>/dev/null; then
+                continue
+            fi
+        fi
+
+        # State tracking with cooldown
+        local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-merge-ready.state"
+        local now
+        now=$(date +%s)
+
+        if [ -f "$state_file" ]; then
+            local last_state last_sha last_timestamp
+            last_state=$(cat "$state_file")
+            last_sha=$(echo "$last_state" | cut -d: -f1)
+            last_timestamp=$(echo "$last_state" | cut -d: -f2)
+
+            # Same HEAD — check cooldown
+            if [ "$head_sha" = "$last_sha" ]; then
+                local elapsed=$(( now - last_timestamp ))
+                if [ "$elapsed" -lt "$cooldown_seconds" ]; then
+                    continue
+                fi
+            fi
+            # HEAD changed or cooldown expired — re-emit
+        fi
+        # First-time discovery OR state change — emit immediately (no seed-only behavior)
+
+        echo "${head_sha}:${now}" > "$state_file"
+
+        local detail="CI green, mergeable"
+        if [ -n "$greptile_score" ] && [ "$greptile_score" != "null" ]; then
+            detail="CI green, mergeable, Greptile ${greptile_score}/5"
+        fi
+        emit_item "merge_ready" "$repo" "$pr_number" "$pr_title" "$detail"
+    done
+}
+
+# Check for actionable unread notifications (review requests, mentions, assigns, author, comments)
 # State-tracked by notification ID to avoid re-triggering for the same unread notification.
 # Returns individual notification items in jsonl mode, count in markdown mode.
 check_notifications() {
     local notifs
     notifs=$(gh api notifications \
-        --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign")' \
+        --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign" or .reason == "author" or .reason == "comment")' \
         2>/dev/null) || return 0
     [ -z "$notifs" ] && return 0
 
@@ -589,6 +677,9 @@ for repo in $all_repos; do
 
     items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
     [ -n "$items" ] && all_items+="$items"$'\n'
+
+    items=$(check_merge_ready "$repo" "$pr_data" 2>/dev/null || true)
+    [ -n "$items" ] && all_items+="$items"$'\n'
 done
 
 if [ "$FORMAT" = "jsonl" ]; then
@@ -597,7 +688,7 @@ if [ "$FORMAT" = "jsonl" ]; then
 else
     notif_count=$(check_notifications)
     if [ "$notif_count" -gt 0 ] 2>/dev/null; then
-        all_items+="notifications — $notif_count actionable (review requests, mentions, assigns)"$'\n'
+        all_items+="notifications — $notif_count actionable (review requests, mentions, assigns, author, comments)"$'\n'
     fi
 fi
 
