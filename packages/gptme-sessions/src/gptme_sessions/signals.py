@@ -206,7 +206,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
-        "journal_paths": journal_paths,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": retry_count,
         "deliverables": deliverables,
@@ -391,7 +391,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
-        "journal_paths": journal_paths,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
@@ -575,7 +575,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                             ):
                                 path = write_match.group(1).strip("'\"")
                                 if path.startswith("/dev/"):
-                                    pass
+                                    continue
                                 elif "/journal/" in path:
                                     journal_paths.append(path)
                                 else:
@@ -620,7 +620,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
-        "journal_paths": journal_paths,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
@@ -738,7 +738,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
         "error_count": error_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
-        "journal_paths": journal_paths,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
