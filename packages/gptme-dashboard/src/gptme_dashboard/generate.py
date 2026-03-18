@@ -624,7 +624,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
 
     _gptodo_load_tasks = None
     try:
-        from gptodo.utils import load_tasks as _gptodo_load_tasks  # type: ignore[assignment]
+        from gptodo.utils import load_tasks as _gptodo_load_tasks  # type: ignore[assignment,no-redef]
     except ImportError:
         pass
 
