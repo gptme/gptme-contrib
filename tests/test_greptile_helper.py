@@ -77,7 +77,8 @@ else:
 
 raw = json.dumps(data)
 if jq_expr:
-    r = sp.run(["jq", jq_expr], input=raw, capture_output=True, text=True)
+    # Use jq -r to match gh --jq behavior (outputs raw strings, not quoted)
+    r = sp.run(["jq", "-r", jq_expr], input=raw, capture_output=True, text=True)
     print(r.stdout.strip())
 else:
     print(raw)
@@ -126,8 +127,8 @@ def _run_helper(
     command: str,
     fixture: dict[str, object],
     *,
-    capture_gh_log: Literal[True],
-) -> tuple[subprocess.CompletedProcess[str], str]: ...
+    capture_gh_log: Literal[False] = ...,
+) -> subprocess.CompletedProcess[str]: ...
 
 
 @overload
@@ -135,8 +136,8 @@ def _run_helper(
     command: str,
     fixture: dict[str, object],
     *,
-    capture_gh_log: Literal[False] = ...,
-) -> subprocess.CompletedProcess[str]: ...
+    capture_gh_log: Literal[True],
+) -> tuple[subprocess.CompletedProcess[str], str]: ...
 
 
 def _run_helper(
@@ -316,3 +317,28 @@ def test_trigger_skips_fresh_pr():
     result = _run_helper("trigger", fixture)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Waiting for auto-review" in result.stdout
+
+
+def test_trigger_re_reviews_on_low_score_with_new_commits():
+    """Trigger on PR with score 4/5 + new commits → posts re-review comment."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 777,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+            # Old trigger from previous cycle (before review)
+            _make_trigger_comment("test-user", _iso_ago(minutes=45)),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),  # New commit after review
+        ],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 1,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
+    assert gh_log, "gh pr comment was never called"
+    assert "@greptileai review" in gh_log
