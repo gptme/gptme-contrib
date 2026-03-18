@@ -221,9 +221,12 @@ trigger)
     # each called `gh api` for comments, all saw 0, all posted. flock makes check+post
     # atomic: the second session waits for or immediately loses the lock, then sees the
     # first session's comment via the 15-min age guard and skips.
-    _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-$(printf '%s#%s' "$REPO" "$PR_NUMBER" | md5sum | cut -c1-12).lock"
+    # Use md5sum (Linux) or md5 (macOS) for lock file naming
+    _LOCK_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5) | cut -c1-12)
+    _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-${_LOCK_HASH}.lock"
     exec 9>"$_LOCK_FILE"
-    if ! flock -n 9; then
+    # flock: use flock if available, otherwise skip locking (macOS without GNU coreutils)
+    if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
         echo "  [greptile] Another session is handling $REPO#$PR_NUMBER trigger. Skipping."
         exit 0
     fi
