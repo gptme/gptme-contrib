@@ -370,6 +370,13 @@ def index(
     multiple=True,
     help="Filter results by path pattern (glob). Can be specified multiple times.",
 )
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Output results as JSON (machine-readable).",
+)
 def search(
     query: str,
     paths: list[Path],
@@ -385,6 +392,7 @@ def search(
     embedding_function: str | None,
     device: str | None,
     filter: tuple[str, ...],
+    output_json: bool,
 ):
     """Search the index and assemble context."""
     paths = [path.resolve() for path in paths]
@@ -427,6 +435,7 @@ def search(
                     search_paths = [Path(".")]
                 logger.debug(f"Using path filters: {filter}")
 
+            explanations: list | None = None
             if explain:
                 documents, distances, explanations = indexer.search(
                     query,
@@ -441,7 +450,24 @@ def search(
                 )
 
     if not documents:
-        console.print("No results found", style="yellow")
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "query": query,
+                        "results": [],
+                        "total_results": 0,
+                        "context": {
+                            "total_tokens": 0,
+                            "truncated": False,
+                            "results_in_context": 0,
+                        },
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console.print("No results found", style="yellow")
         return
 
     # Debug info in verbose mode
@@ -492,6 +518,59 @@ def search(
             logger.debug(f"Found {len(chunks)} adjacent chunks")
 
         return ChunkMerger.merge_chunks(chunks)
+
+    # JSON output mode — emit machine-readable result and exit early
+    if output_json:
+        if format != "summary":
+            print(
+                "Warning: --format is ignored when --json is used (JSON output includes all content)",
+                file=sys.stderr,
+            )
+        results = []
+        for i, doc in enumerate(documents):
+            relevance = (
+                max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
+            )
+            content = get_expanded_content(doc, expand, indexer)
+            result: dict = {
+                "source": doc.metadata.get("source", "unknown"),
+                "relevance": relevance,
+                "content": content,
+                "metadata": {
+                    k: v
+                    for k, v in doc.metadata.items()
+                    if k not in ("source",)  # already top-level
+                },
+            }
+            if explain and explanations:
+                result["explanation"] = explanations[i]
+            results.append(result)
+        # Always compute total_tokens from raw content for consistent semantics.
+        # context.total_tokens adds XML formatting overhead and query tokens that
+        # are not part of the returned content — use raw content counts instead.
+        total_tokens = sum(assembler.count_tokens(r["content"]) for r in results)
+        # results_in_context: how many of the returned results fit in the assembled
+        # context window. When expand=="none" and truncated, this is less than
+        # total_results; when expanding, all results are returned.
+        results_in_context = (
+            len(context.documents) if expand == "none" else len(results)
+        )
+        # truncated: only meaningful for expand=="none" — the assembler truncates
+        # unexpanded chunks. When expand is active, all results are returned in
+        # full, so truncated is always False (no result is omitted).
+        truncated = context.truncated if expand == "none" else False
+        output = {
+            "query": query,
+            "total_results": len(results),
+            "results": results,
+            "context": {
+                "total_tokens": total_tokens,
+                "truncated": truncated,
+                "results_in_context": results_in_context,
+            },
+        }
+        print(json.dumps(output, indent=2, default=str))
+        return
 
     # Initialize output formatter
     formatter = SearchOutputFormatter(console, raw)
