@@ -436,7 +436,9 @@ check_merge_conflicts() {
 # score changes. This function proactively finds PRs with low scores that need
 # code fixes, even if no other activity has occurred.
 #
-# API cost: 1 REST call per open PR (issue comments endpoint).
+# API cost: 1 REST call per open PR (issue comments endpoint), ONLY when the
+# cached score is stale (> 60 min old) or a new HEAD SHA is detected. On quiet
+# runs where no PRs have new commits, 0 API calls are made.
 # HEAD SHA comes from fetch_pr_data() (headRefOid) — no extra API call needed.
 #
 # State tracking: $STATE_DIR/${repo_safe}-pr-${number}-greptile.state
@@ -444,6 +446,8 @@ check_merge_conflicts() {
 #   Re-emits when: (a) first time seeing a low score, or (b) new commits pushed
 #   since last emission (fix attempt may have changed things).
 #   Cooldown: 1 hour — won't re-emit the same PR within that window.
+#   Score cache TTL: 60 min (= cooldown) — re-fetches after this window even if
+#   HEAD unchanged (covers manual @greptileai triggers via greptile-helper.sh).
 #
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
@@ -455,26 +459,53 @@ check_greptile_scores() {
 
     local repo_safe="${repo//\//-}"
     local cooldown_seconds=3600  # 1 hour
+    local fetch_cache_ttl=3600   # 60 min (= cooldown) — skip API call if score is cached for current HEAD SHA
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
         local pr_number pr_title
         pr_number=$(echo "$pr_data" | jq -r '.number')
         pr_title=$(echo "$pr_data" | jq -r '.title')
 
-        # Fetch issue comments and find Greptile review comment with a score.
-        # Uses --paginate to handle PRs with >30 comments (default page size).
-        # Greptile's bot username contains "greptile" (case-insensitive).
-        # Look for "Score: N/5" pattern, anchored to avoid matching prose/flowcharts.
-        #
-        # Note: --paginate with --jq applies the filter per-page, so if multiple
-        # pages each contain Greptile comments, we'd get multiple lines of output.
-        # We take only the last line (tail -1) to get the most recent score.
-        local greptile_score
-        greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
-            --paginate --jq '
-                [.[] | select(.user.login | test("greptile"; "i"))] | last |
-                .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
-            ' 2>/dev/null | tail -1 || true)
+        # Extract HEAD SHA and read state file once — used for cache lookup,
+        # cooldown check, and state updates throughout this iteration.
+        local head_sha
+        head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
+        local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+        local now
+        now=$(date +%s)
+        local last_state last_score last_timestamp last_sha
+        last_state="" last_score="" last_timestamp=0 last_sha=""
+        if [ -f "$state_file" ]; then
+            last_state=$(cat "$state_file")
+            last_score=$(echo "$last_state" | cut -d: -f1)
+            last_timestamp=$(echo "$last_state" | cut -d: -f2)
+            last_sha=$(echo "$last_state" | cut -d: -f3)
+        fi
+
+        # Skip the API call if we have a fresh cached score for the current HEAD SHA.
+        # Greptile edits its review comment in-place (PR updatedAt doesn't bump), but
+        # a re-review only occurs after new commits (→ head_sha changes, invalidates
+        # cache) or a manual @greptileai trigger (greptile-helper.sh's 15-min guard
+        # ensures any such review completes within the 30-min TTL).
+        local greptile_score=""
+        if [ -n "$last_state" ] && [ "$last_sha" = "$head_sha" ] \
+                && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
+            greptile_score="$last_score"
+        else
+            # Fetch issue comments and find Greptile review comment with a score.
+            # Uses --paginate to handle PRs with >30 comments (default page size).
+            # Greptile's bot username contains "greptile" (case-insensitive).
+            # Look for "Score: N/5" pattern, anchored to avoid matching prose/flowcharts.
+            #
+            # Note: --paginate with --jq applies the filter per-page, so if multiple
+            # pages each contain Greptile comments, we'd get multiple lines of output.
+            # We take only the last line (tail -1) to get the most recent score.
+            greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
+                --paginate --jq '
+                    [.[] | select(.user.login | test("greptile"; "i"))] | last |
+                    .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
+                ' 2>/dev/null | tail -1 || true)
+        fi
 
         # No Greptile review or no score found — skip
         # Guard against both empty string and literal "null" from jq
@@ -483,10 +514,7 @@ check_greptile_scores() {
         # Score 5 = clean — update state file (so check_merge_ready sees
         # the perfect score instead of a stale sub-5 entry) and skip.
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
-            local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
-            local head_sha
-            head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
-            echo "${greptile_score}:$(date +%s):${head_sha}" > "$state_file"
+            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
             continue
         fi
 
@@ -498,22 +526,7 @@ check_greptile_scores() {
             item_type="greptile_needs_improvement"
         fi
 
-        # Get HEAD SHA from pre-fetched data (headRefOid) to detect new commits
-        local head_sha
-        head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
-        [ -z "$head_sha" ] && head_sha="unknown"
-
-        local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
-        local now
-        now=$(date +%s)
-
-        if [ -f "$state_file" ]; then
-            local last_state last_score last_timestamp last_sha
-            last_state=$(cat "$state_file")
-            last_score=$(echo "$last_state" | cut -d: -f1)
-            last_timestamp=$(echo "$last_state" | cut -d: -f2)
-            last_sha=$(echo "$last_state" | cut -d: -f3)
-
+        if [ -n "$last_state" ]; then
             # Same score and same HEAD — check cooldown
             if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ]; then
                 local elapsed=$(( now - last_timestamp ))
