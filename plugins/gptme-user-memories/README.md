@@ -102,10 +102,11 @@ from gptme_user_memories.extractor import load_existing_memories, merge_facts, s
 from pathlib import Path
 
 # Process a specific session
-new_facts = process_logdir(Path("~/.local/share/gptme/logs/my-session"))
+new_facts = process_logdir(Path("~/.local/share/gptme/logs/my-session").expanduser())
 
-# Merge and save
-existing = load_existing_memories(USER_MEMORIES_FILE)
-merged = merge_facts(existing, new_facts)
-save_memories(USER_MEMORIES_FILE, merged)
+# Merge and save (process_logdir returns None if session was filtered)
+if new_facts is not None:
+    existing = load_existing_memories(USER_MEMORIES_FILE)
+    merged = merge_facts(existing, new_facts)
+    save_memories(USER_MEMORIES_FILE, merged)
 ```
