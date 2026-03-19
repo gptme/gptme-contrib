@@ -393,14 +393,15 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
         # _fetch_app_usage() total which comes from a different HTTP round-trip.
         category_total = sum(c.duration for c in activity.categories)
         max_cats = 12
-        shown = activity.categories[:max_cats]
+        sorted_cats = sorted(activity.categories, key=lambda c: c.duration, reverse=True)
+        shown = sorted_cats[:max_cats]
         for cat in shown:
             pct = (cat.duration / category_total * 100) if category_total > 0 else 0
             h = cat.duration / 3600
             lines.append(f"- **{cat.name}**: {h:.1f}h ({pct:.0f}%)")
-        if len(activity.categories) > max_cats:
-            omitted = len(activity.categories) - max_cats
-            omitted_h = sum(c.duration for c in activity.categories[max_cats:]) / 3600
+        if len(sorted_cats) > max_cats:
+            omitted = len(sorted_cats) - max_cats
+            omitted_h = sum(c.duration for c in sorted_cats[max_cats:]) / 3600
             lines.append(f"- *...{omitted} more categories ({omitted_h:.1f}h not shown)*")
         lines.append("")
 

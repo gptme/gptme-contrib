@@ -283,6 +283,31 @@ def test_format_aw_activity_category_truncation():
     assert "Cat12" not in text
 
 
+def test_format_aw_activity_category_sort_order():
+    """Categories are displayed sorted by duration descending, regardless of input order.
+
+    Ensures the formatter sorts defensively rather than trusting callers to pre-sort.
+    """
+    cats = [
+        CategoryUsage(category=["Web"], duration=1800),  # 2nd in output
+        CategoryUsage(category=["Coding"], duration=5400),  # 1st in output
+        CategoryUsage(category=["Misc"], duration=900),  # 3rd in output
+    ]
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=8100,
+        top_apps=[AppUsage(app="nvim", duration=8100)],
+        categories=cats,
+    )
+    text = format_aw_activity_for_prompt(activity)
+    coding_pos = text.index("Coding")
+    web_pos = text.index("Web")
+    misc_pos = text.index("Misc")
+    assert coding_pos < web_pos < misc_pos, "Categories should be sorted by duration descending"
+
+
 def test_fetch_category_usage_non_list_category():
     """Defensive branch: non-list $category values are cast to a single-element list."""
     from unittest.mock import MagicMock, patch
