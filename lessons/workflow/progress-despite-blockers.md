@@ -43,8 +43,10 @@ Observable signals indicating opportunity for alternative progress:
 Only declare "Real Blocker" after checking ALL six strategies:
 - ✓ All parallel tracks exhausted (3+ areas)
 - ✓ No partial progress possible
-- ✓ No support/preparation work available
-- ✓ No continuation opportunities
+- ✓ No indirect support work available
+- ✓ Backlog filtered — no unblocked items found
+- ✓ No continuation work available
+- ✓ No preparation work possible
 
 ## Outcome
 
