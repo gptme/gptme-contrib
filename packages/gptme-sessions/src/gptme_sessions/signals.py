@@ -416,10 +416,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
 
                 tool_use_id = item.get("tool_use_id", "")
 
-                # Per-tool-call duration: match result back to dispatch
+                # Per-tool-call duration: match result back to dispatch.
+                # When an assistant message batches multiple tool calls, they all
+                # share the same dispatch timestamp. Divide by batch size so that
+                # total_tool_time_s reflects wall-clock time, not N×wall-clock.
                 if tool_use_id in tool_dispatch and ts is not None:
                     dispatch_name, dispatch_ts = tool_dispatch[tool_use_id]
-                    dur = (ts - dispatch_ts).total_seconds()
+                    same_ts_count = sum(
+                        1 for (_, dts) in tool_dispatch.values() if dts == dispatch_ts
+                    )
+                    dur = (ts - dispatch_ts).total_seconds() / max(same_ts_count, 1)
                     if dur >= 0:
                         tool_durations.setdefault(dispatch_name, []).append(dur)
 
@@ -442,7 +448,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 # Only scan first 2000 chars to avoid false positives from large
                 # reports or log files that naturally contain error strings.
                 _scan = result_str[:2000].lower()
-                for phrase in ("error:", "error ", "failed", "failure", "traceback", "exception"):
+                for phrase in ("error:", "failed", "failure", "traceback", "exception"):
                     warning_phrase_count += _scan.count(phrase)
 
                 # Git commit detection: only from Bash tool output.
