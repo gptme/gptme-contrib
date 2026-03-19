@@ -276,8 +276,6 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
     # Write to a unique temp file in the same directory, then atomically rename to
     # avoid partial writes corrupting the accumulated memories file on interruption.
     # PID in the name prevents concurrent callers (hook + CLI) from colliding.
-    import os
-
     tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
     tmp.write_text(header + body + "\n")
     tmp.replace(memories_file)

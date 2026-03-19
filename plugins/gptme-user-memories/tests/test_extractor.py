@@ -377,7 +377,8 @@ class TestMemoriesFile:
         memories_file = tmp_path / "memories.md"
         save_memories(memories_file, ["Some fact"])
         assert memories_file.exists()
-        assert not memories_file.with_suffix(".tmp").exists()
+        # save_memories creates memories.<pid>.tmp — check no pid-suffixed tmp file remains
+        assert not list(tmp_path.glob("memories.*.tmp"))
 
 
 # ---------------------------------------------------------------------------
