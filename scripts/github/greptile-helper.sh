@@ -316,7 +316,9 @@ trigger)
                 # Record trigger timestamp locally — fast-path guard against GitHub API
                 # propagation delay that causes sequential callers to see "no trigger"
                 # and re-trigger. See: 2026-03-19 INCIDENT #5.
-                date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null || true
+                if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
+                    echo "  [greptile] Warning: could not write trigger-timestamp file; propagation-delay guard disabled for this trigger."
+                fi
                 echo "  [greptile] Re-triggered successfully."
             else
                 echo "  [greptile] Trigger failed (non-fatal)."

@@ -204,6 +204,9 @@ def _run_helper(
             this timestamp (simulates a prior successful trigger in the same TMPDIR)
         repo: repo string passed to the helper (default "gptme/gptme")
     """
+    if capture_gh_log and capture_ts_file:
+        raise ValueError("capture_gh_log and capture_ts_file are mutually exclusive")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         fixture_path = tmp_path / "fixture.json"
