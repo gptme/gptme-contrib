@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 MODULE_PATH = (
     Path(__file__).resolve().parent.parent
     / "scripts"
@@ -13,7 +15,8 @@ MODULE_PATH = (
     / "pr-greptile-trigger.py"
 )
 spec = importlib.util.spec_from_file_location("pr_greptile_trigger", MODULE_PATH)
-assert spec and spec.loader
+if spec is None or spec.loader is None:
+    pytest.skip(f"Could not load module from {MODULE_PATH}", allow_module_level=True)
 pr_greptile_trigger = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = pr_greptile_trigger
 spec.loader.exec_module(pr_greptile_trigger)

@@ -73,6 +73,8 @@ SENSITIVE_PATH_PARTS = (
     "oauth",
     "ssh",
     "deploy",
+    "deployment",
+    "deployer",
     "systemd",
     "kube",
     "k8s",
@@ -155,7 +157,9 @@ def detect_workspace_repo() -> str:
                     )
                     if result.returncode == 0:
                         url = result.stdout.strip()
-                        return _parse_remote_url(url)
+                        parsed = _parse_remote_url(url)
+                        if parsed:
+                            return parsed
                 except (subprocess.TimeoutExpired, OSError):
                     pass
                 break
@@ -215,6 +219,29 @@ def parse_pr_target(
     raise ValueError("Provide a PR URL/specifier or --repo with PR number")
 
 
+def _fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
+    raw = run_gh(
+        [
+            "api",
+            f"repos/{repo}/pulls/{number}/files",
+            "--paginate",
+            "--jq",
+            ".[] | {path: .filename}",
+        ],
+        timeout=60,
+    )
+    if not raw:
+        raise RuntimeError(f"Failed to fetch PR files for {repo}#{number}")
+
+    files: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        files.append(cast(dict[str, Any], json.loads(line)))
+    return files
+
+
 def fetch_pr(repo: str, number: int) -> dict[str, Any]:
     raw = run_gh(
         [
@@ -224,12 +251,15 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,files,statusCheckRollup,isDraft,state,reviewDecision",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision",
         ]
     )
     if not raw:
-        raise RuntimeError(f"Failed to fetch PR {repo}#{number}")
-    return cast(dict[str, Any], json.loads(raw))
+        raise RuntimeError(f"Failed to fetch PR metadata for {repo}#{number}")
+
+    pr = cast(dict[str, Any], json.loads(raw))
+    pr["files"] = _fetch_pr_files(repo, number)
+    return pr
 
 
 def _fetch_greptile_review_data(
