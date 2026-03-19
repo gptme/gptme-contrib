@@ -259,6 +259,29 @@ def test_format_aw_activity_category_percentages():
     assert "25%" in text
 
 
+def test_format_aw_activity_category_truncation():
+    """When more than 12 categories exist, a truncation notice is shown.
+
+    Ensures the LLM knows not all categories are shown and that displayed
+    percentages won't sum to 100%.
+    """
+    cats = [CategoryUsage(category=[f"Cat{i}"], duration=100) for i in range(15)]
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=1500,
+        top_apps=[AppUsage(app="nvim", duration=1500)],
+        categories=cats,
+    )
+    text = format_aw_activity_for_prompt(activity)
+    # Should show truncation notice for the 3 omitted categories
+    assert "3 more categories" in text
+    # Cat0–Cat11 shown, Cat12–Cat14 omitted
+    assert "Cat11" in text
+    assert "Cat12" not in text
+
+
 @pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")
 def test_get_client_returns_client():
     """_get_client returns a client instance when aw-client is installed."""

@@ -352,7 +352,9 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
     if web_bucket:
         activity.top_domains = _fetch_browser_domains(client, web_bucket, afk_bucket, timeperiod)
 
-    # Fetch category breakdown (optional — only if user has configured categories)
+    # Fetch category breakdown (always fetched; conditionality is in the display layer —
+    # when the user has no rules, AW returns all events as ["Uncategorized"] which is
+    # suppressed by the meaningful_categories filter in format_aw_activity_for_prompt)
     activity.categories = _fetch_category_usage(client, window_bucket, afk_bucket, timeperiod)
 
     return activity
@@ -387,10 +389,16 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
         # Use category total as denominator — avoids dependency on the separate
         # _fetch_app_usage() total which comes from a different HTTP round-trip.
         category_total = sum(c.duration for c in activity.categories)
-        for cat in activity.categories[:12]:  # Top 12 categories
+        max_cats = 12
+        shown = activity.categories[:max_cats]
+        for cat in shown:
             pct = (cat.duration / category_total * 100) if category_total > 0 else 0
             h = cat.duration / 3600
             lines.append(f"- **{cat.name}**: {h:.1f}h ({pct:.0f}%)")
+        if len(activity.categories) > max_cats:
+            omitted = len(activity.categories) - max_cats
+            omitted_h = sum(c.duration for c in activity.categories[max_cats:]) / 3600
+            lines.append(f"- *...{omitted} more categories ({omitted_h:.1f}h not shown)*")
         lines.append("")
 
     lines.append("### Top Applications")
