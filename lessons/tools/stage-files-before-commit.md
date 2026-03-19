@@ -15,7 +15,7 @@ status: active
 Always `git add <files>` before committing or running prek. New files must be staged first; prek validates the staged version, not your working directory.
 
 ## Context
-Git distinguishes tracked vs untracked files. `git commit FILE` only works for tracked files. prek stashes unstaged changes, so fixes aren't validated unless staged.
+When you're about to commit or run prek after editing files. If you skip staging, Git may reject new files and prek may validate stale content instead of the fixes you just made.
 
 ## Detection
 - Error: 'pathspec... did not match any file(s) known to git'

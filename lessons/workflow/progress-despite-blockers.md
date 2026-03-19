@@ -36,7 +36,7 @@ Observable signals indicating opportunity for alternative progress:
 5. **Continuation Work**: Enhance existing stable systems
 6. **Preparation Work**: Write follow-up drafts, research alternatives, gather data
 
-**Automated discovery**: Set up a project monitoring service that finds actionable work across repos.
+**Automated discovery**: Use a project monitoring service to surface actionable work across repos. See [Project Monitoring Session Patterns](./project-monitoring-session-patterns.md).
 
 ## Real Blocker Criteria
 
@@ -56,5 +56,8 @@ Following these patterns results in:
 - **Faster unblocking**: Prepared when blockers lift
 
 ## Related
+- [Maintaining Readiness During Blocked Periods](../autonomous/maintaining-readiness-during-blocked-periods.md) - Stay useful while waiting on others
+- [Strategic Completion Leverage When Blocked](../autonomous/strategic-completion-leverage-when-blocked.md) - Finish the highest-leverage adjacent work
 - [Autonomous Session Structure](../autonomous/autonomous-session-structure.md) - Overall session workflow
+- [Project Monitoring Session Patterns](./project-monitoring-session-patterns.md) - Automated discovery of actionable work
 - [Close the Loop](../patterns/close-the-loop.md) - Automation approach
