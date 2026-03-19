@@ -547,6 +547,11 @@ def test_failed_trigger_does_not_write_timestamp():
     result, ts_content = _run_helper(
         "trigger", fixture, capture_ts_file=True, repo="gptme/gptme-contrib"
     )
+    # Confirm the failure branch was actually reached (script prints this on non-zero gh exit)
+    assert "Trigger failed" in result.stdout, (
+        f"Expected 'Trigger failed' in stdout to confirm failure branch was reached,"
+        f" got: {result.stdout!r}"
+    )
     assert (
         ts_content is None
     ), f"TS file must NOT be written after a failed API call, got: {ts_content!r}"
