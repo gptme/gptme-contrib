@@ -86,6 +86,41 @@ class TestIsAutonomousSession:
         conv_file.write_text("not valid json\n")
         assert not is_autonomous_session(conv_file)
 
+    def test_autonomous_pattern_in_list_content_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: str() on list content could miss patterns; use text extraction."""
+        conv = _make_gptme_conv(
+            tmp_path,
+            [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are Bob, an autonomous agent."}
+                    ],
+                }
+            ],
+        )
+        assert is_autonomous_session(conv)
+
+    def test_pure_tool_result_list_content_skipped(self, tmp_path: Path) -> None:
+        """Pure tool-result messages with no text blocks should not cause false positives."""
+        conv = _make_gptme_conv(
+            tmp_path,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": "You are Bob, an autonomous agent.",
+                        }
+                    ],
+                }
+            ],
+        )
+        assert not is_autonomous_session(conv)
+
 
 # ---------------------------------------------------------------------------
 # get_user_messages

@@ -75,9 +75,22 @@ def is_autonomous_session(conv_file: Path) -> bool:
                     break
                 try:
                     msg = json.loads(line)
-                    content = str(msg.get("content", ""))
+                    content = msg.get("content", "")
+                    # Extract text from list-typed content (consistent with get_user_messages)
+                    if isinstance(content, list):
+                        text_parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        ]
+                        if not text_parts:
+                            continue  # pure tool-result, no text to check
+                        content_str = " ".join(text_parts)
+                    else:
+                        content_str = str(content)
                     if any(
-                        pat.lower() in content.lower() for pat in AUTONOMOUS_PATTERNS
+                        pat.lower() in content_str.lower()
+                        for pat in AUTONOMOUS_PATTERNS
                     ):
                         return True
                 except (json.JSONDecodeError, KeyError):
