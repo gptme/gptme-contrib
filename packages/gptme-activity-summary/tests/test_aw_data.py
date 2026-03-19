@@ -8,9 +8,11 @@ from gptme_activity_summary.aw_data import (
     AppUsage,
     AWActivity,
     BrowserDomain,
+    CategoryUsage,
     fetch_aw_activity,
     format_aw_activity_for_prompt,
     _build_timeperiod,
+    _fetch_category_usage,
     _get_client,
 )
 
@@ -150,6 +152,180 @@ def test_browser_domain_dataclass():
     d = BrowserDomain(domain="github.com", duration=3600)
     assert d.domain == "github.com"
     assert d.duration == 3600
+
+
+def test_category_usage_name():
+    """CategoryUsage.name joins path with ' > '."""
+    cat = CategoryUsage(category=["Coding", "Python"], duration=3600)
+    assert cat.name == "Coding > Python"
+
+
+def test_category_usage_top_level():
+    """CategoryUsage.top_level returns first element."""
+    cat = CategoryUsage(category=["Work", "Meetings"], duration=1800)
+    assert cat.top_level == "Work"
+
+
+def test_category_usage_empty():
+    """CategoryUsage with empty path returns 'Uncategorized'."""
+    cat = CategoryUsage(category=[], duration=600)
+    assert cat.name == "Uncategorized"
+    assert cat.top_level == "Uncategorized"
+
+
+def test_format_aw_activity_with_categories():
+    """Activity with categories shows category breakdown before apps."""
+    activity = AWActivity(
+        start_date=date(2026, 3, 11),
+        end_date=date(2026, 3, 11),
+        available=True,
+        total_active_seconds=14400,  # 4 hours
+        top_apps=[
+            AppUsage(app="nvim", duration=7200),
+            AppUsage(app="Firefox", duration=7200),
+        ],
+        categories=[
+            CategoryUsage(category=["Coding"], duration=7200),
+            CategoryUsage(category=["Web"], duration=5400),
+            CategoryUsage(category=["Uncategorized"], duration=1800),
+        ],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Time by Category" in text
+    assert "Coding" in text
+    assert "Web" in text
+    assert "Uncategorized" in text
+    # Category section should appear before apps section
+    cat_pos = text.index("### Time by Category")
+    apps_pos = text.index("### Top Applications")
+    assert cat_pos < apps_pos
+
+
+def test_format_aw_activity_without_categories():
+    """Activity without categories skips category section."""
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=3600,
+        top_apps=[AppUsage(app="nvim", duration=3600)],
+        categories=[],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Time by Category" not in text
+    assert "### Top Applications" in text
+
+
+def test_format_aw_activity_only_uncategorized():
+    """Activity where all time is 'Uncategorized' (no rules configured) skips category section.
+
+    When a user has no AW category rules, categorize(events, []) returns all events
+    as ['Uncategorized']. This should suppress the section rather than showing
+    a meaningless 'Uncategorized: 100%' entry.
+    """
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=3600,
+        top_apps=[AppUsage(app="nvim", duration=3600)],
+        categories=[CategoryUsage(category=["Uncategorized"], duration=3600)],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "### Time by Category" not in text
+    assert "### Top Applications" in text
+
+
+def test_format_aw_activity_category_percentages():
+    """Category percentages are calculated relative to total categorized time (category_total).
+
+    total_active_seconds (4000) intentionally differs from sum(category durations) (3600)
+    to verify the code uses category_total as the denominator, not total_active_seconds.
+    With category_total=3600: Coding=75%, Other=25%.
+    With total_active_seconds=4000: Coding=67%, Other=22% — would fail this test.
+    """
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=4000,  # deliberately != sum(category durations)
+        top_apps=[AppUsage(app="nvim", duration=4000)],
+        categories=[
+            CategoryUsage(category=["Coding"], duration=2700),  # 75% of 3600
+            CategoryUsage(category=["Other"], duration=900),  # 25% of 3600
+        ],
+    )
+    text = format_aw_activity_for_prompt(activity)
+    assert "75%" in text
+    assert "25%" in text
+
+
+def test_format_aw_activity_category_truncation():
+    """When more than 12 categories exist, a truncation notice is shown.
+
+    Ensures the LLM knows not all categories are shown and that displayed
+    percentages won't sum to 100%.
+    """
+    cats = [CategoryUsage(category=[f"Cat{i}"], duration=100) for i in range(15)]
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=1500,
+        top_apps=[AppUsage(app="nvim", duration=1500)],
+        categories=cats,
+    )
+    text = format_aw_activity_for_prompt(activity)
+    # Should show truncation notice for the 3 omitted categories
+    assert "3 more categories" in text
+    # Cat0–Cat11 shown, Cat12–Cat14 omitted
+    assert "Cat11" in text
+    assert "Cat12" not in text
+
+
+def test_format_aw_activity_category_sort_order():
+    """Categories are displayed sorted by duration descending, regardless of input order.
+
+    Ensures the formatter sorts defensively rather than trusting callers to pre-sort.
+    """
+    cats = [
+        CategoryUsage(category=["Web"], duration=1800),  # 2nd in output
+        CategoryUsage(category=["Coding"], duration=5400),  # 1st in output
+        CategoryUsage(category=["Misc"], duration=900),  # 3rd in output
+    ]
+    activity = AWActivity(
+        start_date=date.today(),
+        end_date=date.today(),
+        available=True,
+        total_active_seconds=8100,
+        top_apps=[AppUsage(app="nvim", duration=8100)],
+        categories=cats,
+    )
+    text = format_aw_activity_for_prompt(activity)
+    coding_pos = text.index("Coding")
+    web_pos = text.index("Web")
+    misc_pos = text.index("Misc")
+    assert coding_pos < web_pos < misc_pos, "Categories should be sorted by duration descending"
+
+
+def test_fetch_category_usage_non_list_category():
+    """Defensive branch: non-list $category values are cast to a single-element list."""
+    from unittest.mock import MagicMock, patch
+
+    timeperiod = (
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+        datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    mock_results = [
+        {"duration": 3600, "data": {"$category": "FlatString"}},  # string instead of list
+    ]
+    with patch("gptme_activity_summary.aw_data._run_aw_query", return_value=mock_results):
+        mock_client = MagicMock()
+        result = _fetch_category_usage(mock_client, "aw-watcher-window_host", None, timeperiod)
+
+    assert len(result) == 1
+    assert result[0].category == ["FlatString"]
+    assert result[0].duration == 3600
 
 
 @pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")
