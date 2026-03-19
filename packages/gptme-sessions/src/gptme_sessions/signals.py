@@ -29,6 +29,8 @@ _COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]
 # Note: gptme has a "patch" tool but Claude Code does not — no "Patch" here
 _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
+_WARNING_PHRASE_RE = re.compile(r"error:|failed|failures?\b|traceback|exception")
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -299,8 +301,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     recent_sigs: list[str] = []
     # Map tool_use id → tool name for filtering commit detection to Bash only
     tool_id_to_name: dict[str, str] = {}
-    # Per-tool-call timing: map tool_use_id → (tool_name, dispatch_timestamp)
-    tool_dispatch: dict[str, tuple[str, datetime]] = {}
+    # Per-tool-call timing: map tool_use_id → (tool_name, dispatch_timestamp, batch_size)
+    tool_dispatch: dict[str, tuple[str, datetime, int]] = {}
     tool_durations: dict[str, list[float]] = {}  # tool_name → list of durations (seconds)
 
     for record in msgs:
@@ -316,6 +318,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
             if not isinstance(content, list):
                 continue
             step_has_tool = False
+            dispatch_ids: list[tuple[str, str]] = []
             for item in content:
                 if not isinstance(item, dict) or item.get("type") != "tool_use":
                     continue
@@ -329,9 +332,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 tool_id = item.get("id", "")
                 if tool_id:
                     tool_id_to_name[tool_id] = tool
-                    # Record dispatch time for per-tool-call duration tracking
+                    # Record dispatch ids for this assistant turn so each tool
+                    # can later be tagged with the final batch size of the turn.
                     if ts is not None:
-                        tool_dispatch[tool_id] = (tool, ts)
+                        dispatch_ids.append((tool_id, tool))
 
                 if tool in _CC_WRITE_TOOLS:
                     inp = item.get("input", {})
@@ -403,6 +407,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             if not os.path.isfile(jpath):
                                 continue
                             journal_paths.append(jpath)
+            if ts is not None and dispatch_ids:
+                batch_size = len(dispatch_ids)
+                for tool_id, tool in dispatch_ids:
+                    tool_dispatch[tool_id] = (tool, ts, batch_size)
             if step_has_tool:
                 steps += 1
 
@@ -421,11 +429,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 # share the same dispatch timestamp. Divide by batch size so that
                 # total_tool_time_s reflects wall-clock time, not N×wall-clock.
                 if tool_use_id in tool_dispatch and ts is not None:
-                    dispatch_name, dispatch_ts = tool_dispatch[tool_use_id]
-                    same_ts_count = sum(
-                        1 for (_, dts) in tool_dispatch.values() if dts == dispatch_ts
-                    )
-                    dur = (ts - dispatch_ts).total_seconds() / max(same_ts_count, 1)
+                    dispatch_name, dispatch_ts, batch_size = tool_dispatch.pop(tool_use_id)
+                    dur = (ts - dispatch_ts).total_seconds() / max(batch_size, 1)
                     if dur >= 0:
                         tool_durations.setdefault(dispatch_name, []).append(dur)
 
@@ -445,11 +450,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
 
                 # Error/warning phrase detection in tool output (soft signal).
                 # Elevated counts indicate problems even when is_error is false.
-                # Only scan first 2000 chars to avoid false positives from large
-                # reports or log files that naturally contain error strings.
-                _scan = result_str[:2000].lower()
-                for phrase in ("error:", "failed", "failure", "traceback", "exception"):
-                    warning_phrase_count += _scan.count(phrase)
+                # Scan both the prefix and suffix because many command failures
+                # print the actual error near the end of long outputs.
+                if len(result_str) <= 4000:
+                    _scan = result_str.lower()
+                else:
+                    _scan = (result_str[:2000] + "\n" + result_str[-2000:]).lower()
+                warning_phrase_count += len(_WARNING_PHRASE_RE.findall(_scan))
 
                 # Git commit detection: only from Bash tool output.
                 # Other tools (Read, Glob, Write) can return content containing

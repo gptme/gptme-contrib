@@ -1419,6 +1419,181 @@ def test_extract_signals_cc_steps_parallel_tools():
     assert sigs["tool_calls"]["Bash"] == 4
 
 
+def test_extract_signals_cc_tool_timing_parallel_batch():
+    """Parallel tools split one user-turn wall time across the batch."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "bash_1",
+                        "name": "Bash",
+                        "input": {"command": "pytest -q"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "read_1",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/x"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "bash_1",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read_1",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["total_tool_time_s"] == 10.0
+    assert sigs["tool_time_total"] == {"Bash": 5.0, "Read": 5.0}
+    assert sigs["tool_time_max"] == {"Bash": 5.0, "Read": 5.0}
+
+
+def test_extract_signals_cc_tool_timing_old_dispatch_not_reused():
+    """Consumed dispatch timestamps must not skew later same-timestamp batches."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "old_1",
+                        "name": "Bash",
+                        "input": {"command": "old1"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "old_2",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/old"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "old_1",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "old_2",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "new_1",
+                        "name": "Bash",
+                        "input": {"command": "new1"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "new_1",
+                        "is_error": False,
+                        "content": "ok",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["tool_time_total"]["Bash"] == 15.0
+    assert sigs["tool_time_max"]["Bash"] == 10.0
+    assert sigs["tool_time_total"]["Read"] == 5.0
+    assert sigs["total_tool_time_s"] == 20.0
+
+
+def test_extract_signals_cc_warning_phrases_scan_suffix_and_word_boundary():
+    """Warning scan should catch tail errors without double-counting 'failures'."""
+    prefix = "x" * 2100
+    suffix = "\nTraceback\nerror: bad\n2 failures in 0.5s\n"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "bash_warn",
+                        "name": "Bash",
+                        "input": {"command": "pytest -q"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:02.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "bash_warn",
+                        "is_error": False,
+                        "content": prefix + suffix,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["warning_phrase_count"] == 3
+
+
 def test_detect_format_public_alias():
     """detect_format() is the public alias for _detect_format()."""
     gptme_msgs = [{"role": "assistant", "content": "hi"}]
