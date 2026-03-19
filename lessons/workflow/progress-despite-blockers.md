@@ -2,11 +2,11 @@
 match:
   keywords:
   - "blocked rate"
-  - "awaiting review"
   - "PR queue overloaded"
-  - "all tasks waiting"
-  - "find unblocked work"
-  - "alternative progress"
+  - "parallel work tracks"
+  - "multiple PRs awaiting review"
+  - "six strategies for blockers"
+  - "nothing to do while waiting"
 status: active
 ---
 
