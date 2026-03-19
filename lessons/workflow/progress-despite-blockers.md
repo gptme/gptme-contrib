@@ -16,7 +16,7 @@ status: active
 When facing multiple blockers, use parallel tracks, partial progress, and indirect support work rather than declaring complete blockage.
 
 ## Context
-During autonomous operation when primary work items are blocked by external dependencies (approvals, reviews, decisions).
+When primary work items are blocked by external dependencies (approvals, reviews, decisions). Applies in both interactive and autonomous contexts.
 
 ## Detection
 Observable signals indicating opportunity for alternative progress:
@@ -27,7 +27,7 @@ Observable signals indicating opportunity for alternative progress:
 
 ## Pattern
 
-**Six strategies** (detailed examples in companion doc):
+**Six strategies**:
 
 1. **Parallel Work Tracks**: Work across 3+ areas; when Track 1 blocked, work on Track 2
 2. **Partial Progress**: Can't merge? Add tests, improve docs, address comments preemptively
