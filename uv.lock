@@ -1366,7 +1366,6 @@ dependencies = [
 [package.optional-dependencies]
 test = [
     { name = "pytest" },
-    { name = "pytest-mock" },
 ]
 
 [package.metadata]
@@ -1374,7 +1373,6 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
-    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 provides-extras = ["test"]

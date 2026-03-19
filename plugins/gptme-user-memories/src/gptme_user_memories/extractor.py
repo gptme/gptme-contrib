@@ -196,7 +196,7 @@ def _get_anthropic_api_key() -> str | None:
         return None
 
     try:
-        config = tomllib.loads(config_path.read_text())
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("user_memories: failed to parse %s: %s", config_path, e)
         return None
@@ -257,7 +257,7 @@ def load_existing_memories(memories_file: Path) -> list[str]:
     if not memories_file.exists():
         return []
     facts = []
-    for line in memories_file.read_text().splitlines():
+    for line in memories_file.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line.startswith("- "):
             facts.append(line[2:].strip())
@@ -278,7 +278,7 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
     # PID in the name prevents concurrent callers (hook + CLI) from colliding.
     tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(header + body + "\n")
+        tmp.write_text(header + body + "\n", encoding="utf-8")
         tmp.replace(memories_file)
     finally:
         tmp.unlink(missing_ok=True)
