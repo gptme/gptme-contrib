@@ -56,7 +56,6 @@ class PRInfo:
     number: int
     title: str
     url: str
-    has_greptile: bool
     review_state: str
 
 
@@ -190,8 +189,6 @@ def main() -> int:
                     number=int(raw_pr["number"]),
                     title=str(raw_pr["title"]),
                     url=str(raw_pr["url"]),
-                    has_greptile=review_state
-                    in {"already-reviewed", "needs-re-review", "in-progress"},
                     review_state=review_state,
                 )
             )

@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -325,19 +326,22 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
-    """Return True if all reported checks are success/skipped/neutral."""
+    """Return True if all reported checks are success/skipped/neutral.
+
+    Returns True when no checks are configured (no CI), treating the
+    absence of CI as neutral rather than failing.
+    """
+    if not status_checks:
+        return True
     allowed = {"SUCCESS", "SKIPPED", "NEUTRAL"}
-    seen = False
-    for check in status_checks or []:
+    for check in status_checks:
         conclusion = (check.get("conclusion") or "").upper()
         status = (check.get("status") or "").upper()
         if status and status != "COMPLETED":
             return False
-        if conclusion:
-            seen = True
-            if conclusion not in allowed:
-                return False
-    return seen
+        if conclusion and conclusion not in allowed:
+            return False
+    return True
 
 
 def is_doc_file(path: str) -> bool:
@@ -373,10 +377,14 @@ def is_sensitive_path(path: str) -> bool:
     if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
         return True
     components = normalized.split("/")
-    return any(
-        any(part in component for component in components)
-        for part in SENSITIVE_PATH_PARTS
-    )
+    for component in components:
+        stem = component.rsplit(".", 1)[0] if "." in component else component
+        for part in SENSITIVE_PATH_PARTS:
+            # Match whole words (word boundaries: start/end or separator chars).
+            # Allow trailing "s" for common plurals (token→tokens, secret→secrets).
+            if re.search(r"(?:^|[_\-\.])" + re.escape(part) + r"s?(?:[_\-\.]|$)", stem):
+                return True
+    return False
 
 
 def is_allowed_file(path: str) -> bool:
