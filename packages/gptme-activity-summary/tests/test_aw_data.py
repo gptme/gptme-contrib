@@ -12,6 +12,7 @@ from gptme_activity_summary.aw_data import (
     fetch_aw_activity,
     format_aw_activity_for_prompt,
     _build_timeperiod,
+    _fetch_category_usage,
     _get_client,
 )
 
@@ -280,6 +281,26 @@ def test_format_aw_activity_category_truncation():
     # Cat0–Cat11 shown, Cat12–Cat14 omitted
     assert "Cat11" in text
     assert "Cat12" not in text
+
+
+def test_fetch_category_usage_non_list_category():
+    """Defensive branch: non-list $category values are cast to a single-element list."""
+    from unittest.mock import MagicMock, patch
+
+    timeperiod = (
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+        datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    mock_results = [
+        {"duration": 3600, "data": {"$category": "FlatString"}},  # string instead of list
+    ]
+    with patch("gptme_activity_summary.aw_data._run_aw_query", return_value=mock_results):
+        mock_client = MagicMock()
+        result = _fetch_category_usage(mock_client, "aw-watcher-window_host", None, timeperiod)
+
+    assert len(result) == 1
+    assert result[0].category == ["FlatString"]
+    assert result[0].duration == 3600
 
 
 @pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")

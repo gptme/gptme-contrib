@@ -383,6 +383,9 @@ def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     # Show category breakdown only when user has actual category rules configured.
     # When no rules exist, AW returns all events as ["Uncategorized"], which would
     # produce a meaningless "Uncategorized: 100%" section — suppress that case.
+    # Note: meaningful_categories is used only as a gate (has the user configured rules?).
+    # The display loop below uses activity.categories (all categories, including Uncategorized)
+    # so that when real rules are configured, the "Uncategorized" remainder is still shown.
     meaningful_categories = [c for c in activity.categories if c.top_level != "Uncategorized"]
     if meaningful_categories:
         lines.append("### Time by Category")
