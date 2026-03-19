@@ -400,3 +400,30 @@ def test_max_retries_guard_blocks_after_repeated_triggers():
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert not gh_log, f"Should NOT have posted trigger comment, got: {gh_log}"
+
+
+def test_max_retries_guard_allows_below_threshold():
+    """2 triggers since last review (< MAX_RE_TRIGGERS=3) → NOT blocked, should re-trigger.
+
+    Lower-bound boundary check: the guard only fires at >= threshold, not below.
+    """
+    reviewed_at = _iso_ago(minutes=120)
+    fixture = {
+        "pr_number": 1651,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            # Two re-review triggers posted after the review (below the threshold of 3)
+            _make_trigger_comment("test-user", _iso_ago(minutes=60)),
+            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),  # New commits since review
+        ],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,  # Last trigger not yet acked — age guard doesn't apply
+    }
+    # status: should NOT be in-progress (guard not fired yet)
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() != "in-progress"
+    ), f"Should NOT block at count=2 (< MAX_RE_TRIGGERS=3), got: {status.stdout.strip()}"

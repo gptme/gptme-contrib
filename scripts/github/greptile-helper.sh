@@ -172,7 +172,7 @@ _our_trigger_status() {
     local created_at
     created_at=$(echo "$comment_info" | _json_field "created_at") || created_at=""
     local count_since_review
-    count_since_review=$(echo "$comment_info" | _json_field "count_since_review") || count_since_review=0
+    count_since_review=$(echo "$comment_info" | _json_field "count_since_review")
 
     if [ -z "$comment_id" ]; then
         echo "none"
