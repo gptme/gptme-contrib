@@ -1555,9 +1555,15 @@ def test_extract_signals_cc_tool_timing_old_dispatch_not_reused():
 
 
 def test_extract_signals_cc_warning_phrases_scan_suffix_and_word_boundary():
-    """Warning scan should catch tail errors without double-counting 'failures'."""
-    prefix = "x" * 2100
-    suffix = "\nTraceback\nerror: bad\n2 failures in 0.5s\n"
+    """Warning scan should catch tail errors in long outputs and ignore embedded words."""
+    prefix = "x" * 3980
+    suffix = (
+        "\nTraceback\n"
+        "error: bad\n"
+        "2 failures in 0.5s\n"
+        "exceptional handling kept running\n"
+        "unfailed state preserved\n"
+    )
     msgs = [
         {
             "type": "assistant",

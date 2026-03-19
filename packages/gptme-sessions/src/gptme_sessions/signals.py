@@ -29,7 +29,7 @@ _COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]
 # Note: gptme has a "patch" tool but Claude Code does not — no "Patch" here
 _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
-_WARNING_PHRASE_RE = re.compile(r"error:|failed|failures?\b|traceback|exception")
+_WARNING_PHRASE_RE = re.compile(r"error:|\bfailed\b|\bfailures?\b|\btraceback\b|\bexception\b")
 
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
