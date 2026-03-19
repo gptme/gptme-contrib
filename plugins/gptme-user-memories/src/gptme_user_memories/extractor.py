@@ -197,7 +197,8 @@ def _get_anthropic_api_key() -> str | None:
 
     try:
         config = tomllib.loads(config_path.read_text())
-    except Exception:
+    except Exception as e:
+        logger.warning("user_memories: failed to parse %s: %s", config_path, e)
         return None
 
     env_section = config.get("env", {})
@@ -238,7 +239,7 @@ def extract_facts(conversation_text: str, model: str = DEFAULT_MODEL) -> list[st
         logger.warning("user_memories: API call failed: %s", e)
         return []
 
-    if "NO_NEW_FACTS" in output or not output:
+    if output.strip() == "NO_NEW_FACTS" or not output:
         return []
 
     facts = []
@@ -272,9 +273,12 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
         f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
     )
     body = "\n".join(f"- {fact}" for fact in sorted(facts))
-    # Write to a temp file in the same directory, then atomically rename to avoid
-    # partial writes corrupting the accumulated memories file on interruption.
-    tmp = memories_file.with_suffix(".tmp")
+    # Write to a unique temp file in the same directory, then atomically rename to
+    # avoid partial writes corrupting the accumulated memories file on interruption.
+    # PID in the name prevents concurrent callers (hook + CLI) from colliding.
+    import os
+
+    tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
     tmp.write_text(header + body + "\n")
     tmp.replace(memories_file)
 

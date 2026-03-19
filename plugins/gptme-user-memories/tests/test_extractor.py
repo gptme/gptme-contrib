@@ -427,6 +427,62 @@ class TestGetAnthropicApiKey:
 
 
 # ---------------------------------------------------------------------------
+# extract_facts — NO_NEW_FACTS handling (regression)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFactsNoNewFacts:
+    """Regression: NO_NEW_FACTS must be an exact-match check, not a substring check."""
+
+    def _mock_response(self, text: str):
+        from unittest.mock import MagicMock
+
+        block = MagicMock()
+        block.text = text
+        response = MagicMock()
+        response.content = [block]
+        return response
+
+    def test_exact_no_new_facts_returns_empty(self) -> None:
+        """Model returns exactly NO_NEW_FACTS → no facts extracted."""
+        with (
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="key",
+            ),
+            patch("anthropic.Anthropic") as mock_cls,
+        ):
+            mock_cls.return_value.messages.create.return_value = self._mock_response(
+                "NO_NEW_FACTS"
+            )
+            from gptme_user_memories.extractor import extract_facts
+
+            assert extract_facts("some conversation text " * 10) == []
+
+    def test_fact_containing_no_new_facts_substring_is_not_dropped(self) -> None:
+        """A fact that mentions 'NO_NEW_FACTS' as part of a sentence must NOT be discarded."""
+        response_text = (
+            "- Concerned about the NO_NEW_FACTS sentinel in the memory plugin"
+        )
+        with (
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="key",
+            ),
+            patch("anthropic.Anthropic") as mock_cls,
+        ):
+            mock_cls.return_value.messages.create.return_value = self._mock_response(
+                response_text
+            )
+            from gptme_user_memories.extractor import extract_facts
+
+            facts = extract_facts("some conversation text " * 10)
+        assert any(
+            "NO_NEW_FACTS" in f for f in facts
+        ), f"Expected fact containing NO_NEW_FACTS to be kept, got: {facts}"
+
+
+# ---------------------------------------------------------------------------
 # run_batch — regression tests
 # ---------------------------------------------------------------------------
 
