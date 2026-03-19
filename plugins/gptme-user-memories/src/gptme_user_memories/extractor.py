@@ -277,8 +277,11 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
     # avoid partial writes corrupting the accumulated memories file on interruption.
     # PID in the name prevents concurrent callers (hook + CLI) from colliding.
     tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
-    tmp.write_text(header + body + "\n")
-    tmp.replace(memories_file)
+    try:
+        tmp.write_text(header + body + "\n")
+        tmp.replace(memories_file)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:

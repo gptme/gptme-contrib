@@ -380,6 +380,19 @@ class TestMemoriesFile:
         # save_memories creates memories.<pid>.tmp — check no pid-suffixed tmp file remains
         assert not list(tmp_path.glob("memories.*.tmp"))
 
+    def test_save_cleans_tmp_on_replace_failure(self, tmp_path: Path) -> None:
+        """Regression: .tmp file must be cleaned up even when replace() raises.
+
+        If replace() fails (e.g., cross-device link, permissions), the finally
+        block must unlink the stale temp file so it doesn't accumulate on disk.
+        """
+        memories_file = tmp_path / "memories.md"
+        with patch("pathlib.Path.replace", side_effect=OSError("cross-device link")):
+            with pytest.raises(OSError):
+                save_memories(memories_file, ["Some fact"])
+        # The .tmp file must be cleaned up despite the replace() failure
+        assert not list(tmp_path.glob("memories.*.tmp"))
+
 
 # ---------------------------------------------------------------------------
 # _get_anthropic_api_key
@@ -903,3 +916,40 @@ class TestSessionEndHook:
             "extract_facts must not be called when sentinel already exists "
             "(would waste API quota on double-processing)"
         )
+
+    def test_hook_resilient_to_save_errors(self, tmp_path: Path) -> None:
+        """Regression: OSError in save_memories must not propagate out of the hook.
+
+        An OSError (disk full, bad permissions on ~/.local/share/gptme/) would
+        otherwise crash gptme at session end. The hook should log a warning and
+        continue normally, including touching the sentinel.
+        """
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+
+        with (
+            patch(
+                "gptme_user_memories.hooks.session_end.extract_facts",
+                return_value=["user is a software engineer"],
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.load_existing_memories",
+                return_value=[],
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.save_memories",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            # Must not raise — hook should catch OSError and log at WARNING
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
+        # Sentinel still touched after the exception (outer sentinel.touch() is outside try)
+        assert (
+            log_dir / SENTINEL_FILENAME
+        ).exists(), "sentinel must be touched even when save_memories raises"
