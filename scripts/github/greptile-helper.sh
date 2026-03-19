@@ -84,6 +84,17 @@ PY
 # Shell variable caching doesn't work here because callers use $() subshells.
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
 trap 'rm -f "$_REVIEW_CACHE_FILE"' EXIT
+
+# Shared hash for per-PR state files (lock + trigger timestamp).
+# Used across trigger and _our_trigger_status to coordinate without the GitHub API.
+_PR_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5 -q) | cut -c1-12)
+# Local trigger timestamp file: written when a trigger is posted.
+# Checked in _our_trigger_status as a fast-path BEFORE querying GitHub API.
+# Guards against API propagation delay (comments posted can take minutes to appear
+# in the API, causing sequential post-session pipeline calls to re-trigger).
+# See: 2026-03-19 INCIDENT #5 (gptme-contrib#504/#505 got 2-3 triggers each
+# because the 00:15Z trigger wasn't visible in API at 00:20Z check).
+_TRIGGER_TS_FILE="${TMPDIR:-/tmp}/greptile-trigger-ts-${_PR_HASH}.txt"
 _greptile_review_info() {
     # Reset EXIT trap in subshell context — callers use $() which inherits
     # the parent trap and would delete the cache file immediately on return.
@@ -144,6 +155,36 @@ _needs_re_review() {
 # "stale" = last trigger is still the latest cycle, but it's older than the grace window
 _our_trigger_status() {
     local review_cutoff="${1:-}"
+
+    # Fast-path: check local timestamp file before hitting the GitHub API.
+    # The trigger command writes this file when posting a comment.  GitHub API
+    # can take several minutes to surface new comments (propagation delay), so
+    # sequential callers that run within TRIGGER_GRACE_SECONDS of a successful
+    # trigger would otherwise see "no trigger found" and fire again.
+    if [ -f "$_TRIGGER_TS_FILE" ]; then
+        local _local_ts
+        _local_ts=$(cat "$_TRIGGER_TS_FILE" 2>/dev/null || true)
+        if [ -n "$_local_ts" ]; then
+            # Only count this entry if it's from the CURRENT review cycle
+            # (i.e., the timestamp is after the last Greptile review).
+            # Note: when review_cutoff is empty (no prior Greptile review), skip the
+            # fast-path — the trigger command only writes this file during re-reviews,
+            # which always have a non-empty cutoff, so this invariant holds.
+            local _ts_in_cycle=0  # 1 = TS is from current review cycle; 0 = skip fast-path
+            if [ -n "$review_cutoff" ]; then
+                _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null && _ts_in_cycle=1 || true
+            fi
+            if [ "$_ts_in_cycle" -eq 1 ]; then
+                local _local_age
+                _local_age=$(_age_seconds "$_local_ts" 2>/dev/null) || _local_age=9999
+                if [ "${_local_age:-9999}" -lt "$TRIGGER_GRACE_SECONDS" ]; then
+                    echo "in-progress"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
     # Get our latest @greptileai trigger comment ID and timestamp
     # On API error: return "in-progress" (fail-safe) rather than "none" (fail-open),
     # to prevent rate-limit-caused spam. See: 2026-03-17 (root cause #1) and 2026-03-18 incidents.
@@ -250,9 +291,8 @@ trigger)
     # each called `gh api` for comments, all saw 0, all posted. flock makes check+post
     # atomic: the second session immediately fails the lock (-n = non-blocking), then sees the
     # first session's comment via the 15-min age guard and skips.
-    # Use md5sum (Linux) or md5 (macOS) for lock file naming
-    _LOCK_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5 -q) | cut -c1-12)
-    _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-${_LOCK_HASH}.lock"
+    # Use the shared _PR_HASH (computed at script start) for the lock file name
+    _LOCK_FILE="${TMPDIR:-/tmp}/greptile-lock-${_PR_HASH}.lock"
     exec 9>"$_LOCK_FILE"
     # flock: use flock if available, otherwise skip locking (macOS without GNU coreutils)
     if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
@@ -272,9 +312,17 @@ trigger)
             echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (score < 5/5 + new commits)..."
             # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
             # separate 5000/hour quota that's rarely exhausted.
-            gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null \
-                && echo "  [greptile] Re-triggered successfully." \
-                || echo "  [greptile] Trigger failed (non-fatal)."
+            if gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null; then
+                # Record trigger timestamp locally — fast-path guard against GitHub API
+                # propagation delay that causes sequential callers to see "no trigger"
+                # and re-trigger. See: 2026-03-19 INCIDENT #5.
+                if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
+                    echo "  [greptile] Warning: could not write trigger-timestamp file; propagation-delay guard disabled for this trigger."
+                fi
+                echo "  [greptile] Re-triggered successfully."
+            else
+                echo "  [greptile] Trigger failed (non-fatal)."
+            fi
         else
             echo "  [greptile] Already reviewed on $REPO#$PR_NUMBER (5/5 or no new commits). Skipping."
         fi

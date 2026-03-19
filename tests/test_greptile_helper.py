@@ -7,6 +7,7 @@ sort ordering) are exercised by every test.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -66,6 +67,8 @@ pr_number = fixture["pr_number"]
 
 # REST POST to comments endpoint (script uses gh api instead of gh pr comment)
 if "body" in fields and endpoint.endswith(f"/issues/{pr_number}/comments"):
+    if fixture.get("trigger_api_error"):
+        raise SystemExit(1)  # Simulate API failure (e.g. rate-limit or network error)
     Path(os.environ["GH_LOG"]).write_text(json.dumps({"body": fields["body"]}))
     raise SystemExit(0)
 
@@ -134,12 +137,25 @@ def _make_commit(date: str) -> dict:
     }
 
 
+def _pr_hash(repo: str, pr_number: int) -> str:
+    """Compute the per-PR hash used for lock and trigger-timestamp file names.
+
+    Mirrors the shell: printf '%s#%s' "$REPO" "$PR_NUMBER" | md5sum | cut -c1-12
+    """
+    return hashlib.md5(
+        f"{repo}#{pr_number}".encode(), usedforsecurity=False
+    ).hexdigest()[:12]
+
+
 @overload
 def _run_helper(
     command: str,
     fixture: dict[str, object],
     *,
     capture_gh_log: Literal[False] = ...,
+    capture_ts_file: Literal[False] = ...,
+    pre_trigger_ts: str | None = ...,
+    repo: str = ...,
 ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -149,7 +165,22 @@ def _run_helper(
     fixture: dict[str, object],
     *,
     capture_gh_log: Literal[True],
+    capture_ts_file: Literal[False] = ...,
+    pre_trigger_ts: str | None = ...,
+    repo: str = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str]: ...
+
+
+@overload
+def _run_helper(
+    command: str,
+    fixture: dict[str, object],
+    *,
+    capture_gh_log: Literal[False] = ...,
+    capture_ts_file: Literal[True],
+    pre_trigger_ts: str | None = ...,
+    repo: str = ...,
+) -> tuple[subprocess.CompletedProcess[str], str | None]: ...
 
 
 def _run_helper(
@@ -157,11 +188,29 @@ def _run_helper(
     fixture: dict[str, object],
     *,
     capture_gh_log: bool = False,
-) -> subprocess.CompletedProcess[str] | tuple[subprocess.CompletedProcess[str], str]:
+    capture_ts_file: bool = False,
+    pre_trigger_ts: str | None = None,
+    repo: str = "gptme/gptme",
+) -> (
+    subprocess.CompletedProcess[str]
+    | tuple[subprocess.CompletedProcess[str], str]
+    | tuple[subprocess.CompletedProcess[str], str | None]
+):
     """Run greptile-helper.sh with a fake gh stub.
 
-    When capture_gh_log=True, returns (result, gh_log_content) tuple.
+    Args:
+        command: check | trigger | status
+        fixture: fake API data for the gh stub
+        capture_gh_log: if True, returns (result, gh_log_content) tuple
+        capture_ts_file: if True, returns (result, ts_content_or_None) tuple;
+            ts_content is the content of _TRIGGER_TS_FILE if it was written, else None
+        pre_trigger_ts: if set, pre-create the local trigger-timestamp file with
+            this timestamp (simulates a prior successful trigger in the same TMPDIR)
+        repo: repo string passed to the helper (default "gptme/gptme")
     """
+    if capture_gh_log and capture_ts_file:
+        raise ValueError("capture_gh_log and capture_ts_file are mutually exclusive")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         fixture_path = tmp_path / "fixture.json"
@@ -171,23 +220,37 @@ def _run_helper(
         fake_gh.write_text(FAKE_GH)
         fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
 
+        # Pre-seed the trigger-timestamp file if the test needs it
+        if pre_trigger_ts is not None:
+            pr_number = int(str(fixture["pr_number"]))
+            ts_file = tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt"
+            ts_file.write_text(pre_trigger_ts)
+
         gh_log = tmp_path / "gh-log.json"
         env = os.environ.copy()
         env["GH_FIXTURE"] = str(fixture_path)
         env["GH_LOG"] = str(gh_log)
         env["GITHUB_AUTHOR"] = "test-user"
         env["PATH"] = f"{tmp}:{env['PATH']}"
+        env["TMPDIR"] = tmp  # ensure helper writes state files to test's temp dir
 
         result = subprocess.run(
-            ["bash", str(SCRIPT), command, "gptme/gptme", str(fixture["pr_number"])],
+            ["bash", str(SCRIPT), command, repo, str(fixture["pr_number"])],
             capture_output=True,
             text=True,
             env=env,
             timeout=30,
         )
+
+        # Collect optional outputs before the temp dir is cleaned up
         if capture_gh_log:
             log_content = gh_log.read_text() if gh_log.exists() else ""
             return result, log_content
+        if capture_ts_file:
+            pr_number = int(str(fixture["pr_number"]))
+            ts_path = tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt"
+            ts_content = ts_path.read_text().strip() if ts_path.exists() else None
+            return result, ts_content
         return result
 
 
@@ -427,3 +490,175 @@ def test_max_retries_guard_allows_below_threshold():
     assert (
         status.stdout.strip() != "in-progress"
     ), f"Should NOT block at count=2 (< MAX_RE_TRIGGERS=3), got: {status.stdout.strip()}"
+
+
+# --- Tests for local trigger-timestamp file (API propagation delay guard) ---
+
+
+def test_trigger_writes_local_timestamp_on_success():
+    """Successful trigger → writes _TRIGGER_TS_FILE to TMPDIR.
+
+    This is the core of the API-propagation-delay guard: if a sequential
+    caller checks within TRIGGER_GRACE_SECONDS, it must see "in-progress"
+    even before the GitHub API surfaces the comment.
+    """
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 555,
+        "raw_comments": [
+            _make_greptile_comment(3, reviewed_at=reviewed_at),
+            _make_trigger_comment("test-user", _iso_ago(minutes=45)),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 1,
+    }
+    result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
+
+    assert ts_content is not None, "_TRIGGER_TS_FILE should have been written"
+    # Timestamp should be a recent ISO 8601 UTC string
+    age = (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(ts_content.replace("Z", "+00:00"))
+    ).total_seconds()
+    assert 0 <= age < 30, f"Timestamp should be very recent, got age={age}s"
+
+
+def test_failed_trigger_does_not_write_timestamp():
+    """Failed gh api call → TS file must NOT be written.
+
+    Only a *successful* trigger should write the propagation-delay guard file.
+    A transient API failure must leave the TS untouched so the next caller
+    can attempt a fresh trigger rather than being blocked by a phantom timestamp.
+    """
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 561,
+        "raw_comments": [
+            _make_greptile_comment(3, reviewed_at=reviewed_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+        "trigger_api_error": True,  # gh api POST returns non-zero
+    }
+    result, ts_content = _run_helper(
+        "trigger", fixture, capture_ts_file=True, repo="gptme/gptme-contrib"
+    )
+    # Confirm the failure branch was actually reached (script prints this on non-zero gh exit)
+    assert "Trigger failed" in result.stdout, (
+        f"Expected 'Trigger failed' in stdout to confirm failure branch was reached,"
+        f" got: {result.stdout!r}"
+    )
+    assert (
+        ts_content is None
+    ), f"TS file must NOT be written after a failed API call, got: {ts_content!r}"
+
+
+def test_local_timestamp_blocks_sequential_retrigger():
+    """Pre-seeded local timestamp < 15min old → in-progress even with no API trigger comment.
+
+    Simulates the INCIDENT #5 scenario: fb40 session triggers at 00:15Z, post-session
+    pipeline runs at 00:20Z. The second call sees no API trigger comment (API propagation
+    delay) but should still be blocked by the local timestamp file.
+    """
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 504,
+        # No trigger comment visible in API (propagation delay simulation)
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    # Pre-seed: local TS file says we triggered 5 minutes ago
+    pre_ts = _iso_ago(minutes=5)
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        pre_trigger_ts=pre_ts,
+        repo="gptme/gptme-contrib",
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert (
+        not gh_log
+    ), f"Should NOT have posted trigger (local TS shows recent trigger), got: {gh_log}"
+    # result.returncode==0 and empty gh_log confirm the trigger was blocked;
+    # we intentionally avoid asserting exact stdout message text (fragile)
+
+
+def test_local_timestamp_status_returns_in_progress():
+    """Pre-seeded local timestamp < 15min → status returns 'in-progress'."""
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 505,
+        "raw_comments": [
+            _make_greptile_comment(3, reviewed_at=reviewed_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    pre_ts = _iso_ago(minutes=3)
+    status = _run_helper(
+        "status", fixture, pre_trigger_ts=pre_ts, repo="gptme/gptme-contrib"
+    )
+    assert (
+        status.stdout.strip() == "in-progress"
+    ), f"Expected in-progress (local TS < 15min), got: {status.stdout.strip()}"
+
+
+def test_stale_local_timestamp_does_not_block():
+    """Pre-seeded local timestamp > 15min old → NOT treated as in-progress.
+
+    Once the grace window passes, the local TS is stale and the API is the
+    authoritative source for trigger status.
+    """
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 555,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    # Local TS is 20 minutes old → beyond TRIGGER_GRACE_SECONDS (15min = 900s)
+    pre_ts = _iso_ago(minutes=20)
+    status = _run_helper("status", fixture, pre_trigger_ts=pre_ts, repo="gptme/gptme")
+    # Should NOT be in-progress (old TS doesn't block)
+    assert (
+        status.stdout.strip() != "in-progress"
+    ), f"Stale local TS (20min) should not report in-progress, got: {status.stdout.strip()}"
+
+
+def test_local_timestamp_from_previous_cycle_does_not_block():
+    """Local TS from before the last Greptile review is from a stale cycle → doesn't block.
+
+    After Greptile posts a new review, an old local TS (from a trigger that led to
+    that review) should not block re-review triggers for new commits.
+    """
+    # Greptile reviewed 30 minutes ago
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 777,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    # Local TS from 35 minutes ago (BEFORE the last review — stale cycle)
+    pre_ts = _iso_ago(minutes=35)
+    status = _run_helper("status", fixture, pre_trigger_ts=pre_ts, repo="gptme/gptme")
+    # Should NOT be in-progress — the stale cycle TS is before the review
+    assert (
+        status.stdout.strip() != "in-progress"
+    ), f"Pre-review local TS should not block re-review, got: {status.stdout.strip()}"
