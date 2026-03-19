@@ -140,7 +140,9 @@ def _pr_hash(repo: str, pr_number: int) -> str:
 
     Mirrors the shell: printf '%s#%s' "$REPO" "$PR_NUMBER" | md5sum | cut -c1-12
     """
-    return hashlib.md5(f"{repo}#{pr_number}".encode()).hexdigest()[:12]
+    return hashlib.md5(
+        f"{repo}#{pr_number}".encode(), usedforsecurity=False
+    ).hexdigest()[:12]
 
 
 @overload
