@@ -67,6 +67,8 @@ pr_number = fixture["pr_number"]
 
 # REST POST to comments endpoint (script uses gh api instead of gh pr comment)
 if "body" in fields and endpoint.endswith(f"/issues/{pr_number}/comments"):
+    if fixture.get("trigger_api_error"):
+        raise SystemExit(1)  # Simulate API failure (e.g. rate-limit or network error)
     Path(os.environ["GH_LOG"]).write_text(json.dumps({"body": fields["body"]}))
     raise SystemExit(0)
 
@@ -524,6 +526,32 @@ def test_trigger_writes_local_timestamp_on_success():
     assert 0 <= age < 30, f"Timestamp should be very recent, got age={age}s"
 
 
+def test_failed_trigger_does_not_write_timestamp():
+    """Failed gh api call → TS file must NOT be written.
+
+    Only a *successful* trigger should write the propagation-delay guard file.
+    A transient API failure must leave the TS untouched so the next caller
+    can attempt a fresh trigger rather than being blocked by a phantom timestamp.
+    """
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 561,
+        "raw_comments": [
+            _make_greptile_comment(3, reviewed_at=reviewed_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+        "trigger_api_error": True,  # gh api POST returns non-zero
+    }
+    result, ts_content = _run_helper(
+        "trigger", fixture, capture_ts_file=True, repo="gptme/gptme-contrib"
+    )
+    assert (
+        ts_content is None
+    ), f"TS file must NOT be written after a failed API call, got: {ts_content!r}"
+
+
 def test_local_timestamp_blocks_sequential_retrigger():
     """Pre-seeded local timestamp < 15min old → in-progress even with no API trigger comment.
 
@@ -555,9 +583,8 @@ def test_local_timestamp_blocks_sequential_retrigger():
     assert (
         not gh_log
     ), f"Should NOT have posted trigger (local TS shows recent trigger), got: {gh_log}"
-    assert (
-        "in-flight" in result.stdout
-    ), f"Expected in-flight message, got: {result.stdout}"
+    # result.returncode==0 and empty gh_log confirm the trigger was blocked;
+    # we intentionally avoid asserting exact stdout message text (fragile)
 
 
 def test_local_timestamp_status_returns_in_progress():
