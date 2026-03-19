@@ -31,7 +31,6 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 # Patterns that indicate an autonomous agent session (not a personal user session)
 AUTONOMOUS_PATTERNS = [
-    "autonomous",
     "You are Bob",
     "You are Agent",
     "running in autonomous mode",
@@ -290,11 +289,14 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
     # avoid partial writes corrupting the accumulated memories file on interruption.
     # PID in the name prevents concurrent callers (hook + CLI) from colliding.
     tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
+    replaced = False
     try:
         tmp.write_text(header + body + "\n", encoding="utf-8")
         tmp.replace(memories_file)
+        replaced = True
     finally:
-        tmp.unlink(missing_ok=True)
+        if not replaced:
+            tmp.unlink(missing_ok=True)
 
 
 def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:

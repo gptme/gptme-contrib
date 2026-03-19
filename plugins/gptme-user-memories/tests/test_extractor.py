@@ -78,6 +78,18 @@ class TestIsAutonomousSession:
         )
         assert is_autonomous_session(conv)
 
+    def test_bare_autonomous_word_not_false_positive(self, tmp_path: Path) -> None:
+        """Regression: bare 'autonomous' must not filter personal conversations.
+
+        A user asking "how do I build autonomous agents?" should not be mistaken
+        for an agent session — only specific multi-word patterns qualify.
+        """
+        conv = _make_gptme_conv(
+            tmp_path,
+            [{"role": "user", "content": "How do I build autonomous agents?"}],
+        )
+        assert not is_autonomous_session(conv)
+
     def test_missing_file_returns_false(self, tmp_path: Path) -> None:
         assert not is_autonomous_session(tmp_path / "nonexistent.jsonl")
 
@@ -344,6 +356,22 @@ class TestIsCCAutonomousSession:
                                 "content": "You are starting an autonomous work session.",
                             }
                         ],
+                    },
+                }
+            ],
+        )
+        assert not is_cc_autonomous_session(cc_file)
+
+    def test_bare_autonomous_word_not_false_positive(self, tmp_path: Path) -> None:
+        """Regression: bare 'autonomous' must not filter CC personal conversations."""
+        cc_file = _make_cc_jsonl(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "How do I build autonomous agents?",
                     },
                 }
             ],
