@@ -486,7 +486,7 @@ check_greptile_scores() {
         # Greptile edits its review comment in-place (PR updatedAt doesn't bump), but
         # a re-review only occurs after new commits (→ head_sha changes, invalidates
         # cache) or a manual @greptileai trigger (greptile-helper.sh's 15-min guard
-        # ensures any such review completes within the 30-min TTL).
+        # ensures any such review completes within the 60-min TTL).
         local greptile_score=""
         if [ -n "$last_state" ] && [ "$last_sha" = "$head_sha" ] \
                 && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then

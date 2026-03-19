@@ -1,6 +1,6 @@
 """Tests for check_greptile_scores() API caching in activity-gate.sh.
 
-Verifies that the 30-min HEAD-SHA-keyed cache correctly skips the
+Verifies that the 60-min HEAD-SHA-keyed cache correctly skips the
 ``gh api .../issues/.../comments`` REST call when the score is fresh,
 and falls through to the API when the cache is stale or the HEAD SHA
 has changed.
