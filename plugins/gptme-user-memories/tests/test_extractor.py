@@ -440,9 +440,6 @@ class TestRunBatch:
         cc_dir = tmp_path / ".claude" / "projects"
         cc_dir.mkdir(parents=True)
 
-        # Place a non-directory file before valid project dirs (sorted order matters)
-        (cc_dir / ".DS_Store").write_bytes(b"bogus")
-
         # Two valid project directories, each with a JSONL conversation
         long_content = (
             "I work as a software engineer at Acme Corp. "
@@ -465,6 +462,13 @@ class TestRunBatch:
                 + "\n"
             )
 
+        # Place .DS_Store AFTER the project dirs so it has a newer mtime and
+        # appears first in newest-first sorted order. This makes the break-vs-continue
+        # bug observable: with break, iteration stops immediately on .DS_Store and
+        # neither project dir is visited (0 extracted); with continue, .DS_Store is
+        # skipped and both project dirs are processed (2 extracted).
+        (cc_dir / ".DS_Store").write_bytes(b"bogus")
+
         facts_extracted: list[str] = []
 
         def fake_extract(text: str, model: str = "") -> list[str]:
@@ -478,7 +482,8 @@ class TestRunBatch:
         ):
             run_batch(days=9999, limit=10, dry_run=True)
 
-        # Both project dirs must have been visited; without the fix only 0 would be
+        # Both project dirs must have been visited; without the fix (break instead of
+        # continue) iteration stops on .DS_Store and 0 dirs are processed.
         assert len(facts_extracted) == 2, (
             f"Expected 2 dirs processed, got {len(facts_extracted)}. "
             "The break-vs-continue bug may have been reintroduced."
