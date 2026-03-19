@@ -89,7 +89,10 @@ def session_end_user_memories_hook(
     except Exception as e:
         logger.warning("user_memories: failed to save memories: %s", e)
 
-    sentinel.touch()
+    try:
+        sentinel.touch()
+    except OSError as e:
+        logger.warning("user_memories: failed to touch sentinel: %s", e)
 
     if False:  # makes this function a generator to satisfy Generator return type
         yield Message("system", "")
