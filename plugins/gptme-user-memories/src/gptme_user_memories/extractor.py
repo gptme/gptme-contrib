@@ -401,11 +401,15 @@ def run_batch(
     all_new_facts: list[str] = []
     processed = 0
 
+    def _safe_mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
     # gptme logs
     if LOGS_DIR.exists():
-        for log_dir in sorted(
-            LOGS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-        ):
+        for log_dir in sorted(LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
             if not log_dir.is_dir():
                 continue
             if log_dir.stat().st_mtime < cutoff_ts:
@@ -425,9 +429,7 @@ def run_batch(
 
     # Claude Code logs
     if CC_LOGS_DIR.exists():
-        for proj_dir in sorted(
-            CC_LOGS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-        ):
+        for proj_dir in sorted(CC_LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
             if not proj_dir.is_dir():
                 continue  # skip non-directory entries (e.g. .DS_Store)
             if proj_dir.stat().st_mtime < cutoff_ts:
@@ -435,7 +437,7 @@ def run_batch(
             if processed >= limit:
                 break
             for jsonl_file in sorted(
-                proj_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+                proj_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True
             ):
                 if processed >= limit:
                     break

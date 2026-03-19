@@ -638,6 +638,45 @@ class TestRunBatch:
             "Autonomous sessions must not consume the limit."
         )
 
+    def test_broken_symlink_in_logs_dir_does_not_crash(self, tmp_path: Path) -> None:
+        """Regression: p.stat().st_mtime in sorted() key raises OSError for broken
+        symlinks, causing the entire batch scan to abort before processing any logs."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        long_content = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+        valid_session = logs_dir / "valid-session"
+        valid_session.mkdir()
+        (valid_session / "conversation.jsonl").write_text(
+            json.dumps({"role": "user", "content": long_content}) + "\n"
+        )
+
+        # Broken symlink — stat() raises OSError
+        broken = logs_dir / "broken-link"
+        broken.symlink_to(logs_dir / "nonexistent-target")
+
+        api_calls: list[str] = []
+
+        def fake_extract(text: str, model: str = "") -> list[str]:
+            api_calls.append(text)
+            return ["Works at Acme Corp"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", tmp_path / "no-cc-logs"),
+            patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+        ):
+            # Must not raise OSError; valid session must still be processed
+            run_batch(days=9999, limit=10, dry_run=True)
+
+        assert len(api_calls) == 1, (
+            f"Expected 1 API call (valid session), got {len(api_calls)}. "
+            "A broken symlink in the logs dir must not abort the batch scan."
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_logdir
