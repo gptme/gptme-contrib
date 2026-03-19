@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -368,10 +369,14 @@ def is_bot_config(path: str) -> bool:
 
 
 def is_sensitive_path(path: str) -> bool:
-    lowered = path.lower()
-    if lowered.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
+    normalized = path.lower().replace("\\", "/")
+    if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
         return True
-    return any(part in lowered for part in SENSITIVE_PATH_PARTS)
+    components = normalized.split("/")
+    return any(
+        any(part in component for component in components)
+        for part in SENSITIVE_PATH_PARTS
+    )
 
 
 def is_allowed_file(path: str) -> bool:
@@ -547,8 +552,6 @@ def main() -> int:
     args = parser.parse_args()
 
     # Resolve workspace repo
-    import os
-
     workspace_repo = (
         args.workspace_repo
         or os.environ.get("WORKSPACE_REPO", "")

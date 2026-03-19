@@ -57,9 +57,6 @@ class PRInfo:
     title: str
     url: str
     has_greptile: bool
-    greptile_clean: bool
-    greptile_total: int
-    greptile_unresolved: int
     review_state: str
 
 
@@ -195,9 +192,6 @@ def main() -> int:
                     url=str(raw_pr["url"]),
                     has_greptile=review_state
                     in {"already-reviewed", "needs-re-review", "in-progress"},
-                    greptile_clean=True,
-                    greptile_total=0,
-                    greptile_unresolved=0,
                     review_state=review_state,
                 )
             )
