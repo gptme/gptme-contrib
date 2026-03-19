@@ -34,7 +34,7 @@ vim scripts/fix.py  # fix issues
 prek run       # still shows old errors
 
 # ✅ Correct: Stage first, then commit/prek
-git add new-file.md && git commit new-file.md -m "add new file"
+git add new-file.md && git commit -m "add new file"
 git add scripts/fix.py && prek run
 ```
 

@@ -5,8 +5,8 @@ match:
   - "PR queue overloaded"
   - "parallel work tracks"
   - "multiple PRs awaiting review"
-  - "six strategies for blockers"
-  - "nothing to do while waiting"
+  - "multiple work tracks blocked"
+  - "waiting for reviews or approvals"
 status: active
 ---
 
