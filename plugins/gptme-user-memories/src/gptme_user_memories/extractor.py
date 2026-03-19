@@ -295,30 +295,33 @@ def process_logdir(
     force: bool = False,
     dry_run: bool = False,
     model: str = DEFAULT_MODEL,
-) -> list[str]:
+) -> list[str] | None:
     """Extract facts from a single gptme conversation log directory.
 
-    Returns list of new facts found (empty if session is autonomous, too short,
-    or already processed). Does NOT save to the memories file.
+    Returns:
+        list[str]: facts found (may be empty if API returned nothing useful).
+            Indicates the API was called — counts toward the session limit.
+        None: session was filtered without an API call (autonomous, too short,
+            or already processed). Does NOT count toward the session limit.
     """
     conv_file = logdir / "conversation.jsonl"
     if not conv_file.exists():
-        return []
+        return None
 
     sentinel = logdir / SENTINEL_FILENAME
     if not force and sentinel.exists():
-        return []
+        return None
 
     if is_autonomous_session(conv_file):
         if not force and not dry_run:
             sentinel.touch()
-        return []
+        return None
 
     text = get_user_messages(conv_file)
     if len(text) < 50:
         if not force and not dry_run:
             sentinel.touch()
-        return []
+        return None
 
     facts = extract_facts(text, model=model)
 
@@ -333,26 +336,29 @@ def process_cc_logfile(
     force: bool = False,
     dry_run: bool = False,
     model: str = DEFAULT_MODEL,
-) -> list[str]:
+) -> list[str] | None:
     """Extract facts from a single Claude Code session JSONL file.
 
-    Returns list of new facts found (empty if session is autonomous, too short,
-    or already processed). Does NOT save to the memories file.
+    Returns:
+        list[str]: facts found (may be empty if API returned nothing useful).
+            Indicates the API was called — counts toward the session limit.
+        None: session was filtered without an API call (autonomous, too short,
+            or already processed). Does NOT count toward the session limit.
     """
     sentinel = jsonl_file.with_suffix(".memories-extracted")
     if not force and sentinel.exists():
-        return []
+        return None
 
     if is_cc_autonomous_session(jsonl_file):
         if not force and not dry_run:
             sentinel.touch()
-        return []
+        return None
 
     text = get_cc_user_messages(jsonl_file)
     if len(text) < 50:
         if not force and not dry_run:
             sentinel.touch()
-        return []
+        return None
 
     facts = extract_facts(text, model=model)
 
@@ -393,8 +399,9 @@ def run_batch(
                 continue
 
             facts = process_logdir(log_dir, force=force, dry_run=dry_run, model=model)
-            all_new_facts.extend(facts)
-            processed += 1
+            if facts is not None:
+                all_new_facts.extend(facts)
+                processed += 1
             if processed >= limit:
                 break
 
@@ -423,8 +430,9 @@ def run_batch(
                 facts = process_cc_logfile(
                     jsonl_file, force=force, dry_run=dry_run, model=model
                 )
-                all_new_facts.extend(facts)
-                processed += 1
+                if facts is not None:
+                    all_new_facts.extend(facts)
+                    processed += 1
 
     return all_new_facts
 
@@ -464,6 +472,11 @@ def main() -> None:
         default=USER_MEMORIES_FILE,
         help="Output memories file (default: %(default)s)",
     )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Anthropic model to use for fact extraction (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     new_facts = run_batch(
@@ -471,6 +484,7 @@ def main() -> None:
         limit=args.limit,
         force=args.force,
         dry_run=args.dry_run,
+        model=args.model,
     )
 
     if not new_facts:

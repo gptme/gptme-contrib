@@ -484,6 +484,50 @@ class TestRunBatch:
             "The break-vs-continue bug may have been reintroduced."
         )
 
+    def test_autonomous_sessions_do_not_consume_limit(self, tmp_path: Path) -> None:
+        """Regression: autonomous sessions were counted toward the limit even
+        though no API call was made, exhausting limit=1 before personal sessions."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        long_personal = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+        # Create one autonomous session and one personal session
+        for name, content, is_auto in [
+            (
+                "auto-session",
+                "You are starting an autonomous work session.",
+                True,
+            ),
+            ("personal-session", long_personal, False),
+        ]:
+            d = logs_dir / name
+            d.mkdir()
+            (d / "conversation.jsonl").write_text(
+                json.dumps({"role": "user", "content": content}) + "\n"
+            )
+
+        api_calls: list[str] = []
+
+        def fake_extract(text: str, model: str = "") -> list[str]:
+            api_calls.append(text)
+            return ["Works at Acme Corp"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", tmp_path / "no-cc-logs"),
+            patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+        ):
+            # limit=1 — should be consumed by the personal session, not the auto one
+            run_batch(days=9999, limit=1, dry_run=True)
+
+        assert len(api_calls) == 1, (
+            f"Expected 1 API call (personal session only), got {len(api_calls)}. "
+            "Autonomous sessions must not consume the limit."
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_logdir
@@ -520,7 +564,7 @@ class TestProcessLogdir:
         )
         (log_dir / SENTINEL_FILENAME).touch()
         facts = process_logdir(log_dir)
-        assert facts == []
+        assert facts is None
 
     def test_force_ignores_sentinel(self, tmp_path: Path) -> None:
         log_dir = self._make_logdir(
@@ -546,7 +590,7 @@ class TestProcessLogdir:
             ],
         )
         facts = process_logdir(log_dir, dry_run=True)
-        assert facts == []
+        assert facts is None
 
     def test_skips_short_conversation(self, tmp_path: Path) -> None:
         log_dir = self._make_logdir(
@@ -554,7 +598,7 @@ class TestProcessLogdir:
             [{"role": "user", "content": "ok"}],
         )
         facts = process_logdir(log_dir, dry_run=True)
-        assert facts == []
+        assert facts is None
 
     def test_touches_sentinel_on_success(self, tmp_path: Path) -> None:
         log_dir = self._make_logdir(
@@ -574,11 +618,11 @@ class TestProcessLogdir:
             process_logdir(log_dir, dry_run=True)
         assert not (log_dir / SENTINEL_FILENAME).exists()
 
-    def test_missing_conv_file_returns_empty(self, tmp_path: Path) -> None:
+    def test_missing_conv_file_returns_none(self, tmp_path: Path) -> None:
         log_dir = tmp_path / "empty_session"
         log_dir.mkdir()
         facts = process_logdir(log_dir)
-        assert facts == []
+        assert facts is None
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +657,7 @@ class TestProcessCCLogfile:
         )
         jsonl_file.with_suffix(".memories-extracted").touch()
         facts = process_cc_logfile(jsonl_file)
-        assert facts == []
+        assert facts is None
 
     def test_skips_autonomous_session(self, tmp_path: Path) -> None:
         jsonl_file = self._make_cc_file(
@@ -629,7 +673,7 @@ class TestProcessCCLogfile:
             ],
         )
         facts = process_cc_logfile(jsonl_file, dry_run=True)
-        assert facts == []
+        assert facts is None
 
     def test_touches_sentinel_on_success(self, tmp_path: Path) -> None:
         jsonl_file = self._make_cc_file(
@@ -717,3 +761,83 @@ class TestMain:
         assert not output.exists()
         captured = capsys.readouterr()
         assert "No new facts" in captured.out
+
+    def test_main_forwards_model_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = tmp_path / "memories.md"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "gptme-user-memories",
+                "--model",
+                "claude-haiku-3-5",
+                "--output",
+                str(output),
+            ],
+        )
+        captured_model: list[str] = []
+
+        def fake_run_batch(**kwargs: object) -> list[str]:
+            captured_model.append(str(kwargs.get("model", "")))
+            return []
+
+        with patch(
+            "gptme_user_memories.extractor.run_batch",
+            side_effect=fake_run_batch,
+        ):
+            from gptme_user_memories.extractor import main
+
+            main()
+
+        assert (
+            captured_model == ["claude-haiku-3-5"]
+        ), f"Expected model 'claude-haiku-3-5' forwarded to run_batch, got {captured_model}"
+
+
+# ---------------------------------------------------------------------------
+# session_end hook (sentinel pre-check)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndHook:
+    """Tests for the SESSION_END hook sentinel pre-check."""
+
+    _LONG_MSG = "I work as a software engineer at Acme Corp and have been coding for over ten years."
+
+    def _make_logdir(self, tmp_path: Path, messages: list[dict]) -> Path:
+        log_dir = tmp_path / "session1"
+        log_dir.mkdir()
+        (log_dir / "conversation.jsonl").write_text(
+            "\n".join(json.dumps(m) for m in messages) + "\n"
+        )
+        return log_dir
+
+    def test_skips_session_when_sentinel_exists(self, tmp_path: Path) -> None:
+        """Regression: hook must check sentinel.exists() before calling extract_facts.
+
+        If run_batch already processed a session mid-conversation and set the sentinel,
+        the hook should skip it at session-end rather than making a redundant API call.
+        """
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+        # Simulate run_batch having already processed this session
+        (log_dir / SENTINEL_FILENAME).touch()
+
+        api_calls: list[str] = []
+
+        with patch(
+            "gptme_user_memories.hooks.session_end.extract_facts",
+            side_effect=lambda text, **kw: api_calls.append(text) or [],
+        ):
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
+        assert api_calls == [], (
+            "extract_facts must not be called when sentinel already exists "
+            "(would waste API quota on double-processing)"
+        )

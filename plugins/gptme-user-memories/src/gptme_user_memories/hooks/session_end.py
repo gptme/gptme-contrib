@@ -53,6 +53,9 @@ def session_end_user_memories_hook(
         return
 
     sentinel = logdir / SENTINEL_FILENAME
+    if sentinel.exists():
+        logger.debug("user_memories: sentinel exists, already processed")
+        return
 
     if is_autonomous_session(conv_file):
         logger.debug("user_memories: skipping autonomous session")
