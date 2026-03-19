@@ -149,6 +149,7 @@ def _run_helper(
     fixture: dict[str, object],
     *,
     capture_gh_log: Literal[False] = ...,
+    capture_ts_file: Literal[False] = ...,
     pre_trigger_ts: str | None = ...,
     repo: str = ...,
 ) -> subprocess.CompletedProcess[str]: ...
@@ -160,9 +161,22 @@ def _run_helper(
     fixture: dict[str, object],
     *,
     capture_gh_log: Literal[True],
+    capture_ts_file: Literal[False] = ...,
     pre_trigger_ts: str | None = ...,
     repo: str = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str]: ...
+
+
+@overload
+def _run_helper(
+    command: str,
+    fixture: dict[str, object],
+    *,
+    capture_gh_log: Literal[False] = ...,
+    capture_ts_file: Literal[True],
+    pre_trigger_ts: str | None = ...,
+    repo: str = ...,
+) -> tuple[subprocess.CompletedProcess[str], str | None]: ...
 
 
 def _run_helper(
@@ -170,15 +184,22 @@ def _run_helper(
     fixture: dict[str, object],
     *,
     capture_gh_log: bool = False,
+    capture_ts_file: bool = False,
     pre_trigger_ts: str | None = None,
     repo: str = "gptme/gptme",
-) -> subprocess.CompletedProcess[str] | tuple[subprocess.CompletedProcess[str], str]:
+) -> (
+    subprocess.CompletedProcess[str]
+    | tuple[subprocess.CompletedProcess[str], str]
+    | tuple[subprocess.CompletedProcess[str], str | None]
+):
     """Run greptile-helper.sh with a fake gh stub.
 
     Args:
         command: check | trigger | status
         fixture: fake API data for the gh stub
         capture_gh_log: if True, returns (result, gh_log_content) tuple
+        capture_ts_file: if True, returns (result, ts_content_or_None) tuple;
+            ts_content is the content of _TRIGGER_TS_FILE if it was written, else None
         pre_trigger_ts: if set, pre-create the local trigger-timestamp file with
             this timestamp (simulates a prior successful trigger in the same TMPDIR)
         repo: repo string passed to the helper (default "gptme/gptme")
@@ -213,9 +234,16 @@ def _run_helper(
             env=env,
             timeout=30,
         )
+
+        # Collect optional outputs before the temp dir is cleaned up
         if capture_gh_log:
             log_content = gh_log.read_text() if gh_log.exists() else ""
             return result, log_content
+        if capture_ts_file:
+            pr_number = int(str(fixture["pr_number"]))
+            ts_path = tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt"
+            ts_content = ts_path.read_text().strip() if ts_path.exists() else None
+            return result, ts_content
         return result
 
 
@@ -478,44 +506,17 @@ def test_trigger_writes_local_timestamp_on_success():
         "raw_pr": {"created_at": _iso_ago(minutes=120)},
         "bot_reaction_count": 1,
     }
-    # Run trigger with a known TMPDIR so we can check for the TS file
-    repo = "gptme/gptme"
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        fixture_path = tmp_path / "fixture.json"
-        fixture_path.write_text(json.dumps(fixture))
-        fake_gh = tmp_path / "gh"
-        fake_gh.write_text(FAKE_GH)
-        fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
-        gh_log = tmp_path / "gh-log.json"
-        env = os.environ.copy()
-        env.update(
-            GH_FIXTURE=str(fixture_path),
-            GH_LOG=str(gh_log),
-            GITHUB_AUTHOR="test-user",
-            PATH=f"{tmp}:{env['PATH']}",
-            TMPDIR=tmp,
-        )
-        result = subprocess.run(
-            ["bash", str(SCRIPT), "trigger", repo, str(fixture["pr_number"])],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=30,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "Re-triggered successfully" in result.stdout
+    result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
 
-        pr_num = int(str(fixture["pr_number"]))
-        ts_file = tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_num)}.txt"
-        assert ts_file.exists(), "_TRIGGER_TS_FILE should have been written"
-        ts = ts_file.read_text().strip()
-        # Timestamp should be a recent ISO 8601 UTC string
-        age = (
-            datetime.now(timezone.utc)
-            - datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        ).total_seconds()
-        assert 0 <= age < 30, f"Timestamp should be very recent, got age={age}s"
+    assert ts_content is not None, "_TRIGGER_TS_FILE should have been written"
+    # Timestamp should be a recent ISO 8601 UTC string
+    age = (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(ts_content.replace("Z", "+00:00"))
+    ).total_seconds()
+    assert 0 <= age < 30, f"Timestamp should be very recent, got age={age}s"
 
 
 def test_local_timestamp_blocks_sequential_retrigger():

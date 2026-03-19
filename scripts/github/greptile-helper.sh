@@ -167,11 +167,14 @@ _our_trigger_status() {
         if [ -n "$_local_ts" ]; then
             # Only count this entry if it's from the CURRENT review cycle
             # (i.e., the timestamp is after the last Greptile review).
-            local _cycle_ok=1
+            # Note: when review_cutoff is empty (no prior Greptile review), skip the
+            # fast-path — the trigger command only writes this file during re-reviews,
+            # which always have a non-empty cutoff, so this invariant holds.
+            local _ts_in_cycle=0  # 1 = TS is from current review cycle; 0 = skip fast-path
             if [ -n "$review_cutoff" ]; then
-                _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null && _cycle_ok=0 || _cycle_ok=1
+                _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null && _ts_in_cycle=1 || true
             fi
-            if [ "$_cycle_ok" -eq 0 ]; then
+            if [ "$_ts_in_cycle" -eq 1 ]; then
                 local _local_age
                 _local_age=$(_age_seconds "$_local_ts" 2>/dev/null) || _local_age=9999
                 if [ "${_local_age:-9999}" -lt "$TRIGGER_GRACE_SECONDS" ]; then
