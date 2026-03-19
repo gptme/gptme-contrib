@@ -74,17 +74,20 @@ def session_end_user_memories_hook(
         sentinel.touch()
         return
 
-    existing = load_existing_memories(USER_MEMORIES_FILE)
-    merged = merge_facts(existing, facts)
-    new_count = len(merged) - len(existing)
+    try:
+        existing = load_existing_memories(USER_MEMORIES_FILE)
+        merged = merge_facts(existing, facts)
+        new_count = len(merged) - len(existing)
 
-    if new_count > 0:
-        save_memories(USER_MEMORIES_FILE, merged)
-        logger.info(
-            "user_memories: added %d new facts (total: %d)", new_count, len(merged)
-        )
-    else:
-        logger.debug("user_memories: all extracted facts were duplicates")
+        if new_count > 0:
+            save_memories(USER_MEMORIES_FILE, merged)
+            logger.info(
+                "user_memories: added %d new facts (total: %d)", new_count, len(merged)
+            )
+        else:
+            logger.debug("user_memories: all extracted facts were duplicates")
+    except Exception as e:
+        logger.warning("user_memories: failed to save memories: %s", e)
 
     sentinel.touch()
 
