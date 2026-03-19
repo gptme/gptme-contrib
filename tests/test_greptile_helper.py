@@ -359,3 +359,71 @@ def test_trigger_re_reviews_on_low_score_with_new_commits():
         gh_log
     ), "comment was never posted (neither gh pr comment nor gh api REST call)"
     assert "@greptileai review" in gh_log
+
+
+def test_max_retries_guard_blocks_after_repeated_triggers():
+    """3 triggers since last review (Greptile acked but never reviewed) → blocked.
+
+    Regression test for gptme#1651 (2026-03-18): 7 @greptileai review comments
+    posted in one day because the 20-min ACK_GRACE_SECONDS expiry kept marking
+    prior triggers as 'stale' even though Greptile had acked each one.
+    """
+    reviewed_at = _iso_ago(minutes=120)
+    fixture = {
+        "pr_number": 1651,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            # Three re-review triggers posted after the review, none responded to
+            _make_trigger_comment("test-user", _iso_ago(minutes=90)),
+            _make_trigger_comment("test-user", _iso_ago(minutes=60)),
+            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),  # New commits since review
+        ],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 1,  # Greptile acks each trigger but never posts a review
+    }
+    # check: should block (max retries reached)
+    result = _run_helper("check", fixture)
+    assert (
+        result.returncode == 1
+    ), f"Should block after max retries. stderr: {result.stderr}"
+
+    # status: should report in-progress (trigger loop blocked)
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() == "in-progress"
+    ), f"Expected in-progress, got: {status.stdout.strip()}"
+
+    # trigger: should NOT post a new comment
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"Should NOT have posted trigger comment, got: {gh_log}"
+
+
+def test_max_retries_guard_allows_below_threshold():
+    """2 triggers since last review (< MAX_RE_TRIGGERS=3) → NOT blocked, should re-trigger.
+
+    Lower-bound boundary check: the guard only fires at >= threshold, not below.
+    """
+    reviewed_at = _iso_ago(minutes=120)
+    fixture = {
+        "pr_number": 1651,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            # Two re-review triggers posted after the review (below the threshold of 3)
+            _make_trigger_comment("test-user", _iso_ago(minutes=60)),
+            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),  # New commits since review
+        ],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,  # Last trigger not yet acked — age guard doesn't apply
+    }
+    # status: should NOT be in-progress (guard not fired yet)
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() != "in-progress"
+    ), f"Should NOT block at count=2 (< MAX_RE_TRIGGERS=3), got: {status.stdout.strip()}"
