@@ -20,10 +20,15 @@ spec.loader.exec_module(pr_greptile_trigger)
 
 
 def test_review_state_for_pr_timeout_returns_error() -> None:
-    with patch.object(
-        pr_greptile_trigger.subprocess,
-        "run",
-        side_effect=subprocess.TimeoutExpired(cmd=["bash"], timeout=30),
+    with (
+        patch.object(
+            type(pr_greptile_trigger.SAFE_HELPER), "exists", return_value=True
+        ),
+        patch.object(
+            pr_greptile_trigger.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["bash"], timeout=30),
+        ),
     ):
         assert (
             pr_greptile_trigger.review_state_for_pr("gptme/gptme-contrib", 504)
@@ -32,10 +37,15 @@ def test_review_state_for_pr_timeout_returns_error() -> None:
 
 
 def test_trigger_greptile_timeout_returns_helper_timeout() -> None:
-    with patch.object(
-        pr_greptile_trigger.subprocess,
-        "run",
-        side_effect=subprocess.TimeoutExpired(cmd=["bash"], timeout=30),
+    with (
+        patch.object(
+            type(pr_greptile_trigger.SAFE_HELPER), "exists", return_value=True
+        ),
+        patch.object(
+            pr_greptile_trigger.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["bash"], timeout=30),
+        ),
     ):
         ok, output = pr_greptile_trigger.trigger_greptile("gptme/gptme-contrib", 504)
 

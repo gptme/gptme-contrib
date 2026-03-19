@@ -40,6 +40,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+MAX_GRAPHQL_PAGE_SIZE = 100
+
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 SPEC_LIKE_DOCS = {
     "README.md",
@@ -230,55 +232,91 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(raw))
 
 
+def _fetch_greptile_review_data(
+    repo: str, pr_number: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Fetch Greptile reviews and all review threads for a PR.
+
+    Review threads are paginated to avoid silently undercounting unresolved
+    Greptile comments on large PRs.
+    """
+    owner, name = repo.split("/", 1)
+    all_threads: list[dict[str, Any]] = []
+    reviews: list[dict[str, Any]] = []
+    cursor: str | None = None
+
+    while True:
+        after = f", after:{json.dumps(cursor)}" if cursor else ""
+        query = f"""
+        {{
+          repository(owner:{json.dumps(owner)}, name:{json.dumps(name)}) {{
+            pullRequest(number:{pr_number}) {{
+              reviews(last:50) {{
+                nodes {{
+                  author {{ login }}
+                  submittedAt
+                  state
+                }}
+              }}
+              reviewThreads(first:{MAX_GRAPHQL_PAGE_SIZE}{after}) {{
+                pageInfo {{
+                  hasNextPage
+                  endCursor
+                }}
+                nodes {{
+                  isResolved
+                  comments(first:1) {{
+                    nodes {{
+                      author {{ login }}
+                      createdAt
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
+
+        raw = run_gh(["api", "graphql", "-f", f"query={query}"], timeout=15)
+        if not raw:
+            return None
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+        pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
+        if not pr_data:
+            return None
+
+        if not reviews:
+            reviews = pr_data.get("reviews", {}).get("nodes", [])
+
+        threads_data = pr_data.get("reviewThreads", {})
+        all_threads.extend(threads_data.get("nodes", []))
+        page_info = threads_data.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            break
+
+    return reviews, all_threads
+
+
 def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
     """Check if Greptile reviewed this PR and count unresolved threads.
 
     Only considers threads from the most recent Greptile review cycle so that
     re-reviews after fixes are not blocked by old unresolved thread noise.
     """
-    owner, name = repo.split("/", 1)
-    query = """
-    {
-      repository(owner:"%s", name:"%s") {
-        pullRequest(number:%d) {
-          reviews(last:50) {
-            nodes {
-              author { login }
-              submittedAt
-              state
-            }
-          }
-          reviewThreads(first:50) {
-            nodes {
-              isResolved
-              comments(first:1) {
-                nodes {
-                  author { login }
-                  createdAt
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """ % (owner, name, pr_number)
-
-    raw = run_gh(["api", "graphql", "-f", f"query={query}"], timeout=15)
-    if not raw:
+    review_data = _fetch_greptile_review_data(repo, pr_number)
+    if review_data is None:
         return {"has_review": False, "unresolved": 0, "total": 0}
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {"has_review": False, "unresolved": 0, "total": 0}
-
-    pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
-    if not pr_data:
-        return {"has_review": False, "unresolved": 0, "total": 0}
-
-    reviews = pr_data.get("reviews", {}).get("nodes", [])
-    threads = pr_data.get("reviewThreads", {}).get("nodes", [])
+    reviews, threads = review_data
 
     greptile_reviews = [
         r
