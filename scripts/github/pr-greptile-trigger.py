@@ -109,14 +109,21 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, str]]:
 
 def _helper_cmd(
     command: str, repo: str, pr_number: int
-) -> subprocess.CompletedProcess[str]:
-    """Run greptile-helper.sh."""
-    return subprocess.run(
-        ["bash", str(SAFE_HELPER), command, repo, str(pr_number)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+) -> subprocess.CompletedProcess[str] | None:
+    """Run greptile-helper.sh.
+
+    Returns None on timeout so a single hung helper invocation doesn't abort the
+    whole batch.
+    """
+    try:
+        return subprocess.run(
+            ["bash", str(SAFE_HELPER), command, repo, str(pr_number)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def review_state_for_pr(repo: str, pr_number: int) -> str:
@@ -124,7 +131,7 @@ def review_state_for_pr(repo: str, pr_number: int) -> str:
     if not SAFE_HELPER.exists():
         return "error"
     result = _helper_cmd("status", repo, pr_number)
-    if result.returncode != 0:
+    if result is None or result.returncode != 0:
         return "error"
     return result.stdout.strip() or "error"
 
@@ -134,6 +141,8 @@ def trigger_greptile(repo: str, pr_number: int) -> tuple[bool, str]:
     if not SAFE_HELPER.exists():
         return False, "helper-missing"
     result = _helper_cmd("trigger", repo, pr_number)
+    if result is None:
+        return False, "helper-timeout"
     output = result.stdout.strip()
     return result.returncode == 0, output
 

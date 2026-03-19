@@ -329,7 +329,8 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     """Return True if all reported checks are success/skipped/neutral.
 
     Returns True when no checks are configured (no CI), treating the
-    absence of CI as neutral rather than failing.
+    absence of CI as neutral rather than failing. Individual checks with no
+    status and no conclusion are treated as indeterminate, not passing.
     """
     if not status_checks:
         return True
@@ -337,6 +338,8 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     for check in status_checks:
         conclusion = (check.get("conclusion") or "").upper()
         status = (check.get("status") or "").upper()
+        if not status and not conclusion:
+            return False
         if status and status != "COMPLETED":
             return False
         if conclusion and conclusion not in allowed:
@@ -508,8 +511,11 @@ def evaluate_pr(
     result.category = category
     result.reasons.extend(category_reasons)
 
-    if pr.get("reviewDecision") not in (None, "", "REVIEW_REQUIRED"):
-        result.warnings.append(f"Review decision: {pr.get('reviewDecision')}")
+    review_decision = pr.get("reviewDecision")
+    if review_decision == "CHANGES_REQUESTED":
+        result.reasons.append("Review decision: CHANGES_REQUESTED")
+    elif review_decision not in (None, "", "REVIEW_REQUIRED"):
+        result.warnings.append(f"Review decision: {review_decision}")
 
     result.eligible = not result.reasons
     return result
