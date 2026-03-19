@@ -289,6 +289,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     """
     tool_calls: dict[str, int] = {}
     error_count = 0
+    warning_phrase_count = 0  # soft error signal: "error", "failed", etc. in output
     git_commits: list[str] = []
     file_writes: list[str] = []
     journal_paths: list[str] = []
@@ -298,6 +299,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     recent_sigs: list[str] = []
     # Map tool_use id → tool name for filtering commit detection to Bash only
     tool_id_to_name: dict[str, str] = {}
+    # Per-tool-call timing: map tool_use_id → (tool_name, dispatch_timestamp)
+    tool_dispatch: dict[str, tuple[str, datetime]] = {}
+    tool_durations: dict[str, list[float]] = {}  # tool_name → list of durations (seconds)
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -321,10 +325,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
                 step_has_tool = True
 
-                # Track id → name for commit detection filtering
+                # Track id → name for commit detection filtering and timing
                 tool_id = item.get("id", "")
                 if tool_id:
                     tool_id_to_name[tool_id] = tool
+                    # Record dispatch time for per-tool-call duration tracking
+                    if ts is not None:
+                        tool_dispatch[tool_id] = (tool, ts)
 
                 if tool in _CC_WRITE_TOOLS:
                     inp = item.get("input", {})
@@ -407,6 +414,15 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 if not isinstance(item, dict) or item.get("type") != "tool_result":
                     continue
 
+                tool_use_id = item.get("tool_use_id", "")
+
+                # Per-tool-call duration: match result back to dispatch
+                if tool_use_id in tool_dispatch and ts is not None:
+                    dispatch_name, dispatch_ts = tool_dispatch[tool_use_id]
+                    dur = (ts - dispatch_ts).total_seconds()
+                    if dur >= 0:
+                        tool_durations.setdefault(dispatch_name, []).append(dur)
+
                 if item.get("is_error"):
                     error_count += 1
                     continue
@@ -421,10 +437,17 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 else:
                     result_str = str(result_content)
 
+                # Error/warning phrase detection in tool output (soft signal).
+                # Elevated counts indicate problems even when is_error is false.
+                # Only scan first 2000 chars to avoid false positives from large
+                # reports or log files that naturally contain error strings.
+                _scan = result_str[:2000].lower()
+                for phrase in ("error:", "error ", "failed", "failure", "traceback", "exception"):
+                    warning_phrase_count += _scan.count(phrase)
+
                 # Git commit detection: only from Bash tool output.
                 # Other tools (Read, Glob, Write) can return content containing
                 # commit-like patterns from files, which would be false positives.
-                tool_use_id = item.get("tool_use_id", "")
                 if tool_id_to_name.get(tool_use_id) == "Bash":
                     for commit_match in _COMMIT_RE.finditer(result_str):
                         commit_hash = commit_match.group(1)
@@ -436,14 +459,28 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
 
     deliverables = list(dict.fromkeys(git_commits + file_writes))
+
+    # Summarize per-tool-call timing: total and max per tool name.
+    # Enables detection of slow tests, long pre-commit hooks, and stalled tools.
+    tool_time_total: dict[str, float] = {}
+    tool_time_max: dict[str, float] = {}
+    for name, durs in tool_durations.items():
+        tool_time_total[name] = round(sum(durs), 1)
+        tool_time_max[name] = round(max(durs), 1)
+    total_tool_time_s = round(sum(tool_time_total.values()), 1)
+
     return {
         "tool_calls": tool_calls,
         "steps": steps,
         "error_count": error_count,
+        "warning_phrase_count": warning_phrase_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
         "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
+        "total_tool_time_s": total_tool_time_s,
+        "tool_time_total": tool_time_total,
+        "tool_time_max": tool_time_max,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
     }
