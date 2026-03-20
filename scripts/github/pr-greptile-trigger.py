@@ -287,7 +287,7 @@ def main() -> int:
 
     print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
     # Return non-zero if all triggers failed (agent callers can detect total failure)
-    return 0 if triggered > 0 or not actionable else 1
+    return 0 if triggered > 0 else 1
 
 
 if __name__ == "__main__":

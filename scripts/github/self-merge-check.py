@@ -283,7 +283,6 @@ def _fetch_greptile_review_data(
     cursor: str | None = None
 
     while True:
-        after = f", after:{json.dumps(cursor)}" if cursor else ""
         # Only fetch reviews on the first page; subsequent pages only need threads.
         reviews_block = (
             """reviews(last:50) {
@@ -296,12 +295,15 @@ def _fetch_greptile_review_data(
             if reviews is None
             else ""
         )
+        # Use $after variable to avoid cursor string interpolation.
+        after_arg = ", after: $after" if cursor else ""
+        after_var_decl = ", $after: String" if cursor else ""
         query = f"""
-        {{
-          repository(owner:{json.dumps(owner)}, name:{json.dumps(name)}) {{
-            pullRequest(number:{pr_number}) {{
+        query($owner: String!, $name: String!, $pr: Int!{after_var_decl}) {{
+          repository(owner: $owner, name: $name) {{
+            pullRequest(number: $pr) {{
               {reviews_block}
-              reviewThreads(first:{MAX_GRAPHQL_PAGE_SIZE}{after}) {{
+              reviewThreads(first:{MAX_GRAPHQL_PAGE_SIZE}{after_arg}) {{
                 pageInfo {{
                   hasNextPage
                   endCursor
@@ -321,7 +323,21 @@ def _fetch_greptile_review_data(
         }}
         """
 
-        raw = run_gh(["api", "graphql", "-f", f"query={query}"], timeout=15)
+        gh_args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"pr={pr_number}",
+        ]
+        if cursor:
+            gh_args += ["-f", f"after={cursor}"]
+        raw = run_gh(gh_args, timeout=15)
         if not raw:
             return None
 
@@ -610,7 +626,7 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str) -> CheckResult:
     review_decision = pr.get("reviewDecision")
     if review_decision == "CHANGES_REQUESTED":
         result.reasons.append("Review decision: CHANGES_REQUESTED")
-    elif review_decision not in (None, "", "REVIEW_REQUIRED"):
+    elif review_decision not in (None, "", "REVIEW_REQUIRED", "APPROVED"):
         result.warnings.append(f"Review decision: {review_decision}")
 
     result.eligible = not result.reasons

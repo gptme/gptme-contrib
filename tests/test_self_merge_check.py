@@ -165,10 +165,13 @@ def test_fetch_greptile_status_paginates_review_threads() -> None:
 
     assert result == {"has_review": True, "unresolved": 1, "total": 2}
     assert mock_run_gh.call_count == 2
-    first_query = mock_run_gh.call_args_list[0].args[0][-1]
-    second_query = mock_run_gh.call_args_list[1].args[0][-1]
-    assert "reviewThreads(first:100)" in first_query
-    assert 'after:"cursor-1"' in second_query
+    # Query is now passed as "-f", "query=<body>" — extract body from index 3
+    first_args = mock_run_gh.call_args_list[0].args[0]
+    second_args = mock_run_gh.call_args_list[1].args[0]
+    assert "reviewThreads(first:100)" in first_args[3]
+    # Cursor is passed as a typed "-f after=..." variable, not injected into query
+    assert "-f" in second_args
+    assert any(a == "after=cursor-1" for a in second_args)
 
 
 def test_detect_workspace_repo_falls_back_when_cwd_remote_is_not_github() -> None:
