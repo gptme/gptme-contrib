@@ -277,17 +277,23 @@ def _fetch_greptile_review_data(
 
     while True:
         after = f", after:{json.dumps(cursor)}" if cursor else ""
+        # Only fetch reviews on the first page; subsequent pages only need threads.
+        reviews_block = (
+            """reviews(last:50) {
+                nodes {
+                  author { login }
+                  submittedAt
+                  state
+                }
+              }"""
+            if not reviews
+            else ""
+        )
         query = f"""
         {{
           repository(owner:{json.dumps(owner)}, name:{json.dumps(name)}) {{
             pullRequest(number:{pr_number}) {{
-              reviews(last:50) {{
-                nodes {{
-                  author {{ login }}
-                  submittedAt
-                  state
-                }}
-              }}
+              {reviews_block}
               reviewThreads(first:{MAX_GRAPHQL_PAGE_SIZE}{after}) {{
                 pageInfo {{
                   hasNextPage
@@ -553,7 +559,12 @@ def evaluate_pr(
     if current_user and author != current_user:
         result.reasons.append(f"PR author is {author}, expected {current_user}")
 
-    if workspace_repo and repo != workspace_repo and not allow_cross_repo:
+    if not workspace_repo:
+        result.warnings.append(
+            "Workspace repo could not be detected: cross-repo restriction is disabled. "
+            "Set WORKSPACE_REPO or pass --workspace-repo to enforce cross-repo policy."
+        )
+    elif repo != workspace_repo and not allow_cross_repo:
         result.reasons.append(
             f"Cross-repo PR ({repo}) is not eligible without --allow-cross-repo"
         )

@@ -234,3 +234,35 @@ def test_fetch_pr_uses_paginated_rest_files_api() -> None:
 )
 def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) -> None:
     assert self_merge_check.is_sensitive_path(path) is expected
+
+
+def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
+    """Cross-repo restriction must emit a warning (not silently skip) when workspace repo is undetectable."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+    }
+
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repo="",  # detection failure
+        )
+
+    # Cross-repo restriction cannot be enforced, so a warning must be emitted
+    assert any("cross-repo restriction is disabled" in w for w in result.warnings)
