@@ -71,8 +71,10 @@ def session_end_user_memories_hook(
 
     if not _get_anthropic_api_key():
         logger.warning(
-            "user_memories: ANTHROPIC_API_KEY not configured — skipping extraction (set env var or add to config.toml)"
+            "user_memories: ANTHROPIC_API_KEY not configured — skipping extraction "
+            "(set env var or add to config.toml). This session will be retried once a key is available."
         )
+        # Do not touch sentinel — retry when a key is configured
         return
 
     facts = extract_facts(text)

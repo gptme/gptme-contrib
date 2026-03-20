@@ -1042,6 +1042,59 @@ class TestRunBatch:
             "math.ceil(3/2)=2 per-source allows 2+2 possible but total cap fires at 3."
         )
 
+    def test_single_source_cc_gets_full_limit(self, tmp_path: Path) -> None:
+        """Regression: per-source cap silently halved the limit for single-source users.
+
+        With only CC logs (no gptme logs) and limit=6, the old code capped CC at
+        ceil(6/2)=3. With the fix, CC has no separate cap and total_processed enforces
+        the ceiling, so all 6 sessions are processed.
+        """
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_logs_dir.mkdir()
+        proj = cc_logs_dir / "my-project"
+        proj.mkdir()
+
+        long_content = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+        for i in range(6):
+            (proj / f"conv-{i}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {"role": "user", "content": long_content},
+                    }
+                )
+                + "\n"
+            )
+
+        processed: list[str] = []
+
+        def fake_process_cc(jsonl_file: Path, **kwargs: object) -> list[str] | None:
+            processed.append(jsonl_file.name)
+            return ["cc fact"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", tmp_path / "no-gptme-logs"),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch(
+                "gptme_user_memories.extractor.process_cc_logfile",
+                side_effect=fake_process_cc,
+            ),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
+        ):
+            run_batch(days=9999, limit=6, dry_run=True)
+
+        assert len(processed) == 6, (
+            f"Single-source CC user with limit=6 must process all 6 sessions, "
+            f"got {len(processed)}: {processed}. "
+            "The per-source cap must not halve the limit when only one source has sessions."
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_logdir
@@ -1166,35 +1219,62 @@ class TestProcessLogdir:
 class TestProcessCCLogfile:
     _LONG_MSG = "I work as a software engineer at Acme Corp and have been coding for over ten years."
 
-    def _make_cc_file(self, tmp_path: Path, messages: list[dict]) -> Path:
-        jsonl_file = tmp_path / "session.jsonl"
+    def _make_cc_file(self, cc_logs_dir: Path, messages: list[dict]) -> Path:
+        """Create a fake CC project dir with a session JSONL file under cc_logs_dir."""
+        proj_dir = cc_logs_dir / "proj123abc"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_file = proj_dir / "session.jsonl"
         jsonl_file.write_text("\n".join(json.dumps(m) for m in messages) + "\n")
         return jsonl_file
 
+    def _sentinel_for(
+        self, jsonl_file: Path, cc_logs_dir: Path, sentinel_dir: Path
+    ) -> Path:
+        """Return the expected sentinel path for a CC jsonl file."""
+        return sentinel_dir / jsonl_file.relative_to(cc_logs_dir).with_suffix(
+            ".memories-extracted"
+        )
+
     def test_returns_facts_for_personal_session(self, tmp_path: Path) -> None:
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_sentinel_dir = tmp_path / "cc-sentinels"
         jsonl_file = self._make_cc_file(
-            tmp_path,
+            cc_logs_dir,
             [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
         )
-        with patch(
-            "gptme_user_memories.extractor.extract_facts",
-            return_value=["Works at Acme Corp"],
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.CC_SENTINEL_DIR", cc_sentinel_dir),
+            patch(
+                "gptme_user_memories.extractor.extract_facts",
+                return_value=["Works at Acme Corp"],
+            ),
         ):
             facts = process_cc_logfile(jsonl_file, dry_run=True)
         assert facts == ["Works at Acme Corp"]
 
     def test_skips_sentinel_exists(self, tmp_path: Path) -> None:
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_sentinel_dir = tmp_path / "cc-sentinels"
         jsonl_file = self._make_cc_file(
-            tmp_path,
+            cc_logs_dir,
             [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
         )
-        jsonl_file.with_suffix(".memories-extracted").touch()
-        facts = process_cc_logfile(jsonl_file)
+        sentinel = self._sentinel_for(jsonl_file, cc_logs_dir, cc_sentinel_dir)
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.CC_SENTINEL_DIR", cc_sentinel_dir),
+        ):
+            facts = process_cc_logfile(jsonl_file)
         assert facts is None
 
     def test_skips_autonomous_session(self, tmp_path: Path) -> None:
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_sentinel_dir = tmp_path / "cc-sentinels"
         jsonl_file = self._make_cc_file(
-            tmp_path,
+            cc_logs_dir,
             [
                 {
                     "type": "user",
@@ -1205,26 +1285,49 @@ class TestProcessCCLogfile:
                 }
             ],
         )
-        facts = process_cc_logfile(jsonl_file, dry_run=True)
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.CC_SENTINEL_DIR", cc_sentinel_dir),
+        ):
+            facts = process_cc_logfile(jsonl_file, dry_run=True)
         assert facts is None
 
     def test_touches_sentinel_on_success(self, tmp_path: Path) -> None:
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_sentinel_dir = tmp_path / "cc-sentinels"
         jsonl_file = self._make_cc_file(
-            tmp_path,
+            cc_logs_dir,
             [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
         )
-        with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.CC_SENTINEL_DIR", cc_sentinel_dir),
+            patch("gptme_user_memories.extractor.extract_facts", return_value=[]),
+        ):
             process_cc_logfile(jsonl_file)
-        assert jsonl_file.with_suffix(".memories-extracted").exists()
+        sentinel = self._sentinel_for(jsonl_file, cc_logs_dir, cc_sentinel_dir)
+        assert (
+            sentinel.exists()
+        ), "sentinel must be under CC_SENTINEL_DIR, not alongside jsonl"
+        assert not jsonl_file.with_suffix(
+            ".memories-extracted"
+        ).exists(), "sentinel must NOT be placed in CC's own directory"
 
     def test_dry_run_does_not_touch_sentinel(self, tmp_path: Path) -> None:
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_sentinel_dir = tmp_path / "cc-sentinels"
         jsonl_file = self._make_cc_file(
-            tmp_path,
+            cc_logs_dir,
             [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
         )
-        with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.CC_SENTINEL_DIR", cc_sentinel_dir),
+            patch("gptme_user_memories.extractor.extract_facts", return_value=[]),
+        ):
             process_cc_logfile(jsonl_file, dry_run=True)
-        assert not jsonl_file.with_suffix(".memories-extracted").exists()
+        sentinel = self._sentinel_for(jsonl_file, cc_logs_dir, cc_sentinel_dir)
+        assert not sentinel.exists()
 
     def test_api_failure_does_not_touch_sentinel(self, tmp_path: Path) -> None:
         """Regression: API failure must not permanently mark CC session as processed.
@@ -1232,15 +1335,22 @@ class TestProcessCCLogfile:
         When extract_facts returns None (transient API error), process_cc_logfile must
         return None without touching the sentinel so the session is retried next run.
         """
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_sentinel_dir = tmp_path / "cc-sentinels"
         jsonl_file = self._make_cc_file(
-            tmp_path,
+            cc_logs_dir,
             [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
         )
-        with patch("gptme_user_memories.extractor.extract_facts", return_value=None):
+        with (
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.CC_SENTINEL_DIR", cc_sentinel_dir),
+            patch("gptme_user_memories.extractor.extract_facts", return_value=None),
+        ):
             result = process_cc_logfile(jsonl_file)
         assert result is None, "API failure should return None (not count toward limit)"
+        sentinel = self._sentinel_for(jsonl_file, cc_logs_dir, cc_sentinel_dir)
         assert (
-            not jsonl_file.with_suffix(".memories-extracted").exists()
+            not sentinel.exists()
         ), "sentinel must NOT be touched on API failure — session must be retried"
 
 

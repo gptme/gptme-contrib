@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 LOGS_DIR = Path.home() / ".local/share/gptme/logs"
 CC_LOGS_DIR = Path.home() / ".claude/projects"
+CC_SENTINEL_DIR = Path.home() / ".local/share/gptme/cc-sentinels"
 USER_MEMORIES_FILE = Path.home() / ".local/share/gptme/user-memories.md"
 SENTINEL_FILENAME = ".memories-extracted"
 DEFAULT_DAYS = 14
@@ -379,19 +380,26 @@ def process_cc_logfile(
             already processed) or API call failed. Does NOT count toward the session
             limit. Sentinel is NOT touched on API failure so the session is retried.
     """
-    sentinel = jsonl_file.with_suffix(".memories-extracted")
+    # Store sentinel under gptme's data dir, not inside CC's own directories
+    sentinel = CC_SENTINEL_DIR / jsonl_file.relative_to(CC_LOGS_DIR).with_suffix(
+        ".memories-extracted"
+    )
     if not force and sentinel.exists():
         return None
 
+    def _touch_sentinel() -> None:
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+
     if is_cc_autonomous_session(jsonl_file):
         if not force and not dry_run:
-            sentinel.touch()
+            _touch_sentinel()
         return None
 
     text = get_cc_user_messages(jsonl_file)
     if len(text) < 50:
         if not force and not dry_run:
-            sentinel.touch()
+            _touch_sentinel()
         return None
 
     facts = extract_facts(text, model=model)
@@ -401,7 +409,7 @@ def process_cc_logfile(
         return None
 
     if not dry_run:
-        sentinel.touch()
+        _touch_sentinel()
 
     return facts
 
@@ -425,10 +433,10 @@ def run_batch(
 
     cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
     all_new_facts: list[str] = []
-    # Use per-source limits so neither source starves the other.
-    # total_processed enforces the hard cap across both sources (important for
-    # limit=1 where per_source_limit would otherwise allow 1+1=2 sessions).
-    # Use ceil so odd limits (3, 5, 7…) process the full requested count.
+    # Cap gptme at half the total limit so CC sessions aren't starved.
+    # CC has no separate cap — it can absorb any unused gptme quota up to `limit`.
+    # total_processed enforces the hard ceiling across both sources.
+    # Use ceil so odd limits (3, 5, 7…) still give gptme a fair share.
     per_source_limit = max(1, math.ceil(limit / 2))
     gptme_processed = 0
     cc_processed = 0
@@ -461,24 +469,28 @@ def run_batch(
             if gptme_processed >= per_source_limit or total_processed >= limit:
                 break
 
-    # Claude Code logs
+    # Claude Code logs — no per-source cap here; total_processed enforces the ceiling.
+    # This allows CC to absorb unused quota when gptme has fewer than per_source_limit sessions.
     if CC_LOGS_DIR.exists():
         for proj_dir in sorted(CC_LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
             if not proj_dir.is_dir():
                 continue  # skip non-directory entries (e.g. .DS_Store)
             if _safe_mtime(proj_dir) < cutoff_ts:
                 break  # dirs sorted newest-first; remaining are all stale
-            if cc_processed >= per_source_limit or total_processed >= limit:
+            if total_processed >= limit:
                 break
             for jsonl_file in sorted(
                 proj_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True
             ):
-                if cc_processed >= per_source_limit or total_processed >= limit:
+                if total_processed >= limit:
                     break
                 if _safe_mtime(jsonl_file) < cutoff_ts:
                     break  # files sorted newest-first; remaining are all stale
                 # Pre-check sentinel so sentinel-skipped sessions don't count toward limit
-                if not force and jsonl_file.with_suffix(".memories-extracted").exists():
+                cc_sentinel = CC_SENTINEL_DIR / jsonl_file.relative_to(
+                    CC_LOGS_DIR
+                ).with_suffix(".memories-extracted")
+                if not force and cc_sentinel.exists():
                     continue
 
                 facts = process_cc_logfile(
