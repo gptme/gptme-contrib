@@ -378,7 +378,7 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
         )
         return {"has_review": has_summary, "unresolved": 0, "total": 0}
 
-    latest_review_time = max(r.get("submittedAt", "") for r in greptile_reviews)
+    latest_review_time = max(r.get("submittedAt") or "" for r in greptile_reviews)
 
     total = 0
     unresolved = 0

@@ -97,6 +97,10 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, str]]:
         ]
     )
     if not raw:
+        print(
+            f"  [warn] No PRs returned for {repo} (access error or none open)",
+            file=sys.stderr,
+        )
         return []
     try:
         prs: list[dict[str, str]] = json.loads(raw)
@@ -122,7 +126,7 @@ def _helper_cmd(
             text=True,
             timeout=30,
         )
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
 
 
