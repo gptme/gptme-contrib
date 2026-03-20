@@ -33,7 +33,6 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 # Patterns that indicate an autonomous agent session (not a personal user session)
 AUTONOMOUS_PATTERNS = [
-    "You are Bob",
     "You are Agent",
     "running in autonomous mode",
     "gptme-prompt-",
@@ -439,7 +438,6 @@ def run_batch(
     # Use ceil so odd limits (3, 5, 7…) still give gptme a fair share.
     per_source_limit = max(1, math.ceil(limit / 2))
     gptme_processed = 0
-    cc_processed = 0
     total_processed = 0
 
     def _safe_mtime(p: Path) -> float:
@@ -498,7 +496,6 @@ def run_batch(
                 )
                 if facts is not None:
                     all_new_facts.extend(facts)
-                    cc_processed += 1
                     total_processed += 1
 
     return all_new_facts

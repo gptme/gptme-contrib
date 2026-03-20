@@ -64,10 +64,10 @@ class TestIsAutonomousSession:
         )
         assert is_autonomous_session(conv)
 
-    def test_explicit_bob_pattern(self, tmp_path: Path) -> None:
+    def test_explicit_agent_pattern(self, tmp_path: Path) -> None:
         conv = _make_gptme_conv(
             tmp_path,
-            [{"role": "system", "content": "You are Bob, an autonomous agent."}],
+            [{"role": "system", "content": "You are Agent, operating autonomously."}],
         )
         assert is_autonomous_session(conv)
 
@@ -108,7 +108,10 @@ class TestIsAutonomousSession:
                 {
                     "role": "system",
                     "content": [
-                        {"type": "text", "text": "You are Bob, an autonomous agent."}
+                        {
+                            "type": "text",
+                            "text": "You are Agent, operating autonomously.",
+                        }
                     ],
                 }
             ],
@@ -125,7 +128,7 @@ class TestIsAutonomousSession:
                     "content": [
                         {
                             "type": "tool_result",
-                            "content": "You are Bob, an autonomous agent.",
+                            "content": "You are Agent, operating autonomously.",
                         }
                     ],
                 }
@@ -787,6 +790,10 @@ class TestRunBatch:
         with (
             patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
             patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
             patch(
                 "gptme_user_memories.extractor.process_logdir",
                 side_effect=fake_process_logdir,
