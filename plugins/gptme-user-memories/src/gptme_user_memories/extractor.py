@@ -308,13 +308,18 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
 
 
 def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
-    """Merge new facts with existing ones, deduplicating by normalized form."""
-    normalized_existing = {f.lower().strip() for f in existing}
-    merged = list(existing)
-    for fact in new_facts:
-        if fact.lower().strip() not in normalized_existing:
+    """Merge new facts with existing ones, deduplicating by normalized form.
+
+    Also deduplicates within ``existing`` itself, so duplicates introduced via
+    manual editing of the memories file are cleaned up on the next write.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for fact in existing + new_facts:
+        normalized = fact.lower().strip()
+        if normalized not in seen:
+            seen.add(normalized)
             merged.append(fact)
-            normalized_existing.add(fact.lower().strip())
     return merged
 
 
@@ -448,10 +453,16 @@ def run_batch(
 
     # gptme logs
     if LOGS_DIR.exists():
-        for log_dir in sorted(LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
+        # Collect (mtime, path) once so sort key and cutoff check share the same stat() call.
+        gptme_entries = sorted(
+            ((mtime, p) for p in LOGS_DIR.iterdir() if (mtime := _safe_mtime(p))),
+            key=lambda t: t[0],
+            reverse=True,
+        )
+        for mtime, log_dir in gptme_entries:
             if not log_dir.is_dir():
                 continue
-            if _safe_mtime(log_dir) < cutoff_ts:
+            if mtime < cutoff_ts:
                 break
             if not (log_dir / "conversation.jsonl").exists():
                 continue
@@ -470,19 +481,31 @@ def run_batch(
     # Claude Code logs — no per-source cap here; total_processed enforces the ceiling.
     # This allows CC to absorb unused quota when gptme has fewer than per_source_limit sessions.
     if CC_LOGS_DIR.exists():
-        for proj_dir in sorted(CC_LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
+        cc_proj_entries = sorted(
+            ((mtime, p) for p in CC_LOGS_DIR.iterdir() if (mtime := _safe_mtime(p))),
+            key=lambda t: t[0],
+            reverse=True,
+        )
+        for proj_mtime, proj_dir in cc_proj_entries:
             if not proj_dir.is_dir():
                 continue  # skip non-directory entries (e.g. .DS_Store)
-            if _safe_mtime(proj_dir) < cutoff_ts:
+            if proj_mtime < cutoff_ts:
                 break  # dirs sorted newest-first; remaining are all stale
             if total_processed >= limit:
                 break
-            for jsonl_file in sorted(
-                proj_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True
-            ):
+            jsonl_entries = sorted(
+                (
+                    (mtime, f)
+                    for f in proj_dir.glob("*.jsonl")
+                    if (mtime := _safe_mtime(f))
+                ),
+                key=lambda t: t[0],
+                reverse=True,
+            )
+            for file_mtime, jsonl_file in jsonl_entries:
                 if total_processed >= limit:
                     break
-                if _safe_mtime(jsonl_file) < cutoff_ts:
+                if file_mtime < cutoff_ts:
                     break  # files sorted newest-first; remaining are all stale
                 # Pre-check sentinel so sentinel-skipped sessions don't count toward limit
                 cc_sentinel = CC_SENTINEL_DIR / jsonl_file.relative_to(

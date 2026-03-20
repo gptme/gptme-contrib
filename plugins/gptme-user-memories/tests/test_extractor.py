@@ -1651,6 +1651,63 @@ class TestSessionEndHook:
             "session should be processed once the key is configured"
         )
 
+    def test_hook_happy_path_saves_new_facts(self, tmp_path: Path) -> None:
+        """Hook must extract facts, merge with existing, save, and touch sentinel.
+
+        This exercises the full component wiring: get_user_messages → extract_facts →
+        load_existing_memories → merge_facts → save_memories → sentinel.touch().
+        """
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+        memories_file = tmp_path / "user-memories.md"
+
+        with (
+            patch(
+                "gptme_user_memories.hooks.session_end._get_anthropic_api_key",
+                return_value="sk-test",
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.extract_facts",
+                return_value=["user is a software engineer at Acme Corp"],
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.USER_MEMORIES_FILE",
+                memories_file,
+            ),
+        ):
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
+        assert (
+            log_dir / SENTINEL_FILENAME
+        ).exists(), "sentinel must be touched after successful extraction"
+        content = memories_file.read_text()
+        assert (
+            "user is a software engineer at Acme Corp" in content
+        ), "extracted fact must be written to memories file"
+
+    def test_merge_facts_deduplicates_existing(self) -> None:
+        """merge_facts must clean up duplicates already present in existing, not just new ones."""
+        from gptme_user_memories.extractor import merge_facts
+
+        existing = ["user likes Python", "user likes Python", "user works at Acme"]
+        new_facts = ["user works at Acme", "user uses vim"]
+
+        result = merge_facts(existing, new_facts)
+
+        assert (
+            result.count("user likes Python") == 1
+        ), "duplicates in existing must be deduplicated"
+        assert (
+            result.count("user works at Acme") == 1
+        ), "facts present in both existing and new must appear only once"
+        assert "user uses vim" in result, "new non-duplicate facts must be added"
+        assert len(result) == 3
+
 
 class TestRunBatchAPIKeyCheck:
     """Tests for run_batch early-exit when API key is not configured."""

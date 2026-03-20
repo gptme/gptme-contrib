@@ -48,6 +48,10 @@ def session_end_user_memories_hook(
         logger.debug("user_memories: missing logdir, skipping")
         return
 
+    # We read conversation.jsonl directly rather than using `manager.log` because
+    # run_batch (the backfill path) also reads from disk, keeping both paths consistent.
+    # gptme writes messages to disk eagerly, so the on-disk file is complete by the
+    # time SESSION_END fires.  If that assumption ever changes, switch to manager.log.
     conv_file = logdir / "conversation.jsonl"
     if not conv_file.exists():
         logger.debug("user_memories: no conversation.jsonl in %s", logdir)
