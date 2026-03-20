@@ -378,6 +378,34 @@ class TestIsCCAutonomousSession:
         )
         assert not is_cc_autonomous_session(cc_file)
 
+    def test_autonomous_pattern_in_later_message_detected(self, tmp_path: Path) -> None:
+        """Regression: autonomous pattern in 2nd+ message must not be missed.
+
+        Previously is_cc_autonomous_session returned False after the first
+        substantial non-autonomous message, so patterns in later messages were
+        silently skipped and the session was mis-classified as personal.
+        """
+        cc_file = _make_cc_jsonl(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "Good morning, let's get started.",
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "You are starting an autonomous work session.",
+                    },
+                },
+            ],
+        )
+        assert is_cc_autonomous_session(cc_file)
+
 
 # ---------------------------------------------------------------------------
 # merge_facts

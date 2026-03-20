@@ -126,9 +126,6 @@ def is_cc_autonomous_session(jsonl_file: Path) -> bool:
                         for pat in AUTONOMOUS_PATTERNS
                     ):
                         return True
-                    # First real user message found and not autonomous → it's personal
-                    if len(content_str) > 20:
-                        return False
                 except (json.JSONDecodeError, KeyError):
                     continue
     except OSError:
