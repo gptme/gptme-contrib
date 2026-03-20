@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -224,24 +225,105 @@ def test_fetch_pr_uses_paginated_rest_files_api() -> None:
         [json.dumps({"path": f"tests/test_{i}.py"}) for i in range(105)]
     )
 
-    with patch.object(
-        self_merge_check,
-        "run_gh",
-        side_effect=[json.dumps(pr_metadata), files_output],
-    ) as mock_run_gh:
+    with (
+        patch.object(
+            self_merge_check,
+            "run_gh",
+            side_effect=[json.dumps(pr_metadata)],
+        ) as mock_run_gh,
+        patch.object(
+            self_merge_check.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=files_output
+            ),
+        ) as mock_subprocess_run,
+    ):
         pr = self_merge_check.fetch_pr("gptme/gptme-contrib", 504)
 
     assert len(pr["files"]) == 105
     assert pr["files"][104]["path"] == "tests/test_104.py"
-    first_call = mock_run_gh.call_args_list[0]
-    second_call = mock_run_gh.call_args_list[1]
-    assert "files" not in first_call.args[0][-1]
-    assert second_call.args[0][:4] == [
+    # run_gh is called only for `gh pr view`; files now use subprocess.run directly
+    assert mock_run_gh.call_count == 1
+    assert "files" not in mock_run_gh.call_args_list[0].args[0][-1]
+    subprocess_args = mock_subprocess_run.call_args.args[0]
+    assert subprocess_args[:5] == [
+        "gh",
         "api",
         "repos/gptme/gptme-contrib/pulls/504/files",
         "--paginate",
         "--jq",
     ]
+
+
+def test_fetch_pr_files_returns_empty_list_for_pr_with_no_changed_files() -> None:
+    """A PR with 0 changed files should return [] not raise RuntimeError."""
+    with patch.object(
+        self_merge_check.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=""),
+    ):
+        files = self_merge_check._fetch_pr_files("gptme/gptme-contrib", 999)
+    assert files == []
+
+
+def test_fetch_greptile_review_data_returns_partial_on_mid_pagination_failure() -> None:
+    """Mid-pagination failure should return already-collected data, not None."""
+    first_page = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviews": {
+                        "nodes": [
+                            {
+                                "author": {"login": "greptile-apps"},
+                                "submittedAt": "2026-03-19T12:00:00Z",
+                                "state": "COMMENTED",
+                            }
+                        ]
+                    },
+                    "reviewThreads": {
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor-1",
+                        },
+                        "nodes": [
+                            {
+                                "isResolved": True,
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "author": {"login": "greptile-apps"},
+                                            "createdAt": "2026-03-19T12:01:00Z",
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                    },
+                }
+            }
+        }
+    }
+
+    with patch.object(
+        self_merge_check,
+        "run_gh",
+        side_effect=[
+            self_merge_check.json.dumps(first_page),
+            "",  # second page fails (network error / timeout)
+        ],
+    ):
+        result = self_merge_check._fetch_greptile_review_data(
+            "gptme/gptme-contrib", 504
+        )
+
+    # Should return partial data from page 1, not None
+    assert result is not None
+    reviews, threads = result
+    assert len(reviews) == 1
+    assert reviews[0]["author"]["login"] == "greptile-apps"
+    assert len(threads) == 1
 
 
 @pytest.mark.parametrize(

@@ -223,18 +223,27 @@ def parse_pr_target(
 
 
 def _fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
-    raw = run_gh(
+    # Use subprocess.run directly so we can check the exit code.  A PR with 0
+    # changed files produces empty stdout (jq emits nothing for an empty array),
+    # which is indistinguishable from a failure when we only look at the output
+    # string.  Checking returncode lets us correctly return [] for the 0-file
+    # case instead of incorrectly raising RuntimeError.
+    result = subprocess.run(
         [
+            "gh",
             "api",
             f"repos/{repo}/pulls/{number}/files",
             "--paginate",
             "--jq",
             ".[] | {path: .filename}",
         ],
+        capture_output=True,
+        text=True,
         timeout=60,
     )
-    if not raw:
+    if result.returncode != 0:
         raise RuntimeError(f"Failed to fetch PR files for {repo}#{number}")
+    raw = result.stdout.strip()
 
     files: list[dict[str, Any]] = []
     for line in raw.splitlines():
@@ -339,6 +348,12 @@ def _fetch_greptile_review_data(
             gh_args += ["-f", f"after={cursor}"]
         raw = run_gh(gh_args, timeout=15)
         if not raw:
+            # If we already have review data from page 1, degrade gracefully by
+            # returning what was collected so far rather than discarding it.  A
+            # mid-pagination transient error should not produce a false "Greptile
+            # review not found" result.
+            if reviews is not None:
+                break
             return None
 
         try:
