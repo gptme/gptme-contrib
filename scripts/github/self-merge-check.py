@@ -272,7 +272,11 @@ def _fetch_greptile_review_data(
     """
     owner, name = repo.split("/", 1)
     all_threads: list[dict[str, Any]] = []
-    reviews: list[dict[str, Any]] = []
+    # None = not yet fetched; [] = fetched but no reviews found.
+    # This distinction prevents re-including the reviews block on every pagination
+    # page when the PR has no Greptile reviews (empty list is falsy, so `if not
+    # reviews` would incorrectly re-request reviews on every subsequent page).
+    reviews: list[dict[str, Any]] | None = None
     cursor: str | None = None
 
     while True:
@@ -286,7 +290,7 @@ def _fetch_greptile_review_data(
                   state
                 }
               }"""
-            if not reviews
+            if reviews is None
             else ""
         )
         query = f"""
@@ -327,7 +331,7 @@ def _fetch_greptile_review_data(
         if not pr_data:
             return None
 
-        if not reviews:
+        if reviews is None:
             reviews = pr_data.get("reviews", {}).get("nodes", [])
 
         threads_data = pr_data.get("reviewThreads", {})
@@ -339,7 +343,7 @@ def _fetch_greptile_review_data(
         if not cursor:
             break
 
-    return reviews, all_threads
+    return reviews or [], all_threads
 
 
 def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:

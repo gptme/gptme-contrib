@@ -214,6 +214,7 @@ def main() -> int:
     reviewed = [p for p in all_prs if p.review_state == "already-reviewed"]
     actionable = [p for p in all_prs if p.review_state in ACTIONABLE_STATES]
     in_progress = [p for p in all_prs if p.review_state == "in-progress"]
+    awaiting = [p for p in all_prs if p.review_state == "awaiting-initial-review"]
     errors = [p for p in all_prs if p.review_state == "error"]
 
     if args.status:
@@ -221,6 +222,7 @@ def main() -> int:
         print(f"  ✅ Reviewed: {len(reviewed)}")
         print(f"  🔄 Actionable: {len(actionable)}")
         print(f"  ⏳ In progress: {len(in_progress)}")
+        print(f"  🆕 Awaiting initial: {len(awaiting)}")
         print(f"  ❌ Errors: {len(errors)}")
         print()
         for pr in all_prs:
