@@ -68,10 +68,7 @@ def is_autonomous_session(conv_file: Path) -> bool:
     """Check if a gptme session is an autonomous agent run (not an interactive user session)."""
     try:
         with open(conv_file) as f:
-            for _ in range(5):
-                line = f.readline()
-                if not line:
-                    break
+            for line in f:
                 try:
                     msg = json.loads(line)
                     content = msg.get("content", "")
@@ -431,7 +428,7 @@ def run_batch(
         for proj_dir in sorted(CC_LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
             if not proj_dir.is_dir():
                 continue  # skip non-directory entries (e.g. .DS_Store)
-            if proj_dir.stat().st_mtime < cutoff_ts:
+            if _safe_mtime(proj_dir) < cutoff_ts:
                 break  # dirs sorted newest-first; remaining are all stale
             if processed >= limit:
                 break
