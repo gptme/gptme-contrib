@@ -108,7 +108,11 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
         for p in prs:
             p["repo"] = repo
         return prs
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(
+            f"[warn] Failed to parse JSON from `gh pr list` for {repo}: {e}",
+            file=sys.stderr,
+        )
         return []
 
 
@@ -219,6 +223,8 @@ def main() -> int:
     errors = [p for p in all_prs if p.review_state == "error"]
 
     if args.status:
+        if args.execute:
+            print("[warn] --execute is ignored when --status is set", file=sys.stderr)
         print(f"Greptile Review Status — {len(all_prs)} PRs\n")
         print(f"  ✅ Reviewed: {len(reviewed)}")
         print(f"  🔄 Actionable: {len(actionable)}")
@@ -286,7 +292,7 @@ def main() -> int:
             time.sleep(1)
 
     print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
-    # Return non-zero if all triggers failed (agent callers can detect total failure)
+    # Return 0 if at least one trigger succeeded; non-zero only if all failed
     return 0 if triggered > 0 else 1
 
 
