@@ -133,6 +133,27 @@ class TestIsAutonomousSession:
         )
         assert not is_autonomous_session(conv)
 
+    def test_autonomous_pattern_in_assistant_message_no_false_positive(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: assistant messages explaining autonomous mode must not trigger
+        classification as autonomous — only system/user messages should be checked."""
+        conv = _make_gptme_conv(
+            tmp_path,
+            [
+                {
+                    "role": "user",
+                    "content": "How does gptme autonomous mode work?",
+                },
+                {
+                    "role": "assistant",
+                    # Assistant explanation contains the trigger pattern
+                    "content": "gptme-prompt- is used when running in autonomous mode...",
+                },
+            ],
+        )
+        assert not is_autonomous_session(conv)
+
 
 # ---------------------------------------------------------------------------
 # get_user_messages
@@ -712,6 +733,67 @@ class TestRunBatch:
         assert len(api_calls) == 1, (
             f"Expected 1 API call (personal session only), got {len(api_calls)}. "
             "Autonomous sessions must not consume the limit."
+        )
+
+    def test_limit_1_not_exceeded_across_both_sources(self, tmp_path: Path) -> None:
+        """Regression: --limit 1 allowed up to 2 sessions (1 per source) because
+        per_source_limit = max(1, 1//2) = 1, letting each source process independently.
+        Total sessions processed must respect the hard limit."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_logs_dir.mkdir()
+
+        long_content = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+
+        # One gptme session
+        d = logs_dir / "gptme-session"
+        d.mkdir()
+        (d / "conversation.jsonl").write_text(
+            json.dumps({"role": "user", "content": long_content}) + "\n"
+        )
+
+        # One CC session
+        proj = cc_logs_dir / "my-project"
+        proj.mkdir()
+        (proj / "conv.jsonl").write_text(
+            json.dumps(
+                {"type": "user", "message": {"role": "user", "content": long_content}}
+            )
+            + "\n"
+        )
+
+        sessions_processed: list[str] = []
+
+        def fake_process_logdir(log_dir: Path, **kwargs: object) -> list[str] | None:
+            sessions_processed.append(f"gptme:{log_dir.name}")
+            return ["gptme fact"]
+
+        def fake_process_cc(jsonl_file: Path, **kwargs: object) -> list[str] | None:
+            sessions_processed.append(f"cc:{jsonl_file.name}")
+            return ["cc fact"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch(
+                "gptme_user_memories.extractor.process_logdir",
+                side_effect=fake_process_logdir,
+            ),
+            patch(
+                "gptme_user_memories.extractor.process_cc_logfile",
+                side_effect=fake_process_cc,
+            ),
+        ):
+            run_batch(days=9999, limit=1, dry_run=True)
+
+        assert len(sessions_processed) <= 1, (
+            f"Expected at most 1 session processed with --limit 1, "
+            f"got {len(sessions_processed)}: {sessions_processed}. "
+            "per_source_limit must not allow each source to independently reach 1."
         )
 
     def test_broken_symlink_in_logs_dir_does_not_crash(self, tmp_path: Path) -> None:

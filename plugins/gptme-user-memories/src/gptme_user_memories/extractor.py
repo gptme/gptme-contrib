@@ -71,6 +71,10 @@ def is_autonomous_session(conv_file: Path) -> bool:
             for line in f:
                 try:
                     msg = json.loads(line)
+                    # Only check system/user messages — assistant messages may
+                    # *explain* autonomous mode, causing false-positive matches.
+                    if msg.get("role") not in ("system", "user"):
+                        continue
                     content = msg.get("content", "")
                     # Extract text from list-typed content (consistent with get_user_messages)
                     if isinstance(content, list):
@@ -395,10 +399,13 @@ def run_batch(
     """
     cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
     all_new_facts: list[str] = []
-    # Use per-source limits so neither source starves the other
+    # Use per-source limits so neither source starves the other.
+    # total_processed enforces the hard cap across both sources (important for
+    # limit=1 where per_source_limit would otherwise allow 1+1=2 sessions).
     per_source_limit = max(1, limit // 2)
     gptme_processed = 0
     cc_processed = 0
+    total_processed = 0
 
     def _safe_mtime(p: Path) -> float:
         try:
@@ -423,7 +430,8 @@ def run_batch(
             if facts is not None:
                 all_new_facts.extend(facts)
                 gptme_processed += 1
-            if gptme_processed >= per_source_limit:
+                total_processed += 1
+            if gptme_processed >= per_source_limit or total_processed >= limit:
                 break
 
     # Claude Code logs
@@ -433,12 +441,12 @@ def run_batch(
                 continue  # skip non-directory entries (e.g. .DS_Store)
             if _safe_mtime(proj_dir) < cutoff_ts:
                 break  # dirs sorted newest-first; remaining are all stale
-            if cc_processed >= per_source_limit:
+            if cc_processed >= per_source_limit or total_processed >= limit:
                 break
             for jsonl_file in sorted(
                 proj_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True
             ):
-                if cc_processed >= per_source_limit:
+                if cc_processed >= per_source_limit or total_processed >= limit:
                     break
                 if _safe_mtime(jsonl_file) < cutoff_ts:
                     break  # files sorted newest-first; remaining are all stale
@@ -452,6 +460,7 @@ def run_batch(
                 if facts is not None:
                     all_new_facts.extend(facts)
                     cc_processed += 1
+                    total_processed += 1
 
     return all_new_facts
 
