@@ -681,6 +681,10 @@ class TestRunBatch:
             patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_dir),
             patch("gptme_user_memories.extractor.LOGS_DIR", tmp_path / "no-gptme-logs"),
             patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
         ):
             run_batch(days=9999, limit=10, dry_run=True)
 
@@ -726,6 +730,10 @@ class TestRunBatch:
             patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
             patch("gptme_user_memories.extractor.CC_LOGS_DIR", tmp_path / "no-cc-logs"),
             patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
         ):
             # limit=1 — should be consumed by the personal session, not the auto one
             run_batch(days=9999, limit=1, dry_run=True)
@@ -826,6 +834,10 @@ class TestRunBatch:
             patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
             patch("gptme_user_memories.extractor.CC_LOGS_DIR", tmp_path / "no-cc-logs"),
             patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
         ):
             # Must not raise OSError; valid session must still be processed
             run_batch(days=9999, limit=10, dry_run=True)
@@ -875,6 +887,10 @@ class TestRunBatch:
             patch("gptme_user_memories.extractor.LOGS_DIR", tmp_path / "no-gptme-logs"),
             patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
             patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
         ):
             # Must not raise OSError; valid session must still be processed
             run_batch(days=9999, limit=10, dry_run=True)
@@ -940,6 +956,10 @@ class TestRunBatch:
             patch(
                 "gptme_user_memories.extractor.process_cc_logfile",
                 side_effect=fake_process_cc,
+            ),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
             ),
         ):
             run_batch(days=9999, limit=4, dry_run=True)
@@ -1009,6 +1029,10 @@ class TestRunBatch:
             patch(
                 "gptme_user_memories.extractor.process_cc_logfile",
                 side_effect=fake_process_cc,
+            ),
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value="fake-key",
             ),
         ):
             run_batch(days=9999, limit=3, dry_run=True)
@@ -1419,6 +1443,10 @@ class TestSessionEndHook:
         )
 
         with (
+            patch(
+                "gptme_user_memories.hooks.session_end._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
             patch(
                 "gptme_user_memories.hooks.session_end.extract_facts",
                 return_value=["user is a software engineer"],
