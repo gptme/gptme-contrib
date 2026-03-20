@@ -87,9 +87,7 @@ def session_end_user_memories_hook(
     facts = extract_facts(text, model=model)
     if facts is None:
         # Transient API failure — do NOT touch sentinel so the session is retried next run
-        logger.warning(
-            "user_memories: API call failed — session will be retried next run"
-        )
+        # (extract_facts already logs the warning with exception details)
         return
     if not facts:
         logger.debug("user_memories: no new facts extracted")

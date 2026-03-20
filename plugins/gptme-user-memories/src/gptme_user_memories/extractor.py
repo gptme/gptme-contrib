@@ -347,13 +347,13 @@ def process_logdir(
         return None
 
     if is_autonomous_session(conv_file):
-        if not force and not dry_run:
+        if not dry_run:
             sentinel.touch()
         return None
 
     text = get_user_messages(conv_file)
     if len(text) < 50:
-        if not force and not dry_run:
+        if not dry_run:
             sentinel.touch()
         return None
 
@@ -385,9 +385,17 @@ def process_cc_logfile(
             limit. Sentinel is NOT touched on API failure so the session is retried.
     """
     # Store sentinel under gptme's data dir, not inside CC's own directories
-    sentinel = CC_SENTINEL_DIR / jsonl_file.relative_to(CC_LOGS_DIR).with_suffix(
-        ".memories-extracted"
-    )
+    try:
+        sentinel = CC_SENTINEL_DIR / jsonl_file.relative_to(CC_LOGS_DIR).with_suffix(
+            ".memories-extracted"
+        )
+    except ValueError:
+        logger.warning(
+            "user_memories: %s is not under CC_LOGS_DIR %s — cannot compute sentinel path, skipping",
+            jsonl_file,
+            CC_LOGS_DIR,
+        )
+        return None
     if not force and sentinel.exists():
         return None
 
@@ -396,13 +404,13 @@ def process_cc_logfile(
         sentinel.touch()
 
     if is_cc_autonomous_session(jsonl_file):
-        if not force and not dry_run:
+        if not dry_run:
             _touch_sentinel()
         return None
 
     text = get_cc_user_messages(jsonl_file)
     if len(text) < 50:
-        if not force and not dry_run:
+        if not dry_run:
             _touch_sentinel()
         return None
 
