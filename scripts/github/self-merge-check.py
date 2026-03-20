@@ -395,7 +395,7 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
     greptile_reviews = [
         r
         for r in reviews
-        if "greptile" in (r.get("author", {}).get("login", "") or "").lower()
+        if "greptile" in ((r.get("author") or {}).get("login", "") or "").lower()
     ]
 
     if not greptile_reviews:
@@ -429,7 +429,7 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
         comments = thread.get("comments", {}).get("nodes", [])
         if not comments:
             continue
-        author = comments[0].get("author", {}).get("login", "")
+        author = (comments[0].get("author") or {}).get("login", "")
         if "greptile" not in author.lower():
             continue
         created_at = comments[0].get("createdAt", "")

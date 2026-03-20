@@ -19,6 +19,11 @@ Environment:
     GREPTILE_REPOS  Comma-separated list of repos to scan. Overrides the built-in
                     defaults when set. Example:
                     GREPTILE_REPOS=gptme/gptme,gptme/gptme-contrib python3 ...
+
+Exit codes (--execute mode):
+    0  All actionable re-reviews triggered successfully.
+    1  No re-reviews triggered (all attempts failed).
+    2  Partial failure — at least one succeeded, but some failed.
 """
 
 from __future__ import annotations
@@ -166,7 +171,7 @@ def resolve_repos(repo_arg: str | None) -> list[str]:
     return list(DEFAULT_GREPTILE_REPOS)
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -183,8 +188,14 @@ def main() -> int:
         "--author",
         help="GitHub username to filter PRs by (default: authenticated user)",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser().parse_args(argv)
+
+
+def _run(args: argparse.Namespace) -> int:
     author = args.author or get_gh_user()
     if not author:
         print(
@@ -292,8 +303,15 @@ def main() -> int:
             time.sleep(1)
 
     print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
-    # Return 0 if at least one trigger succeeded; non-zero only if all failed
-    return 0 if triggered > 0 else 1
+    if triggered == 0:
+        return 1  # All failed
+    if triggered < len(actionable):
+        return 2  # Partial failure — some triggers succeeded, some failed
+    return 0  # All succeeded
+
+
+def main() -> int:
+    return _run(_parse_args())
 
 
 if __name__ == "__main__":
