@@ -26,6 +26,16 @@ def test_checks_green_rejects_indeterminate_check() -> None:
     assert not self_merge_check.checks_green([{"status": None, "conclusion": None}])
 
 
+def test_checks_green_rejects_completed_without_conclusion() -> None:
+    # COMPLETED check with no conclusion is indeterminate — should not pass
+    assert not self_merge_check.checks_green(
+        [{"status": "COMPLETED", "conclusion": None}]
+    )
+    assert not self_merge_check.checks_green(
+        [{"status": "COMPLETED", "conclusion": ""}]
+    )
+
+
 def test_checks_green_allows_empty_list() -> None:
     assert self_merge_check.checks_green([])
 
@@ -103,15 +113,6 @@ def test_fetch_greptile_status_paginates_review_threads() -> None:
         "data": {
             "repository": {
                 "pullRequest": {
-                    "reviews": {
-                        "nodes": [
-                            {
-                                "author": {"login": "greptile-apps"},
-                                "submittedAt": "2026-03-19T12:00:00Z",
-                                "state": "COMMENTED",
-                            }
-                        ]
-                    },
                     "reviewThreads": {
                         "pageInfo": {
                             "hasNextPage": False,

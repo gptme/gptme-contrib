@@ -420,6 +420,8 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
             return False
         if status and status != "COMPLETED":
             return False
+        if status == "COMPLETED" and not conclusion:
+            return False
         if conclusion and conclusion not in allowed:
             return False
     return True

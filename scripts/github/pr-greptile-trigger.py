@@ -245,7 +245,6 @@ def main() -> int:
         return 0
 
     if not actionable:
-        awaiting = [p for p in all_prs if p.review_state == "awaiting-initial-review"]
         if awaiting:
             print(
                 f"All PRs are either already reviewed, in-flight, or awaiting Greptile "
