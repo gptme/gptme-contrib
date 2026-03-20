@@ -40,6 +40,22 @@ def test_checks_green_allows_empty_list() -> None:
     assert self_merge_check.checks_green([])
 
 
+def test_parse_pr_target_rejects_malformed_url() -> None:
+    """Malformed URL missing owner/repo path segments must raise ValueError."""
+    import pytest
+
+    with pytest.raises(ValueError, match="Not a PR URL"):
+        self_merge_check.parse_pr_target("https://github.com/pull/123", None, None)
+
+
+def test_parse_pr_target_accepts_valid_url() -> None:
+    repo, number = self_merge_check.parse_pr_target(
+        "https://github.com/gptme/gptme-contrib/pull/504", None, None
+    )
+    assert repo == "gptme/gptme-contrib"
+    assert number == 504
+
+
 def test_evaluate_pr_blocks_changes_requested() -> None:
     pr_data = {
         "author": {"login": "TimeToBuildBob"},

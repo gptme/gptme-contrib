@@ -37,6 +37,7 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -135,10 +136,10 @@ def get_gh_user() -> str:
 
 
 def detect_workspace_repo() -> str:
-    """Infer workspace repo from the git remote of the script's directory.
+    """Infer workspace repo from the git remote of the current working directory.
 
-    Walks up from the script's location looking for a .git directory, then
-    reads the origin remote URL and converts it to owner/repo format.
+    Tries CWD first, then the script's directory, walking up to find a .git
+    directory and reads the origin remote URL to convert it to owner/repo format.
 
     Returns empty string if detection fails.
     """
@@ -207,7 +208,8 @@ def parse_pr_target(
             return repo, int(pr)
         if pr.startswith("http://") or pr.startswith("https://"):
             parts = pr.rstrip("/").split("/")
-            if len(parts) < 2 or parts[-2] != "pull":
+            # Valid GitHub PR URL: https://github.com/owner/repo/pull/123 = 7 parts
+            if len(parts) < 7 or parts[-2] != "pull":
                 raise ValueError(f"Not a PR URL: {pr}")
             return "/".join(parts[-4:-2]), int(parts[-1])
         if "#" in pr:
@@ -380,7 +382,14 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
         has_summary = bool(comments_raw and comments_raw.strip())
         return {"has_review": has_summary, "unresolved": 0, "total": 0}
 
-    latest_review_time = max(r.get("submittedAt") or "" for r in greptile_reviews)
+    def _parse_ts(ts: str) -> datetime:
+        """Parse ISO 8601 timestamp to timezone-aware datetime (handles Z and +00:00)."""
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+    latest_review_time = max(
+        (_parse_ts(r["submittedAt"]) for r in greptile_reviews if r.get("submittedAt")),
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
 
     total = 0
     unresolved = 0
@@ -392,7 +401,7 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
         if "greptile" not in author.lower():
             continue
         created_at = comments[0].get("createdAt", "")
-        if created_at and created_at < latest_review_time:
+        if created_at and _parse_ts(created_at) < latest_review_time:
             continue
         total += 1
         if not thread.get("isResolved", False):
