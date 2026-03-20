@@ -1708,6 +1708,53 @@ class TestSessionEndHook:
         assert "user uses vim" in result, "new non-duplicate facts must be added"
         assert len(result) == 3
 
+    def test_hook_saves_when_dedup_reduces_existing(self, tmp_path: Path) -> None:
+        """Regression: hook must persist in-memory dedup even when new_count <= 0.
+
+        If existing has internal duplicates AND all extracted facts are already present,
+        new_count = len(merged) - len(existing) can be 0 or negative even though
+        merge_facts cleaned up duplicates in-memory. save_memories must still be called
+        so the on-disk file reflects the deduplicated list.
+        """
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        # Existing has a duplicate entry on disk
+        memories_file = tmp_path / "user-memories.md"
+        memories_file.write_text(
+            "# User Memories\n\n- user likes Python\n- user likes Python\n- user works at Acme\n"
+        )
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+
+        with (
+            patch(
+                "gptme_user_memories.hooks.session_end._get_anthropic_api_key",
+                return_value="sk-test",
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.extract_facts",
+                # All extracted facts already exist — new_count will be <= 0,
+                # but dedup-within-existing should still be persisted
+                return_value=["user likes Python", "user works at Acme"],
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.USER_MEMORIES_FILE",
+                memories_file,
+            ),
+        ):
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
+        content = memories_file.read_text()
+        # The duplicate "user likes Python" must be removed from the on-disk file
+        assert (
+            content.count("user likes Python") == 1
+        ), "hook must persist dedup-within-existing even when no new facts were added"
+        assert "user works at Acme" in content, "existing facts must be preserved"
+
 
 class TestRunBatchAPIKeyCheck:
     """Tests for run_batch early-exit when API key is not configured."""

@@ -98,11 +98,20 @@ def session_end_user_memories_hook(
         merged = merge_facts(existing, facts)
         new_count = len(merged) - len(existing)
 
-        if new_count > 0:
+        if len(merged) != len(existing):
             save_memories(USER_MEMORIES_FILE, merged)
-            logger.info(
-                "user_memories: added %d new facts (total: %d)", new_count, len(merged)
-            )
+            if new_count > 0:
+                logger.info(
+                    "user_memories: added %d new facts (total: %d)",
+                    new_count,
+                    len(merged),
+                )
+            else:
+                logger.debug(
+                    "user_memories: cleaned up %d duplicate facts (total: %d)",
+                    len(existing) - len(merged),
+                    len(merged),
+                )
         else:
             logger.debug("user_memories: all extracted facts were duplicates")
 
