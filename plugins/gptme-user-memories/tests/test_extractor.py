@@ -463,6 +463,20 @@ class TestMemoriesFile:
         zebra_pos = text.index("Zebra fact")
         assert apple_pos < zebra_pos
 
+    def test_save_case_insensitive_sort(self, tmp_path: Path) -> None:
+        """Facts are sorted case-insensitively, matching merge_facts deduplication."""
+        memories_file = tmp_path / "memories.md"
+        save_memories(
+            memories_file,
+            ["banana preference", "Apple preference", "cherry preference"],
+        )
+        text = memories_file.read_text()
+        apple_pos = text.index("Apple preference")
+        banana_pos = text.index("banana preference")
+        cherry_pos = text.index("cherry preference")
+        # Case-insensitive: Apple < banana < cherry (not ASCII: banana < Apple)
+        assert apple_pos < banana_pos < cherry_pos
+
     def test_save_no_tmp_file_left_behind(self, tmp_path: Path) -> None:
         """Atomic write via temp-then-rename should leave no .tmp file."""
         memories_file = tmp_path / "memories.md"
@@ -495,6 +509,12 @@ class TestGetAnthropicApiKey:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key-123")
+        result = _get_anthropic_api_key()
+        assert result == "env-key-123"
+
+    def test_env_var_strips_whitespace(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Env var with surrounding whitespace should be stripped like the TOML path."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "  env-key-123  ")
         result = _get_anthropic_api_key()
         assert result == "env-key-123"
 

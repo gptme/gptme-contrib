@@ -193,7 +193,7 @@ def get_cc_user_messages(jsonl_file: Path) -> str:
 
 def _get_anthropic_api_key() -> str | None:
     """Get Anthropic API key from env or gptme config.toml."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if api_key:
         return api_key
 
@@ -278,7 +278,7 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
         "Facts about the user extracted from past gptme conversations.\n"
         f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
     )
-    body = "\n".join(f"- {fact}" for fact in sorted(facts))
+    body = "\n".join(f"- {fact}" for fact in sorted(facts, key=str.casefold))
     # Write to a unique temp file in the same directory, then atomically rename to
     # avoid partial writes corrupting the accumulated memories file on interruption.
     # PID in the name prevents concurrent callers (hook + CLI) from colliding.
