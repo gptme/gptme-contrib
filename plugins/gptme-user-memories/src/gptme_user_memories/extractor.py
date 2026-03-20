@@ -411,7 +411,7 @@ def run_batch(
         for log_dir in sorted(LOGS_DIR.iterdir(), key=_safe_mtime, reverse=True):
             if not log_dir.is_dir():
                 continue
-            if log_dir.stat().st_mtime < cutoff_ts:
+            if _safe_mtime(log_dir) < cutoff_ts:
                 break
             if not (log_dir / "conversation.jsonl").exists():
                 continue
@@ -440,7 +440,7 @@ def run_batch(
             ):
                 if processed >= limit:
                     break
-                if jsonl_file.stat().st_mtime < cutoff_ts:
+                if _safe_mtime(jsonl_file) < cutoff_ts:
                     break  # files sorted newest-first; remaining are all stale
                 # Pre-check sentinel so sentinel-skipped sessions don't count toward limit
                 if not force and jsonl_file.with_suffix(".memories-extracted").exists():

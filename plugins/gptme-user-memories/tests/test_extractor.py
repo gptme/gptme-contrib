@@ -733,6 +733,55 @@ class TestRunBatch:
             "A broken symlink in the logs dir must not abort the batch scan."
         )
 
+    def test_broken_symlink_jsonl_in_cc_logs_does_not_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: jsonl_file.stat().st_mtime in CC inner loop raises OSError for
+        broken .jsonl symlinks, crashing the entire batch scan mid-iteration."""
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_logs_dir.mkdir()
+
+        proj_dir = cc_logs_dir / "some-project"
+        proj_dir.mkdir()
+
+        long_content = (
+            "I work as a data scientist at Widgets Inc. "
+            "I primarily use Python and SQL for my work."
+        )
+        valid_jsonl = proj_dir / "valid-session.jsonl"
+        valid_jsonl.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": long_content},
+                }
+            )
+            + "\n"
+        )
+
+        # Broken .jsonl symlink — stat() raises OSError
+        broken = proj_dir / "broken-link.jsonl"
+        broken.symlink_to(proj_dir / "nonexistent-target.jsonl")
+
+        api_calls: list[str] = []
+
+        def fake_extract(text: str, model: str = "") -> list[str]:
+            api_calls.append(text)
+            return ["Works at Widgets Inc"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", tmp_path / "no-gptme-logs"),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch("gptme_user_memories.extractor.extract_facts", fake_extract),
+        ):
+            # Must not raise OSError; valid session must still be processed
+            run_batch(days=9999, limit=10, dry_run=True)
+
+        assert len(api_calls) == 1, (
+            f"Expected 1 API call (valid CC session), got {len(api_calls)}. "
+            "A broken .jsonl symlink in a CC project dir must not abort the batch scan."
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_logdir
