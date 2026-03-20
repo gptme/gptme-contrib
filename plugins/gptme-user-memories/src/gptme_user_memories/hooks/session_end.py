@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from gptme.hooks import HookType, register_hook
 from gptme.message import Message
 
 from ..extractor import (
+    DEFAULT_MODEL,
     SENTINEL_FILENAME,
     USER_MEMORIES_FILE,
     _get_anthropic_api_key,
@@ -81,7 +83,8 @@ def session_end_user_memories_hook(
         # Do not touch sentinel — retry when a key is configured
         return
 
-    facts = extract_facts(text)
+    model = os.environ.get("GPTME_MEMORIES_MODEL", DEFAULT_MODEL)
+    facts = extract_facts(text, model=model)
     if facts is None:
         # Transient API failure — do NOT touch sentinel so the session is retried next run
         logger.warning(
@@ -96,9 +99,9 @@ def session_end_user_memories_hook(
     try:
         existing = load_existing_memories(USER_MEMORIES_FILE)
         merged = merge_facts(existing, facts)
-        new_count = len(merged) - len(existing)
 
-        if len(merged) != len(existing):
+        if merged != existing:
+            new_count = len(merged) - len(existing)
             save_memories(USER_MEMORIES_FILE, merged)
             if new_count > 0:
                 logger.info(
@@ -106,10 +109,15 @@ def session_end_user_memories_hook(
                     new_count,
                     len(merged),
                 )
-            else:
+            elif new_count < 0:
                 logger.debug(
                     "user_memories: cleaned up %d duplicate facts (total: %d)",
                     len(existing) - len(merged),
+                    len(merged),
+                )
+            else:
+                logger.debug(
+                    "user_memories: updated memories — deduplicated existing + added new (total: %d)",
                     len(merged),
                 )
         else:
