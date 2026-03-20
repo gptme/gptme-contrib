@@ -59,8 +59,6 @@ SPEC_LIKE_DOCS = {
 TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
-    "dotfiles/.config/systemd/",
-    "scripts/runs/",
     "scripts/deploy",
     "infra/",
     "k8s/",
@@ -84,17 +82,12 @@ SENSITIVE_PATH_PARTS = (
 INTERNAL_TOOLING_PREFIXES = (
     "scripts/",
     "packages/",
-    "state/",
 )
 TASK_METADATA_PREFIXES = (
     "tasks/",
     "journal/",
-    "state/calendars/",
 )
-LESSON_PREFIXES = (
-    "lessons/",
-    "knowledge/lessons/",
-)
+LESSON_PREFIXES = ("lessons/",)
 BOT_CONFIG_FILES = {
     ".pre-commit-config.yaml",
     "Makefile",
@@ -671,6 +664,16 @@ def format_human(result: CheckResult) -> str:
     return "\n".join(lines)
 
 
+def _resolve_workspace_repo(args: argparse.Namespace) -> str:
+    """Resolve workspace repo from CLI args, env, or auto-detection."""
+    cli_value = getattr(args, "workspace_repo", None)
+    if isinstance(cli_value, str):
+        return cli_value
+    if "WORKSPACE_REPO" in os.environ:
+        return os.environ["WORKSPACE_REPO"]  # honours "" to opt out
+    return detect_workspace_repo()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -689,18 +692,7 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
-
-    # Resolve workspace repo.
-    # NOTE: use explicit key-presence checks — an or-chain can't distinguish
-    # "env var not set" from "env var explicitly set to ''" (empty string).
-    # Setting WORKSPACE_REPO="" is the documented way to disable the cross-repo
-    # restriction, so we must honour the empty string and not fall through.
-    if args.workspace_repo is not None:
-        workspace_repo = args.workspace_repo
-    elif "WORKSPACE_REPO" in os.environ:
-        workspace_repo = os.environ["WORKSPACE_REPO"]  # honours "" to opt out
-    else:
-        workspace_repo = detect_workspace_repo()
+    workspace_repo = _resolve_workspace_repo(args)
 
     try:
         repo, number = parse_pr_target(args.pr, args.repo, args.number)

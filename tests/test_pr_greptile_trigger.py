@@ -118,6 +118,30 @@ def test_fetch_prs_empty_response_returns_empty_list() -> None:
     assert result == []
 
 
+def test_main_returns_2_when_all_pr_status_checks_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Missing helper / status errors for every PR must not look like success."""
+    monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [{"number": 1, "title": "t", "url": "u", "repo": repo}],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger, "review_state_for_pr", lambda repo, num: "error"
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger, "resolve_repos", lambda arg: ["gptme/gptme"]
+    )
+
+    args = pr_greptile_trigger._parse_args([])
+    assert pr_greptile_trigger._run(args) == 2
+    captured = capsys.readouterr()
+    assert "could not determine greptile status" in captured.err.lower()
+
+
 # --- exit code semantics ---
 
 

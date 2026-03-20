@@ -263,6 +263,13 @@ def _run(args: argparse.Namespace) -> int:
         return 0
 
     if not actionable:
+        if errors and not reviewed and not in_progress and not awaiting:
+            print(
+                f"[warn] Could not determine Greptile status for {len(errors)} PR(s) "
+                "(helper missing or errored).",
+                file=sys.stderr,
+            )
+            return 2
         if awaiting:
             print(
                 f"All PRs are either already reviewed, in-flight, or awaiting Greptile "
