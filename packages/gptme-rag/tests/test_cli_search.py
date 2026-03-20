@@ -243,6 +243,65 @@ def test_search_json_expand_truncated_consistency(populated_index):
         assert ctx["results_in_context"] == data["total_results"]
 
 
+def test_search_json_truncated_on_dedup(tmp_path):
+    """When assemble_context deduplicates chunks, truncated reflects the drop."""
+    index_dir = tmp_path / "dedup_index"
+    indexer = Indexer(
+        persist_directory=index_dir,
+        enable_persist=True,
+        # Large chunk size to avoid splitting — each doc becomes one chunk
+        chunk_size=500,
+        chunk_overlap=0,
+    )
+    # Two documents with identical content but different sources
+    shared_content = "Duplicate content about Python programming and data analysis."
+    docs = [
+        Document(
+            content=shared_content,
+            metadata={"source": str(tmp_path / "file_a.txt"), "extension": ".txt"},
+            doc_id="dup_a",
+        ),
+        Document(
+            content=shared_content,
+            metadata={"source": str(tmp_path / "file_b.txt"), "extension": ".txt"},
+            doc_id="dup_b",
+        ),
+    ]
+    indexer.add_documents(docs)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "search",
+            "Python programming",
+            "--persist-dir",
+            str(index_dir),
+            "--n-results",
+            "10",
+            "--json",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    ctx = data["context"]
+    # Both docs have distinct IDs (dup_a, dup_b) so ChromaDB stores and returns
+    # both — the indexer deduplicates by ID only, not by content.
+    assert data["total_results"] == 2, (
+        f"Expected both duplicate docs to be returned by ChromaDB, "
+        f"got total_results={data['total_results']}"
+    )
+    # assemble_context sees identical content and drops the second doc
+    assert (
+        ctx["results_in_context"] == 1
+    ), f"Expected dedup to keep only 1 doc, got results_in_context={ctx['results_in_context']}"
+    # The fix: truncated must be True when dedup dropped results
+    assert ctx["truncated"] is True, (
+        f"results_in_context={ctx['results_in_context']} < "
+        f"total_results={data['total_results']} but truncated=False"
+    )
+
+
 def test_search_human_format_is_default(populated_index):
     """Default output is human-readable (not JSON)."""
     runner = CliRunner()
