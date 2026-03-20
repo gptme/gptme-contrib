@@ -47,10 +47,10 @@ DEFAULT_GREPTILE_REPOS = [
     "gptme/gptme-cloud",
 ]
 
-# Only `needs-re-review` is actionable: greptile-helper.sh never triggers
-# initial reviews — unreviewed PRs return `awaiting-initial-review`, not `none`.
-# `stale` / `none` are kept for backward-compat but should never appear after
-# PR #497 in gptme-contrib (March 2026).
+# `needs-re-review` is the primary actionable state; `stale` and `none` are
+# kept for backward-compat but should not appear after PR #497 in gptme-contrib
+# (March 2026).  greptile-helper.sh never triggers initial reviews —
+# unreviewed PRs return `awaiting-initial-review`, not `none`.
 ACTIONABLE_STATES = {"none", "stale", "needs-re-review"}
 
 SAFE_HELPER = Path(__file__).with_name("greptile-helper.sh")

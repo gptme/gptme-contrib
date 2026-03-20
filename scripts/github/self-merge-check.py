@@ -228,19 +228,22 @@ def _fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
     # which is indistinguishable from a failure when we only look at the output
     # string.  Checking returncode lets us correctly return [] for the 0-file
     # case instead of incorrectly raising RuntimeError.
-    result = subprocess.run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo}/pulls/{number}/files",
-            "--paginate",
-            "--jq",
-            ".[] | {path: .filename}",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/pulls/{number}/files",
+                "--paginate",
+                "--jq",
+                ".[] | {path: .filename}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Timed out fetching PR files for {repo}#{number} (>60 s)")
     if result.returncode != 0:
         raise RuntimeError(f"Failed to fetch PR files for {repo}#{number}")
     raw = result.stdout.strip()
@@ -687,12 +690,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Resolve workspace repo
-    workspace_repo = (
-        args.workspace_repo
-        or os.environ.get("WORKSPACE_REPO", "")
-        or detect_workspace_repo()
-    )
+    # Resolve workspace repo.
+    # NOTE: use explicit key-presence checks — an or-chain can't distinguish
+    # "env var not set" from "env var explicitly set to ''" (empty string).
+    # Setting WORKSPACE_REPO="" is the documented way to disable the cross-repo
+    # restriction, so we must honour the empty string and not fall through.
+    if args.workspace_repo is not None:
+        workspace_repo = args.workspace_repo
+    elif "WORKSPACE_REPO" in os.environ:
+        workspace_repo = os.environ["WORKSPACE_REPO"]  # honours "" to opt out
+    else:
+        workspace_repo = detect_workspace_repo()
 
     try:
         repo, number = parse_pr_target(args.pr, args.repo, args.number)

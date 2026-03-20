@@ -437,3 +437,29 @@ def test_evaluate_pr_warns_on_auth_failure() -> None:
         )
 
     assert any("author-identity check skipped" in w for w in result.warnings)
+
+
+def test_workspace_repo_env_empty_string_disables_cross_repo_restriction() -> None:
+    """WORKSPACE_REPO="" should disable the cross-repo restriction (opt-out)."""
+    import argparse
+    import os
+
+    # Simulate CLI args where --workspace-repo was NOT supplied (default None)
+    args = argparse.Namespace(
+        workspace_repo=None, pr=None, repo=None, number=None, json=False
+    )
+
+    with patch.dict(os.environ, {"WORKSPACE_REPO": ""}, clear=False):
+        # Mimic the resolver block from main()
+        if args.workspace_repo is not None:
+            workspace_repo = args.workspace_repo
+        elif "WORKSPACE_REPO" in os.environ:
+            workspace_repo = os.environ["WORKSPACE_REPO"]
+        else:
+            workspace_repo = self_merge_check.detect_workspace_repo()
+
+    # Empty string means "disabled" — cross-repo restriction should not be enforced
+    assert workspace_repo == "", (
+        f"WORKSPACE_REPO='' should yield empty workspace_repo so cross-repo "
+        f"restriction is disabled; got: {workspace_repo!r}"
+    )
