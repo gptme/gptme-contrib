@@ -247,6 +247,9 @@ def test_fetch_pr_uses_paginated_rest_files_api() -> None:
         ("packages/docker-deployment.yaml", True),
         ("packages/service-deployer.py", True),
         ("packages/author_utils.py", False),
+        # oauth2 variants should also be caught
+        ("packages/oauth2_client.py", True),
+        ("src/oauth2/provider.py", True),
     ],
 )
 def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) -> None:

@@ -134,7 +134,7 @@ lessons, internal tooling, task metadata). Sensitive/infra paths immediately dis
 
 **Features:**
 - Auto-detects workspace repo from git remote (override with `--workspace-repo` or `WORKSPACE_REPO`)
-- Cross-repo PRs disqualified by default (use `--allow-cross-repo` to opt in)
+- Cross-repo PRs disqualified when workspace repo is set (clear `WORKSPACE_REPO` to disable)
 - JSON output mode for scripting
 - Detailed per-check reasoning
 
@@ -149,8 +149,8 @@ python3 scripts/github/self-merge-check.py --repo gptme/gptme 456
 # JSON output for scripting
 python3 scripts/github/self-merge-check.py --json https://github.com/owner/repo/pull/123
 
-# Allow cross-repo merges (external PRs)
-python3 scripts/github/self-merge-check.py --allow-cross-repo https://github.com/gptme/gptme/pull/456
+# Allow cross-repo merges (clear workspace repo restriction)
+WORKSPACE_REPO="" python3 scripts/github/self-merge-check.py https://github.com/gptme/gptme/pull/456
 
 # Override workspace repo detection
 python3 scripts/github/self-merge-check.py --workspace-repo myorg/myrepo <pr-url>

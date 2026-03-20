@@ -12,18 +12,18 @@ Policy summary:
   tooling, task metadata)
 - Sensitive/security/infra paths immediately disqualify the PR
 
-The workspace repo (the repo where the agent's brain lives) is treated separately:
-cross-repo PRs (agent pushing to external repos) require an explicit
-`--allow-cross-repo` flag to be eligible.
+The workspace repo (the repo where the agent's brain lives) is detected automatically.
+Cross-repo PRs (agent pushing to external repos) are disqualified by default.
+To allow cross-repo merges, clear WORKSPACE_REPO (set it to empty string).
 
 Usage:
     python3 scripts/github/self-merge-check.py <pr-url>
     python3 scripts/github/self-merge-check.py --repo gptme/gptme 123
     python3 scripts/github/self-merge-check.py --json <pr-url>
-    python3 scripts/github/self-merge-check.py --allow-cross-repo <pr-url>
 
 Environment:
     WORKSPACE_REPO  Override auto-detected workspace repo (owner/name format).
+                    Set to empty string to disable cross-repo restriction.
                     Defaults to the repo inferred from `git remote get-url origin`
                     in the script's directory tree.
 """
@@ -72,6 +72,7 @@ SENSITIVE_PATH_PARTS = (
     "token",
     "auth",
     "oauth",
+    "oauth2",
     "ssh",
     "deploy",
     "deployment",
@@ -549,9 +550,7 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
     return None, ["Changed files do not fit an allowed self-merge category"]
 
 
-def evaluate_pr(
-    repo: str, number: int, *, workspace_repo: str, allow_cross_repo: bool = False
-) -> CheckResult:
+def evaluate_pr(repo: str, number: int, *, workspace_repo: str) -> CheckResult:
     pr = fetch_pr(repo, number)
     author = pr.get("author", {}).get("login", "")
     title = pr.get("title", "")
@@ -581,9 +580,10 @@ def evaluate_pr(
             "Workspace repo could not be detected: cross-repo restriction is disabled. "
             "Set WORKSPACE_REPO or pass --workspace-repo to enforce cross-repo policy."
         )
-    elif repo != workspace_repo and not allow_cross_repo:
+    elif repo != workspace_repo:
         result.reasons.append(
-            f"Cross-repo PR ({repo}) is not eligible without --allow-cross-repo"
+            f"Cross-repo PR ({repo}) is not eligible for workspace {workspace_repo}. "
+            "Clear WORKSPACE_REPO to disable cross-repo restriction."
         )
 
     if pr.get("isDraft"):
@@ -648,11 +648,6 @@ def main() -> int:
     parser.add_argument("--repo", help="Repository in owner/name form")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     parser.add_argument(
-        "--allow-cross-repo",
-        action="store_true",
-        help="Allow merging PRs in repos other than the workspace repo",
-    )
-    parser.add_argument(
         "--workspace-repo",
         help=(
             "Workspace repo (owner/name) for cross-repo policy. "
@@ -674,7 +669,6 @@ def main() -> int:
             repo,
             number,
             workspace_repo=workspace_repo,
-            allow_cross_repo=args.allow_cross_repo,
         )
     except Exception as exc:
         if args.json:
