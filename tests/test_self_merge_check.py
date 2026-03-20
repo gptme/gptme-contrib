@@ -267,3 +267,69 @@ def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
 
     # Cross-repo restriction cannot be enforced, so a warning must be emitted
     assert any("cross-repo restriction is disabled" in w for w in result.warnings)
+
+
+def test_fetch_greptile_status_fallback_paginates_issue_comments() -> None:
+    """Fallback path must use --paginate so Greptile's comment isn't missed on busy PRs."""
+    # Simulate no formal Greptile review (GraphQL returns no greptile reviewer)
+    graphql_page = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviews": {"nodes": []},
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [],
+                    },
+                }
+            }
+        }
+    }
+    # Fallback REST call returns a Greptile comment ID (one line of output)
+    fallback_response = "123456789"
+
+    with patch.object(
+        self_merge_check,
+        "run_gh",
+        side_effect=[
+            self_merge_check.json.dumps(graphql_page),
+            fallback_response,
+        ],
+    ) as mock_run_gh:
+        result = self_merge_check.fetch_greptile_status("gptme/gptme-contrib", 504)
+
+    assert result["has_review"] is True
+    # Verify --paginate was passed to the fallback REST call
+    fallback_call_args = mock_run_gh.call_args_list[1].args[0]
+    assert "--paginate" in fallback_call_args
+
+
+def test_evaluate_pr_warns_on_auth_failure() -> None:
+    """When get_gh_user() returns empty, a warning is emitted instead of silently skipping."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "baseRefName": "master",
+    }
+
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value=""),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repo="gptme/gptme-contrib",
+        )
+
+    assert any("author-identity check skipped" in w for w in result.warnings)

@@ -365,21 +365,19 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
     ]
 
     if not greptile_reviews:
-        # Fall back to issue comments for summary-only reviews
+        # Fall back to issue comments for summary-only reviews.
+        # Use --paginate so Greptile's comment is found even on PRs with >30 comments.
         comments_raw = run_gh(
             [
                 "api",
                 f"repos/{repo}/issues/{pr_number}/comments",
+                "--paginate",
                 "--jq",
-                '[.[] | select(.user.login | test("greptile";"i"))] | length',
+                '.[] | select(.user.login | test("greptile";"i")) | .id',
             ],
-            timeout=15,
+            timeout=30,
         )
-        has_summary = (
-            bool(comments_raw)
-            and comments_raw.strip().isdigit()
-            and int(comments_raw.strip()) > 0
-        )
+        has_summary = bool(comments_raw and comments_raw.strip())
         return {"has_review": has_summary, "unresolved": 0, "total": 0}
 
     latest_review_time = max(r.get("submittedAt") or "" for r in greptile_reviews)
@@ -562,7 +560,11 @@ def evaluate_pr(
     )
 
     current_user = get_gh_user()
-    if current_user and author != current_user:
+    if not current_user:
+        result.warnings.append(
+            "Could not determine authenticated GitHub user; author-identity check skipped."
+        )
+    elif author != current_user:
         result.reasons.append(f"PR author is {author}, expected {current_user}")
 
     if not workspace_repo:
