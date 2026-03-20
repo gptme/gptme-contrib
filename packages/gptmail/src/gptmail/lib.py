@@ -47,7 +47,7 @@ from email.mime.text import MIMEText
 from email.policy import default
 from email.utils import format_datetime, parseaddr, parsedate_to_datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import markdown
 
@@ -148,7 +148,7 @@ class AgentEmail:
         """
         # Clear message index cache at start of sync
         # This ensures we rebuild the index with current state
-        self._message_index_cache = {}
+        self._message_index_cache: dict[str, Any] = {}
 
         self.workspace = Path(workspace_dir)
         self.email_dir = self.workspace / "email"
@@ -1247,7 +1247,7 @@ class AgentEmail:
         logger.debug(f"Built message index for {folder}: {len(index)} entries")
         return index
 
-    def _get_message_key(self, email_msg: EmailMessage, folder: str) -> Tuple[str, str]:
+    def _get_message_key(self, email_msg: EmailMessage, folder: str) -> Tuple[str, str | None]:
         """Get indexing keys for a message.
 
         Args:

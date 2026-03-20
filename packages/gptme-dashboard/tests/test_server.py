@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from gptme_dashboard.server import create_app, load_org_config
+flask = pytest.importorskip("flask", reason="Flask required for dashboard server tests")
+
+from gptme_dashboard.server import create_app, load_org_config  # noqa: E402
 
 
 @pytest.fixture

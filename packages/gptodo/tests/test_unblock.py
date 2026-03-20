@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import frontmatter
 
@@ -23,9 +23,9 @@ def create_task_info(
     name: str,
     path: Path,
     state: str = "active",
-    requires: List[str] = None,
-    depends: List[str] = None,
-    metadata: dict = None,
+    requires: Optional[List[str]] = None,
+    depends: Optional[List[str]] = None,
+    metadata: Optional[dict] = None,
 ) -> TaskInfo:
     """Create a TaskInfo object for testing."""
     metadata = metadata or {}
