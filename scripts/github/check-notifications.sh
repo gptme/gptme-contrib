@@ -115,12 +115,14 @@ is_item_open() {
 
     case "$type" in
         PullRequest)
-            state=$(gh pr view "$number" --repo "$repo" --json state -q .state 2>/dev/null || echo "UNKNOWN")
-            [[ "$state" == "OPEN" ]]
+            # Use REST API to avoid consuming GraphQL quota (gh pr view uses GraphQL)
+            state=$(gh api "repos/$repo/pulls/$number" --jq '.state' 2>/dev/null || echo "unknown")
+            [[ "$state" == "open" ]]
             ;;
         Issue)
-            state=$(gh issue view "$number" --repo "$repo" --json state -q .state 2>/dev/null || echo "UNKNOWN")
-            [[ "$state" == "OPEN" ]]
+            # Use REST API to avoid consuming GraphQL quota (gh issue view uses GraphQL)
+            state=$(gh api "repos/$repo/issues/$number" --jq '.state' 2>/dev/null || echo "unknown")
+            [[ "$state" == "open" ]]
             ;;
         *)
             # For other types (discussions, releases), always show
