@@ -4,7 +4,7 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,10 +23,10 @@ spec.loader.exec_module(pr_greptile_trigger)
 
 
 def test_review_state_for_pr_timeout_returns_error() -> None:
+    mock_helper = MagicMock(spec=Path)
+    mock_helper.exists.return_value = True
     with (
-        patch.object(
-            type(pr_greptile_trigger.SAFE_HELPER), "exists", return_value=True
-        ),
+        patch.object(pr_greptile_trigger, "SAFE_HELPER", mock_helper),
         patch.object(
             pr_greptile_trigger.subprocess,
             "run",
@@ -40,10 +40,10 @@ def test_review_state_for_pr_timeout_returns_error() -> None:
 
 
 def test_trigger_greptile_timeout_returns_helper_timeout() -> None:
+    mock_helper = MagicMock(spec=Path)
+    mock_helper.exists.return_value = True
     with (
-        patch.object(
-            type(pr_greptile_trigger.SAFE_HELPER), "exists", return_value=True
-        ),
+        patch.object(pr_greptile_trigger, "SAFE_HELPER", mock_helper),
         patch.object(
             pr_greptile_trigger.subprocess,
             "run",

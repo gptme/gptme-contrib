@@ -31,6 +31,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # Default repos where Greptile is likely installed (gptme ecosystem).
 # Override with GREPTILE_REPOS env var or --repo CLI flag.
@@ -80,7 +81,7 @@ def get_gh_user() -> str:
     return run_gh(["api", "user", "-q", ".login"]) or ""
 
 
-def fetch_prs(repo: str, author: str) -> list[dict[str, str]]:
+def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
     """Fetch open PRs for a repo authored by *author*."""
     raw = run_gh(
         [
@@ -103,7 +104,7 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, str]]:
         )
         return []
     try:
-        prs: list[dict[str, str]] = json.loads(raw)
+        prs: list[dict[str, Any]] = json.loads(raw)
         for p in prs:
             p["repo"] = repo
         return prs
@@ -270,7 +271,7 @@ def main() -> int:
     # Trigger re-reviews
     print(f"\nTriggering {len(actionable)} Greptile re-reviews...\n")
     triggered = 0
-    for pr in actionable:
+    for i, pr in enumerate(actionable):
         print(f"  Triggering {pr.repo}#{pr.number}...", end=" ", flush=True)
         success, detail = trigger_greptile(pr.repo, pr.number)
         if success:
@@ -280,8 +281,9 @@ def main() -> int:
             print("❌")
         if detail:
             print(f"    {detail}")
-        # Small delay to avoid rate limiting
-        time.sleep(1)
+        # Small delay to avoid rate limiting (skip after last item)
+        if i < len(actionable) - 1:
+            time.sleep(1)
 
     print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
     return 0

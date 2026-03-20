@@ -434,7 +434,7 @@ def is_spec_like_doc(path: str) -> bool:
 
 
 def is_test_file(path: str) -> bool:
-    return path.startswith("tests/") or any(marker in path for marker in TEST_MARKERS)
+    return any(marker in path for marker in TEST_MARKERS)
 
 
 def is_internal_tooling(path: str) -> bool:
