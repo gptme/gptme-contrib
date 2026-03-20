@@ -31,6 +31,14 @@ _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
 _WARNING_PHRASE_RE = re.compile(r"error:|failed|failures?\b|traceback|exception")
 
+_GPTME_META_SYSTEM_PREFIXES = (
+    "# Relevant Lessons",
+    "<workspace-",
+    "<budget:",
+    "<system_",
+    "Shellcheck found",
+)
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -112,6 +120,14 @@ def _extract_path_from_args(args_str: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _is_gptme_tool_result_system(content: str) -> bool:
+    """Heuristic: identify actual tool-result system messages in gptme logs."""
+    stripped = content.strip()
+    if not stripped:
+        return False
+    return not stripped.startswith(_GPTME_META_SYSTEM_PREFIXES)
+
+
 def extract_signals(msgs: list[dict]) -> dict:
     """Extract productivity signals from parsed gptme trajectory messages.
 
@@ -129,9 +145,12 @@ def extract_signals(msgs: list[dict]) -> dict:
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     steps = 0  # number of assistant turns that yielded to await tool results
+    warning_phrase_count = 0
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
+    pending_tools: list[tuple[str, datetime]] = []
+    tool_durations: dict[str, list[float]] = {}
 
     for msg in msgs:
         role = msg.get("role", "")
@@ -155,6 +174,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                 tool, _call_id, args_str = m.group(1), m.group(2), m.group(3)
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
                 step_has_tool = True
+                if ts is not None:
+                    pending_tools.append((tool, ts))
 
                 if tool in ("save", "write", "patch", "edit"):
                     path = _extract_path_from_args(args_str)
@@ -178,6 +199,19 @@ def extract_signals(msgs: list[dict]) -> dict:
 
         elif role == "system" and ts_str:
             content_stripped = content.strip()
+            is_tool_result = _is_gptme_tool_result_system(content)
+
+            if is_tool_result and pending_tools and ts is not None:
+                dispatch_name, dispatch_ts = pending_tools.pop(0)
+                dur = (ts - dispatch_ts).total_seconds()
+                if dur >= 0:
+                    tool_durations.setdefault(dispatch_name, []).append(dur)
+
+                if len(content) <= 4000:
+                    _scan = content.lower()
+                else:
+                    _scan = (content[:2000] + "\n" + content[-2000:]).lower()
+                warning_phrase_count += len(_WARNING_PHRASE_RE.findall(_scan))
 
             # Error detection (guard applies to all conditions, not just the last)
             if not content_stripped.startswith("Ran command:") and (
@@ -203,15 +237,25 @@ def extract_signals(msgs: list[dict]) -> dict:
     # Combine deliverables: git commits + distinct file writes
     deliverables = list(dict.fromkeys(git_commits + file_writes))
     retry_count = len(retry_candidates)
+    tool_time_total: dict[str, float] = {}
+    tool_time_max: dict[str, float] = {}
+    for name, durs in tool_durations.items():
+        tool_time_total[name] = round(sum(durs), 1)
+        tool_time_max[name] = round(max(durs), 1)
+    total_tool_time_s = round(sum(tool_time_total.values()), 1)
 
     return {
         "tool_calls": tool_calls,
         "steps": steps,
         "error_count": error_count,
+        "warning_phrase_count": warning_phrase_count,
         "git_commits": git_commits,
         "file_writes": file_writes,
         "journal_paths": list(dict.fromkeys(journal_paths)),
         "session_duration_s": duration_s,
+        "total_tool_time_s": total_tool_time_s,
+        "tool_time_total": tool_time_total,
+        "tool_time_max": tool_time_max,
         "retry_count": retry_count,
         "deliverables": deliverables,
     }

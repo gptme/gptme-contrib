@@ -1237,6 +1237,61 @@ def test_extract_signals_gptme_journal_excluded():
     assert len(sigs["file_writes"]) == 0
 
 
+def test_extract_signals_gptme_tool_timing_and_warning_phrases():
+    """gptme trajectories capture per-tool timing and warning phrases from tool results."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": '@shell(c0): {"command": "pytest -q"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "system",
+            "content": "Ran command: pytest -q\n```stdout\n2 failed, 1 passed\n```",
+            "timestamp": "2026-03-01T10:00:05+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@patch(c1): {"path": "/home/bob/bob/foo.py"}',
+            "timestamp": "2026-03-01T10:00:06+00:00",
+        },
+        {
+            "role": "system",
+            "content": "Applied patch successfully",
+            "timestamp": "2026-03-01T10:00:09+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["warning_phrase_count"] == 1
+    assert sigs["tool_time_total"] == {"shell": 5.0, "patch": 3.0}
+    assert sigs["tool_time_max"] == {"shell": 5.0, "patch": 3.0}
+    assert sigs["total_tool_time_s"] == 8.0
+
+
+def test_extract_signals_gptme_meta_system_messages_not_counted_as_tool_results():
+    """Injected lesson/meta system messages must not steal tool timing from real results."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": '@shell(c0): {"command": "false"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "system",
+            "content": "# Relevant Lessons\nThis is injected context, not a tool result.",
+            "timestamp": "2026-03-01T10:00:01+00:00",
+        },
+        {
+            "role": "system",
+            "content": "Ran command: false\nReturn code: 1",
+            "timestamp": "2026-03-01T10:00:04+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["tool_time_total"] == {"shell": 4.0}
+    assert sigs["total_tool_time_s"] == 4.0
+
+
 def test_extract_signals_gptme_no_placeholder_inflation():
     """gptme trajectory: tool calls with unparseable paths don't inflate file_writes.
 
