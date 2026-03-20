@@ -417,6 +417,12 @@ def run_batch(
 
     Returns list of all new facts found. Call save_memories() to persist them.
     """
+    if not _get_anthropic_api_key():
+        logger.warning(
+            "user_memories: ANTHROPIC_API_KEY not configured — skipping batch extraction (set env var or add to config.toml)"
+        )
+        return []
+
     cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
     all_new_facts: list[str] = []
     # Use per-source limits so neither source starves the other.

@@ -13,6 +13,7 @@ from gptme.message import Message
 from ..extractor import (
     SENTINEL_FILENAME,
     USER_MEMORIES_FILE,
+    _get_anthropic_api_key,
     extract_facts,
     get_user_messages,
     is_autonomous_session,
@@ -68,11 +69,17 @@ def session_end_user_memories_hook(
         sentinel.touch()
         return
 
+    if not _get_anthropic_api_key():
+        logger.warning(
+            "user_memories: ANTHROPIC_API_KEY not configured — skipping extraction (set env var or add to config.toml)"
+        )
+        return
+
     facts = extract_facts(text)
     if facts is None:
-        # API failure — do NOT touch sentinel so the session is retried next run
+        # Transient API failure — do NOT touch sentinel so the session is retried next run
         logger.warning(
-            "user_memories: API call failed — session will be retried (or use --force)"
+            "user_memories: API call failed — session will be retried next run"
         )
         return
     if not facts:
@@ -102,7 +109,9 @@ def session_end_user_memories_hook(
         logger.warning("user_memories: failed to save memories: %s", e)
         # Do NOT touch sentinel — transient failure, retry on next session
 
-    if False:  # makes this function a generator to satisfy Generator return type
+    # gptme's hook framework requires Generator[Message, None, None] return type.
+    # This stub makes CPython compile the function as a generator without any yields.
+    if False:  # pragma: no cover
         yield Message("system", "")
 
 

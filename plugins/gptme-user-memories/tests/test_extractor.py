@@ -1450,9 +1450,15 @@ class TestSessionEndHook:
             tmp_path, [{"role": "user", "content": self._LONG_MSG}]
         )
 
-        with patch(
-            "gptme_user_memories.hooks.session_end.extract_facts",
-            return_value=None,  # None = API failure
+        with (
+            patch(
+                "gptme_user_memories.hooks.session_end._get_anthropic_api_key",
+                return_value="fake-key",
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.extract_facts",
+                return_value=None,  # None = transient API failure
+            ),
         ):
             # Must not raise — hook should log a warning and return cleanly
             list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
@@ -1460,4 +1466,76 @@ class TestSessionEndHook:
         assert not (log_dir / SENTINEL_FILENAME).exists(), (
             "sentinel must NOT be touched on API failure — "
             "session must be retried on next run without requiring --force"
+        )
+
+    def test_hook_skips_cleanly_when_api_key_missing(self, tmp_path: Path) -> None:
+        """Missing ANTHROPIC_API_KEY must not call extract_facts or suggest --force.
+
+        When the API key is not configured, the hook should log a clear configuration
+        message and return without touching the sentinel. extract_facts must not be
+        called since no API call will be made and retrying won't help.
+        """
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+
+        api_calls: list[str] = []
+
+        with (
+            patch(
+                "gptme_user_memories.hooks.session_end._get_anthropic_api_key",
+                return_value=None,
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.extract_facts",
+                side_effect=lambda text, **kw: api_calls.append(text) or [],
+            ),
+        ):
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
+        assert api_calls == [], (
+            "extract_facts must not be called when API key is missing — "
+            "no API call will succeed, so calling it would just log repeated warnings"
+        )
+        assert not (log_dir / SENTINEL_FILENAME).exists(), (
+            "sentinel must NOT be touched on missing key — "
+            "session should be processed once the key is configured"
+        )
+
+
+class TestRunBatchAPIKeyCheck:
+    """Tests for run_batch early-exit when API key is not configured."""
+
+    def test_run_batch_returns_empty_when_no_api_key(self, tmp_path: Path) -> None:
+        """run_batch must short-circuit before scanning logs when API key is missing.
+
+        Without this guard, every unprocessed session in the --days window triggers
+        a call to extract_facts which logs the same 'no API key' warning, causing
+        unbounded I/O and log noise on every run.
+        """
+        from gptme_user_memories.extractor import run_batch
+
+        extract_calls: list[str] = []
+
+        with (
+            patch(
+                "gptme_user_memories.extractor._get_anthropic_api_key",
+                return_value=None,
+            ),
+            patch("gptme_user_memories.extractor.LOGS_DIR", tmp_path / "no-logs"),
+            patch(
+                "gptme_user_memories.extractor.extract_facts",
+                side_effect=lambda text, **kw: extract_calls.append(text) or [],
+            ),
+        ):
+            result = run_batch(days=30, limit=10)
+
+        assert result == [], "run_batch must return empty list when API key is missing"
+        assert extract_calls == [], (
+            "extract_facts must not be called when API key is missing — "
+            "no per-session scanning should happen"
         )
