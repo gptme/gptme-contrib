@@ -782,6 +782,73 @@ class TestRunBatch:
             "A broken .jsonl symlink in a CC project dir must not abort the batch scan."
         )
 
+    def test_per_source_limit_prevents_cc_starvation(self, tmp_path: Path) -> None:
+        """Regression: shared processed counter caused CC logs to be skipped entirely
+        when gptme sessions filled the limit first.
+
+        With limit=4 and 4 gptme sessions, the old code set processed=4 before
+        reaching CC logs, so the CC break fired immediately and zero CC sessions
+        were extracted. Per-source limits (limit//2 each) fix this.
+        """
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_logs_dir.mkdir()
+
+        long_content = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+
+        # Create 4 gptme sessions — enough to exhaust limit=4 with the old shared counter
+        for i in range(4):
+            d = logs_dir / f"session-{i}"
+            d.mkdir()
+            (d / "conversation.jsonl").write_text(
+                json.dumps({"role": "user", "content": long_content}) + "\n"
+            )
+
+        # Create 1 CC session — should be processed even though gptme fills its half
+        proj = cc_logs_dir / "my-project"
+        proj.mkdir()
+        (proj / "conv.jsonl").write_text(
+            json.dumps(
+                {"type": "user", "message": {"role": "user", "content": long_content}}
+            )
+            + "\n"
+        )
+
+        sources_seen: list[str] = []
+
+        def fake_process_logdir(log_dir: Path, **kwargs: object) -> list[str] | None:
+            sources_seen.append(f"gptme:{log_dir.name}")
+            return ["gptme fact"]
+
+        def fake_process_cc(jsonl_file: Path, **kwargs: object) -> list[str] | None:
+            sources_seen.append(f"cc:{jsonl_file.name}")
+            return ["cc fact"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch(
+                "gptme_user_memories.extractor.process_logdir",
+                side_effect=fake_process_logdir,
+            ),
+            patch(
+                "gptme_user_memories.extractor.process_cc_logfile",
+                side_effect=fake_process_cc,
+            ),
+        ):
+            run_batch(days=9999, limit=4, dry_run=True)
+
+        cc_calls = [s for s in sources_seen if s.startswith("cc:")]
+        assert len(cc_calls) >= 1, (
+            f"CC logs were starved: sources_seen={sources_seen}. "
+            "Per-source limits must ensure CC logs are processed even when "
+            "gptme sessions fill their half of the limit."
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_logdir
@@ -1101,7 +1168,7 @@ class TestSessionEndHook:
 
         An OSError (disk full, bad permissions on ~/.local/share/gptme/) would
         otherwise crash gptme at session end. The hook should log a warning and
-        continue normally, including touching the sentinel.
+        NOT touch the sentinel — so the session is retried on the next run.
         """
         from unittest.mock import MagicMock
 
@@ -1128,7 +1195,37 @@ class TestSessionEndHook:
             # Must not raise — hook should catch OSError and log at WARNING
             list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
 
-        # Sentinel still touched after the exception (outer sentinel.touch() is outside try)
+        # Sentinel must NOT be touched — transient failure should allow retry on next run.
+        # If we touch sentinel here, successfully-extracted facts are permanently lost.
+        assert not (log_dir / SENTINEL_FILENAME).exists(), (
+            "sentinel must NOT be touched when save_memories raises — "
+            "successfully-extracted facts would be permanently lost if we mark "
+            "the session as processed before confirming a successful write"
+        )
+
+    def test_hook_touches_sentinel_after_successful_save(self, tmp_path: Path) -> None:
+        """Sentinel is written after a successful save_memories call."""
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+
+        with (
+            patch(
+                "gptme_user_memories.hooks.session_end.extract_facts",
+                return_value=["user is a software engineer"],
+            ),
+            patch(
+                "gptme_user_memories.hooks.session_end.load_existing_memories",
+                return_value=[],
+            ),
+            patch("gptme_user_memories.hooks.session_end.save_memories"),
+        ):
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
         assert (
             log_dir / SENTINEL_FILENAME
-        ).exists(), "sentinel must be touched even when save_memories raises"
+        ).exists(), "sentinel must be touched after a successful save"

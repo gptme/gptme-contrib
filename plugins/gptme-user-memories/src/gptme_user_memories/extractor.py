@@ -395,7 +395,10 @@ def run_batch(
     """
     cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
     all_new_facts: list[str] = []
-    processed = 0
+    # Use per-source limits so neither source starves the other
+    per_source_limit = max(1, limit // 2)
+    gptme_processed = 0
+    cc_processed = 0
 
     def _safe_mtime(p: Path) -> float:
         try:
@@ -419,8 +422,8 @@ def run_batch(
             facts = process_logdir(log_dir, force=force, dry_run=dry_run, model=model)
             if facts is not None:
                 all_new_facts.extend(facts)
-                processed += 1
-            if processed >= limit:
+                gptme_processed += 1
+            if gptme_processed >= per_source_limit:
                 break
 
     # Claude Code logs
@@ -430,12 +433,12 @@ def run_batch(
                 continue  # skip non-directory entries (e.g. .DS_Store)
             if _safe_mtime(proj_dir) < cutoff_ts:
                 break  # dirs sorted newest-first; remaining are all stale
-            if processed >= limit:
+            if cc_processed >= per_source_limit:
                 break
             for jsonl_file in sorted(
                 proj_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True
             ):
-                if processed >= limit:
+                if cc_processed >= per_source_limit:
                     break
                 if _safe_mtime(jsonl_file) < cutoff_ts:
                     break  # files sorted newest-first; remaining are all stale
@@ -448,7 +451,7 @@ def run_batch(
                 )
                 if facts is not None:
                     all_new_facts.extend(facts)
-                    processed += 1
+                    cc_processed += 1
 
     return all_new_facts
 

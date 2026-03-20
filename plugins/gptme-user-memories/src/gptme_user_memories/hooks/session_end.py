@@ -86,13 +86,15 @@ def session_end_user_memories_hook(
             )
         else:
             logger.debug("user_memories: all extracted facts were duplicates")
+
+        # Only mark processed after a successful save (or no-op dedup)
+        try:
+            sentinel.touch()
+        except OSError as e:
+            logger.warning("user_memories: failed to touch sentinel: %s", e)
     except Exception as e:
         logger.warning("user_memories: failed to save memories: %s", e)
-
-    try:
-        sentinel.touch()
-    except OSError as e:
-        logger.warning("user_memories: failed to touch sentinel: %s", e)
+        # Do NOT touch sentinel — transient failure, retry on next session
 
     if False:  # makes this function a generator to satisfy Generator return type
         yield Message("system", "")
