@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 from datetime import datetime, timedelta
@@ -220,8 +221,15 @@ def _get_anthropic_api_key() -> str | None:
     return None
 
 
-def extract_facts(conversation_text: str, model: str = DEFAULT_MODEL) -> list[str]:
-    """Use Claude to extract user facts from conversation text."""
+def extract_facts(
+    conversation_text: str, model: str = DEFAULT_MODEL
+) -> list[str] | None:
+    """Use Claude to extract user facts from conversation text.
+
+    Returns:
+        list[str]: facts extracted (may be empty if no new facts found).
+        None: API call failed (transient error) — caller should NOT touch sentinel.
+    """
     if len(conversation_text.strip()) < 50:
         return []
 
@@ -232,7 +240,7 @@ def extract_facts(conversation_text: str, model: str = DEFAULT_MODEL) -> list[st
         logger.warning(
             "user_memories: no ANTHROPIC_API_KEY found in env or config.toml — skipping extraction"
         )
-        return []
+        return None
 
     client = anthropic.Anthropic(api_key=api_key)
     prompt = EXTRACTION_PROMPT.format(conversation=conversation_text)
@@ -246,8 +254,10 @@ def extract_facts(conversation_text: str, model: str = DEFAULT_MODEL) -> list[st
         block = response.content[0]
         output = block.text.strip() if hasattr(block, "text") else ""
     except Exception as e:
-        logger.warning("user_memories: API call failed: %s", e)
-        return []
+        logger.warning(
+            "user_memories: API call failed: %s — session will be retried", e
+        )
+        return None
 
     if output.strip() == "NO_NEW_FACTS" or not output:
         return []
@@ -319,8 +329,9 @@ def process_logdir(
     Returns:
         list[str]: facts found (may be empty if API returned nothing useful).
             Indicates the API was called — counts toward the session limit.
-        None: session was filtered without an API call (autonomous, too short,
-            or already processed). Does NOT count toward the session limit.
+        None: session was not processed — either filtered (autonomous, too short,
+            already processed) or API call failed. Does NOT count toward the session
+            limit. Sentinel is NOT touched on API failure so the session is retried.
     """
     conv_file = logdir / "conversation.jsonl"
     if not conv_file.exists():
@@ -343,6 +354,10 @@ def process_logdir(
 
     facts = extract_facts(text, model=model)
 
+    if facts is None:
+        # API failure — do NOT touch sentinel so the session is retried next time
+        return None
+
     if not dry_run:
         sentinel.touch()
 
@@ -360,8 +375,9 @@ def process_cc_logfile(
     Returns:
         list[str]: facts found (may be empty if API returned nothing useful).
             Indicates the API was called — counts toward the session limit.
-        None: session was filtered without an API call (autonomous, too short,
-            or already processed). Does NOT count toward the session limit.
+        None: session was not processed — either filtered (autonomous, too short,
+            already processed) or API call failed. Does NOT count toward the session
+            limit. Sentinel is NOT touched on API failure so the session is retried.
     """
     sentinel = jsonl_file.with_suffix(".memories-extracted")
     if not force and sentinel.exists():
@@ -379,6 +395,10 @@ def process_cc_logfile(
         return None
 
     facts = extract_facts(text, model=model)
+
+    if facts is None:
+        # API failure — do NOT touch sentinel so the session is retried next time
+        return None
 
     if not dry_run:
         sentinel.touch()
@@ -402,7 +422,8 @@ def run_batch(
     # Use per-source limits so neither source starves the other.
     # total_processed enforces the hard cap across both sources (important for
     # limit=1 where per_source_limit would otherwise allow 1+1=2 sessions).
-    per_source_limit = max(1, limit // 2)
+    # Use ceil so odd limits (3, 5, 7…) process the full requested count.
+    per_source_limit = max(1, math.ceil(limit / 2))
     gptme_processed = 0
     cc_processed = 0
     total_processed = 0

@@ -951,6 +951,73 @@ class TestRunBatch:
             "gptme sessions fill their half of the limit."
         )
 
+    def test_odd_limit_processes_full_requested_count(self, tmp_path: Path) -> None:
+        """Regression: limit//2 silently processed fewer sessions for odd limit values.
+
+        With limit=3, the old code set per_source_limit=1 (floor division), allowing
+        at most 1+1=2 sessions. Users requesting --limit 3 only got 2. The fix uses
+        math.ceil so limit=3 → per_source_limit=2, and the total cap fires at 3.
+        """
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        cc_logs_dir = tmp_path / "cc-logs"
+        cc_logs_dir.mkdir()
+
+        long_content = (
+            "I work as a software engineer at Acme Corp. "
+            "I have been programming for over ten years using Python and Go."
+        )
+
+        # 2 gptme sessions and 2 CC sessions — with limit=3, expect 3 total processed
+        for i in range(2):
+            d = logs_dir / f"session-{i}"
+            d.mkdir()
+            (d / "conversation.jsonl").write_text(
+                json.dumps({"role": "user", "content": long_content}) + "\n"
+            )
+
+        cc_proj = cc_logs_dir / "my-project"
+        cc_proj.mkdir()
+        for i in range(2):
+            (cc_proj / f"conv-{i}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {"role": "user", "content": long_content},
+                    }
+                )
+                + "\n"
+            )
+
+        processed: list[str] = []
+
+        def fake_process_logdir(log_dir: Path, **kwargs: object) -> list[str] | None:
+            processed.append(f"gptme:{log_dir.name}")
+            return ["gptme fact"]
+
+        def fake_process_cc(jsonl_file: Path, **kwargs: object) -> list[str] | None:
+            processed.append(f"cc:{jsonl_file.stem}")
+            return ["cc fact"]
+
+        with (
+            patch("gptme_user_memories.extractor.LOGS_DIR", logs_dir),
+            patch("gptme_user_memories.extractor.CC_LOGS_DIR", cc_logs_dir),
+            patch(
+                "gptme_user_memories.extractor.process_logdir",
+                side_effect=fake_process_logdir,
+            ),
+            patch(
+                "gptme_user_memories.extractor.process_cc_logfile",
+                side_effect=fake_process_cc,
+            ),
+        ):
+            run_batch(days=9999, limit=3, dry_run=True)
+
+        assert len(processed) == 3, (
+            f"limit=3 must process exactly 3 sessions, got {len(processed)}: {processed}. "
+            "math.ceil(3/2)=2 per-source allows 2+2 possible but total cap fires at 3."
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_logdir
@@ -1047,6 +1114,25 @@ class TestProcessLogdir:
         facts = process_logdir(log_dir)
         assert facts is None
 
+    def test_api_failure_does_not_touch_sentinel(self, tmp_path: Path) -> None:
+        """Regression: API failure must not permanently mark session as processed.
+
+        When extract_facts returns None (transient API error), process_logdir must
+        return None without touching the sentinel so the session is retried next run.
+        """
+        log_dir = self._make_logdir(
+            tmp_path,
+            [{"role": "user", "content": self._LONG_MSG}],
+        )
+        with patch("gptme_user_memories.extractor.extract_facts", return_value=None):
+            result = process_logdir(log_dir)
+        assert result is None, "API failure should return None (not count toward limit)"
+        assert not (
+            log_dir / SENTINEL_FILENAME
+        ).exists(), (
+            "sentinel must NOT be touched on API failure — session must be retried"
+        )
+
 
 # ---------------------------------------------------------------------------
 # process_cc_logfile
@@ -1115,6 +1201,23 @@ class TestProcessCCLogfile:
         with patch("gptme_user_memories.extractor.extract_facts", return_value=[]):
             process_cc_logfile(jsonl_file, dry_run=True)
         assert not jsonl_file.with_suffix(".memories-extracted").exists()
+
+    def test_api_failure_does_not_touch_sentinel(self, tmp_path: Path) -> None:
+        """Regression: API failure must not permanently mark CC session as processed.
+
+        When extract_facts returns None (transient API error), process_cc_logfile must
+        return None without touching the sentinel so the session is retried next run.
+        """
+        jsonl_file = self._make_cc_file(
+            tmp_path,
+            [{"type": "user", "message": {"role": "user", "content": self._LONG_MSG}}],
+        )
+        with patch("gptme_user_memories.extractor.extract_facts", return_value=None):
+            result = process_cc_logfile(jsonl_file)
+        assert result is None, "API failure should return None (not count toward limit)"
+        assert (
+            not jsonl_file.with_suffix(".memories-extracted").exists()
+        ), "sentinel must NOT be touched on API failure — session must be retried"
 
 
 # ---------------------------------------------------------------------------
@@ -1331,3 +1434,30 @@ class TestSessionEndHook:
         assert (
             log_dir / SENTINEL_FILENAME
         ).exists(), "sentinel must be touched after a successful save"
+
+    def test_hook_api_failure_does_not_touch_sentinel(self, tmp_path: Path) -> None:
+        """Regression: API failure in extract_facts must not permanently skip the session.
+
+        When extract_facts returns None (network error, rate-limit, quota), the hook
+        must NOT touch the sentinel — so the session is retried on the next run.
+        Without this fix, the session is permanently lost and only --force can recover it.
+        """
+        from unittest.mock import MagicMock
+
+        from gptme_user_memories.hooks.session_end import session_end_user_memories_hook
+
+        log_dir = self._make_logdir(
+            tmp_path, [{"role": "user", "content": self._LONG_MSG}]
+        )
+
+        with patch(
+            "gptme_user_memories.hooks.session_end.extract_facts",
+            return_value=None,  # None = API failure
+        ):
+            # Must not raise — hook should log a warning and return cleanly
+            list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
+
+        assert not (log_dir / SENTINEL_FILENAME).exists(), (
+            "sentinel must NOT be touched on API failure — "
+            "session must be retried on next run without requiring --force"
+        )

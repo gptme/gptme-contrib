@@ -69,6 +69,12 @@ def session_end_user_memories_hook(
         return
 
     facts = extract_facts(text)
+    if facts is None:
+        # API failure — do NOT touch sentinel so the session is retried next run
+        logger.warning(
+            "user_memories: API call failed — session will be retried (or use --force)"
+        )
+        return
     if not facts:
         logger.debug("user_memories: no new facts extracted")
         sentinel.touch()
