@@ -541,7 +541,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Extract user facts from past gptme/Claude Code sessions and store them in user-memories.md.",
+        description="Extract user facts from past gptme/Claude Code sessions and store them in ~/.config/gptme/user-memories/facts.md.",
     )
     parser.add_argument(
         "--days",

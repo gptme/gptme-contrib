@@ -36,7 +36,7 @@ def session_end_user_memories_hook(
     """Run user memory extraction at session end.
 
     Extracts facts about the user from the just-completed conversation and
-    merges them into ~/.local/share/gptme/user-memories.md.
+    merges them into ~/.config/gptme/user-memories/facts.md.
 
     Args:
         manager: Active LogManager for this conversation
