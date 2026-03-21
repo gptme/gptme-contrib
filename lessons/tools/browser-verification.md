@@ -4,11 +4,12 @@ match:
   - "verify web changes in browser"
   - "check browser console errors"
   - "deployment verification"
-  - "web changes not working"
-  - "page not loading correctly"
+  - "commit web changes without testing"
+  - "push without browser check"
   - "claiming fixed without testing"
   - "check in browser"
-  - "browser tool"
+  - "forgot to test in browser"
+  - "web change deployed without verification"
 status: active
 ---
 
@@ -63,3 +64,7 @@ Following this pattern results in:
 Example (from real incident):
 - Without verification: "Fixed!" → still broken → second fix needed
 - With verification: Caught missing elements → fixed first time
+
+## Related
+- [Pre-Landing Self-Review](../workflow/pre-landing-self-review.md) - Verification before merging
+- [Git Workflow](../workflow/git-workflow.md) - General commit hygiene
