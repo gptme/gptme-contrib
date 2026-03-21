@@ -240,3 +240,26 @@ def test_main_all_fetch_prs_fail_returns_2(
         "auth failure" in captured.err.lower()
         or "could not fetch" in captured.err.lower()
     )
+
+
+def test_main_partial_fetch_fail_returns_2(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Returns 2 (not 0) when some repos fail and the successful repos have no open PRs."""
+    monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
+
+    def _fetch(repo: str, author: str) -> list[dict[str, object]] | None:
+        # First repo fails, second succeeds but is empty
+        return None if repo == "gptme/gptme" else []
+
+    monkeypatch.setattr(pr_greptile_trigger, "fetch_prs", _fetch)
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "resolve_repos",
+        lambda arg: ["gptme/gptme", "gptme/gptme-contrib"],
+    )
+    args = pr_greptile_trigger._parse_args([])
+    assert pr_greptile_trigger._run(args) == 2
+    captured = capsys.readouterr()
+    assert "1/2" in captured.err or "missed" in captured.err.lower()

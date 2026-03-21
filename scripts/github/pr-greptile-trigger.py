@@ -112,7 +112,8 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]] | None:
     )
     if not raw:
         print(
-            f"[warn] No PRs returned for {repo} (gh returned empty — auth failure, timeout, or no gh CLI)",
+            f"[warn] Failed to fetch PRs for {repo}: gh returned empty output"
+            " (possible auth failure, timeout, or gh CLI not installed)",
             file=sys.stderr,
         )
         return None
@@ -239,6 +240,13 @@ def _run(args: argparse.Namespace) -> int:
             print(
                 "Error: could not fetch PRs from any configured repo "
                 "(gh auth failure, timeout, or gh CLI not installed).",
+                file=sys.stderr,
+            )
+            return 2
+        elif fetch_errors > 0:
+            print(
+                f"Error: could not fetch PRs from {fetch_errors}/{len(repos)} repos; "
+                "no PRs found in the remaining repos — some PRs may have been missed.",
                 file=sys.stderr,
             )
             return 2

@@ -605,7 +605,10 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
             categories.append("docs")
         return f"mixed-allowed({'+'.join(categories)})", reasons
 
-    return None, ["Changed files do not fit an allowed self-merge category"]
+    disqualifying = [p for p in paths if not is_allowed_file(p)]
+    return None, [
+        f"Files not in any allowed self-merge category: {', '.join(disqualifying)}"
+    ]
 
 
 def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckResult:
