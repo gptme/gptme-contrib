@@ -404,12 +404,15 @@ def join_short_sentences(
             combined = f"{current} {sentence.lstrip()}"
 
             if max_length is not None:
-                # Max length mode: combine as long as possible up to max_length
+                # Max length mode: combine up to max_length, but respect min_length as floor
                 if len(combined) <= max_length:
                     current = combined
-                else:
+                elif len(current) >= min_length:
                     result.append(current)
                     current = sentence
+                else:
+                    # Haven't reached min_length yet, keep combining even if over max
+                    current = combined
             else:
                 # Min length mode: combine only if result is still under min_length
                 if len(combined) <= min_length:
