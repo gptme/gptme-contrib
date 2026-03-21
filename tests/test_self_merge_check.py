@@ -356,6 +356,10 @@ def test_fetch_greptile_review_data_returns_partial_on_mid_pagination_failure() 
         # authentication/authorization compound forms must also be caught
         ("packages/authentication_service.py", True),
         ("src/authorization/policy.py", True),
+        # camelCase filenames must also be caught (not just snake_case)
+        ("packages/authToken.py", True),
+        ("scripts/deployScript.py", True),
+        ("src/oauthClient.py", True),
     ],
 )
 def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) -> None:

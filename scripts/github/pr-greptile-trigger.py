@@ -107,7 +107,7 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
     )
     if not raw:
         print(
-            f"  [warn] No PRs returned for {repo} (access error or none open)",
+            f"  [warn] No PRs returned for {repo} (access error)",
             file=sys.stderr,
         )
         return []

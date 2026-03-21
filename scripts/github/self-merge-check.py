@@ -385,7 +385,11 @@ def _fetch_greptile_review_data(
         if not cursor:
             break
 
-    return reviews or [], all_threads
+    # reviews is always a list here: all break paths require at least one successful
+    # page, and reviews is set from the first page's response (line 377).  The
+    # `or []` guard would only fire if reviews were None, which is unreachable at
+    # this point — use an explicit None-check to make the invariant clear.
+    return reviews if reviews is not None else [], all_threads
 
 
 def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
@@ -506,13 +510,20 @@ def is_sensitive_path(path: str) -> bool:
     normalized = path.lower().replace("\\", "/")
     if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
         return True
-    components = normalized.split("/")
-    for component in components:
+    # Use the original (pre-lowercase) path to preserve camelCase boundaries for
+    # detection; e.g. "authToken.py" → "auth_token" catches the "auth" rule.
+    original_components = path.replace("\\", "/").split("/")
+    for component in original_components:
         stem = component.rsplit(".", 1)[0] if "." in component else component
+        # Normalise camelCase → snake_case so camelCase filenames are matched.
+        # e.g. "authToken" → "auth_token", "deployScript" → "deploy_script".
+        stem_normalised = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", stem).lower()
         for part in SENSITIVE_PATH_PARTS:
             # Match whole words (word boundaries: start/end or separator chars).
             # Allow trailing "s" for common plurals (token→tokens, secret→secrets).
-            if re.search(r"(?:^|[_\-\.])" + re.escape(part) + r"s?(?:[_\-\.]|$)", stem):
+            if re.search(
+                r"(?:^|[_\-\.])" + re.escape(part) + r"s?(?:[_\-\.]|$)", stem_normalised
+            ):
                 return True
     return False
 
