@@ -76,6 +76,8 @@ def run_gh(args: list[str], timeout: int = 30) -> str:
             timeout=timeout,
         )
         if result.returncode != 0:
+            if result.stderr:
+                print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
             return ""
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):

@@ -57,6 +57,24 @@ def test_parse_pr_target_accepts_valid_url() -> None:
     assert number == 504
 
 
+def test_parse_pr_target_strips_query_string() -> None:
+    """URLs with query params (e.g. ?tab=files) must parse correctly, not raise ValueError."""
+    repo, number = self_merge_check.parse_pr_target(
+        "https://github.com/gptme/gptme-contrib/pull/504?tab=files", None, None
+    )
+    assert repo == "gptme/gptme-contrib"
+    assert number == 504
+
+
+def test_parse_pr_target_strips_fragment() -> None:
+    """URLs with fragment anchors must parse correctly."""
+    repo, number = self_merge_check.parse_pr_target(
+        "https://github.com/gptme/gptme-contrib/pull/504#discussion_r123", None, None
+    )
+    assert repo == "gptme/gptme-contrib"
+    assert number == 504
+
+
 def test_evaluate_pr_blocks_changes_requested() -> None:
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
@@ -335,6 +353,9 @@ def test_fetch_greptile_review_data_returns_partial_on_mid_pagination_failure() 
         # oauth2 variants should also be caught
         ("packages/oauth2_client.py", True),
         ("src/oauth2/provider.py", True),
+        # authentication/authorization compound forms must also be caught
+        ("packages/authentication_service.py", True),
+        ("src/authorization/policy.py", True),
     ],
 )
 def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) -> None:

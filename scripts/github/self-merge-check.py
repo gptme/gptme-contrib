@@ -71,6 +71,8 @@ SENSITIVE_PATH_PARTS = (
     "credential",
     "token",
     "auth",
+    "authentication",
+    "authorization",
     "oauth",
     "oauth2",
     "ssh",
@@ -121,6 +123,8 @@ def run_gh(args: list[str], timeout: int = 30) -> str:
             timeout=timeout,
         )
         if result.returncode != 0:
+            if result.stderr:
+                print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
             return ""
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -141,10 +145,14 @@ def detect_workspace_repo() -> str:
     """
 
     # Try to find git root from current working directory first, then script dir
+    seen_roots: set[Path] = set()
     for start_dir in (Path.cwd(), Path(__file__).resolve().parent):
         candidate = start_dir
         for _ in range(10):  # max 10 levels up
             if (candidate / ".git").exists():
+                if candidate in seen_roots:
+                    break
+                seen_roots.add(candidate)
                 try:
                     result = subprocess.run(
                         ["git", "-C", str(candidate), "remote", "get-url", "origin"],
@@ -203,7 +211,9 @@ def parse_pr_target(
                 raise ValueError("--repo is required when PR is given as a number")
             return repo, int(pr)
         if pr.startswith("http://") or pr.startswith("https://"):
-            parts = pr.rstrip("/").split("/")
+            # Strip query string and fragment before parsing (e.g. ?tab=files, #discussion)
+            clean_pr = pr.split("?")[0].split("#")[0].rstrip("/")
+            parts = clean_pr.split("/")
             # Valid GitHub PR URL: https://github.com/owner/repo/pull/123 = 7 parts
             if len(parts) < 7 or parts[-2] != "pull":
                 raise ValueError(f"Not a PR URL: {pr}")
