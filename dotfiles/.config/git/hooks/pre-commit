@@ -15,6 +15,19 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# --- Part 0: Tree size safety check ---
+# Refuse to commit if staged changes would delete >50% of tracked files.
+# Catches catastrophic commits (e.g. git add -u from wrong working tree state).
+TRACKED_COUNT=$(git ls-tree -r HEAD --name-only 2>/dev/null | wc -l)
+if [ "$TRACKED_COUNT" -gt 100 ]; then
+    STAGED_DELETIONS=$(git diff --cached --diff-filter=D --name-only | wc -l)
+    if [ "$STAGED_DELETIONS" -gt $((TRACKED_COUNT / 2)) ]; then
+        echo -e "${RED}ABORT: commit would delete $STAGED_DELETIONS of $TRACKED_COUNT tracked files${NC}"
+        echo -e "${RED}This looks like a catastrophic commit. Refusing to proceed.${NC}"
+        exit 1
+    fi
+fi
+
 # Get the hooks directory for sourcing config
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
