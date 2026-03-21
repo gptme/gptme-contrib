@@ -20,10 +20,11 @@ Environment:
                     defaults when set. Example:
                     GREPTILE_REPOS=gptme/gptme,gptme/gptme-contrib python3 ...
 
-Exit codes (--execute mode):
-    0  All actionable re-reviews triggered successfully.
-    1  No re-reviews triggered (all attempts failed).
-    2  Partial failure — at least one succeeded, but some failed.
+Exit codes:
+    0  All actionable re-reviews triggered successfully (or nothing to do).
+    1  All trigger attempts failed.
+    2  Partial failure or unrecoverable error (auth failure, helper unavailable,
+       or at least one trigger succeeded while others failed).
 """
 
 from __future__ import annotations
@@ -263,13 +264,14 @@ def _run(args: argparse.Namespace) -> int:
         return 0
 
     if not actionable:
-        if errors and not reviewed and not in_progress and not awaiting:
+        if errors:
             print(
                 f"[warn] Could not determine Greptile status for {len(errors)} PR(s) "
                 "(helper missing or errored).",
                 file=sys.stderr,
             )
-            return 2
+            if not reviewed and not in_progress and not awaiting:
+                return 2
         if awaiting:
             print(
                 f"All PRs are either already reviewed, in-flight, or awaiting Greptile "

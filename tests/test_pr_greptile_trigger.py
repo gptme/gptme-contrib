@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -176,6 +177,7 @@ def test_main_execute_partial_failure_returns_2(
         call_count["n"] += 1
         return (call_count["n"] == 1, "ok" if call_count["n"] == 1 else "err")
 
+    monkeypatch.setattr(time, "sleep", lambda _: None)
     monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
     monkeypatch.setattr(
         pr_greptile_trigger,
