@@ -226,8 +226,8 @@ def generate_audio_cli(
 
 
 @click.command()
-@click.argument("text")
-@click.argument("voice_sample_path")
+@click.argument("text", required=False, default="")
+@click.argument("voice_sample_path", required=False, default="")
 @click.option("--output", "-o", help="Output file path")
 @click.option("--voice-dir", help="Directory containing voice samples", default=None)
 @click.option("--exaggeration", default=0.5, help="Exaggeration level (0.0-1.0)")
@@ -261,6 +261,11 @@ def main(
         else:
             click.echo("No voice samples found.")
         return
+
+    if not text or not voice_sample_path:
+        raise click.UsageError(
+            "TEXT and VOICE_SAMPLE_PATH are required unless --list-voices is used."
+        )
 
     try:
         if voice_dir:

@@ -246,7 +246,9 @@ async def text_to_speech(
         raise HTTPException(status_code=400, detail="Text parameter cannot be empty")
 
     if speed <= 0 or speed > 3.0:
-        raise HTTPException(status_code=400, detail="Speed must be between 0 and 3.0")
+        raise HTTPException(
+            status_code=400, detail="Speed must be greater than 0 and at most 3.0"
+        )
 
     try:
         log.info(
