@@ -608,7 +608,7 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
     return None, ["Changed files do not fit an allowed self-merge category"]
 
 
-def evaluate_pr(repo: str, number: int, *, workspace_repo: str) -> CheckResult:
+def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckResult:
     pr = fetch_pr(repo, number)
     author = pr.get("author", {}).get("login", "")
     title = pr.get("title", "")
@@ -633,10 +633,15 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str) -> CheckResult:
     elif author != current_user:
         result.reasons.append(f"PR author is {author}, expected {current_user}")
 
-    if not workspace_repo:
+    if workspace_repo is None:
+        result.reasons.append(
+            "Workspace repo could not be auto-detected; cross-repo restriction cannot be "
+            "enforced. Pass --workspace-repo or set WORKSPACE_REPO (use '' to opt out)."
+        )
+    elif not workspace_repo:
         result.warnings.append(
-            "Workspace repo could not be detected: cross-repo restriction is disabled. "
-            "Set WORKSPACE_REPO or pass --workspace-repo to enforce cross-repo policy."
+            "Workspace repo check disabled via WORKSPACE_REPO='' or --workspace-repo ''; "
+            "cross-repo restriction is not enforced."
         )
     elif repo != workspace_repo:
         result.reasons.append(
@@ -700,14 +705,20 @@ def format_human(result: CheckResult) -> str:
     return "\n".join(lines)
 
 
-def _resolve_workspace_repo(args: argparse.Namespace) -> str:
-    """Resolve workspace repo from CLI args, env, or auto-detection."""
+def _resolve_workspace_repo(args: argparse.Namespace) -> str | None:
+    """Resolve workspace repo from CLI args, env, or auto-detection.
+
+    Returns:
+        str  — explicit value (including "" to opt out of cross-repo restriction)
+        None — detection was attempted but failed; cross-repo restriction will disqualify
+    """
     cli_value: str | None = getattr(args, "workspace_repo", None)
     if cli_value is not None:
-        return cli_value
+        return cli_value  # explicit "" = opt out
     if "WORKSPACE_REPO" in os.environ:
-        return os.environ["WORKSPACE_REPO"]  # honours "" to opt out
-    return detect_workspace_repo()
+        return os.environ["WORKSPACE_REPO"]  # "" still means opt out
+    detected = detect_workspace_repo()
+    return detected if detected else None  # None = unknown, not opt-out
 
 
 def main() -> int:

@@ -101,22 +101,22 @@ def test_fetch_prs_valid_json_returns_prs_with_repo() -> None:
     assert result[0]["number"] == 1
 
 
-def test_fetch_prs_json_decode_error_returns_empty_list(
+def test_fetch_prs_json_decode_error_returns_none(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Malformed JSON is handled gracefully — returns [] and emits a warning."""
+    """Malformed JSON is a hard failure — returns None and emits a warning."""
     with patch.object(pr_greptile_trigger, "run_gh", return_value="not-json{{{"):
         result = pr_greptile_trigger.fetch_prs("gptme/gptme", "TimeToBuildBob")
-    assert result == []
+    assert result is None
     captured = capsys.readouterr()
     assert "warn" in captured.err.lower()
 
 
-def test_fetch_prs_empty_response_returns_empty_list() -> None:
-    """Empty/None response returns [] without crashing."""
+def test_fetch_prs_empty_response_returns_none() -> None:
+    """Empty response (gh auth/timeout failure) returns None, not empty list."""
     with patch.object(pr_greptile_trigger, "run_gh", return_value=""):
         result = pr_greptile_trigger.fetch_prs("gptme/gptme", "TimeToBuildBob")
-    assert result == []
+    assert result is None
 
 
 def test_main_returns_2_when_all_pr_status_checks_error(
@@ -217,3 +217,26 @@ def test_main_execute_all_fail_returns_2(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     args = pr_greptile_trigger._parse_args(["--execute"])
     assert pr_greptile_trigger._run(args) == 2
+
+
+def test_main_all_fetch_prs_fail_returns_2(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Returns 2 when ALL fetch_prs calls return None (auth/network failure), not 0."""
+    monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: None,  # hard failure for every repo
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger, "resolve_repos", lambda arg: ["gptme/gptme"]
+    )
+    args = pr_greptile_trigger._parse_args([])
+    assert pr_greptile_trigger._run(args) == 2
+    captured = capsys.readouterr()
+    assert (
+        "auth failure" in captured.err.lower()
+        or "could not fetch" in captured.err.lower()
+    )

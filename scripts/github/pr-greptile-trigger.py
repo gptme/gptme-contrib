@@ -89,8 +89,13 @@ def get_gh_user() -> str:
     return run_gh(["api", "user", "-q", ".login"]) or ""
 
 
-def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
-    """Fetch open PRs for a repo authored by *author*."""
+def fetch_prs(repo: str, author: str) -> list[dict[str, Any]] | None:
+    """Fetch open PRs for a repo authored by *author*.
+
+    Returns:
+        list  — PRs found (may be empty if the repo truly has none open)
+        None  — hard failure (gh not authenticated, timed out, gh CLI missing)
+    """
     raw = run_gh(
         [
             "pr",
@@ -110,7 +115,7 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
             f"[warn] No PRs returned for {repo} (gh returned empty — auth failure, timeout, or no gh CLI)",
             file=sys.stderr,
         )
-        return []
+        return None
     try:
         prs: list[dict[str, Any]] = json.loads(raw)
         for p in prs:
@@ -121,7 +126,7 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
             f"[warn] Failed to parse JSON from `gh pr list` for {repo}: {e}",
             file=sys.stderr,
         )
-        return []
+        return None
 
 
 def _helper_cmd(
@@ -211,8 +216,12 @@ def _run(args: argparse.Namespace) -> int:
 
     # Fetch all open PRs
     all_prs: list[PRInfo] = []
+    fetch_errors = 0
     for repo in repos:
         prs = fetch_prs(repo, author)
+        if prs is None:  # hard fetch failure (auth, timeout, missing gh)
+            fetch_errors += 1
+            continue
         for raw_pr in prs:
             review_state = review_state_for_pr(repo, int(raw_pr["number"]))
             all_prs.append(
@@ -226,6 +235,13 @@ def _run(args: argparse.Namespace) -> int:
             )
 
     if not all_prs:
+        if fetch_errors == len(repos):
+            print(
+                "Error: could not fetch PRs from any configured repo "
+                "(gh auth failure, timeout, or gh CLI not installed).",
+                file=sys.stderr,
+            )
+            return 2
         print("No open PRs found in Greptile-enabled repos.")
         return 0
 

@@ -367,7 +367,7 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
 
 
 def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
-    """Cross-repo restriction must emit a warning (not silently skip) when workspace repo is undetectable."""
+    """Explicit opt-out (workspace_repo='') emits a warning but does not disqualify."""
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
@@ -391,11 +391,47 @@ def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
             999,
-            workspace_repo="",  # detection failure
+            workspace_repo="",  # explicit opt-out via WORKSPACE_REPO=''
         )
 
-    # Cross-repo restriction cannot be enforced, so a warning must be emitted
-    assert any("cross-repo restriction is disabled" in w for w in result.warnings)
+    # Explicit opt-out → warning, but PR is still eligible
+    assert any("cross-repo restriction" in w for w in result.warnings)
+    assert (
+        result.eligible
+    ), f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
+
+
+def test_evaluate_pr_disqualified_when_workspace_repo_unknown() -> None:
+    """Detection failure (workspace_repo=None) must disqualify the PR."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+    }
+
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repo=None,  # detection failed — unknown workspace
+        )
+
+    # Detection failure → disqualified (not just a warning)
+    assert not result.eligible
+    assert any("auto-detected" in r for r in result.reasons)
 
 
 def test_fetch_greptile_status_fallback_paginates_issue_comments() -> None:
