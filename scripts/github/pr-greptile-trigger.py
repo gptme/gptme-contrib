@@ -253,6 +253,13 @@ def _run(args: argparse.Namespace) -> int:
         print("No open PRs found in Greptile-enabled repos.")
         return 0
 
+    if fetch_errors > 0:
+        print(
+            f"[warn] Could not fetch PRs from {fetch_errors}/{len(repos)} repo(s); "
+            "some PRs may have been missed (see above warnings).",
+            file=sys.stderr,
+        )
+
     # Categorize
     reviewed = [p for p in all_prs if p.review_state == "already-reviewed"]
     actionable = [p for p in all_prs if p.review_state in ACTIONABLE_STATES]

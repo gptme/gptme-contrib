@@ -394,7 +394,7 @@ def _fetch_greptile_review_data(
             break
 
     # reviews is always a list here: all break paths require at least one successful
-    # page, and reviews is set from the first page's response (line 377).  The
+    # page, and reviews is set from the first page's response (line 385).  The
     # `or []` guard would only fire if reviews were None, which is unreachable at
     # this point — use an explicit None-check to make the invariant clear.
     return (reviews if reviews is not None else []), all_threads

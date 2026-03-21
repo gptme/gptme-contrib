@@ -263,3 +263,42 @@ def test_main_partial_fetch_fail_returns_2(
     assert pr_greptile_trigger._run(args) == 2
     captured = capsys.readouterr()
     assert "1/2" in captured.err or "missed" in captured.err.lower()
+
+
+def test_main_partial_fetch_with_prs_warns_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Partial fetch failure warns on stderr even when other repos returned PRs."""
+    monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
+
+    def _fetch(repo: str, author: str) -> list[dict[str, object]] | None:
+        # First repo fails, second returns a PR
+        if repo == "gptme/gptme":
+            return None
+        return [
+            {
+                "number": 1,
+                "title": "test PR",
+                "url": "https://github.com/gptme/gptme-contrib/pull/1",
+            }
+        ]
+
+    monkeypatch.setattr(pr_greptile_trigger, "fetch_prs", _fetch)
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "resolve_repos",
+        lambda arg: ["gptme/gptme", "gptme/gptme-contrib"],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "already-reviewed",
+    )
+    args = pr_greptile_trigger._parse_args([])
+    rc = pr_greptile_trigger._run(args)
+    captured = capsys.readouterr()
+    # Should NOT return 2 (PRs were found), but must warn about the missed repo
+    assert rc == 0
+    assert "warn" in captured.err.lower() or "missed" in captured.err.lower()
+    assert "1/2" in captured.err
