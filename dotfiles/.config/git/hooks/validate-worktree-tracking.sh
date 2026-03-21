@@ -15,16 +15,21 @@ if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
     exit 0
 fi
 
+# Read push refspecs from stdin early (stdin can only be read once).
+# Pre-push hook receives: local_ref local_sha remote_ref remote_sha
+push_remote_refs=()
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    push_remote_refs+=("$remote_ref")
+done
+
 # Get upstream tracking branch
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
 
 if [ -z "$upstream" ]; then
     # Check if this is a push to create new remote branch
-    # Pre-push hook receives: local_ref local_sha remote_ref remote_sha on stdin
-    # For new branches with -u, remote_ref will be refs/heads/<branch>
     new_branch_push=false
-    while read -r _local_ref _local_sha remote_ref _remote_sha; do
-        expected_ref="refs/heads/$current_branch"
+    expected_ref="refs/heads/$current_branch"
+    for remote_ref in "${push_remote_refs[@]}"; do
         if [ "$remote_ref" = "$expected_ref" ]; then
             # Pushing to same-named branch on origin - likely creating new branch
             new_branch_push=true
@@ -51,6 +56,36 @@ if [[ ! "$upstream" =~ ^origin/ ]]; then
     echo "   Fix with: git branch --set-upstream-to=origin/$current_branch"
     echo ""
     # Don't fail, just warn - might be intentional
+fi
+
+# CRITICAL: Block feature branches that track origin/master or origin/main.
+# This happens when git worktree add -b <branch> origin/master sets the upstream
+# to origin/master. A subsequent `git push` then pushes to master, bypassing PR review.
+#
+# Only block when the actual push destination is master/main — explicit pushes like
+# `git push origin feature:feature` are safe even with a misconfigured upstream.
+if [ "$upstream" = "origin/master" ] || [ "$upstream" = "origin/main" ]; then
+    # Check if any push destination is master or main
+    pushing_to_default=false
+    for remote_ref in "${push_remote_refs[@]}"; do
+        if [ "$remote_ref" = "refs/heads/master" ] || [ "$remote_ref" = "refs/heads/main" ]; then
+            pushing_to_default=true
+            break
+        fi
+    done
+    # Also block when stdin was empty (e.g. plain `git push` with no refspecs)
+    if [ "$pushing_to_default" = true ] || [ ${#push_remote_refs[@]} -eq 0 ]; then
+        echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream'!"
+        echo ""
+        echo "   This will push your feature branch directly to master/main."
+        echo "   This is almost always a mistake from worktree creation."
+        echo ""
+        echo "   Fix with:"
+        echo "     git branch --unset-upstream"
+        echo "     git push -u origin $current_branch"
+        echo ""
+        exit 1
+    fi
 fi
 
 exit 0
