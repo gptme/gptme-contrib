@@ -21,6 +21,10 @@ def _extract_video_id(url_or_id: str) -> str:
             qs = parse_qs(parsed.query)
             if "v" in qs:
                 return qs["v"][0]
+            # Handle https://www.youtube.com/shorts/VIDEOID
+            path_parts = [p for p in parsed.path.split("/") if p]
+            if "shorts" in path_parts:
+                return path_parts[path_parts.index("shorts") + 1]
         # Handle https://youtu.be/VIDEOID
         if "youtu.be" in parsed.netloc:
             return parsed.path.lstrip("/")
@@ -68,7 +72,7 @@ def execute(
 tool: ToolSpec = ToolSpec(
     name="youtube",
     desc="Fetch and summarize YouTube video transcripts",
-    instructions="Use get_transcript(video_id) to fetch a transcript from a YouTube URL or video ID. Use summarize_transcript(transcript) to summarize a long transcript. You can also use ```youtube blocks with a video ID to fetch the transcript inline.",
+    instructions="When the user shares a YouTube link or asks about video content, use get_transcript(url_or_id) to retrieve the full transcript — it accepts watch?v=, youtu.be/, and /shorts/ URLs as well as bare video IDs. For long transcripts, pass the result to summarize_transcript(transcript) to get a concise summary. You can also emit ```youtube VIDEO_ID blocks to fetch transcripts inline.",
     block_types=["youtube"],
     execute=execute,
     functions=[get_transcript, summarize_transcript],
