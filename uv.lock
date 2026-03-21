@@ -29,6 +29,7 @@ members = [
     "gptme-retrieval",
     "gptme-runloops",
     "gptme-sessions",
+    "gptme-user-memories",
     "gptme-voice",
     "gptme-warpgrep",
     "gptme-whatsapp",
@@ -1364,6 +1365,30 @@ requires-dist = [
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.0" },
 ]
 provides-extras = ["dev", "test"]
+
+[[package]]
+name = "gptme-user-memories"
+version = "0.1.0"
+source = { editable = "plugins/gptme-user-memories" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "gptme" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.40" },
+    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "gptme-voice"
