@@ -88,6 +88,84 @@ These scripts are designed to be integrated into gptme agent workflows:
 - **Better Coordination:** Agent aware of open issues and PRs without manual checking
 - **CI Health Awareness:** Catch failing builds before adding more changes
 
+### pr-greptile-trigger.py
+
+Batch-trigger safe Greptile re-review requests for open PRs.
+
+Scans open PRs authored by the authenticated user, identifies which ones need a
+re-review (new commits since the last Greptile review), and routes triggers through
+`greptile-helper.sh`. Never triggers initial reviews — Greptile auto-reviews new PRs.
+
+**Features:**
+- Safe re-review triggering (no spam — uses greptile-helper.sh guards)
+- Configurable repo list via `GREPTILE_REPOS` env var or `--repo` flag
+- Dry-run mode by default (use `--execute` to actually trigger)
+- Status overview mode (`--status`)
+- Filter PRs by author via `--author` (default: authenticated user)
+
+**Usage:**
+```bash
+# Show what would be triggered (dry-run)
+python3 scripts/github/pr-greptile-trigger.py
+
+# Actually trigger re-reviews
+python3 scripts/github/pr-greptile-trigger.py --execute
+
+# Show review status for all open PRs
+python3 scripts/github/pr-greptile-trigger.py --status
+
+# Scan a specific repo
+python3 scripts/github/pr-greptile-trigger.py --repo gptme/gptme
+
+# Use custom repo list
+GREPTILE_REPOS=myorg/repo1,myorg/repo2 python3 scripts/github/pr-greptile-trigger.py
+
+# Filter by a specific author (useful in shared CI contexts)
+python3 scripts/github/pr-greptile-trigger.py --author mybot
+```
+
+**Requirements:**
+- `gh` (GitHub CLI) installed and authenticated
+- `greptile-helper.sh` in the same directory
+
+### self-merge-check.py
+
+Evaluates whether a PR is eligible for autonomous agent self-merge.
+
+Applies a conservative policy: CI must be green, Greptile must have reviewed with no
+unresolved threads, and changed files must fall into a low-risk category (tests, docs,
+lessons, internal tooling, task metadata). Sensitive/infra paths immediately disqualify.
+
+**Features:**
+- Auto-detects workspace repo from git remote (override with `--workspace-repo` or `WORKSPACE_REPO`)
+- Cross-repo PRs disqualified when workspace repo is set (clear `WORKSPACE_REPO` to disable)
+- JSON output mode for scripting
+- Detailed per-check reasoning
+
+**Usage:**
+```bash
+# Check a PR by URL
+python3 scripts/github/self-merge-check.py https://github.com/owner/repo/pull/123
+
+# Check by repo and number
+python3 scripts/github/self-merge-check.py --repo gptme/gptme 456
+
+# JSON output for scripting
+python3 scripts/github/self-merge-check.py --json https://github.com/owner/repo/pull/123
+
+# Allow cross-repo merges (clear workspace repo restriction)
+WORKSPACE_REPO="" python3 scripts/github/self-merge-check.py https://github.com/gptme/gptme/pull/456
+
+# Override workspace repo detection
+python3 scripts/github/self-merge-check.py --workspace-repo myorg/myrepo <pr-url>
+```
+
+**Exit codes:** 0 = eligible, 1 = not eligible, 2 = error
+
+**Requirements:**
+- `gh` (GitHub CLI) installed and authenticated
+- Greptile installed on the target repo for review checking
+
 ## Related
 
 - [gptme](https://github.com/gptme/gptme) - The AI agent framework these scripts support
