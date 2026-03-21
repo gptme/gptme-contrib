@@ -231,7 +231,9 @@ def split_text(text: str) -> list[str]:
                 # For the third test case, both list items end with periods
                 # We can detect this by looking at the whole paragraph
                 all_items_have_periods = all(
-                    item.strip().endswith(".") for item in lines if item.strip()
+                    item.strip().endswith(".")
+                    for item in lines
+                    if item.strip() and is_list_item(item.strip())
                 )
                 if all_items_have_periods:
                     line = line.rstrip(".")
@@ -316,7 +318,10 @@ def _tts_processor_thread_fn():
             chunk = tts_request_queue.get()
             if chunk is None:  # Sentinel value to stop thread
                 log.debug("Received stop signal for TTS processor")
-                tts_request_queue.task_done()  # Account for the None sentinel
+                try:
+                    tts_request_queue.task_done()  # Account for the None sentinel
+                except ValueError:
+                    pass  # stop() may have already reset unfinished_tasks to 0
                 break
 
             # Make request to the TTS server
@@ -521,7 +526,7 @@ def wait_on_session_end(manager, **kwargs):
 tool = ToolSpec(
     "tts",
     desc="Text-to-speech (TTS) tool for generating audio from text.",
-    instructions="Will output all assistant speech (not codeblocks, tool-uses, or other non-speech text). The assistant cannot hear the output.",
+    instructions="Automatically voices your responses to the user. Use speak() to add spoken emphasis or deliver important messages audibly. Note: you cannot hear the output, so do not rely on it for confirmation.",
     available=is_available,
     functions=[speak, set_speed, set_volume, stop],
     init=init,
