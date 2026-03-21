@@ -121,6 +121,11 @@ class ChatterboxTTSBackend:
                 f"Voice sample '{voice_file}' not found. Available: {available}"
             )
 
+        if speed != 1.0:
+            log.warning(
+                "Chatterbox backend does not support speed control; ignoring speed parameter"
+            )
+
         try:
             log.info(f"Generating audio with Chatterbox (voice: {voice_file})")
 

@@ -142,7 +142,7 @@ class TTSBackendLoader:
             # Not using HF_TOKEN for local dev versions
             if not os.getenv("HF_TOKEN"):
                 print("Using local Gradio source for Chatterbox backend")
-                os.environ["HF_TOKEN"] = "local-dev"
+                os.environ.setdefault("HF_TOKEN", "local-dev")
         if os.getenv("HF_TOKEN"):
             if find_spec("gradio_client"):
                 print("Chatterbox backend is available")
@@ -385,6 +385,7 @@ def main(
             click.echo(f"Available voices for {backend}:")
             for v in voices:
                 click.echo(f"  - {v}")
+            return
 
         except Exception as e:
             click.echo(f"Error listing voices: {e}", err=True)
