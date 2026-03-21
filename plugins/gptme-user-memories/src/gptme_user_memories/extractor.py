@@ -654,7 +654,8 @@ def run_batch_categorized(
             if gptme_processed >= per_source_limit or total_processed >= limit:
                 break
 
-    # Claude Code logs
+    # Claude Code logs — no per-source cap here; total_processed enforces the ceiling.
+    # This allows CC to absorb unused quota when gptme has fewer than per_source_limit sessions.
     if CC_LOGS_DIR.exists():
         cc_proj_entries = sorted(
             ((mtime, p) for p in CC_LOGS_DIR.iterdir() if (mtime := _safe_mtime(p))),
@@ -889,6 +890,9 @@ def main() -> None:
                     print(f"    - {fact}")
             return
         new_counts = save_categorized_memories(USER_MEMORIES_DIR, categorized)
+        if not new_counts:
+            print("No new facts found (all already known).")
+            return
         for cat, count in new_counts.items():
             print(f"  {cat}: {count} new facts → {USER_MEMORIES_DIR / cat}.md")
         return
