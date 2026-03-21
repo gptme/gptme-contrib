@@ -203,8 +203,10 @@ discover_repos() {
 # This replaces 3 separate `gh pr list` calls with a single one.
 fetch_pr_data() {
     local repo=$1
+    # Filter out draft PRs — they're intentionally deprioritized/not on merge path
     gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid \
+        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
+        --jq '[.[] | select(.isDraft | not)]' \
         2>/dev/null || echo "[]"
 }
 
