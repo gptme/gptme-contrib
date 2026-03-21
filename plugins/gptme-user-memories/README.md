@@ -56,6 +56,16 @@ The plugin uses Claude Haiku for fact extraction. It reads the key from:
 1. `ANTHROPIC_API_KEY` environment variable
 2. `~/.config/gptme/config.toml` under `[env] ANTHROPIC_API_KEY`
 
+### 4. (Optional) Override the extraction model
+
+The hook uses `claude-haiku-4-5-20251001` by default. To use a different model:
+
+```sh
+export GPTME_MEMORIES_MODEL=claude-3-5-haiku-20241022
+```
+
+This applies to both the `SESSION_END` hook and the `gptme-user-memories` CLI.
+
 ## What gets extracted
 
 The plugin looks for personalisation-relevant facts:
@@ -92,9 +102,30 @@ Last updated: 2026-03-11
 
 Facts are deduplicated and sorted alphabetically on each update.
 
-## Manual extraction
+## CLI usage
 
-You can also run extraction manually using the `extractor` module:
+After installation, the `gptme-user-memories` command is available for backfilling memories from past sessions:
+
+```sh
+# Dry-run: show what would be extracted without writing anything
+gptme-user-memories --dry-run
+
+# Backfill the last 30 days, up to 50 sessions
+gptme-user-memories --days 30 --limit 50
+
+# Re-process already-handled sessions
+gptme-user-memories --force
+
+# Write to a custom output file
+gptme-user-memories --output ~/my-memories.md
+
+# Use a specific model
+gptme-user-memories --model claude-3-5-haiku-20241022
+```
+
+## Manual extraction (Python API)
+
+You can also drive extraction directly from the `extractor` module:
 
 ```python
 from gptme_user_memories.extractor import process_logdir, USER_MEMORIES_FILE
