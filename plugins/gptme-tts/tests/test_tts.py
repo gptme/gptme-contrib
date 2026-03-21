@@ -197,7 +197,7 @@ def test_wait_on_session_end_hook():
         patch("gptme_tts.tts.tts_request_queue") as mock_queue,
         patch("gptme_tts.tts.stop"),
         patch("gptme_tts.tts.os.environ.get", return_value="1"),
-        patch("gptme.util.sound.wait_for_audio") as mock_wait_audio,
+        patch("gptme_tts.tts.wait_for_audio") as mock_wait_audio,
     ):
         mock_manager = MagicMock()
         result = list(wait_on_session_end(manager=mock_manager))

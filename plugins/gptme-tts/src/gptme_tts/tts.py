@@ -33,12 +33,16 @@ import queue
 import re
 import socket
 import threading
-from functools import lru_cache
 
 import requests
 from gptme.tools.base import ToolSpec
 from gptme.util import console
-from gptme.util.sound import is_audio_available, play_audio_data, stop_audio
+from gptme.util.sound import (
+    is_audio_available,
+    play_audio_data,
+    stop_audio,
+    wait_for_audio,
+)
 from gptme.util.sound import set_volume as set_audio_volume
 
 # Setup logging
@@ -57,7 +61,6 @@ except (ImportError, OSError):
     has_tts_imports = False
 
 
-@lru_cache
 def is_available() -> bool:
     """Check if the TTS server is available."""
     if not has_tts_imports or not is_audio_available():
@@ -127,19 +130,23 @@ def stop() -> None:
     """Stop audio playback and clear queues."""
     stop_audio()
 
-    # Clear TTS request queue
+    # Clear TTS request queue and reset unfinished_tasks to unblock any join() callers
     with tts_request_queue.mutex:
         tts_request_queue.queue.clear()
+        tts_request_queue.unfinished_tasks = 0
         tts_request_queue.all_tasks_done.notify_all()
 
     # Stop processor thread quietly
     global tts_processor_thread
     if tts_processor_thread and tts_processor_thread.is_alive():
-        tts_request_queue.put(None)
+        tts_request_queue.put(None)  # Signal thread to exit
         try:
             tts_processor_thread.join(timeout=1)
         except RuntimeError:
             pass
+    # Always reset reference so ensure_tts_thread() creates a fresh thread,
+    # even if the old thread didn't die within the join timeout.
+    tts_processor_thread = None
 
 
 def split_text(text: str) -> list[str]:
@@ -175,12 +182,12 @@ def split_text(text: str) -> list[str]:
         return text
 
     def protect_decimals(text):
-        """Replace decimal points with @ to avoid splitting them."""
-        return re.sub(r"(\d+)\.(\d+)", r"\1@\2", text)
+        """Replace decimal points with a null-byte placeholder to avoid splitting them."""
+        return re.sub(r"(\d+)\.(\d+)", lambda m: m.group(1) + "\x00" + m.group(2), text)
 
     def restore_decimals(text):
-        """Restore @ back to decimal points."""
-        return text.replace("@", ".")
+        """Restore the null-byte placeholder back to decimal points."""
+        return text.replace("\x00", ".")
 
     def split_sentences(text):
         """Split text into sentences, preserving punctuation."""
@@ -224,7 +231,7 @@ def split_text(text: str) -> list[str]:
                 # For the third test case, both list items end with periods
                 # We can detect this by looking at the whole paragraph
                 all_items_have_periods = all(
-                    line.strip().endswith(".") for line in lines if line.strip()
+                    item.strip().endswith(".") for item in lines if item.strip()
                 )
                 if all_items_have_periods:
                     line = line.rstrip(".")
@@ -271,7 +278,7 @@ def clean_for_speech(content: str) -> str:
 
     - <thinking> tags and their content
     - Tool use blocks (```tool ...```)
-    - **Italic** markup
+    - **Bold** (``**text**``) and italic (``*text*``) markup
     - Additional (details) that may not need to be spoken
     - Emojis and other non-speech content
     - Hash symbols from Markdown headers (e.g., "# Header" → "Header")
@@ -287,8 +294,9 @@ def clean_for_speech(content: str) -> str:
     # Replace Markdown headers with just the header text (removing hash symbols)
     content = re_markdown_header.sub(r"\2", content)
 
-    # Remove **Italic** markup
+    # Remove bold and italic markup
     content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
+    content = re.sub(r"\*(.*?)\*", r"\1", content)
 
     # Remove (details)
     content = re.sub(r"\(.*?\)", "", content)
@@ -308,6 +316,7 @@ def _tts_processor_thread_fn():
             chunk = tts_request_queue.get()
             if chunk is None:  # Sentinel value to stop thread
                 log.debug("Received stop signal for TTS processor")
+                tts_request_queue.task_done()  # Account for the None sentinel
                 break
 
             # Make request to the TTS server
@@ -320,8 +329,8 @@ def _tts_processor_thread_fn():
                 params["voice"] = voice
 
             try:
-                response = requests.get(url, params=params)
-            except requests.exceptions.ConnectionError:
+                response = requests.get(url, params=params, timeout=10)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
                 log.warning(f"TTS server unavailable at {url}")
                 tts_request_queue.task_done()
                 continue
@@ -489,8 +498,6 @@ def wait_on_session_end(manager, **kwargs):
     Registered for SESSION_END hook.
     Replaces the old _wait_for_tts_if_enabled() function.
     """
-    import os
-
     # Only wait if GPTME_VOICE_FINISH is enabled
     if os.environ.get("GPTME_VOICE_FINISH", "").lower() not in ["1", "true"]:
         return
@@ -502,8 +509,6 @@ def wait_on_session_end(manager, **kwargs):
         log.info("TTS request queue joined")
 
         # Then wait for all audio to finish playing
-        from gptme.util.sound import wait_for_audio
-
         wait_for_audio()
         log.info("Audio playback finished")
     except KeyboardInterrupt:
