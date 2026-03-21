@@ -141,11 +141,11 @@ class TTSBackendLoader:
         if os.getenv("GRADIO_SRC", "").count("/") > 1:
             # Not using HF_TOKEN for local dev versions
             if not os.getenv("HF_TOKEN"):
-                print("Using local Gradio source for Chatterbox backend")
+                log.info("Using local Gradio source for Chatterbox backend")
                 os.environ.setdefault("HF_TOKEN", "local-dev")
         if os.getenv("HF_TOKEN"):
             if find_spec("gradio_client"):
-                print("Chatterbox backend is available")
+                log.info("Chatterbox backend is available")
                 backends.append("chatterbox")
 
         return backends
