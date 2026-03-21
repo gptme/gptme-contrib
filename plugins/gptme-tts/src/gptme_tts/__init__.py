@@ -2,7 +2,7 @@
 Text-to-speech plugin for gptme.
 
 Uses Kokoro for local TTS generation. Requires a running TTS server
-(see ``scripts/tts_server.py`` in the gptme repository).
+(``tts_server.py`` included in this plugin).
 
 Install with::
 

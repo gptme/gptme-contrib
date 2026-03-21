@@ -10,12 +10,9 @@ Uses Kokoro for local TTS generation.
     # Install the TTS plugin
     pip install gptme-tts
 
-    # Clone gptme repository for the TTS server
-    git clone https://github.com/gptme/gptme.git
-    cd gptme
-
-    # Run the Kokoro TTS server (needs uv installed)
-    ./scripts/tts_server.py
+    # Run the Kokoro TTS server (included in the plugin)
+    # Find tts_server.py in the plugin directory
+    python tts_server.py
 
     # Start gptme (should detect the running TTS server)
     gptme 'hello, testing tts'
