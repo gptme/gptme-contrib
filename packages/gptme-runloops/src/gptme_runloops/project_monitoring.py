@@ -195,7 +195,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--state",
                     "open",
                     "--json",
-                    "number,title,updatedAt,url,headRefName",
+                    "number,title,updatedAt,url,headRefName,isDraft",
                 ],
                 capture_output=True,
                 text=True,
@@ -208,6 +208,9 @@ class ProjectMonitoringRun(BaseRunLoop):
             prs = json.loads(result.stdout)
 
             for pr in prs:
+                # Skip draft PRs — they're not on the merge path
+                if pr.get("isDraft"):
+                    continue
                 pr_number = pr["number"]
                 updated_at = pr["updatedAt"]
                 state_file = (
@@ -278,7 +281,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--state",
                     "open",
                     "--json",
-                    "number,title,statusCheckRollup,url",
+                    "number,title,statusCheckRollup,url,isDraft",
                 ],
                 capture_output=True,
                 text=True,
@@ -292,6 +295,9 @@ class ProjectMonitoringRun(BaseRunLoop):
             current_failures = []
 
             for pr in prs:
+                # Skip draft PRs — don't chase CI failures on deprioritized work
+                if pr.get("isDraft"):
+                    continue
                 pr_number = pr["number"]
                 checks = pr.get("statusCheckRollup") or []
 
