@@ -150,7 +150,7 @@ else
         if echo "$ORIGINALLY_STAGED" | grep -qxF "$f"; then
             git add "$f"
         fi
-    done < <(git diff --name-only)
+    done < <(git diff --name-only --diff-filter=M)
 
     echo -e "${GREEN}Auto-staged formatter fixes. Re-running pre-commit...${NC}"
 
