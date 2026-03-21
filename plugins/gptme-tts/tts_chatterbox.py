@@ -258,8 +258,8 @@ def main(
     VOICE_SAMPLE_PATH: Path to the voice sample file (relative to voice directory)
     """
     if list_voices:
-        backend = ChatterboxTTSBackend(voice_sample_dir=voice_dir)
-        voices = backend.list_voices()
+        voice_dir_path = Path(voice_dir) if voice_dir else Path(__file__).parent
+        voices = _list_voices(voice_dir_path)
         if voices:
             click.echo("Available voice samples:")
             for voice in voices:

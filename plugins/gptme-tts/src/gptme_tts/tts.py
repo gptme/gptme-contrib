@@ -112,7 +112,7 @@ re_markdown_header = re.compile(r"^(#+)\s+(.*?)$", flags=re.MULTILINE)
 
 
 def set_speed(speed):
-    """Set the speaking speed (0.5 to 2.0, default 1.3)."""
+    """Set the speaking speed (0.5 to 2.0, default 1.0)."""
     global current_speed
     current_speed = max(0.5, min(2.0, speed))
     log.info(f"TTS speed set to {current_speed:.2f}x")
@@ -356,7 +356,10 @@ def _tts_processor_thread_fn():
 
         except Exception as e:
             log.error(f"Error in TTS processing: {e}")
-            tts_request_queue.task_done()
+            try:
+                tts_request_queue.task_done()
+            except ValueError:
+                pass  # stop() may have already reset unfinished_tasks to 0
 
 
 def ensure_tts_thread():
