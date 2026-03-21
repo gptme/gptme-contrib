@@ -68,6 +68,39 @@ If nothing useful found, respond with exactly: NO_NEW_FACTS
 Conversation (user messages only):
 {conversation}"""
 
+CATEGORIZED_EXTRACTION_PROMPT = """Analyze this conversation to extract key facts about the USER (not the AI assistant).
+
+Organize facts into these categories:
+
+## preferences
+Technical preferences (languages, frameworks, editors, workflows, communication style).
+
+## projects
+Ongoing projects, their goals and current status.
+
+## personal
+Personal facts relevant to work (timezone, company, role, location).
+
+Do NOT extract:
+- Things the AI said
+- Common/generic preferences (e.g., "prefers code that works")
+- Facts already obvious from context (e.g., "uses gptme")
+- Speculative or uncertain information
+- Private sensitive information
+
+Format: Use the section headers above, with a markdown list under each.
+Omit sections that have no facts. If nothing useful found at all, respond with: NO_NEW_FACTS
+
+Conversation (user messages only):
+{conversation}"""
+
+# Category file names and display titles
+MEMORY_CATEGORIES: dict[str, str] = {
+    "preferences": "User Preferences",
+    "projects": "User Projects",
+    "personal": "Personal Context",
+}
+
 
 def is_autonomous_session(conv_file: Path) -> bool:
     """Check if a gptme session is an autonomous agent run (not an interactive user session)."""
@@ -237,7 +270,7 @@ def extract_facts(
     if len(conversation_text.strip()) < 50:
         return []
 
-    import anthropic
+    import anthropic  # type: ignore[import-not-found]
 
     api_key = _get_anthropic_api_key()
     if not api_key:
@@ -276,6 +309,75 @@ def extract_facts(
     return facts
 
 
+def parse_categorized_output(output: str) -> dict[str, list[str]]:
+    """Parse categorized LLM output into a dict of {category: [facts]}.
+
+    Recognizes section headers like ``## preferences`` and collects
+    bullet-point facts under each. Unknown categories are silently ignored
+    (only ``preferences``, ``projects``, ``personal`` are kept).
+    """
+    result: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in output.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            category = stripped[3:].strip().lower()
+            if category in MEMORY_CATEGORIES:
+                current = category
+                result.setdefault(current, [])
+            else:
+                current = None  # skip unknown categories
+        elif stripped.startswith("- ") and current is not None:
+            fact = stripped[2:].strip()
+            if fact:
+                result[current].append(fact)
+    return result
+
+
+def extract_categorized_facts(
+    conversation_text: str, model: str = DEFAULT_MODEL
+) -> dict[str, list[str]] | None:
+    """Use Claude to extract user facts organized by category.
+
+    Returns:
+        dict[str, list[str]]: facts per category (may be empty dicts).
+        None: API call failed — caller should NOT touch sentinel.
+    """
+    if len(conversation_text.strip()) < 50:
+        return {}
+
+    import anthropic  # same optional dep — type: ignore suppressed by the identical import in extract_facts
+
+    api_key = _get_anthropic_api_key()
+    if not api_key:
+        logger.warning(
+            "user_memories: no ANTHROPIC_API_KEY found in env or config.toml — skipping extraction"
+        )
+        return None
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = CATEGORIZED_EXTRACTION_PROMPT.format(conversation=conversation_text)
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,  # higher than flat extraction: multi-section format needs more tokens
+            messages=[{"role": "user", "content": prompt}],
+        )
+        block = response.content[0]
+        output = block.text.strip() if hasattr(block, "text") else ""
+    except Exception as e:
+        logger.warning(
+            "user_memories: API call failed: %s — session will be retried", e
+        )
+        return None
+
+    if output.strip() == "NO_NEW_FACTS" or not output:
+        return {}
+
+    return parse_categorized_output(output)
+
+
 def load_existing_memories(memories_file: Path) -> list[str]:
     """Load existing memories from the memories file."""
     if not memories_file.exists():
@@ -288,6 +390,24 @@ def load_existing_memories(memories_file: Path) -> list[str]:
     return facts
 
 
+def _atomic_write(target: Path, content: str) -> None:
+    """Write content to target atomically using a temp file + rename.
+
+    Uses a PID-stamped temp name in the same directory to prevent concurrent
+    callers (hook + CLI) from colliding and to avoid partial writes corrupting
+    the output file on interruption.
+    """
+    tmp = target.with_name(f"{target.stem}.{os.getpid()}.tmp")
+    replaced = False
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(target)
+        replaced = True
+    finally:
+        if not replaced:
+            tmp.unlink(missing_ok=True)
+
+
 def save_memories(memories_file: Path, facts: list[str]) -> None:
     """Save memories to the markdown file using an atomic write."""
     memories_file.parent.mkdir(parents=True, exist_ok=True)
@@ -297,18 +417,7 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
         f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
     )
     body = "\n".join(f"- {fact}" for fact in sorted(facts, key=str.casefold))
-    # Write to a unique temp file in the same directory, then atomically rename to
-    # avoid partial writes corrupting the accumulated memories file on interruption.
-    # PID in the name prevents concurrent callers (hook + CLI) from colliding.
-    tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
-    replaced = False
-    try:
-        tmp.write_text(header + body + "\n", encoding="utf-8")
-        tmp.replace(memories_file)
-        replaced = True
-    finally:
-        if not replaced:
-            tmp.unlink(missing_ok=True)
+    _atomic_write(memories_file, header + body + "\n")
 
 
 def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
@@ -325,6 +434,43 @@ def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
             seen.add(normalized)
             merged.append(fact)
     return merged
+
+
+def save_categorized_memories(
+    memories_dir: Path, categorized: dict[str, list[str]]
+) -> dict[str, int]:
+    """Save categorized facts to per-category files in memories_dir.
+
+    Each category gets its own markdown file (e.g. preferences.md, projects.md,
+    personal.md). Facts are merged with any existing content and deduplicated.
+    Categories with no new facts are left unchanged.
+
+    Returns:
+        dict[str, int]: net-new fact count per category (len(merged) - len(existing)).
+    """
+    new_counts: dict[str, int] = {}
+    for category, new_facts in categorized.items():
+        if not new_facts:
+            continue
+        title = MEMORY_CATEGORIES.get(category, category.capitalize())
+        cat_file = memories_dir / f"{category}.md"
+        existing = load_existing_memories(cat_file)
+        merged = merge_facts(existing, new_facts)
+        if merged == existing:
+            continue  # all facts already present — skip write
+        memories_dir.mkdir(parents=True, exist_ok=True)
+        header = (
+            f"# {title}\n\n"
+            f"Facts about the user extracted from past gptme conversations.\n"
+            f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+        )
+        body = "\n".join(f"- {fact}" for fact in sorted(merged, key=str.casefold))
+        _atomic_write(cat_file, header + body + "\n")
+        new_counts[category] = len(merged) - len(existing)
+        logger.info(
+            "user_memories: saved %d %s facts to %s", len(merged), category, cat_file
+        )
+    return new_counts
 
 
 def process_logdir(
@@ -430,6 +576,139 @@ def process_cc_logfile(
     return facts
 
 
+def _safe_mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def run_batch_categorized(
+    days: int = DEFAULT_DAYS,
+    limit: int = 30,
+    force: bool = False,
+    dry_run: bool = False,
+    model: str = DEFAULT_MODEL,
+) -> dict[str, list[str]]:
+    """Scan recent sessions and extract user facts organized by category.
+
+    Returns a dict of {category: [facts]}. Call save_categorized_memories() to persist.
+    """
+    if not _get_anthropic_api_key():
+        logger.warning(
+            "user_memories: ANTHROPIC_API_KEY not configured — skipping batch extraction"
+        )
+        return {}
+
+    cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
+    all_categorized: dict[str, list[str]] = {}
+    per_source_limit = max(1, math.ceil(limit / 2))
+    gptme_processed = 0
+    total_processed = 0
+
+    def _merge_categorized(
+        target: dict[str, list[str]], source: dict[str, list[str]]
+    ) -> None:
+        for cat, facts in source.items():
+            target.setdefault(cat, []).extend(facts)
+
+    # gptme logs
+    if LOGS_DIR.exists():
+        gptme_entries = sorted(
+            ((mtime, p) for p in LOGS_DIR.iterdir() if (mtime := _safe_mtime(p))),
+            key=lambda t: t[0],
+            reverse=True,
+        )
+        for mtime, log_dir in gptme_entries:
+            if not log_dir.is_dir():
+                continue
+            if mtime < cutoff_ts:
+                break
+            if not (log_dir / "conversation.jsonl").exists():
+                continue
+            if not force and (log_dir / SENTINEL_FILENAME).exists():
+                continue
+
+            conv_file = log_dir / "conversation.jsonl"
+            sentinel = log_dir / SENTINEL_FILENAME
+            if is_autonomous_session(conv_file):
+                if not dry_run:
+                    sentinel.touch()
+                continue
+            text = get_user_messages(conv_file)
+            if len(text) < 50:
+                if not dry_run:
+                    sentinel.touch()
+                continue
+            result = extract_categorized_facts(text, model=model)
+            if result is None:
+                continue  # API failure — skip, don't touch sentinel
+            if not dry_run:
+                sentinel.touch()
+            _merge_categorized(all_categorized, result)
+            gptme_processed += 1
+            total_processed += 1
+            if gptme_processed >= per_source_limit or total_processed >= limit:
+                break
+
+    # Claude Code logs — no per-source cap here; total_processed enforces the ceiling.
+    # This allows CC to absorb unused quota when gptme has fewer than per_source_limit sessions.
+    if CC_LOGS_DIR.exists():
+        cc_proj_entries = sorted(
+            ((mtime, p) for p in CC_LOGS_DIR.iterdir() if (mtime := _safe_mtime(p))),
+            key=lambda t: t[0],
+            reverse=True,
+        )
+        for proj_mtime, proj_dir in cc_proj_entries:
+            if not proj_dir.is_dir():
+                continue
+            if proj_mtime < cutoff_ts:
+                break
+            if total_processed >= limit:
+                break
+            jsonl_entries = sorted(
+                (
+                    (mtime, f)
+                    for f in proj_dir.glob("*.jsonl")
+                    if (mtime := _safe_mtime(f))
+                ),
+                key=lambda t: t[0],
+                reverse=True,
+            )
+            for file_mtime, jsonl_file in jsonl_entries:
+                if total_processed >= limit:
+                    break
+                if file_mtime < cutoff_ts:
+                    break
+                cc_sentinel = CC_SENTINEL_DIR / jsonl_file.relative_to(
+                    CC_LOGS_DIR
+                ).with_suffix(".memories-extracted")
+                if not force and cc_sentinel.exists():
+                    continue
+
+                if is_cc_autonomous_session(jsonl_file):
+                    if not dry_run:
+                        cc_sentinel.parent.mkdir(parents=True, exist_ok=True)
+                        cc_sentinel.touch()
+                    continue
+                text = get_cc_user_messages(jsonl_file)
+                if len(text) < 50:
+                    if not dry_run:
+                        cc_sentinel.parent.mkdir(parents=True, exist_ok=True)
+                        cc_sentinel.touch()
+                    continue
+                result = extract_categorized_facts(text, model=model)
+                if result is None:
+                    continue
+                if not dry_run:
+                    cc_sentinel.parent.mkdir(parents=True, exist_ok=True)
+                    cc_sentinel.touch()
+                _merge_categorized(all_categorized, result)
+                total_processed += 1
+
+    return all_categorized
+
+
 def run_batch(
     days: int = DEFAULT_DAYS,
     limit: int = 30,
@@ -456,12 +735,6 @@ def run_batch(
     per_source_limit = max(1, math.ceil(limit / 2))
     gptme_processed = 0
     total_processed = 0
-
-    def _safe_mtime(p: Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
 
     # gptme logs
     if LOGS_DIR.exists():
@@ -576,7 +849,51 @@ def main() -> None:
         default=DEFAULT_MODEL,
         help="Anthropic model to use for fact extraction (default: %(default)s)",
     )
+    parser.add_argument(
+        "--categorize",
+        action="store_true",
+        help=(
+            "Organize extracted facts into category files "
+            "(preferences.md, projects.md, personal.md) "
+            "instead of a single flat facts.md. "
+            "Note: shares session sentinels with the default mode — use --force to "
+            "(re-)process already-sentineled sessions."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.categorize:
+        if args.output != USER_MEMORIES_FILE:
+            print(
+                f"Warning: --output is ignored when --categorize is used; "
+                f"writing to {USER_MEMORIES_DIR}",
+                file=sys.stderr,
+            )
+        categorized = run_batch_categorized(
+            days=args.days,
+            limit=args.limit,
+            force=args.force,
+            dry_run=args.dry_run,
+            model=args.model,
+        )
+        if not categorized:
+            print("No new facts found.")
+            return
+        if args.dry_run:
+            total = sum(len(f) for f in categorized.values())
+            print(f"Dry run — would add up to {total} facts (before dedup):")
+            for cat, facts in categorized.items():
+                print(f"  [{cat}]")
+                for fact in facts:
+                    print(f"    - {fact}")
+            return
+        new_counts = save_categorized_memories(USER_MEMORIES_DIR, categorized)
+        if not new_counts:
+            print("No new facts found (all already known).")
+            return
+        for cat, count in new_counts.items():
+            print(f"  {cat}: {count} new facts → {USER_MEMORIES_DIR / cat}.md")
+        return
 
     new_facts = run_batch(
         days=args.days,
