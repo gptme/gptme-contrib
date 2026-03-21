@@ -167,10 +167,10 @@ def test_main_execute_all_success_returns_0(monkeypatch: pytest.MonkeyPatch) -> 
     assert pr_greptile_trigger._run(args) == 0
 
 
-def test_main_execute_partial_failure_returns_2(
+def test_main_execute_partial_failure_returns_1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Returns 2 (partial failure) when some triggers fail."""
+    """Returns 1 (partial failure) when some triggers fail."""
     call_count = {"n": 0}
 
     def _trigger(repo: str, num: int) -> tuple[bool, str]:
@@ -195,11 +195,11 @@ def test_main_execute_partial_failure_returns_2(
         pr_greptile_trigger, "resolve_repos", lambda arg: ["gptme/gptme"]
     )
     args = pr_greptile_trigger._parse_args(["--execute"])
-    assert pr_greptile_trigger._run(args) == 2
+    assert pr_greptile_trigger._run(args) == 1
 
 
-def test_main_execute_all_fail_returns_1(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Returns 1 when all triggers fail."""
+def test_main_execute_all_fail_returns_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns 2 when all triggers fail."""
     monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
     monkeypatch.setattr(
         pr_greptile_trigger,
@@ -216,4 +216,4 @@ def test_main_execute_all_fail_returns_1(monkeypatch: pytest.MonkeyPatch) -> Non
         pr_greptile_trigger, "resolve_repos", lambda arg: ["gptme/gptme"]
     )
     args = pr_greptile_trigger._parse_args(["--execute"])
-    assert pr_greptile_trigger._run(args) == 1
+    assert pr_greptile_trigger._run(args) == 2

@@ -436,7 +436,8 @@ def test_evaluate_pr_warns_on_auth_failure() -> None:
             workspace_repo="gptme/gptme-contrib",
         )
 
-    assert any("author-identity check skipped" in w for w in result.warnings)
+    assert any("author-identity check failed" in r for r in result.reasons)
+    assert not result.eligible
 
 
 def test_resolve_workspace_repo_honors_empty_env_opt_out() -> None:

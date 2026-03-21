@@ -60,6 +60,8 @@ TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
+    "scripts/github/self-merge-check.py",
+    "scripts/github/pr-greptile-trigger.py",
     "infra/",
     "k8s/",
     "secrets/",
@@ -596,8 +598,8 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str) -> CheckResult:
 
     current_user = get_gh_user()
     if not current_user:
-        result.warnings.append(
-            "Could not determine authenticated GitHub user; author-identity check skipped."
+        result.reasons.append(
+            "Could not determine authenticated GitHub user; author-identity check failed."
         )
     elif author != current_user:
         result.reasons.append(f"PR author is {author}, expected {current_user}")

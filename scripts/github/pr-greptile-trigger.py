@@ -22,9 +22,9 @@ Environment:
 
 Exit codes:
     0  All actionable re-reviews triggered successfully (or nothing to do).
-    1  All trigger attempts failed.
-    2  Partial failure or unrecoverable error (auth failure, helper unavailable,
-       or at least one trigger succeeded while others failed).
+    1  Partial failure — at least one trigger succeeded, at least one failed.
+    2  Total failure — all trigger attempts failed, or unrecoverable error
+       (auth failure, helper unavailable).
 """
 
 from __future__ import annotations
@@ -313,9 +313,9 @@ def _run(args: argparse.Namespace) -> int:
 
     print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
     if triggered == 0:
-        return 1  # All failed
+        return 2  # All failed
     if triggered < len(actionable):
-        return 2  # Partial failure — some triggers succeeded, some failed
+        return 1  # Partial failure — some triggers succeeded, some failed
     return 0  # All succeeded
 
 
