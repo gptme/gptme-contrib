@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gptme-youtube"
+version = "0.1.0"
+description = "YouTube transcript extraction and summarization plugin for gptme"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "gptme",
+    "youtube_transcript_api>=0.6.1",
+]
+
+[project.entry-points."gptme.plugins"]
+gptme_youtube = "gptme_youtube:tool"
+
+[tool.setuptools.packages.find]
+where = ["src"]
