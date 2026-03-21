@@ -890,6 +890,54 @@ def test_extract_signals_cc_gh_pr_merge():
     assert "merge PR #1725" in sigs["git_commits"][0]
 
 
+@pytest.mark.parametrize(
+    "merge_output",
+    [
+        "✓ Squashed and merged pull request #42 (feat: squash test)",
+        "✓ Rebased and merged pull request #42 (feat: rebase test)",
+        "✓ Merged pull request #42 (feat: merge test)",
+    ],
+)
+def test_extract_signals_cc_gh_pr_merge_variants(merge_output: str):
+    """CC trajectory: all gh pr merge variants (squash/rebase/plain) are detected."""
+    bash_id = "bash_merge_variants"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr merge 42"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": merge_output,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 1
+    assert "merge PR #42" in sigs["git_commits"][0]
+
+
 def test_grade_signals_dead_session():
     """Grade is very low (0.10) for dead sessions with zero tool calls."""
     sigs = extract_signals_cc([])

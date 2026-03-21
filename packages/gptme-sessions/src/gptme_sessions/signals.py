@@ -35,7 +35,8 @@ _WARNING_PHRASE_RE = re.compile(r"error:|\bfailed\b|\bfailures?\b|\btraceback\b|
 # When CC runs a Bash command in background mode, the tool result contains:
 # "Command running in background with ID: TASKID. Output is being written to: PATH"
 # The actual git commit output (which matches _COMMIT_RE) is in that file, not the result.
-_BG_TASK_RE = re.compile(r"Output is being written to: ([^\s]+\.output)")
+# Note: paths are matched greedily up to the end of line to handle spaces in paths.
+_BG_TASK_RE = re.compile(r"Output is being written to: (.+\.output)")
 
 # Regex for gh pr merge success output.
 # Format: "✓ Squashed and merged pull request #N (title)"
@@ -490,7 +491,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                 commit_hash = commit_match.group(1)
                                 commit_msg = commit_match.group(2).strip()
                                 git_commits.append(f"{commit_msg} ({commit_hash})")
-                        except (OSError, IOError):
+                        except OSError:
                             pass  # File may not exist if session ran on a different host
 
                     # gh pr merge detection: output format is
