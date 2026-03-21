@@ -144,8 +144,14 @@ class ChatterboxTTSBackend:
             if not result or not isinstance(result, str) or not result.endswith(".wav"):
                 raise ValueError(f"Unexpected result from Chatterbox API: {result}")
 
-            # Read the generated audio file
-            sample_rate, audio_data = wavfile.read(result)
+            # Read the generated audio file and clean up the temp file
+            try:
+                sample_rate, audio_data = wavfile.read(result)
+            finally:
+                try:
+                    os.unlink(result)
+                except OSError:
+                    pass
 
             # Normalize to [-1, 1] range if needed
             if np.max(np.abs(audio_data)) > 1.0:
