@@ -15,6 +15,19 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# --- Part 0: Tree size safety check ---
+# Refuse to commit if staged changes would delete >50% of tracked files.
+# Catches catastrophic commits (e.g. git add -u from wrong working tree state).
+TRACKED_COUNT=$(git ls-tree -r HEAD --name-only 2>/dev/null | wc -l)
+if [ "$TRACKED_COUNT" -gt 100 ]; then
+    STAGED_DELETIONS=$(git diff --cached --diff-filter=D --name-only | wc -l)
+    if [ "$STAGED_DELETIONS" -gt $((TRACKED_COUNT / 2)) ]; then
+        echo -e "${RED}ABORT: commit would delete $STAGED_DELETIONS of $TRACKED_COUNT tracked files${NC}"
+        echo -e "${RED}This looks like a catastrophic commit. Refusing to proceed.${NC}"
+        exit 1
+    fi
+fi
+
 # Get the hooks directory for sourcing config
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -104,19 +117,26 @@ if [ ! -f ".pre-commit-config.yaml" ]; then
     exit 0
 fi
 
-# Check if pre-commit is available
-if ! command -v pre-commit &> /dev/null; then
-    echo -e "${YELLOW}⚠️  pre-commit not found, skipping pre-commit checks${NC}"
+# Check if prek or pre-commit is available (prefer prek — typically no stash/unstash by default)
+if command -v prek &> /dev/null; then
+    PRECOMMIT_CMD="prek"
+elif command -v pre-commit &> /dev/null; then
+    PRECOMMIT_CMD="pre-commit"
+else
+    echo -e "${YELLOW}⚠️  Neither prek nor pre-commit found, skipping checks${NC}"
     exit 0
 fi
 
-echo -e "${GREEN}Running pre-commit checks...${NC}"
+echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
+
+# Capture originally staged files BEFORE any formatter runs.
+# In multi-session environments, another session could 'git add' files between
+# now and when we check later — capturing here ensures we only re-stage our own files.
+ORIGINALLY_STAGED=$(git diff --cached --name-only --diff-filter=ACM)
 
 # Run pre-commit checks on staged files only
-# Capture output to avoid spamming context with passed/skipped hooks
-# NOTE: Temporarily disable set -e so we can capture exit code even on failure
 set +e
-PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
+PRECOMMIT_OUTPUT=$("$PRECOMMIT_CMD" run 2>&1)
 PRECOMMIT_EXIT=$?
 set -e
 
@@ -135,15 +155,20 @@ else
         exit 1
     fi
 
-    # Auto-stage modified files
-    git add -u
+    # Auto-stage ONLY the originally staged files that were modified by formatters.
+    # Do NOT use 'git add -u' — in multi-session environments that picks up
+    # other sessions' changes and causes wrong-file commits.
+    # Use 'while read' instead of 'for f in $FILES' to handle filenames with spaces.
+    while IFS= read -r f; do
+        if echo "$ORIGINALLY_STAGED" | grep -qxF "$f"; then
+            git add "$f"
+        fi
+    done < <(git diff --name-only --diff-filter=M)
 
-    echo -e "${GREEN}Auto-staged modified files. Re-running pre-commit...${NC}"
+    echo -e "${GREEN}Auto-staged formatter fixes. Re-running pre-commit...${NC}"
 
-    # Re-run pre-commit on staged files
-    # NOTE: Temporarily disable set -e so we can capture exit code even on failure
     set +e
-    PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
+    PRECOMMIT_OUTPUT=$("$PRECOMMIT_CMD" run 2>&1)
     PRECOMMIT_EXIT=$?
     set -e
 
