@@ -799,6 +799,145 @@ def test_extract_signals_cc_retry_detection():
     assert sigs["retry_count"] >= 1
 
 
+def test_extract_signals_cc_background_bash_commits(tmp_path: Path):
+    """CC trajectory: git commits in background bash task output files are detected.
+
+    When CC runs a Bash command in background mode, the tool result contains only
+    a pointer: "Output is being written to: /tmp/claude.../tasks/TASKID.output"
+    The actual git commit output is in that file, not the tool result string.
+    """
+    # Write a fake background task output file with a git commit line
+    bg_output = tmp_path / "bayr910lo.output"
+    bg_output.write_text(
+        "[master b88840647] feat(speckit-reader): add phase 3 tests\n 8 files changed\n"
+    )
+
+    bash_id = "bash_bg_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add tests'", "timeout": 60000},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": f"Command running in background with ID: bayr910lo. Output is being written to: {bg_output}",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 1
+    assert "feat(speckit-reader)" in sigs["git_commits"][0]
+
+
+def test_extract_signals_cc_gh_pr_merge():
+    """CC trajectory: gh pr merge success output is detected as a commit signal."""
+    bash_id = "bash_merge_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr merge 1725 --squash"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": "✓ Squashed and merged pull request #1725 (fix(models): add parallel tool calls flag)",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 1
+    assert "merge PR #1725" in sigs["git_commits"][0]
+
+
+@pytest.mark.parametrize(
+    "merge_output",
+    [
+        "✓ Squashed and merged pull request #42 (feat: squash test)",
+        "✓ Rebased and merged pull request #42 (feat: rebase test)",
+        "✓ Merged pull request #42 (feat: merge test)",
+    ],
+)
+def test_extract_signals_cc_gh_pr_merge_variants(merge_output: str):
+    """CC trajectory: all gh pr merge variants (squash/rebase/plain) are detected."""
+    bash_id = "bash_merge_variants"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr merge 42"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": merge_output,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 1
+    assert "merge PR #42" in sigs["git_commits"][0]
+
+
 def test_grade_signals_dead_session():
     """Grade is very low (0.10) for dead sessions with zero tool calls."""
     sigs = extract_signals_cc([])
