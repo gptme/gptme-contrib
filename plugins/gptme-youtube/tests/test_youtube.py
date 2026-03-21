@@ -47,3 +47,37 @@ def test_get_transcript_error():
 
         result = get_transcript("bad_id")
         assert "Error fetching transcript" in result
+
+
+def test_execute_with_code():
+    """Test execute extracts video ID from the code block content."""
+    mock_api = MagicMock()
+    mock_api.get_transcript.return_value = [{"text": "Hello world"}]
+
+    with patch("gptme_youtube.tools.youtube.YouTubeTranscriptApi", mock_api):
+        from gptme_youtube.tools.youtube import execute
+
+        msg = execute("dQw4w9WgXcQ", None, None)
+        assert "Hello world" in msg.content
+        mock_api.get_transcript.assert_called_once_with("dQw4w9WgXcQ")
+
+
+def test_execute_fallback_to_args():
+    """Test execute falls back to args when code is empty."""
+    mock_api = MagicMock()
+    mock_api.get_transcript.return_value = [{"text": "Fallback transcript"}]
+
+    with patch("gptme_youtube.tools.youtube.YouTubeTranscriptApi", mock_api):
+        from gptme_youtube.tools.youtube import execute
+
+        msg = execute("", ["dQw4w9WgXcQ"], None)
+        assert "Fallback transcript" in msg.content
+        mock_api.get_transcript.assert_called_once_with("dQw4w9WgXcQ")
+
+
+def test_execute_empty_video_id():
+    """Test execute returns an error when no video ID is provided."""
+    from gptme_youtube.tools.youtube import execute
+
+    msg = execute("", None, None)
+    assert "Error" in msg.content
