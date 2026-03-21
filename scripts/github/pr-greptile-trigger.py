@@ -80,7 +80,7 @@ def run_gh(args: list[str], timeout: int = 30) -> str:
                 print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
             return ""
         return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return ""
 
 
@@ -139,7 +139,7 @@ def _helper_cmd(
             text=True,
             timeout=30,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return None
 
 

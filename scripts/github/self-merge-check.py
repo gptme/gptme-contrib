@@ -128,7 +128,7 @@ def run_gh(args: list[str], timeout: int = 30) -> str:
                 print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
             return ""
         return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return ""
 
 
@@ -375,7 +375,7 @@ def _fetch_greptile_review_data(
             return None
 
         if reviews is None:
-            reviews = pr_data.get("reviews", {}).get("nodes", [])
+            reviews = (pr_data.get("reviews") or {}).get("nodes", [])
 
         threads_data = pr_data.get("reviewThreads", {})
         all_threads.extend(threads_data.get("nodes", []))
@@ -643,7 +643,12 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str) -> CheckResult:
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
 
-    if not checks_green(pr.get("statusCheckRollup", [])):
+    status_checks = pr.get("statusCheckRollup", [])
+    if not status_checks:
+        result.warnings.append(
+            "No CI checks configured; CI requirement satisfied without a green build"
+        )
+    elif not checks_green(status_checks):
         result.reasons.append("CI is not fully green")
 
     greptile = fetch_greptile_status(repo, number)
