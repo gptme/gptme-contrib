@@ -53,4 +53,20 @@ if [[ ! "$upstream" =~ ^origin/ ]]; then
     # Don't fail, just warn - might be intentional
 fi
 
+# CRITICAL: Block feature branches that track origin/master or origin/main.
+# This happens when git worktree add -b <branch> origin/master sets the upstream
+# to origin/master. A subsequent `git push` then pushes to master, bypassing PR review.
+if [ "$upstream" = "origin/master" ] || [ "$upstream" = "origin/main" ]; then
+    echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream'!"
+    echo ""
+    echo "   This will push your feature branch directly to master/main."
+    echo "   This is almost always a mistake from worktree creation."
+    echo ""
+    echo "   Fix with:"
+    echo "     git branch --unset-upstream"
+    echo "     git push -u origin $current_branch"
+    echo ""
+    exit 1
+fi
+
 exit 0
