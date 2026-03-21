@@ -361,7 +361,7 @@ def extract_categorized_facts(
     try:
         response = client.messages.create(
             model=model,
-            max_tokens=512,
+            max_tokens=1024,  # higher than flat extraction: multi-section format needs more tokens
             messages=[{"role": "user", "content": prompt}],
         )
         block = response.content[0]

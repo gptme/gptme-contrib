@@ -1889,7 +1889,10 @@ class TestSaveCategorizedMemories:
 
     def test_deduplicates_facts(self, tmp_path: Path) -> None:
         save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
-        save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
+        counts = save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
+        assert (
+            counts == {}
+        ), "second call should be a no-op when all facts already exist"
         content = (tmp_path / "preferences.md").read_text()
         assert content.count("Uses Vim") == 1
 
