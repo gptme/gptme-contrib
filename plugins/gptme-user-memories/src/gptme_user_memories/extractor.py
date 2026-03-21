@@ -449,6 +449,8 @@ def save_categorized_memories(
         cat_file = memories_dir / f"{category}.md"
         existing = load_existing_memories(cat_file)
         merged = merge_facts(existing, new_facts)
+        if merged == existing:
+            continue  # all facts already present — skip write
         # Reuse save_memories but target the category file, overriding title
         # by temporarily building the content directly.
         memories_dir.mkdir(parents=True, exist_ok=True)
@@ -577,6 +579,13 @@ def process_cc_logfile(
     return facts
 
 
+def _safe_mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def run_batch_categorized(
     days: int = DEFAULT_DAYS,
     limit: int = 30,
@@ -599,12 +608,6 @@ def run_batch_categorized(
     per_source_limit = max(1, math.ceil(limit / 2))
     gptme_processed = 0
     total_processed = 0
-
-    def _safe_mtime(p: Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
 
     def _merge_categorized(
         target: dict[str, list[str]], source: dict[str, list[str]]
@@ -735,12 +738,6 @@ def run_batch(
     gptme_processed = 0
     total_processed = 0
 
-    def _safe_mtime(p: Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-
     # gptme logs
     if LOGS_DIR.exists():
         # Collect (mtime, path) once so sort key and cutoff check share the same stat() call.
@@ -860,7 +857,9 @@ def main() -> None:
         help=(
             "Organize extracted facts into category files "
             "(preferences.md, projects.md, personal.md) "
-            "instead of a single flat facts.md"
+            "instead of a single flat facts.md. "
+            "Note: shares session sentinels with the default mode — use --force to "
+            "(re-)process already-sentineled sessions."
         ),
     )
     args = parser.parse_args()
