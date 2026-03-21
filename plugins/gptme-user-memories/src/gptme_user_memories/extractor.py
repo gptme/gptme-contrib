@@ -346,7 +346,7 @@ def extract_categorized_facts(
     if len(conversation_text.strip()) < 50:
         return {}
 
-    import anthropic
+    import anthropic  # type: ignore[import-not-found]
 
     api_key = _get_anthropic_api_key()
     if not api_key:
@@ -431,13 +431,17 @@ def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
 
 def save_categorized_memories(
     memories_dir: Path, categorized: dict[str, list[str]]
-) -> None:
+) -> dict[str, int]:
     """Save categorized facts to per-category files in memories_dir.
 
     Each category gets its own markdown file (e.g. preferences.md, projects.md,
     personal.md). Facts are merged with any existing content and deduplicated.
     Categories with no new facts are left unchanged.
+
+    Returns:
+        dict[str, int]: net-new fact count per category (len(merged) - len(existing)).
     """
+    new_counts: dict[str, int] = {}
     for category, new_facts in categorized.items():
         if not new_facts:
             continue
@@ -463,9 +467,11 @@ def save_categorized_memories(
         finally:
             if not replaced:
                 tmp.unlink(missing_ok=True)
+        new_counts[category] = len(merged) - len(existing)
         logger.info(
             "user_memories: saved %d %s facts to %s", len(merged), category, cat_file
         )
+    return new_counts
 
 
 def process_logdir(
@@ -860,6 +866,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.categorize:
+        if args.output != USER_MEMORIES_FILE:
+            logger.warning(
+                "--output is ignored when --categorize is used; writing to %s",
+                USER_MEMORIES_DIR,
+            )
         categorized = run_batch_categorized(
             days=args.days,
             limit=args.limit,
@@ -878,9 +889,9 @@ def main() -> None:
                 for fact in facts:
                     print(f"    - {fact}")
             return
-        save_categorized_memories(USER_MEMORIES_DIR, categorized)
-        for cat, facts in categorized.items():
-            print(f"  {cat}: {len(facts)} new facts → {USER_MEMORIES_DIR / cat}.md")
+        new_counts = save_categorized_memories(USER_MEMORIES_DIR, categorized)
+        for cat, count in new_counts.items():
+            print(f"  {cat}: {count} new facts → {USER_MEMORIES_DIR / cat}.md")
         return
 
     new_facts = run_batch(
