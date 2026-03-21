@@ -346,7 +346,7 @@ def extract_categorized_facts(
     if len(conversation_text.strip()) < 50:
         return {}
 
-    import anthropic  # type: ignore[import-not-found]
+    import anthropic  # same optional dep — type: ignore suppressed by the identical import in extract_facts
 
     api_key = _get_anthropic_api_key()
     if not api_key:
@@ -390,6 +390,24 @@ def load_existing_memories(memories_file: Path) -> list[str]:
     return facts
 
 
+def _atomic_write(target: Path, content: str) -> None:
+    """Write content to target atomically using a temp file + rename.
+
+    Uses a PID-stamped temp name in the same directory to prevent concurrent
+    callers (hook + CLI) from colliding and to avoid partial writes corrupting
+    the output file on interruption.
+    """
+    tmp = target.with_name(f"{target.stem}.{os.getpid()}.tmp")
+    replaced = False
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(target)
+        replaced = True
+    finally:
+        if not replaced:
+            tmp.unlink(missing_ok=True)
+
+
 def save_memories(memories_file: Path, facts: list[str]) -> None:
     """Save memories to the markdown file using an atomic write."""
     memories_file.parent.mkdir(parents=True, exist_ok=True)
@@ -399,18 +417,7 @@ def save_memories(memories_file: Path, facts: list[str]) -> None:
         f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
     )
     body = "\n".join(f"- {fact}" for fact in sorted(facts, key=str.casefold))
-    # Write to a unique temp file in the same directory, then atomically rename to
-    # avoid partial writes corrupting the accumulated memories file on interruption.
-    # PID in the name prevents concurrent callers (hook + CLI) from colliding.
-    tmp = memories_file.with_name(f"{memories_file.stem}.{os.getpid()}.tmp")
-    replaced = False
-    try:
-        tmp.write_text(header + body + "\n", encoding="utf-8")
-        tmp.replace(memories_file)
-        replaced = True
-    finally:
-        if not replaced:
-            tmp.unlink(missing_ok=True)
+    _atomic_write(memories_file, header + body + "\n")
 
 
 def merge_facts(existing: list[str], new_facts: list[str]) -> list[str]:
@@ -451,8 +458,6 @@ def save_categorized_memories(
         merged = merge_facts(existing, new_facts)
         if merged == existing:
             continue  # all facts already present — skip write
-        # Reuse save_memories but target the category file, overriding title
-        # by temporarily building the content directly.
         memories_dir.mkdir(parents=True, exist_ok=True)
         header = (
             f"# {title}\n\n"
@@ -460,15 +465,7 @@ def save_categorized_memories(
             f"Last updated: {datetime.now().strftime('%Y-%m-%d')}\n\n"
         )
         body = "\n".join(f"- {fact}" for fact in sorted(merged, key=str.casefold))
-        tmp = cat_file.with_name(f"{cat_file.stem}.{os.getpid()}.tmp")
-        replaced = False
-        try:
-            tmp.write_text(header + body + "\n", encoding="utf-8")
-            tmp.replace(cat_file)
-            replaced = True
-        finally:
-            if not replaced:
-                tmp.unlink(missing_ok=True)
+        _atomic_write(cat_file, header + body + "\n")
         new_counts[category] = len(merged) - len(existing)
         logger.info(
             "user_memories: saved %d %s facts to %s", len(merged), category, cat_file
@@ -867,9 +864,10 @@ def main() -> None:
 
     if args.categorize:
         if args.output != USER_MEMORIES_FILE:
-            logger.warning(
-                "--output is ignored when --categorize is used; writing to %s",
-                USER_MEMORIES_DIR,
+            print(
+                f"Warning: --output is ignored when --categorize is used; "
+                f"writing to {USER_MEMORIES_DIR}",
+                file=sys.stderr,
             )
         categorized = run_batch_categorized(
             days=args.days,
