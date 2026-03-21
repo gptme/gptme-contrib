@@ -11,8 +11,8 @@ Uses Kokoro for local TTS generation.
     pip install gptme-tts
 
     # Run the Kokoro TTS server (included in the plugin)
-    # Find tts_server.py in the plugin directory
-    python tts_server.py
+    # tts_server.py is a uv script — run directly (no python prefix needed)
+    ./tts_server.py
 
     # Start gptme (should detect the running TTS server)
     gptme 'hello, testing tts'
