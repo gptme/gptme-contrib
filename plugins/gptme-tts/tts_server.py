@@ -245,6 +245,9 @@ async def text_to_speech(
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text parameter cannot be empty")
 
+    # Note: server accepts 0–3.0; the gptme plugin client enforces 0.5–2.0 for
+    # typical voice quality. The wider server range allows direct API use with
+    # experimental speeds outside the plugin's recommended range.
     if speed <= 0 or speed > 3.0:
         raise HTTPException(
             status_code=400, detail="Speed must be greater than 0 and at most 3.0"
