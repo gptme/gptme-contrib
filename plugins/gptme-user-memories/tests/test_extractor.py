@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from gptme_user_memories.extractor import (
+    MEMORY_CATEGORIES,
     SENTINEL_FILENAME,
     _get_anthropic_api_key,
     get_cc_user_messages,
@@ -16,9 +17,12 @@ from gptme_user_memories.extractor import (
     is_cc_autonomous_session,
     load_existing_memories,
     merge_facts,
+    parse_categorized_output,
     process_cc_logfile,
     process_logdir,
     run_batch,
+    run_batch_categorized,
+    save_categorized_memories,
     save_memories,
 )
 
@@ -1788,3 +1792,128 @@ class TestRunBatchAPIKeyCheck:
             "extract_facts must not be called when API key is missing — "
             "no per-session scanning should happen"
         )
+
+
+# ---------------------------------------------------------------------------
+# parse_categorized_output
+# ---------------------------------------------------------------------------
+
+
+class TestParseCategorizedOutput:
+    def test_parses_known_categories(self) -> None:
+        output = """## preferences
+- Uses Vim as editor
+- Prefers Python over JavaScript
+
+## projects
+- Working on gptme, an AI assistant
+
+## personal
+- Based in Sweden, CET timezone
+"""
+        result = parse_categorized_output(output)
+        assert result["preferences"] == [
+            "Uses Vim as editor",
+            "Prefers Python over JavaScript",
+        ]
+        assert result["projects"] == ["Working on gptme, an AI assistant"]
+        assert result["personal"] == ["Based in Sweden, CET timezone"]
+
+    def test_ignores_unknown_categories(self) -> None:
+        output = """## preferences
+- Uses Vim
+
+## hobbies
+- Plays guitar
+"""
+        result = parse_categorized_output(output)
+        assert "hobbies" not in result
+        assert result["preferences"] == ["Uses Vim"]
+
+    def test_empty_output_returns_empty_dict(self) -> None:
+        assert parse_categorized_output("NO_NEW_FACTS") == {}
+        assert parse_categorized_output("") == {}
+
+    def test_skips_non_bullet_lines(self) -> None:
+        output = """## preferences
+Some preamble text
+- Actual fact
+"""
+        result = parse_categorized_output(output)
+        assert result["preferences"] == ["Actual fact"]
+
+    def test_omitted_categories_not_in_result(self) -> None:
+        output = """## preferences
+- Uses Vim
+"""
+        result = parse_categorized_output(output)
+        assert "projects" not in result
+        assert "personal" not in result
+
+    def test_all_known_categories_recognized(self) -> None:
+        for cat in MEMORY_CATEGORIES:
+            output = f"## {cat}\n- Some fact\n"
+            result = parse_categorized_output(output)
+            assert cat in result
+
+
+# ---------------------------------------------------------------------------
+# save_categorized_memories
+# ---------------------------------------------------------------------------
+
+
+class TestSaveCategorizedMemories:
+    def test_creates_category_files(self, tmp_path: Path) -> None:
+        categorized = {
+            "preferences": ["Uses Vim", "Prefers Python"],
+            "projects": ["Working on gptme"],
+        }
+        save_categorized_memories(tmp_path, categorized)
+        assert (tmp_path / "preferences.md").exists()
+        assert (tmp_path / "projects.md").exists()
+        assert not (tmp_path / "personal.md").exists()
+
+    def test_category_file_contains_facts(self, tmp_path: Path) -> None:
+        save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
+        content = (tmp_path / "preferences.md").read_text()
+        assert "- Uses Vim" in content
+
+    def test_merges_with_existing_facts(self, tmp_path: Path) -> None:
+        # Write initial preferences
+        save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
+        # Add new fact
+        save_categorized_memories(tmp_path, {"preferences": ["Prefers Python"]})
+        content = (tmp_path / "preferences.md").read_text()
+        assert "- Uses Vim" in content
+        assert "- Prefers Python" in content
+
+    def test_deduplicates_facts(self, tmp_path: Path) -> None:
+        save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
+        save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
+        content = (tmp_path / "preferences.md").read_text()
+        assert content.count("Uses Vim") == 1
+
+    def test_empty_category_not_written(self, tmp_path: Path) -> None:
+        save_categorized_memories(tmp_path, {"preferences": [], "projects": ["gptme"]})
+        assert not (tmp_path / "preferences.md").exists()
+        assert (tmp_path / "projects.md").exists()
+
+    def test_creates_directory_if_needed(self, tmp_path: Path) -> None:
+        new_dir = tmp_path / "nested" / "memories"
+        save_categorized_memories(new_dir, {"personal": ["Based in Sweden"]})
+        assert (new_dir / "personal.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# run_batch_categorized API key guard
+# ---------------------------------------------------------------------------
+
+
+class TestRunBatchCategorizedAPIKeyCheck:
+    def test_returns_empty_when_no_api_key(self, tmp_path: Path) -> None:
+        with patch(
+            "gptme_user_memories.extractor._get_anthropic_api_key",
+            return_value=None,
+        ):
+            result = run_batch_categorized(days=30, limit=10)
+        assert result == {}
