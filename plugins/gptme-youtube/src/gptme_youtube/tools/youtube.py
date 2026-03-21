@@ -51,6 +51,7 @@ def execute(
 tool: ToolSpec = ToolSpec(
     name="youtube",
     desc="Fetch and summarize YouTube video transcripts",
+    instructions="Use get_transcript(video_id) to fetch a transcript from a YouTube URL or video ID. Use summarize_transcript(transcript) to summarize a long transcript. You can also use ```youtube blocks with a video ID to fetch the transcript inline.",
     block_types=["youtube"],
     execute=execute,
     functions=[get_transcript, summarize_transcript],

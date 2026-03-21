@@ -24,6 +24,7 @@ gptme_youtube = "gptme_youtube:tool"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
