@@ -35,6 +35,7 @@ def summarize_transcript(transcript: str) -> str:
 tool: ToolSpec = ToolSpec(
     name="youtube",
     desc="Fetch and summarize YouTube video transcripts",
+    block_types=["youtube"],
     functions=[get_transcript, summarize_transcript],
     available=bool(YouTubeTranscriptApi),
 )
