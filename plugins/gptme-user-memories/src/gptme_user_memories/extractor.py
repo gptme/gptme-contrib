@@ -1,7 +1,8 @@
 """User memory extraction from gptme and Claude Code conversation logs.
 
 Scans recent conversations, uses Claude to extract key facts about the user,
-and stores them in ~/.local/share/gptme/user-memories.md.
+and stores them in ~/.config/gptme/user-memories/facts.md — a shared location
+readable by all gptme agents on the same machine.
 """
 
 from __future__ import annotations
@@ -24,7 +25,10 @@ logger = logging.getLogger(__name__)
 LOGS_DIR = Path.home() / ".local/share/gptme/logs"
 CC_LOGS_DIR = Path.home() / ".claude/projects"
 CC_SENTINEL_DIR = Path.home() / ".local/share/gptme/cc-sentinels"
-USER_MEMORIES_FILE = Path.home() / ".local/share/gptme/user-memories.md"
+# Shared location readable by all agents on the same machine.
+# Previously: ~/.local/share/gptme/user-memories.md
+USER_MEMORIES_DIR = Path.home() / ".config/gptme/user-memories"
+USER_MEMORIES_FILE = USER_MEMORIES_DIR / "facts.md"
 SENTINEL_FILENAME = ".memories-extracted"
 DEFAULT_DAYS = 14
 MAX_CONV_CHARS = 8000
