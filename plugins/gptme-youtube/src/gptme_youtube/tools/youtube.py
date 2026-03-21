@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import parse_qs, urlparse
 
 from gptme.message import Message
 from gptme.tools import ToolSpec
@@ -11,10 +12,26 @@ except ImportError:
     YouTubeTranscriptApi = None
 
 
+def _extract_video_id(url_or_id: str) -> str:
+    """Extract the bare video ID from a YouTube URL or return as-is if already an ID."""
+    parsed = urlparse(url_or_id)
+    if parsed.scheme in ("http", "https"):
+        # Handle https://www.youtube.com/watch?v=VIDEOID
+        if "youtube.com" in parsed.netloc:
+            qs = parse_qs(parsed.query)
+            if "v" in qs:
+                return qs["v"][0]
+        # Handle https://youtu.be/VIDEOID
+        if "youtu.be" in parsed.netloc:
+            return parsed.path.lstrip("/")
+    return url_or_id
+
+
 def get_transcript(video_id: str) -> str:
-    """Fetch transcript for a YouTube video by its video ID."""
+    """Fetch transcript for a YouTube video by its URL or video ID."""
     if not YouTubeTranscriptApi:
         return "Error: youtube_transcript_api is not installed."
+    video_id = _extract_video_id(video_id)
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         return " ".join([entry["text"] for entry in transcript])

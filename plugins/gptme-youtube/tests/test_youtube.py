@@ -81,3 +81,16 @@ def test_execute_empty_video_id():
 
     msg = execute("", None, None)
     assert "Error" in msg.content
+
+
+def test_extract_video_id_from_url():
+    """Test _extract_video_id handles full YouTube URLs and bare IDs."""
+    from gptme_youtube.tools.youtube import _extract_video_id
+
+    assert _extract_video_id("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert (
+        _extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        == "dQw4w9WgXcQ"
+    )
+    assert _extract_video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert _extract_video_id("https://youtu.be/dQw4w9WgXcQ?si=abc") == "dQw4w9WgXcQ"
