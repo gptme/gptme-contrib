@@ -10,12 +10,20 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
-    "gptme",
+    "gptme>=0.27.0",
     "youtube_transcript_api>=0.6.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
 ]
 
 [project.entry-points."gptme.plugins"]
 gptme_youtube = "gptme_youtube:tool"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

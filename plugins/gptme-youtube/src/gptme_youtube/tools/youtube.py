@@ -26,13 +26,15 @@ def summarize_transcript(transcript: str) -> str:
     """Summarize a transcript using the LLM."""
     from gptme.llm import summarize as llm_summarize
 
-    return llm_summarize(transcript).content
+    result = llm_summarize(transcript)
+    if result is None:
+        return "Error: LLM returned no response."
+    return result.content
 
 
 tool: ToolSpec = ToolSpec(
     name="youtube",
     desc="Fetch and summarize YouTube video transcripts",
     functions=[get_transcript, summarize_transcript],
-    block_types=["youtube"],
     available=bool(YouTubeTranscriptApi),
 )
