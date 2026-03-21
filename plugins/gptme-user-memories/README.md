@@ -7,7 +7,7 @@ A gptme plugin that automatically extracts user facts from past conversations an
 1. A `SESSION_END` hook runs after each conversation
 2. It checks if the session was a personal (non-autonomous) conversation
 3. Uses Claude Haiku to extract key user facts from the conversation
-4. Stores them in `~/.local/share/gptme/user-memories.md`
+4. Stores them in `~/.config/gptme/user-memories/facts.md`
 5. You include that file in your gptme.toml or context script
 
 ## Installation
@@ -36,16 +36,16 @@ Add to your `gptme.toml`:
 [prompt]
 files = [
     # ... other files ...
-    "~/.local/share/gptme/user-memories.md",
+    "~/.config/gptme/user-memories/facts.md",
 ]
 ```
 
 Or in your context script (`context.sh`):
 
 ```bash
-if [[ -f ~/.local/share/gptme/user-memories.md ]]; then
+if [[ -f ~/.config/gptme/user-memories/facts.md ]]; then
     echo "# User Memories"
-    cat ~/.local/share/gptme/user-memories.md
+    cat ~/.config/gptme/user-memories/facts.md
 fi
 ```
 
@@ -87,7 +87,7 @@ All processing is local. The only external call is to Anthropic's API to extract
 
 ## Storage
 
-Memories are stored in `~/.local/share/gptme/user-memories.md` as a simple markdown list:
+Memories are stored in `~/.config/gptme/user-memories/facts.md` as a simple markdown list:
 
 ```markdown
 # User Memories
@@ -133,7 +133,7 @@ from gptme_user_memories.extractor import load_existing_memories, merge_facts, s
 from pathlib import Path
 
 # Process a specific session
-new_facts = process_logdir(Path("~/.local/share/gptme/logs/my-session").expanduser())
+new_facts = process_logdir(Path("~/.local/share/gptme/logs/my-session").expanduser())  # gptme logs path (unchanged)
 
 # Merge and save (process_logdir returns None if session was filtered)
 if new_facts is not None:
