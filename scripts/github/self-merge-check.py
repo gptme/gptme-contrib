@@ -62,6 +62,7 @@ SENSITIVE_PATH_PREFIXES = (
     "scripts/deploy",
     "scripts/github/self-merge-check.py",
     "scripts/github/pr-greptile-trigger.py",
+    "scripts/github/greptile-helper.sh",
     "infra/",
     "k8s/",
     "secrets/",
@@ -389,7 +390,7 @@ def _fetch_greptile_review_data(
     # page, and reviews is set from the first page's response (line 377).  The
     # `or []` guard would only fire if reviews were None, which is unreachable at
     # this point — use an explicit None-check to make the invariant clear.
-    return reviews if reviews is not None else [], all_threads
+    return (reviews if reviews is not None else []), all_threads
 
 
 def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
