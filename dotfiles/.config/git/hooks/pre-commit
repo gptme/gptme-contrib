@@ -104,19 +104,21 @@ if [ ! -f ".pre-commit-config.yaml" ]; then
     exit 0
 fi
 
-# Check if pre-commit is available
-if ! command -v pre-commit &> /dev/null; then
-    echo -e "${YELLOW}⚠️  pre-commit not found, skipping pre-commit checks${NC}"
+# Check if prek or pre-commit is available (prefer prek — no stash/unstash)
+if command -v prek &> /dev/null; then
+    PRECOMMIT_CMD="prek"
+elif command -v pre-commit &> /dev/null; then
+    PRECOMMIT_CMD="pre-commit"
+else
+    echo -e "${YELLOW}⚠️  Neither prek nor pre-commit found, skipping checks${NC}"
     exit 0
 fi
 
-echo -e "${GREEN}Running pre-commit checks...${NC}"
+echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
 
 # Run pre-commit checks on staged files only
-# Capture output to avoid spamming context with passed/skipped hooks
-# NOTE: Temporarily disable set -e so we can capture exit code even on failure
 set +e
-PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
+PRECOMMIT_OUTPUT=$("$PRECOMMIT_CMD" run 2>&1)
 PRECOMMIT_EXIT=$?
 set -e
 
@@ -135,15 +137,21 @@ else
         exit 1
     fi
 
-    # Auto-stage modified files
-    git add -u
+    # Auto-stage ONLY the originally staged files that were modified by formatters.
+    # Do NOT use 'git add -u' — in multi-session environments that picks up
+    # other sessions' changes and causes wrong-file commits.
+    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+    MODIFIED_FILES=$(git diff --name-only)
+    for f in $MODIFIED_FILES; do
+        if echo "$STAGED_FILES" | grep -qxF "$f"; then
+            git add "$f"
+        fi
+    done
 
-    echo -e "${GREEN}Auto-staged modified files. Re-running pre-commit...${NC}"
+    echo -e "${GREEN}Auto-staged formatter fixes. Re-running pre-commit...${NC}"
 
-    # Re-run pre-commit on staged files
-    # NOTE: Temporarily disable set -e so we can capture exit code even on failure
     set +e
-    PRECOMMIT_OUTPUT=$(pre-commit run 2>&1)
+    PRECOMMIT_OUTPUT=$("$PRECOMMIT_CMD" run 2>&1)
     PRECOMMIT_EXIT=$?
     set -e
 
