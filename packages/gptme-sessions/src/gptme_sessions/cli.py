@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -1020,6 +1020,16 @@ def sync(
     updated = 0
     skipped = 0
 
+    # Warn when a large number of new sessions would be imported.
+    # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
+    new_count_estimate = sum(1 for e in discovered if str(e["path"]) not in existing_by_path)
+    if not dry_run and new_count_estimate > 100:
+        click.echo(
+            f"Warning: {new_count_estimate} new session(s) would be imported "
+            f"(window: {since_days}d). Use --dry-run to preview. Proceeding...",
+            err=True,
+        )
+
     for entry in discovered:
         path_str = str(entry["path"])
         traj_path = entry["path"]
@@ -1080,6 +1090,20 @@ def sync(
         }
         if entry.get("model"):
             record_kwargs["model"] = entry["model"]
+        # Use the actual session date as timestamp, not the sync time.
+        # Without this, all bulk-synced records get today's timestamp and
+        # skew daily stats (e.g. 7102 records appearing as "today").
+        session_date: date | None = entry.get("session_date")
+        if session_date:
+            record_kwargs["timestamp"] = datetime(
+                session_date.year,
+                session_date.month,
+                session_date.day,
+                12,
+                0,
+                0,
+                tzinfo=timezone.utc,
+            ).isoformat()
 
         if with_signals and traj_path.is_file() and not dry_run:
             try:
