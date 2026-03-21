@@ -255,6 +255,8 @@ def _fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Timed out fetching PR files for {repo}#{number} (>60 s)")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to run 'gh' for {repo}#{number}: {exc}") from exc
     if result.returncode != 0:
         raise RuntimeError(f"Failed to fetch PR files for {repo}#{number}")
     raw = result.stdout.strip()
@@ -700,8 +702,8 @@ def format_human(result: CheckResult) -> str:
 
 def _resolve_workspace_repo(args: argparse.Namespace) -> str:
     """Resolve workspace repo from CLI args, env, or auto-detection."""
-    cli_value = getattr(args, "workspace_repo", None)
-    if isinstance(cli_value, str):
+    cli_value: str | None = getattr(args, "workspace_repo", None)
+    if cli_value is not None:
         return cli_value
     if "WORKSPACE_REPO" in os.environ:
         return os.environ["WORKSPACE_REPO"]  # honours "" to opt out

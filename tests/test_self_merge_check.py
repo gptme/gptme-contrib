@@ -433,8 +433,8 @@ def test_fetch_greptile_status_fallback_paginates_issue_comments() -> None:
     assert "--paginate" in fallback_call_args
 
 
-def test_evaluate_pr_warns_on_auth_failure() -> None:
-    """When get_gh_user() returns empty, a warning is emitted instead of silently skipping."""
+def test_evaluate_pr_ineligible_on_auth_failure() -> None:
+    """When get_gh_user() returns empty, the PR is disqualified (author-identity check fails)."""
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
