@@ -31,6 +31,17 @@ _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
 _WARNING_PHRASE_RE = re.compile(r"error:|\bfailed\b|\bfailures?\b|\btraceback\b|\bexception\b")
 
+# Regex to detect background bash task output file paths in CC sessions.
+# When CC runs a Bash command in background mode, the tool result contains:
+# "Command running in background with ID: TASKID. Output is being written to: PATH"
+# The actual git commit output (which matches _COMMIT_RE) is in that file, not the result.
+_BG_TASK_RE = re.compile(r"Output is being written to: ([^\s]+\.output)")
+
+# Regex for gh pr merge success output.
+# Format: "✓ Squashed and merged pull request #N (title)"
+# This does NOT match _COMMIT_RE (no branch/hash format), so needs separate detection.
+_PR_MERGE_RE = re.compile(r"(?:Squashed and merged|Rebased and merged|Merged) pull request #(\d+)")
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -466,6 +477,28 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
+
+                    # Background bash tasks: when CC runs a command in background mode,
+                    # the tool result only contains a pointer to an output file like:
+                    # "Command running in background with ID: X. Output is being written to: PATH"
+                    # The actual git commit output (matching _COMMIT_RE) is in that file.
+                    for bg_match in _BG_TASK_RE.finditer(result_str):
+                        bg_path = bg_match.group(1)
+                        try:
+                            bg_content = Path(bg_path).read_text(errors="replace")
+                            for commit_match in _COMMIT_RE.finditer(bg_content):
+                                commit_hash = commit_match.group(1)
+                                commit_msg = commit_match.group(2).strip()
+                                git_commits.append(f"{commit_msg} ({commit_hash})")
+                        except (OSError, IOError):
+                            pass  # File may not exist if session ran on a different host
+
+                    # gh pr merge detection: output format is
+                    # "✓ Squashed and merged pull request #N (title)"
+                    # which doesn't match _COMMIT_RE (no branch/hash format).
+                    for merge_match in _PR_MERGE_RE.finditer(result_str):
+                        pr_num = merge_match.group(1)
+                        git_commits.append(f"merge PR #{pr_num}")
 
     duration_s = 0
     if len(timestamps) >= 2:
