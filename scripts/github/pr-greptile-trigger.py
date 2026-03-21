@@ -275,13 +275,19 @@ def _run(args: argparse.Namespace) -> int:
             if not reviewed and not in_progress and not awaiting:
                 return 2
         if awaiting:
+            error_note = (
+                f"; {len(errors)} PR(s) had errors (see stderr)" if errors else ""
+            )
             print(
                 f"All PRs are either already reviewed, in-flight, or awaiting Greptile "
-                f"auto-review ({len(awaiting)} awaiting). Nothing to trigger manually."
+                f"auto-review ({len(awaiting)} awaiting{error_note}). Nothing to trigger manually."
             )
         else:
+            error_note = (
+                f"; {len(errors)} PR(s) had errors (see stderr)" if errors else ""
+            )
             print(
-                "All PRs are already reviewed or currently in-flight. Nothing to trigger."
+                f"All PRs are already reviewed or currently in-flight{error_note}. Nothing to trigger."
             )
         return 0
 

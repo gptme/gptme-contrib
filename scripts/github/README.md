@@ -101,6 +101,7 @@ re-review (new commits since the last Greptile review), and routes triggers thro
 - Configurable repo list via `GREPTILE_REPOS` env var or `--repo` flag
 - Dry-run mode by default (use `--execute` to actually trigger)
 - Status overview mode (`--status`)
+- Filter PRs by author via `--author` (default: authenticated user)
 
 **Usage:**
 ```bash
@@ -118,6 +119,9 @@ python3 scripts/github/pr-greptile-trigger.py --repo gptme/gptme
 
 # Use custom repo list
 GREPTILE_REPOS=myorg/repo1,myorg/repo2 python3 scripts/github/pr-greptile-trigger.py
+
+# Filter by a specific author (useful in shared CI contexts)
+python3 scripts/github/pr-greptile-trigger.py --author mybot
 ```
 
 **Requirements:**

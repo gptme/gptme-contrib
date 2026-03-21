@@ -60,9 +60,11 @@ TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
-    "scripts/github/self-merge-check.py",
-    "scripts/github/pr-greptile-trigger.py",
-    "scripts/github/greptile-helper.sh",
+    # Use prefix without extension — catches hyphen/underscore variants and versioned copies
+    # e.g. self-merge-check.py, self_merge_check.py, self-merge-check-v2.py all match
+    "scripts/github/self-merge-check",
+    "scripts/github/pr-greptile-trigger",
+    "scripts/github/greptile-helper",
     "infra/",
     "k8s/",
     "secrets/",
@@ -93,6 +95,9 @@ TASK_METADATA_PREFIXES = (
     "journal/",
 )
 LESSON_PREFIXES = ("lessons/",)
+# Exact full-path match — intentionally only root-level files.
+# Nested Makefiles (e.g. scripts/Makefile, packages/Makefile) fall through to
+# is_internal_tooling() instead. If that scope should change, extend this set.
 BOT_CONFIG_FILES = {
     ".pre-commit-config.yaml",
     "Makefile",
