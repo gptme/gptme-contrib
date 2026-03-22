@@ -3,6 +3,7 @@ from urllib.parse import parse_qs, urlparse
 
 from gptme.message import Message
 from gptme.tools import ToolSpec
+from gptme.tools.base import ConfirmFunc
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ def execute(
     code: str | None,
     args: list[str] | None,
     kwargs: dict[str, str] | None,
+    confirm: ConfirmFunc,
 ) -> Message:
     """Execute a youtube block by fetching the transcript for the given video ID."""
     video_id = (code or "").strip()

@@ -57,7 +57,7 @@ def test_execute_with_code():
     with patch("gptme_youtube.tools.youtube.YouTubeTranscriptApi", mock_api):
         from gptme_youtube.tools.youtube import execute
 
-        msg = execute("dQw4w9WgXcQ", None, None)
+        msg = execute("dQw4w9WgXcQ", None, None, lambda _: True)
         assert "Hello world" in msg.content
         mock_api.get_transcript.assert_called_once_with("dQw4w9WgXcQ")
 
@@ -70,7 +70,7 @@ def test_execute_fallback_to_args():
     with patch("gptme_youtube.tools.youtube.YouTubeTranscriptApi", mock_api):
         from gptme_youtube.tools.youtube import execute
 
-        msg = execute("", ["dQw4w9WgXcQ"], None)
+        msg = execute("", ["dQw4w9WgXcQ"], None, lambda _: True)
         assert "Fallback transcript" in msg.content
         mock_api.get_transcript.assert_called_once_with("dQw4w9WgXcQ")
 
@@ -79,7 +79,7 @@ def test_execute_empty_video_id():
     """Test execute returns an error when no video ID is provided."""
     from gptme_youtube.tools.youtube import execute
 
-    msg = execute("", None, None)
+    msg = execute("", None, None, lambda _: True)
     assert "Error" in msg.content
 
 
