@@ -21,7 +21,16 @@ QUOTA_GATE_SESSION_THRESHOLD="${QUOTA_GATE_SESSION_THRESHOLD:-0.90}"   # 5h sess
 QUOTA_GATE_WEEKLY_THRESHOLD="${QUOTA_GATE_WEEKLY_THRESHOLD:-0.90}"     # 7d weekly window
 
 quota_gate_check() {
-    local model="${1:-}"  # optional: "sonnet" checks sonnet-specific weekly limit
+    # Parse args: supports both positional (quota_gate_check sonnet)
+    # and flag form (quota_gate_check --model sonnet)
+    local model=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model) model="${2:-}"; shift 2 ;;
+            --model=*) model="${1#--model=}"; shift ;;
+            *) model="$1"; shift ;;
+        esac
+    done
     local log_prefix="${QUOTA_GATE_LOG_PREFIX:-[quota-gate]}"
 
     if [ ! -f "$QUOTA_CHECK_SCRIPT" ]; then

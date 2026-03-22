@@ -45,7 +45,8 @@ CACHE_TTL="${CLAUDE_USAGE_CACHE_TTL:-600}"  # 10 minutes default
 
 # --- Cache check (JSON and human-readable modes only, not --raw) ---
 if [ "$MODE" != "raw" ] && [ "$NO_CACHE" = false ] && [ -f "$CACHE_FILE" ]; then
-    CACHE_AGE=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0) ))
+    # stat mtime: -c %Y on Linux, -f %m on macOS/BSD
+    CACHE_AGE=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0) ))
     if [ "$CACHE_AGE" -lt "$CACHE_TTL" ]; then
         if [ "$MODE" = "json" ]; then
             cat "$CACHE_FILE"
@@ -256,13 +257,23 @@ for key in result:
         result[key]['resets_in_seconds'] = max(0, int(delta.total_seconds()))
         result[key]['time_left'] = format_time_left(reset_dt)
 
-# --- Off-peak detection (March 2026 promotion: Mar 13-27) ---
+# --- Off-peak detection ---
 # Peak: 8 AM-2 PM ET (12:00-18:00 UTC) weekdays. Off-peak: everything else.
-# Off-peak: 5h usage doubled, doesn't count against weekly.
+# Anthropic may run promotions where off-peak usage is discounted or doesn't count
+# against weekly limits. Set CLAUDE_USAGE_PROMO_START / CLAUDE_USAGE_PROMO_END
+# (ISO 8601 UTC strings) to enable off-peak tracking for a custom promo window.
+import os as _os
 now_utc = datetime.now(timezone.utc)
 is_weekday = now_utc.weekday() < 5
 is_peak_hour = is_weekday and 12 <= now_utc.hour < 18
-promo_active = datetime(2026, 3, 13, tzinfo=timezone.utc) <= now_utc <= datetime(2026, 3, 28, tzinfo=timezone.utc)
+promo_start_env = _os.environ.get('CLAUDE_USAGE_PROMO_START', '')
+promo_end_env = _os.environ.get('CLAUDE_USAGE_PROMO_END', '')
+if promo_start_env and promo_end_env:
+    promo_start = datetime.fromisoformat(promo_start_env)
+    promo_end = datetime.fromisoformat(promo_end_env)
+    promo_active = promo_start <= now_utc <= promo_end
+else:
+    promo_active = False
 off_peak = promo_active and not is_peak_hour
 result['_off_peak'] = {
     'active': off_peak,
