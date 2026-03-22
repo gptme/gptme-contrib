@@ -23,9 +23,13 @@ def _extract_video_id(url_or_id: str) -> str:
             if "v" in qs:
                 return qs["v"][0]
             # Handle https://www.youtube.com/shorts/VIDEOID
+            # and https://www.youtube.com/live/VIDEOID
             path_parts = [p for p in parsed.path.split("/") if p]
-            if "shorts" in path_parts:
-                return path_parts[path_parts.index("shorts") + 1]
+            for segment in ("shorts", "live"):
+                if segment in path_parts:
+                    idx = path_parts.index(segment) + 1
+                    if idx < len(path_parts):
+                        return path_parts[idx]
         # Handle https://youtu.be/VIDEOID
         if "youtu.be" in parsed.netloc:
             return parsed.path.lstrip("/")

@@ -97,3 +97,10 @@ def test_extract_video_id_from_url():
     assert (
         _extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
     )
+    # Malformed shorts URL with no video ID should return the URL as-is (no IndexError)
+    malformed = "https://www.youtube.com/shorts/"
+    assert _extract_video_id(malformed) == malformed
+    # /live/ URL format
+    assert (
+        _extract_video_id("https://www.youtube.com/live/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    )
