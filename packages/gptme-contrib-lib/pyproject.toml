@@ -21,6 +21,9 @@ test = [
     "pytest-asyncio>=0.23.0",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

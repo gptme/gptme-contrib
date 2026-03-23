@@ -2,7 +2,7 @@
 
 test:  ## Run tests for this package
 	@if [ -d tests ] && [ "$$(find tests -name '*.py' 2>/dev/null | head -1)" ]; then \
-		uv run --with pytest pytest tests/ -v; \
+		uv run --with pytest --with pytest-asyncio pytest tests/ -v; \
 	else \
 		echo "No tests found"; \
 	fi
