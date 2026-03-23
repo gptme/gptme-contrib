@@ -74,6 +74,8 @@ empty runs. In Bob's deployment, this gate prevents ~97% of NOOP monitoring runs
 - Merge readiness (CLEAN status + acceptable Greptile score)
 - GitHub notifications (filtered for actionable reasons)
 - Greptile score sweep (finds low-scored PRs needing code fixes)
+- Assigned issues (issues assigned to the configured author)
+- Master branch CI failures (CI regressions on the main branch)
 
 **Exit codes:**
 - `0` = actionable work found (items printed to stdout)
@@ -91,7 +93,7 @@ activity-gate.sh --author MyBot --org myorg --repo OtherOrg/repo
 # JSONL output for structured processing
 activity-gate.sh --author MyBot --org myorg --format jsonl
 
-# Custom state directory (default: /tmp/activity-gate-state)
+# Custom state directory (default: /tmp/github-activity-gate-state)
 activity-gate.sh --author MyBot --org myorg --state-dir /tmp/my-state
 
 # Use as a gate before spawning a session
@@ -125,8 +127,9 @@ work=$("$ACTIVITY_GATE" --author "$AUTHOR" --org "$ORG" \
     exit 0
 }
 
-# Process each item, then promote state on success
+# Promote state only after successful session — uncomment after your session call:
 # rsync -a "$PENDING_STATE_DIR/" "$STATE_DIR/"
+# Without this, all items re-emit every run (state is never committed).
 ```
 
 **Requirements:**
