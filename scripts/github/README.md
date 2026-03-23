@@ -122,10 +122,15 @@ mkdir -p "$STATE_DIR" "$PENDING_STATE_DIR"
 rsync -a --delete "$STATE_DIR/" "$PENDING_STATE_DIR/"
 
 work=$("$ACTIVITY_GATE" --author "$AUTHOR" --org "$ORG" \
-    --state-dir "$PENDING_STATE_DIR" --format jsonl) || {
+    --state-dir "$PENDING_STATE_DIR" --format jsonl)
+gate_exit=$?
+if [ "$gate_exit" -eq 2 ]; then
+    echo "Error: activity-gate.sh usage error (check AUTHOR/ORG/STATE_DIR are set)" >&2
+    exit 2
+elif [ "$gate_exit" -ne 0 ]; then
     echo "No work found, skipping session."
     exit 0
-}
+fi
 
 # Promote state only after successful session — uncomment after your session call:
 # rsync -a "$PENDING_STATE_DIR/" "$STATE_DIR/"
