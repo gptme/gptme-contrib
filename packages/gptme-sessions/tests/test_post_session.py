@@ -1,13 +1,20 @@
 """Tests for post_session context_tier plumbing and signal fallbacks."""
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import gptme_sessions.post_session as _post_session_mod
 import pytest
 
 from gptme_sessions.post_session import post_session
 from gptme_sessions.store import SessionStore
+
+# gptme_sessions/__init__.py re-exports 'post_session' (function), shadowing the
+# submodule attribute on the package.  `import gptme_sessions.post_session as mod`
+# resolves via getattr(gptme_sessions, 'post_session') → the function, not the module.
+# from gptme_sessions.post_session import post_session ensures the module is in
+# sys.modules, so we can retrieve it directly for patch.object calls.
+_post_session_mod = sys.modules["gptme_sessions.post_session"]
 
 
 def test_post_session_context_tier(tmp_path: Path):
