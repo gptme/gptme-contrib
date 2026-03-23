@@ -28,6 +28,7 @@ gptodo = { workspace = true }
 # Required for cross-package test collection (pytest packages/)
 # Without this, multiple packages with tests/__init__.py cause namespace collisions
 addopts = "--import-mode=importlib"
+asyncio_mode = "auto"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
