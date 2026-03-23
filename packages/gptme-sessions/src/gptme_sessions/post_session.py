@@ -188,6 +188,18 @@ def post_session(
             # Signal extraction is non-fatal; proceed without signals
             logger.warning("Signal extraction from %s failed: %s", trajectory_path, e)
 
+        # Use session_duration_s from signals when caller didn't provide duration.
+        # Needed for Claude Code sessions where the Stop hook doesn't track wall-clock time.
+        if duration_seconds == 0 and signals:
+            duration_seconds = int(signals.get("session_duration_s", 0))
+
+        # Use model from trajectory signals when caller didn't provide one.
+        # Needed when the hook payload doesn't include the model name (e.g. CC Stop hook).
+        if (not model or model == "unknown") and signals:
+            traj_model = (signals.get("usage") or {}).get("model")
+            if traj_model:
+                model = traj_model
+
     # --- Resolve deliverables ---
     # Merge shell-provided deliverables (bare SHAs) with trajectory-derived
     # ones (commit messages, file write paths).  The shell always passes a

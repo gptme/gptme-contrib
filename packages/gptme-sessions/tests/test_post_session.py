@@ -1,6 +1,7 @@
-"""Tests for post_session context_tier plumbing."""
+"""Tests for post_session context_tier plumbing and signal fallbacks."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -99,3 +100,44 @@ def test_post_session_ab_group_invalid(tmp_path: Path):
             ab_group="invalid-group",
             duration_seconds=60,
         )
+
+
+def test_post_session_duration_fallback_from_signals(tmp_path: Path):
+    """duration_seconds falls back to session_duration_s from trajectory signals when 0."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")  # must exist for signal extraction to run
+
+    fake_signals = {"session_duration_s": 300, "productive": True, "deliverables": []}
+    with patch("gptme_sessions.post_session.extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+        )
+    assert result.record.duration_seconds == 300
+
+
+def test_post_session_model_fallback_from_signals(tmp_path: Path):
+    """model falls back to usage.model from trajectory signals when 'unknown'."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [],
+        "usage": {"model": "claude-sonnet-4-6", "total_tokens": 1000},
+    }
+    with patch("gptme_sessions.post_session.extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="unknown",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+        )
+    assert result.record.model == "claude-sonnet-4-6"
