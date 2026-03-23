@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import gptme_sessions.post_session as _post_session_mod
 import pytest
 
 from gptme_sessions.post_session import post_session
@@ -109,7 +110,7 @@ def test_post_session_duration_fallback_from_signals(tmp_path: Path):
     fake_traj.write_text("")  # must exist for signal extraction to run
 
     fake_signals = {"session_duration_s": 300, "productive": True, "deliverables": []}
-    with patch("gptme_sessions.post_session.extract_from_path", return_value=fake_signals):
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
         result = post_session(
             store=store,
             harness="claude-code",
@@ -132,7 +133,7 @@ def test_post_session_model_fallback_from_signals(tmp_path: Path):
         "deliverables": [],
         "usage": {"model": "claude-sonnet-4-6", "total_tokens": 1000},
     }
-    with patch("gptme_sessions.post_session.extract_from_path", return_value=fake_signals):
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
         result = post_session(
             store=store,
             harness="claude-code",
