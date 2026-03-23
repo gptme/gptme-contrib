@@ -191,7 +191,7 @@ def post_session(
         # Use session_duration_s from signals when caller didn't provide duration.
         # Needed for Claude Code sessions where the Stop hook doesn't track wall-clock time.
         if duration_seconds == 0 and signals:
-            duration_seconds = int(signals.get("session_duration_s", 0))
+            duration_seconds = int(signals.get("session_duration_s") or 0)
 
         # Use model from trajectory signals when caller didn't provide one.
         # Needed when the hook payload doesn't include the model name (e.g. CC Stop hook).
