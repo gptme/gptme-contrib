@@ -7,7 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
-import pytest
 from gptme_contrib_lib.input_sources import (
     InputSource,
     InputSourceManager,
@@ -214,7 +213,6 @@ class TestInputSourceBase:
         assert source._consume_rate_limit() is True
         assert source._get_rate_limit_wait_time() == 0.0
 
-    @pytest.mark.asyncio
     async def test_process_request_valid(self):
         source = MockInputSource(config={})
         req = self._make_request()
@@ -222,7 +220,6 @@ class TestInputSourceBase:
         assert result.success is True
         assert len(source._acknowledged) == 1
 
-    @pytest.mark.asyncio
     async def test_process_request_invalid(self):
         source = MockInputSource(config={})
         req = self._make_request(title="")
@@ -265,7 +262,6 @@ class TestInputSourceManager:
         # Should not raise
         manager.unregister_source("nonexistent")
 
-    @pytest.mark.asyncio
     async def test_poll_all_sources(self):
         manager = InputSourceManager()
         source = MockInputSource(config={})
@@ -283,7 +279,6 @@ class TestInputSourceManager:
         assert "github" in results
         assert len(results["github"]) == 1
 
-    @pytest.mark.asyncio
     async def test_poll_all_empty(self):
         manager = InputSourceManager()
         source = MockInputSource(config={})
@@ -291,7 +286,6 @@ class TestInputSourceManager:
         results = await manager.poll_all_sources()
         assert results["github"] == []
 
-    @pytest.mark.asyncio
     async def test_process_all_sources(self):
         manager = InputSourceManager()
         source = MockInputSource(config={})
@@ -316,7 +310,6 @@ class TestInputSourceManager:
         assert len(results) == 2
         assert all(r.success for r in results)
 
-    @pytest.mark.asyncio
     async def test_poll_handles_source_error(self):
         """Manager should handle errors from individual sources gracefully."""
 
