@@ -118,6 +118,8 @@ def main() -> None:
     keywords = [k.strip() for k in args.filter.split(",")] if args.filter else None
 
     stories = fetch_top_stories(args.limit)
+    if not stories:
+        sys.exit(1)
 
     if args.json:
         filtered = stories

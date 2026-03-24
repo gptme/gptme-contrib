@@ -88,8 +88,12 @@ def parse_trending(html: str) -> list[dict]:
         if stars_match:
             stars = int(stars_match.group(1).replace(",", ""))
 
-        # Today's stars
-        today_match = re.search(r"([\d,]+)\s+stars?\s+today", article, re.DOTALL)
+        # Stars in selected period (GitHub renders "today", "this week", or "this month")
+        today_match = re.search(
+            r"([\d,]+)\s+stars?\s+(?:today|this\s+week|this\s+month)",
+            article,
+            re.DOTALL,
+        )
         today_stars = 0
         if today_match:
             today_stars = int(today_match.group(1).replace(",", ""))
