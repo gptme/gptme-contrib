@@ -64,7 +64,9 @@ def get_repo_root() -> Path:
             check=True,
         )
         return Path(result.stdout.strip())
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        if isinstance(e, FileNotFoundError):
+            raise RuntimeError("git not found in PATH. agent-msg.py requires git.")
         raise RuntimeError(
             "Not in a git repository. agent-msg.py must be run from a git workspace."
         )
@@ -243,8 +245,8 @@ def list_inbox(show_all: bool = False) -> list[dict]:
                     meta["file"] = f.name
                     if show_all or not meta.get("read", False):
                         messages.append(meta)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Warning: failed to parse {f.name}: {e}", file=sys.stderr)
 
     return messages
 
