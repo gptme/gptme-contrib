@@ -1244,6 +1244,14 @@ def infer_category(signals: dict) -> str | None:
     for cat, count in path_signals.items():
         votes[cat] = votes.get(cat, 0) + count
 
+    # Fallback heuristic: sessions with significant GitHub interactions but no
+    # commit/file-write signals are monitoring sessions (PR reviews, issue triage,
+    # notification handling). Threshold of 2 avoids false-positives from sessions
+    # that post one incidental comment while doing something else.
+    # Checked before vote count so commit-free review sessions aren't left uncategorised.
+    if signals.get("gh_interactions", 0) >= 2 and not commits and not file_writes:
+        return "monitoring"
+
     if not votes:
         return None
 

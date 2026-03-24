@@ -6545,6 +6545,58 @@ def test_grade_signals_backward_compat():
     assert grade_signals(sigs_old) == pytest.approx(0.70)  # 2 commits → 0.70
 
 
+def test_infer_category_monitoring_fallback():
+    """infer_category returns 'monitoring' for high-gh_interactions, commit-free sessions."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 3,
+    }
+    assert infer_category(sigs) == "monitoring"
+
+
+def test_infer_category_monitoring_not_triggered_with_commits():
+    """Monitoring fallback does not override when commits are present."""
+    sigs = {
+        "git_commits": ["fix: something (abc1234)", "fix: other (def5678)"],
+        "file_writes": ["scripts/foo.py", "scripts/bar.py"],
+        "gh_interactions": 5,
+    }
+    # Has commits → should classify as code, not monitoring
+    result = infer_category(sigs)
+    assert result != "monitoring"
+
+
+def test_infer_category_monitoring_not_triggered_below_threshold():
+    """Monitoring fallback requires at least 2 gh_interactions."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 1,
+    }
+    assert infer_category(sigs) is None
+
+
+def test_grade_signals_monitoring_via_infer_category():
+    """End-to-end: infer_category detects monitoring, grade_signals applies relaxed threshold."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+        "gh_interactions": 2,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # Without wiring: category=None → effective_writes=2 < 3 → 0.40
+    assert grade_signals(sigs, category=None) == pytest.approx(0.40)
+    # With infer_category providing "monitoring" → relaxed threshold → 0.55
+    category = infer_category(sigs)
+    assert category == "monitoring"
+    assert grade_signals(sigs, category=category) == pytest.approx(0.55)
+
+
 def test_is_productive_pr_submitted():
     """is_productive returns True when a PR was submitted (even no commits/writes)."""
     sigs = {
