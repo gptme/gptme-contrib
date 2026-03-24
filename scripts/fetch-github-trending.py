@@ -48,7 +48,10 @@ def parse_trending(html: str) -> list[dict]:
     repos = []
 
     # Each repo is in an <article> element with class "Box-row"
-    articles = re.findall(r'<article class="Box-row">(.*?)</article>', html, re.DOTALL)
+    # Use [^"]* to allow additional CSS classes (e.g. "Box-row Box-row--focus-gray")
+    articles = re.findall(
+        r'<article[^>]*class="[^"]*Box-row[^"]*"[^>]*>(.*?)</article>', html, re.DOTALL
+    )
 
     for article in articles:
         # Repo name: /owner/name in an <h2> link
@@ -168,7 +171,7 @@ def main() -> None:
         print(
             "Warning: No repos parsed (page format may have changed)", file=sys.stderr
         )
-        sys.exit(0)
+        sys.exit(1)
 
     keywords = [k.strip() for k in args.filter.split(",")] if args.filter else None
 

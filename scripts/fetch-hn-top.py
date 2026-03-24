@@ -17,6 +17,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 HN_API = "https://hacker-news.firebaseio.com/v0"
@@ -84,8 +85,6 @@ def format_compact(stories: list[dict], keywords: list[str] | None = None) -> st
 
         # Extract domain
         try:
-            from urllib.parse import urlparse
-
             domain = urlparse(url).netloc.replace("www.", "")
         except Exception:
             domain = ""
