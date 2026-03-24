@@ -56,13 +56,18 @@ def get_repo_root() -> Path:
     When this script is symlinked into an agent workspace, git will return
     the agent workspace root (not the gptme-contrib repo).
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return Path(result.stdout.strip())
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except subprocess.CalledProcessError:
+        raise RuntimeError(
+            "Not in a git repository. agent-msg.py must be run from a git workspace."
+        )
 
 
 def load_agents() -> dict[str, dict[str, str]]:
@@ -109,9 +114,11 @@ def ensure_dirs() -> None:
 def make_message_filename(sender: str, subject: str) -> str:
     """Generate a unique message filename."""
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_sender = "".join(c if c.isalnum() or c in "-_" else "-" for c in sender)
+    safe_sender = safe_sender[:20].strip("-")
     safe_subject = "".join(c if c.isalnum() or c in "-_" else "-" for c in subject)
     safe_subject = safe_subject[:40].strip("-")
-    return f"{ts}-{sender}-{safe_subject}.md"
+    return f"{ts}-{safe_sender}-{safe_subject}.md"
 
 
 def format_message(sender: str, recipient: str, subject: str, body: str) -> str:
@@ -213,6 +220,13 @@ def send_message(
 
 def list_inbox(show_all: bool = False) -> list[dict]:
     """List messages in inbox."""
+    if not HAS_YAML:
+        print(
+            "Error: PyYAML required to list messages. Install with: pip install pyyaml",
+            file=sys.stderr,
+        )
+        return []
+
     ensure_dirs()
     inbox = get_messages_dir() / "inbox"
     messages = []
@@ -221,7 +235,7 @@ def list_inbox(show_all: bool = False) -> list[dict]:
         content = f.read_text()
         if content.startswith("---"):
             parts = content.split("---", 2)
-            if len(parts) >= 3 and HAS_YAML:
+            if len(parts) >= 3:
                 try:
                     meta = yaml.safe_load(parts[1])
                     body = parts[2].strip()

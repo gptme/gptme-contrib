@@ -40,6 +40,13 @@ class TestMakeMessageFilename:
         result = agent_msg.make_message_filename("bob", "")
         assert result.endswith("-bob-.md")
 
+    def test_sanitizes_sender_name(self):
+        """Sender name with path chars must be sanitized to prevent path traversal."""
+        result = agent_msg.make_message_filename("../evil/agent", "Hello")
+        assert "/" not in result
+        assert ".." not in result
+        assert result.endswith(".md")
+
 
 class TestFormatMessage:
     def test_contains_frontmatter(self):
