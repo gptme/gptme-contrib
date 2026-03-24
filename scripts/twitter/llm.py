@@ -42,6 +42,14 @@ from gptme.message import Message
 from gptme.prompts import prompt_workspace
 from rich.console import Console
 
+# Maximum output tokens for Twitter LLM calls.
+# Tweet evaluations/responses need ~200-500 tokens; 4096 is generous.
+# This prevents OpenRouter from reserving the model's full max_output (64k for Sonnet)
+# against the daily key budget, which causes 402 errors.
+# Without this: each request reserves ~$0.96 (64k * $15/M), exhausting a $10/day budget in ~10 requests.
+# With this: each request reserves ~$0.06 (4k * $15/M), allowing 160+ requests/day.
+TWITTER_MAX_TOKENS = 4096
+
 
 class TaskType(Enum):
     """Types of LLM tasks"""
@@ -403,6 +411,52 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         return response_type.default()
 
 
+def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
+    """Call LLM with explicit max_tokens to control OpenRouter budget reservation.
+
+    OpenRouter reserves the model's full max_output against the daily key budget.
+    For Sonnet (max_output=64k), this means ~$0.96/request reserved even if only
+    ~200 tokens are actually generated. Setting max_tokens=4096 drops the
+    reservation to ~$0.06/request, allowing 160+ requests on a $10/day budget.
+
+    Falls back to gptme's reply() if OPENROUTER_API_KEY is not set.
+
+    TODO: Simplify to reply(..., max_tokens=TWITTER_MAX_TOKENS) once gptme#1828 is merged.
+    See: https://github.com/gptme/gptme/pull/1828
+    """
+    import openai
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        # Not using OpenRouter — fall back to gptme's reply (no budget issue)
+        return reply(messages, model_name, stream=False)
+
+    client = openai.OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    # Strip provider prefix for API call
+    # e.g. "openrouter/anthropic/claude-sonnet-4-5" -> "anthropic/claude-sonnet-4-5"
+    api_model = model_name
+    if api_model.startswith("openrouter/"):
+        api_model = api_model[len("openrouter/") :]
+
+    messages_dicts: list[dict[str, str]] = [
+        {"role": msg.role, "content": msg.content} for msg in messages
+    ]
+
+    response = client.chat.completions.create(
+        model=api_model,
+        messages=messages_dicts,  # type: ignore[arg-type]
+        max_tokens=TWITTER_MAX_TOKENS,
+        temperature=0.5,
+    )
+
+    content = response.choices[0].message.content or ""
+    return Message("assistant", content)
+
+
 def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
     """Evaluate tweet using LLM"""
     config = load_config()
@@ -413,7 +467,7 @@ def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
     if not model:
         raise RuntimeError("default model not set")
     messages = [get_system_prompt(), Message("user", prompt)]
-    response = reply(messages, model.full, stream=False)
+    response = _reply_with_max_tokens(messages, model.full)
 
     return parse_llm_response(response.content, EvaluationResponse, TaskType.EVALUATE)
 
@@ -441,7 +495,7 @@ def generate_response(
     if not model:
         raise RuntimeError("default model not set")
     messages = [get_system_prompt(), Message("user", prompt)]
-    response = reply(messages, model.full, stream=False)
+    response = _reply_with_max_tokens(messages, model.full)
 
     return parse_llm_response(response.content, TweetResponse, TaskType.RESPONSE)
 
@@ -456,7 +510,7 @@ def review_draft(draft: Dict) -> ReviewResponse:
     if not model:
         raise RuntimeError("default model not set")
     messages = [get_system_prompt(), Message("user", prompt)]
-    response = reply(messages, model.full, stream=False)
+    response = _reply_with_max_tokens(messages, model.full)
 
     return parse_llm_response(response.content, ReviewResponse, TaskType.REVIEW)
 
