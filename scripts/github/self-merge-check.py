@@ -400,10 +400,20 @@ def _fetch_greptile_review_data(
     return (reviews if reviews is not None else []), all_threads
 
 
+# Sentinel for "review_data was not provided by the caller".
+# Distinguishes between:
+#   - review_data=_UNSET  → helper should fetch on demand (standalone call)
+#   - review_data=None    → caller already tried and the API failed; skip retry
+# This prevents fetch_greptile_status and fetch_unresolved_human_threads from
+# each making an independent GraphQL round-trip when evaluate_pr already tried
+# and got None back (e.g. transient GitHub API failure).
+_UNSET: object = object()
+
+
 def fetch_greptile_status(
     repo: str,
     pr_number: int,
-    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = _UNSET,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Check if Greptile reviewed this PR and count unresolved threads.
 
@@ -412,9 +422,10 @@ def fetch_greptile_status(
 
     Pass *review_data* (the return value of ``_fetch_greptile_review_data``)
     to avoid a duplicate GitHub API round-trip when the caller has already
-    fetched this data.
+    fetched this data.  Pass ``None`` explicitly to indicate the upstream fetch
+    already failed — the helper will skip its own retry in that case.
     """
-    if review_data is None:
+    if review_data is _UNSET:
         review_data = _fetch_greptile_review_data(repo, pr_number)
     if review_data is None:
         return {"has_review": False, "unresolved": 0, "total": 0}
@@ -486,7 +497,7 @@ def _is_bot_author(author: str) -> bool:
 def fetch_unresolved_human_threads(
     repo: str,
     pr_number: int,
-    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = _UNSET,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Count unresolved review threads from human (non-bot) reviewers.
 
@@ -497,9 +508,10 @@ def fetch_unresolved_human_threads(
 
     Pass *review_data* (the return value of ``_fetch_greptile_review_data``)
     to avoid a duplicate GitHub API round-trip when the caller has already
-    fetched this data.
+    fetched this data.  Pass ``None`` explicitly to indicate the upstream fetch
+    already failed — the helper will skip its own retry in that case.
     """
-    if review_data is None:
+    if review_data is _UNSET:
         review_data = _fetch_greptile_review_data(repo, pr_number)
     if review_data is None:
         return {"unresolved": 0, "total": 0, "authors": []}
