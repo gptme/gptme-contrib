@@ -43,9 +43,6 @@ DEFAULT_SCAN_DIRS = [
     "plugins",
 ]
 
-# Cross-repo directories (absolute paths) — empty by default; use --cross-repo-dir to add
-CROSS_REPO_DIRS: list[Path] = []
-
 # Patterns to exclude
 EXCLUDE_PATTERNS = {
     "__pycache__",
@@ -193,7 +190,11 @@ def find_near_duplicates(
                 with open(report_path) as f:
                     data: dict[str, object] = json.load(f)
                     return data
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        except (
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+            json.JSONDecodeError,
+        ) as e:
             print(f"jscpd error: {e}", file=sys.stderr)
 
     return None
@@ -282,10 +283,10 @@ def main():
         # Print exact duplicates
         if exact_groups:
             print(f"\n## Exact Duplicates ({len(exact_groups)} groups)\n")
-            for i, group in enumerate(
-                sorted(exact_groups, key=lambda g: -count_lines(g[0])), 1
-            ):
-                lines = count_lines(group[0])
+            sorted_groups = sorted(
+                [(count_lines(g[0]), g) for g in exact_groups], key=lambda t: -t[0]
+            )
+            for i, (lines, group) in enumerate(sorted_groups, 1):
                 size = group[0].stat().st_size
                 print(f"### Group {i} ({lines} lines, {size} bytes)")
                 for f in group:
