@@ -6092,3 +6092,298 @@ def test_extract_signals_cc_bash_escaped_date_expansion(tmp_path: Path):
     sigs = extract_signals_cc(msgs)
     # Escaped \$(date +%Y-%m-%d) should be resolved to 2026-03-18
     assert sigs["journal_paths"] == [str(journal_file)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Forward-Progress Signals: prs_submitted and issues_closed
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_pr_create_msgs(pr_url: str = "https://github.com/owner/repo/pull/42") -> list[dict]:
+    """Build a minimal CC trajectory where gh pr create succeeds."""
+    tool_id = "bash_pr_create_001"
+    return [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {
+                            "command": "gh pr create --title 'feat: add thing' --body 'description'"
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": False,
+                        "content": f"Creating pull request for feature-branch into master\n\n{pr_url}",
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def _make_issue_close_msgs(issue_num: int = 99) -> list[dict]:
+    """Build a minimal CC trajectory where gh issue close succeeds."""
+    tool_id = "bash_issue_close_001"
+    return [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {
+                            "command": f"gh issue close {issue_num} --comment 'Fixed in PR #42'"
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:03.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": False,
+                        "content": "✓ Closed issue #99",
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def test_extract_signals_cc_pr_create():
+    """gh pr create with successful URL output is tracked in prs_submitted."""
+    msgs = _make_pr_create_msgs("https://github.com/owner/repo/pull/42")
+    sigs = extract_signals_cc(msgs)
+    assert sigs["prs_submitted"] == ["PR #42"]
+    assert sigs["issues_closed"] == 0
+
+
+def test_extract_signals_cc_pr_create_no_url():
+    """gh pr create with no URL in output (e.g. draft, error) is NOT counted."""
+    tool_id = "bash_pr_create_nourl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --draft --title 'WIP'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": False,
+                        "content": "PR creation failed: already exists",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["prs_submitted"] == []
+
+
+def test_extract_signals_cc_pr_create_multiple():
+    """Multiple gh pr create calls (e.g. 2 PRs from 2 worktrees) are all tracked."""
+    tool_id1, tool_id2 = "bash_pr_001", "bash_pr_002"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id1,
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --title 'feat: A'"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": tool_id2,
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --title 'fix: B'"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id1,
+                        "is_error": False,
+                        "content": "https://github.com/owner/repo/pull/100",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id2,
+                        "is_error": False,
+                        "content": "https://github.com/owner/repo/pull/101",
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["prs_submitted"]) == 2
+    assert "PR #100" in sigs["prs_submitted"]
+    assert "PR #101" in sigs["prs_submitted"]
+
+
+def test_extract_signals_cc_issue_close():
+    """gh issue close N command increments issues_closed."""
+    msgs = _make_issue_close_msgs(issue_num=99)
+    sigs = extract_signals_cc(msgs)
+    assert sigs["issues_closed"] == 1
+    assert sigs["prs_submitted"] == []
+
+
+def test_extract_signals_cc_issue_close_multiple():
+    """Multiple gh issue close commands accumulate in issues_closed."""
+    tool_id1, tool_id2 = "bash_close_001", "bash_close_002"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id1,
+                        "name": "Bash",
+                        "input": {"command": "gh issue close 10"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": tool_id2,
+                        "name": "Bash",
+                        "input": {"command": "gh issue close 11 --comment 'done'"},
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["issues_closed"] == 2
+
+
+def test_grade_signals_pr_submitted_alone():
+    """A session with 1 PR submitted (no commits) grades like ~1 commit (0.60)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 3},
+        "prs_submitted": ["PR #42"],
+        "issues_closed": 0,
+    }
+    grade = grade_signals(sigs)
+    assert grade == pytest.approx(0.60)
+
+
+def test_grade_signals_two_prs_submitted():
+    """Two PRs submitted grades like ~2 commits (0.70)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 6},
+        "prs_submitted": ["PR #42", "PR #43"],
+        "issues_closed": 0,
+    }
+    grade = grade_signals(sigs)
+    assert grade == pytest.approx(0.70)
+
+
+def test_grade_signals_issues_closed_boost():
+    """Closing issues boosts grade above pure-commit threshold."""
+    sigs_base = {
+        "git_commits": ["fix: something (abc1234)"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+    }
+    sigs_with_close = {**sigs_base, "issues_closed": 2}
+    grade_base = grade_signals(sigs_base)
+    grade_with_close = grade_signals(sigs_with_close)
+    # 1 commit alone → 0.60; with 2 issue closes: effective_units=1.8 → still < 2.5 → 0.70
+    assert grade_with_close > grade_base
+    assert grade_with_close == pytest.approx(0.70)
+
+
+def test_grade_signals_backward_compat():
+    """Old signals dicts without prs_submitted/issues_closed grade identically."""
+    # Signals from before FPS addition — no new keys
+    sigs_old = {
+        "git_commits": ["fix: something (abc1234)", "refactor: other (def5678)"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 5},
+    }
+    # Same signals with explicit zeros
+    sigs_new = {**sigs_old, "prs_submitted": [], "issues_closed": 0}
+    assert grade_signals(sigs_old) == grade_signals(sigs_new)
+    assert grade_signals(sigs_old) == pytest.approx(0.70)  # 2 commits → 0.70
+
+
+def test_is_productive_pr_submitted():
+    """is_productive returns True when a PR was submitted (even no commits/writes)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": ["PR #99"],
+    }
+    assert is_productive(sigs)

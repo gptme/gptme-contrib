@@ -55,6 +55,19 @@ _GH_INTERACTION_RE = re.compile(
     r")"
 )
 
+# Regex for gh pr create command detection (from Bash input).
+# Tracked separately from gh_interactions because PR submission is higher-value
+# work that should boost the session grade comparable to a real commit.
+_PR_CREATE_CMD_RE = re.compile(r"\bgh\s+pr\s+create\b")
+
+# Regex for detecting the PR URL in gh pr create output.
+# Format: "https://github.com/owner/repo/pull/N"
+_PR_CREATE_URL_RE = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)")
+
+# Regex for gh issue close command detection (from Bash input).
+# Tracks explicit issue closures as a forward-progress signal (blocker removal).
+_ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -246,9 +259,16 @@ def grade_signals(signals: dict) -> float:
 
     Based on ground-truth evidence from the transcript:
     - Git commits (strongest signal)
+    - PRs submitted (gh pr create → counted as ~1.2 commits)
+    - Issues closed (blocker removal → counted as ~0.4 commits)
     - File writes / patches
     - Error rate penalty
     - Retry penalty
+
+    Uses *effective_units* = commits + 1.2*prs_submitted + 0.4*issues_closed
+    so that sessions with no direct commits but high forward progress (e.g.
+    submitting two PRs in worktrees) are graded comparably to commit-producing
+    sessions.
     """
     commits = len(signals["git_commits"])
     # Use unique writes for tier placement — repeated edits to the same file
@@ -264,23 +284,34 @@ def grade_signals(signals: dict) -> float:
     # GitHub interactions (PR reviews, issue comments) count as productive work
     gh_interactions = signals.get("gh_interactions", 0)
 
-    if commits == 0 and writes == 0 and gh_interactions == 0:
+    # Forward-progress signals: PR submissions and issue closures.
+    # These represent high-value work that may not produce direct commits
+    # (e.g. PRs submitted from /tmp/worktrees without touching the main repo).
+    prs_submitted = len(signals.get("prs_submitted", []))
+    issues_closed = signals.get("issues_closed", 0)
+
+    # Effective work units: weighted sum of all forward-progress signals.
+    # Weights reflect relative value: commit=1.0, PR submit=1.2, issue close=0.4.
+    # PR submission scored slightly above a commit because it bundles work + review loop.
+    effective_units = commits + 1.2 * prs_submitted + 0.4 * issues_closed
+
+    if effective_units == 0 and writes == 0 and gh_interactions == 0:
         # Distinguish dead sessions (zero tool calls) from active-but-unproductive ones
         reward = 0.10 if total_tools == 0 else 0.25
-    elif commits == 0:
+    elif effective_units == 0:
         effective_writes = writes + gh_interactions
         if effective_writes >= 3:
             reward = 0.55
         else:
             reward = 0.40
-    elif commits == 1:
+    elif effective_units < 1.5:
         reward = 0.60
-    elif commits == 2:
+    elif effective_units < 2.5:
         reward = 0.70
-    elif commits == 3:
+    elif effective_units < 3.5:
         reward = 0.78
     else:
-        reward = min(0.92, 0.80 + 0.03 * (commits - 4))
+        reward = min(0.92, 0.80 + 0.03 * (effective_units - 4))
 
     if total_tools > 0:
         error_rate = errors / total_tools
@@ -306,6 +337,7 @@ def is_productive(signals: dict) -> bool:
         signals["git_commits"]
         or len(set(signals["file_writes"])) >= 2
         or signals.get("gh_interactions", 0) >= 1
+        or signals.get("prs_submitted")  # any PR submitted = productive
     )
 
 
@@ -338,6 +370,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # Per-tool-call timing: map tool_use_id → (tool_name, dispatch_timestamp, batch_size)
     tool_dispatch: dict[str, tuple[str, datetime, int]] = {}
     tool_durations: dict[str, list[float]] = {}  # tool_name → list of durations (seconds)
+    # Forward-progress signals: PR submissions and issue closures.
+    prs_submitted: list[str] = []  # PR numbers/URLs for PRs created this session
+    issues_closed: int = 0  # count of explicit gh issue close commands
+    _pr_create_pending: set[str] = set()  # tool_use_ids awaiting pr create result
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -398,6 +434,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     cmd = item.get("input", {}).get("command", "")
                     if _GH_INTERACTION_RE.search(cmd):
                         gh_interactions += 1
+
+                    # Track PR creation commands for output-side URL detection.
+                    # gh pr create does not appear in _GH_INTERACTION_RE intentionally —
+                    # it's a higher-value signal tracked separately as prs_submitted.
+                    if _PR_CREATE_CMD_RE.search(cmd):
+                        _pr_create_pending.add(tool_id)
+
+                    # Track explicit issue close commands as blocker-removal signals.
+                    if _ISSUE_CLOSE_CMD_RE.search(cmd):
+                        issues_closed += 1
 
                     # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
@@ -528,6 +574,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         pr_num = merge_match.group(1)
                         git_commits.append(f"merge PR #{pr_num}")
 
+                    # gh pr create detection: successful output contains a PR URL.
+                    # Only check when this tool_use_id was flagged as a pr create command.
+                    if tool_use_id in _pr_create_pending:
+                        _pr_create_pending.discard(tool_use_id)
+                        url_match = _PR_CREATE_URL_RE.search(result_str)
+                        if url_match:
+                            prs_submitted.append(f"PR #{url_match.group(1)}")
+
     duration_s = 0
     if len(timestamps) >= 2:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
@@ -557,6 +611,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "tool_time_max": tool_time_max,
         "retry_count": len(retry_candidates),
         "gh_interactions": gh_interactions,
+        "prs_submitted": prs_submitted,
+        "issues_closed": issues_closed,
         "deliverables": deliverables,
     }
 
