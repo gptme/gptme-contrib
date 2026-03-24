@@ -6286,7 +6286,7 @@ def test_extract_signals_cc_issue_close():
 
 
 def test_extract_signals_cc_issue_close_multiple():
-    """Multiple gh issue close commands accumulate in issues_closed."""
+    """Multiple confirmed gh issue close commands accumulate in issues_closed."""
     tool_id1, tool_id2 = "bash_close_001", "bash_close_002"
     msgs = [
         {
@@ -6310,9 +6310,109 @@ def test_extract_signals_cc_issue_close_multiple():
                 ],
             },
         },
+        # Both closes succeed
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:03.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id1,
+                        "is_error": False,
+                        "content": "✓ Closed issue #10",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id2,
+                        "is_error": False,
+                        "content": "✓ Closed issue #11",
+                    },
+                ],
+            },
+        },
     ]
     sigs = extract_signals_cc(msgs)
     assert sigs["issues_closed"] == 2
+
+
+def test_extract_signals_cc_issue_close_error_not_counted():
+    """Failed gh issue close (is_error=True) does NOT increment issues_closed."""
+    tool_id = "bash_close_fail"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {"command": "gh issue close 999"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:02.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": True,  # permission denied or issue not found
+                        "content": "Error: issue not found or you lack permission",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["issues_closed"] == 0
+
+
+def test_extract_signals_cc_pr_create_empty_tool_id():
+    """gh pr create with empty tool_id does not cause a spurious PR to be attributed."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "",  # empty tool_id edge case
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --title 'test' --body 'body'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "",  # empty id in result
+                        "is_error": False,
+                        "content": "https://github.com/owner/repo/pull/77\n",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Empty tool_id means we cannot safely attribute the URL to the right command
+    assert sigs["prs_submitted"] == []
 
 
 def test_grade_signals_pr_submitted_alone():
@@ -6387,3 +6487,27 @@ def test_is_productive_pr_submitted():
         "prs_submitted": ["PR #99"],
     }
     assert is_productive(sigs)
+
+
+def test_is_productive_issue_closed():
+    """is_productive returns True when an issue was successfully closed."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 1,
+    }
+    assert is_productive(sigs)
+
+
+def test_is_productive_issue_closed_zero():
+    """is_productive returns False when issues_closed is 0 and nothing else."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    assert not is_productive(sigs)

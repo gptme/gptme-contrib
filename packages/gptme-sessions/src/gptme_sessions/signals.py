@@ -338,6 +338,7 @@ def is_productive(signals: dict) -> bool:
         or len(set(signals["file_writes"])) >= 2
         or signals.get("gh_interactions", 0) >= 1
         or signals.get("prs_submitted")  # any PR submitted = productive
+        or signals.get("issues_closed", 0) >= 1  # confirmed issue close = productive
     )
 
 
@@ -372,8 +373,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     tool_durations: dict[str, list[float]] = {}  # tool_name → list of durations (seconds)
     # Forward-progress signals: PR submissions and issue closures.
     prs_submitted: list[str] = []  # PR numbers/URLs for PRs created this session
-    issues_closed: int = 0  # count of explicit gh issue close commands
+    issues_closed: int = 0  # count of confirmed successful gh issue close commands
     _pr_create_pending: set[str] = set()  # tool_use_ids awaiting pr create result
+    _issue_close_pending: set[str] = set()  # tool_use_ids awaiting issue close result
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -439,11 +441,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # gh pr create does not appear in _GH_INTERACTION_RE intentionally —
                     # it's a higher-value signal tracked separately as prs_submitted.
                     if _PR_CREATE_CMD_RE.search(cmd):
-                        _pr_create_pending.add(tool_id)
+                        if tool_id:  # guard against empty tool_id
+                            _pr_create_pending.add(tool_id)
 
-                    # Track explicit issue close commands as blocker-removal signals.
+                    # Track issue close commands for output-side confirmation.
+                    # Only count confirmed closes (not failed/permission-denied).
                     if _ISSUE_CLOSE_CMD_RE.search(cmd):
-                        issues_closed += 1
+                        if tool_id:
+                            _issue_close_pending.add(tool_id)
 
                     # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
@@ -581,6 +586,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         url_match = _PR_CREATE_URL_RE.search(result_str)
                         if url_match:
                             prs_submitted.append(f"PR #{url_match.group(1)}")
+
+                    # gh issue close confirmation: count only when result is not an error.
+                    # is_error=True is already handled above (continue), so reaching here
+                    # means the command succeeded — unlike command-side counting, this
+                    # avoids crediting failed closes (permission errors, non-existent issues).
+                    if tool_use_id in _issue_close_pending:
+                        _issue_close_pending.discard(tool_use_id)
+                        issues_closed += 1
 
     duration_s = 0
     if len(timestamps) >= 2:
