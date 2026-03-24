@@ -118,11 +118,13 @@ SSLType IMAPS
 ```ini
 account gmail
 host smtp.gmail.com
+port 587
 from agent@gmail.com
 auth on
 user agent@gmail.com
 passwordeval "pass email/agent-account"
 tls on
+tls_starttls on
 ```
 
 This ensures passwords are stored encrypted at rest and never appear in config files,
