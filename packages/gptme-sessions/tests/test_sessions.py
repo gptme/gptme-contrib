@@ -1184,7 +1184,9 @@ def test_extract_signals_cc_ci_fixed_grade_boost():
     ci_fixed_sigs = {**base_sigs, "ci_fixed": True}
     # ci_fixed session should grade higher
     assert grade_signals(ci_fixed_sigs) > grade_signals(base_sigs)
-    # 0.8 effective units → should hit the 0.60 tier
+    # Isolated grade_signals unit test: 0.8 effective units alone → 0.60 tier.
+    # Note: in practice extract_signals_cc always sets ci_fixed=True together with
+    # ≥1 commit, so real sessions reach effective_units ≥ 1.8 → 0.70 tier.
     assert grade_signals(ci_fixed_sigs) == pytest.approx(0.60)
 
 

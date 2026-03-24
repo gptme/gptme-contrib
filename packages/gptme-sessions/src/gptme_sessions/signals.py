@@ -687,7 +687,19 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # after finding failures is sufficient evidence of debugging/fix work.
                     if tool_use_id in _ci_failure_check_pending:
                         _ci_failure_check_pending.discard(tool_use_id)
-                        if result_str.strip():
+                        # Guard against background-task pointer strings: when CC runs
+                        # `gh run view --log-failed` in background mode the immediate
+                        # result is "Output is being written to: PATH", not the actual
+                        # log output. Resolve the real content before checking non-empty.
+                        actual_str = result_str
+                        for bg_match in _BG_TASK_RE.finditer(result_str):
+                            bg_path = bg_match.group(1)
+                            try:
+                                actual_str = Path(bg_path).read_text(errors="replace")
+                            except OSError:
+                                actual_str = ""
+                            break
+                        if actual_str.strip():
                             _ci_failure_found = True
 
     duration_s = 0
