@@ -113,9 +113,8 @@ class ClaudeCodeExecutor(Executor):
     Invokes `claude -p` with the given prompt. Handles the CLAUDECODE
     env var to allow nesting (running claude from within a claude session).
 
-    Run loops are non-interactive by design, so always pass
-    --dangerously-skip-permissions to allow tool execution without human
-    approval.
+    Always passes --dangerously-skip-permissions to allow tool execution
+    without prompting.
     """
 
     name = "claude-code"
