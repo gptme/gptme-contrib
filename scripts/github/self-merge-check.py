@@ -462,6 +462,47 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
     return {"has_review": True, "unresolved": unresolved, "total": total}
 
 
+# Bot login substrings to exclude when counting human review threads.
+_BOT_SUBSTRINGS = ("bot", "greptile", "codecov")
+
+
+def fetch_unresolved_human_threads(repo: str, pr_number: int) -> dict[str, Any]:
+    """Count unresolved review threads from human (non-bot) reviewers.
+
+    Uses the same GraphQL data as ``fetch_greptile_status`` but filters for
+    threads authored by humans.  Unresolved human threads indicate review
+    feedback that has not been acknowledged — merging over them is the exact
+    pattern Erik flagged on gptme-contrib#537.
+    """
+    review_data = _fetch_greptile_review_data(repo, pr_number)
+    if review_data is None:
+        return {"unresolved": 0, "total": 0, "authors": []}
+
+    _, threads = review_data
+
+    total = 0
+    unresolved = 0
+    unresolved_authors: set[str] = set()
+
+    for thread in threads:
+        comments = thread.get("comments", {}).get("nodes", [])
+        if not comments:
+            continue
+        author = (comments[0].get("author") or {}).get("login", "")
+        if any(s in author.lower() for s in _BOT_SUBSTRINGS):
+            continue
+        total += 1
+        if not thread.get("isResolved", False):
+            unresolved += 1
+            unresolved_authors.add(author)
+
+    return {
+        "unresolved": unresolved,
+        "total": total,
+        "authors": sorted(unresolved_authors),
+    }
+
+
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     """Return True if all reported checks are success/skipped/neutral.
 
@@ -672,6 +713,14 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckR
     elif greptile["unresolved"] > 0:
         result.reasons.append(
             f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
+        )
+
+    human_threads = fetch_unresolved_human_threads(repo, number)
+    if human_threads["unresolved"] > 0:
+        authors = ", ".join(human_threads["authors"]) or "unknown"
+        result.reasons.append(
+            f"{human_threads['unresolved']} unresolved human review thread(s) "
+            f"from: {authors}"
         )
 
     category, category_reasons = classify_category(files)
