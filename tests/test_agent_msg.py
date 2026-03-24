@@ -1,7 +1,9 @@
 """Tests for agent-msg.py inter-agent messaging."""
 
 import importlib.util
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 # Load agent-msg.py as a module (it has a hyphen in the name)
 _spec = importlib.util.spec_from_file_location(
@@ -156,6 +158,25 @@ class TestReadMessage:
         # File on disk should also be updated
         assert "read: true" in msg_file.read_text()
 
+    def test_marks_as_read_does_not_corrupt_body(self, tmp_path, monkeypatch):
+        """read: false in message body must not be replaced when marking as read."""
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        msg_file = inbox / "body-test.md"
+        msg_file.write_text(
+            '---\nfrom: alice\nsubject: "test"\nread: false\n---\n'
+            "This message says read: false in its body"
+        )
+
+        content = agent_msg.read_message("body-test.md")
+        assert content is not None
+        # Frontmatter should be updated
+        assert "read: true" in content
+        # Body must be preserved exactly — the literal text must remain
+        assert "This message says read: false in its body" in content
+
     def test_missing_message(self, tmp_path, monkeypatch):
         msg_dir = tmp_path / "messages"
         monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
@@ -187,7 +208,7 @@ class TestSendMessage:
         assert result is False
 
     def test_saves_to_outbox(self, tmp_path, monkeypatch):
-        """Message is saved to local outbox even if SSH fails."""
+        """Message is saved to local outbox even if SSH fails (mocked)."""
         msg_dir = tmp_path / "messages"
         monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
 
@@ -195,9 +216,13 @@ class TestSendMessage:
             "alice": {"ssh": "alice@unreachable.test", "workspace": "/home/alice"}
         }
 
-        # SSH will fail (unreachable host), but outbox should still be written
-        result = agent_msg.send_message(agents, "bob", "alice", "Test", "Body")
-        # Will fail due to SSH, but outbox file should exist
+        # Mock subprocess.run to simulate SSH failure without a real network call
+        def fake_run(cmd, **kwargs):
+            raise subprocess.CalledProcessError(255, cmd)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = agent_msg.send_message(agents, "bob", "alice", "Test", "Body")
+
         assert result is False
         outbox_files = list((msg_dir / "outbox").glob("*.md"))
         assert len(outbox_files) == 1

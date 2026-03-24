@@ -8,9 +8,6 @@ Usage:
     # Send a message to Alice
     python3 scripts/agent-msg.py send alice "Subject" "Message body"
 
-    # Read inbox
-    python3 scripts/agent-msg.py inbox
-
     # List unread messages
     python3 scripts/agent-msg.py list
 
@@ -251,10 +248,13 @@ def read_message(filename: str) -> str | None:
 
     content = filepath.read_text()
 
-    # Mark as read
-    if "read: false" in content:
-        content = content.replace("read: false", "read: true")
-        filepath.write_text(content)
+    # Mark as read — only update frontmatter, never touch body
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3 and "read: false" in parts[1]:
+            parts[1] = parts[1].replace("read: false", "read: true")
+            content = "---".join(parts)
+            filepath.write_text(content)
 
     return content
 
@@ -335,8 +335,14 @@ def main() -> None:
     subparsers.add_parser("status", help="Show messaging status")
 
     args = parser.parse_args()
-    agents = load_agents()
     self_name = get_self()
+
+    # Only load agents config for commands that need remote delivery
+    # (list/read work on local inbox — no need to warn about missing agents.yaml)
+    if args.command in ("send", "broadcast", "status"):
+        agents = load_agents()
+    else:
+        agents = {}
 
     if args.command == "send":
         success = send_message(
