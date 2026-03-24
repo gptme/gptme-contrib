@@ -552,21 +552,31 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 # Other tools (Read, Glob, Write) can return content containing
                 # commit-like patterns from files, which would be false positives.
                 if tool_id_to_name.get(tool_use_id) == "Bash":
+                    # Track hashes found in result_str to deduplicate against bg file.
+                    # CC background tasks stream the full output into result_str when
+                    # the command finishes, so the commit line appears in BOTH the
+                    # direct result and the background output file. Without dedup,
+                    # the same commit gets appended twice.
+                    _direct_hashes: set[str] = set()
                     for commit_match in _COMMIT_RE.finditer(result_str):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
+                        _direct_hashes.add(commit_hash)
 
                     # Background bash tasks: when CC runs a command in background mode,
                     # the tool result only contains a pointer to an output file like:
                     # "Command running in background with ID: X. Output is being written to: PATH"
                     # The actual git commit output (matching _COMMIT_RE) is in that file.
+                    # Skip hashes already found in result_str to avoid double-counting.
                     for bg_match in _BG_TASK_RE.finditer(result_str):
                         bg_path = bg_match.group(1)
                         try:
                             bg_content = Path(bg_path).read_text(errors="replace")
                             for commit_match in _COMMIT_RE.finditer(bg_content):
                                 commit_hash = commit_match.group(1)
+                                if commit_hash in _direct_hashes:
+                                    continue  # already captured from result_str
                                 commit_msg = commit_match.group(2).strip()
                                 git_commits.append(f"{commit_msg} ({commit_hash})")
                         except OSError:

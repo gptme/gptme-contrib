@@ -6511,3 +6511,67 @@ def test_is_productive_issue_closed_zero():
         "issues_closed": 0,
     }
     assert not is_productive(sigs)
+
+
+def test_extract_signals_cc_background_commit_no_duplicate(tmp_path: Path):
+    """Background bash commit must not be double-counted when result_str also has the output.
+
+    CC streams the full background task output into result_str when the command
+    finishes. So the commit line appears in BOTH result_str (direct scan) AND the
+    background output file (bg file scan). Without deduplication the commit is
+    appended twice.
+
+    The fix: track hashes found in result_str and skip them in the bg file scan.
+    """
+    commit_line = (
+        "[feat/my-feature a1b2c3d] feat(test): add background dedup test\n 2 files changed\n"
+    )
+    bg_output = tmp_path / "abc123.output"
+    bg_output.write_text("Some prek output\n✓ All pre-commit checks passed\n" + commit_line)
+
+    bash_id = "bash_bg_dedup_001"
+    # result_str contains BOTH the bg file pointer AND the full output (CC streaming)
+    result_content = (
+        f"Command running in background with ID: abc123. "
+        f"Output is being written to: {bg_output}\n"
+        f"Some prek output\n✓ All pre-commit checks passed\n" + commit_line
+    )
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "git safe-commit signals.py -m 'feat: add test'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": result_content,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Must be exactly 1, not 2
+    assert (
+        len(sigs["git_commits"]) == 1
+    ), f"Expected 1 commit, got {len(sigs['git_commits'])}: {sigs['git_commits']}"
+    assert "feat(test): add background dedup test" in sigs["git_commits"][0]
+    assert "a1b2c3d" in sigs["git_commits"][0]
