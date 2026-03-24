@@ -254,7 +254,7 @@ def extract_signals(msgs: list[dict]) -> dict:
     }
 
 
-def grade_signals(signals: dict) -> float:
+def grade_signals(signals: dict, *, category: str | None = None) -> float:
     """Compute a graded reward (0.0-1.0) from trajectory signals.
 
     Based on ground-truth evidence from the transcript:
@@ -269,6 +269,14 @@ def grade_signals(signals: dict) -> float:
     so that sessions with no direct commits but high forward progress (e.g.
     submitting two PRs in worktrees) are graded comparably to commit-producing
     sessions.
+
+    Args:
+        signals: Raw signal dict from extract_signals* functions.
+        category: Optional session category hint. When the category is one
+            where commits are not the primary output (monitoring, research,
+            triage, social, self-review), the threshold for the 0.55 reward
+            tier is lowered from 3 effective writes to 1, preventing
+            productive review/triage sessions from being floor-graded.
     """
     commits = len(signals["git_commits"])
     # Use unique writes for tier placement — repeated edits to the same file
@@ -295,12 +303,20 @@ def grade_signals(signals: dict) -> float:
     # PR submission scored slightly above a commit because it bundles work + review loop.
     effective_units = commits + 1.2 * prs_submitted + 0.4 * issues_closed
 
+    # Categories where gh_interactions and file_writes are the PRIMARY output,
+    # not commits. For these, a single useful interaction is sufficient for the
+    # 0.55 "active" tier — don't floor-grade productive review/triage sessions.
+    _NON_COMMIT_CATS = {"monitoring", "research", "triage", "social", "self-review"}
+    is_non_commit_category = category in _NON_COMMIT_CATS
+
     if effective_units == 0 and writes == 0 and gh_interactions == 0:
         # Distinguish dead sessions (zero tool calls) from active-but-unproductive ones
         reward = 0.10 if total_tools == 0 else 0.25
     elif effective_units == 0:
         effective_writes = writes + gh_interactions
-        if effective_writes >= 3:
+        # Non-commit categories: any interaction clears the 0.55 tier floor.
+        # Commit-producing categories: require 3+ effective writes to hit 0.55.
+        if effective_writes >= 3 or (is_non_commit_category and effective_writes >= 1):
             reward = 0.55
         else:
             reward = 0.40
@@ -1289,13 +1305,14 @@ def extract_from_path(jsonl_path: Path) -> dict:
     else:
         signals = extract_signals(msgs)
         usage = extract_usage_gptme(msgs)
-    grade = grade_signals(signals)
+    inferred_category = infer_category(signals)
+    grade = grade_signals(signals, category=inferred_category)
     result: dict = {
         **signals,
         "format": fmt,
         "productive": is_productive(signals),
         "grade": round(grade, 4),
-        "inferred_category": infer_category(signals),
+        "inferred_category": inferred_category,
     }
     if usage:
         result["usage"] = usage

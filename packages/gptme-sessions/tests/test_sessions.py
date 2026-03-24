@@ -6462,6 +6462,73 @@ def test_grade_signals_issues_closed_boost():
     assert grade_with_close == pytest.approx(0.70)
 
 
+def test_grade_signals_category_aware_monitoring():
+    """Monitoring sessions with ≥1 gh_interaction reach 0.55 tier (not floor at 0.40)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 5},
+        "gh_interactions": 2,  # 2 review comments posted
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # Without category: effective_writes=2 < 3 → floor at 0.40
+    assert grade_signals(sigs) == pytest.approx(0.40)
+    # With monitoring category: any interaction clears 0.55 tier
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.55)
+
+
+def test_grade_signals_category_aware_triage():
+    """Triage sessions with 1 gh_interaction reach 0.55 tier."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 3},
+        "gh_interactions": 1,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    assert grade_signals(sigs) == pytest.approx(0.40)
+    assert grade_signals(sigs, category="triage") == pytest.approx(0.55)
+
+
+def test_grade_signals_category_aware_no_interaction():
+    """Non-commit category with 0 gh_interactions still floors at 0.25 (active but empty)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # Category hint does not help when there's nothing to show for the session
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+
+
+def test_grade_signals_category_does_not_affect_commit_tiers():
+    """Category hint does not change grading when commits are present."""
+    sigs = {
+        "git_commits": ["feat: something (abc1234)"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+        "gh_interactions": 1,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # effective_units=1 < 1.5 → 0.60 regardless of category
+    assert grade_signals(sigs) == pytest.approx(0.60)
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.60)
+
+
 def test_grade_signals_backward_compat():
     """Old signals dicts without prs_submitted/issues_closed grade identically."""
     # Signals from before FPS addition — no new keys
