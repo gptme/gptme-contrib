@@ -474,7 +474,7 @@ def fetch_greptile_status(
 # Known bot logins (exact match, case-insensitive) to exclude when counting
 # human review threads.  GitHub Apps append "[bot]" to their login, so any
 # login ending with that suffix is also excluded.
-_BOT_EXACT_NAMES = frozenset(("greptile", "codecov", "greptile-apps"))
+_BOT_EXACT_NAMES = frozenset(("greptile", "codecov", "greptile-apps", "greptileai"))
 
 
 def _is_bot_author(author: str) -> bool:
