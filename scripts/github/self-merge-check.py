@@ -400,13 +400,22 @@ def _fetch_greptile_review_data(
     return (reviews if reviews is not None else []), all_threads
 
 
-def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
+def fetch_greptile_status(
+    repo: str,
+    pr_number: int,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Check if Greptile reviewed this PR and count unresolved threads.
 
     Only considers threads from the most recent Greptile review cycle so that
     re-reviews after fixes are not blocked by old unresolved thread noise.
+
+    Pass *review_data* (the return value of ``_fetch_greptile_review_data``)
+    to avoid a duplicate GitHub API round-trip when the caller has already
+    fetched this data.
     """
-    review_data = _fetch_greptile_review_data(repo, pr_number)
+    if review_data is None:
+        review_data = _fetch_greptile_review_data(repo, pr_number)
     if review_data is None:
         return {"has_review": False, "unresolved": 0, "total": 0}
 
@@ -462,19 +471,36 @@ def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
     return {"has_review": True, "unresolved": unresolved, "total": total}
 
 
-# Bot login substrings to exclude when counting human review threads.
-_BOT_SUBSTRINGS = ("bot", "greptile", "codecov")
+# Known bot logins (exact match, case-insensitive) to exclude when counting
+# human review threads.  GitHub Apps append "[bot]" to their login, so any
+# login ending with that suffix is also excluded.
+_BOT_EXACT_NAMES = frozenset(("greptile", "codecov", "greptile-apps"))
 
 
-def fetch_unresolved_human_threads(repo: str, pr_number: int) -> dict[str, Any]:
+def _is_bot_author(author: str) -> bool:
+    """Return True if the GitHub login belongs to a bot / GitHub App."""
+    lower = author.lower()
+    return lower.endswith("[bot]") or lower in _BOT_EXACT_NAMES
+
+
+def fetch_unresolved_human_threads(
+    repo: str,
+    pr_number: int,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Count unresolved review threads from human (non-bot) reviewers.
 
     Uses the same GraphQL data as ``fetch_greptile_status`` but filters for
     threads authored by humans.  Unresolved human threads indicate review
     feedback that has not been acknowledged — merging over them is the exact
     pattern Erik flagged on gptme-contrib#537.
+
+    Pass *review_data* (the return value of ``_fetch_greptile_review_data``)
+    to avoid a duplicate GitHub API round-trip when the caller has already
+    fetched this data.
     """
-    review_data = _fetch_greptile_review_data(repo, pr_number)
+    if review_data is None:
+        review_data = _fetch_greptile_review_data(repo, pr_number)
     if review_data is None:
         return {"unresolved": 0, "total": 0, "authors": []}
 
@@ -489,7 +515,7 @@ def fetch_unresolved_human_threads(repo: str, pr_number: int) -> dict[str, Any]:
         if not comments:
             continue
         author = (comments[0].get("author") or {}).get("login", "")
-        if any(s in author.lower() for s in _BOT_SUBSTRINGS):
+        if _is_bot_author(author):
             continue
         total += 1
         if not thread.get("isResolved", False):
@@ -707,7 +733,10 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckR
     elif not checks_green(status_checks):
         result.reasons.append("CI is not fully green")
 
-    greptile = fetch_greptile_status(repo, number)
+    # Fetch once; pass to both helpers to avoid duplicate GraphQL round-trips.
+    shared_review_data = _fetch_greptile_review_data(repo, number)
+
+    greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
     if not greptile["has_review"]:
         result.reasons.append("Greptile review not found")
     elif greptile["unresolved"] > 0:
@@ -715,7 +744,9 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckR
             f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
         )
 
-    human_threads = fetch_unresolved_human_threads(repo, number)
+    human_threads = fetch_unresolved_human_threads(
+        repo, number, review_data=shared_review_data
+    )
     if human_threads["unresolved"] > 0:
         authors = ", ".join(human_threads["authors"]) or "unknown"
         result.reasons.append(
