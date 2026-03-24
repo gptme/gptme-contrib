@@ -63,10 +63,10 @@ def save_token_to_env(
         >>> save_token_to_env("TWITTER_TOKEN", "abc123")
         True
     """
-    from dotenv import find_dotenv
-
     # Find .env file if not provided
     if env_path is None:
+        from dotenv import find_dotenv
+
         env_path_str = find_dotenv()
         if not env_path_str:
             return False
