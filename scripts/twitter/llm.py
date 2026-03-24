@@ -451,6 +451,9 @@ def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
         model=api_model,
         messages=messages_dicts,  # type: ignore[arg-type]
         max_tokens=TWITTER_MAX_TOKENS,
+        # temperature=0.5: intentional — provides balanced creativity for tweet generation.
+        # 0.0 (deterministic) would produce robotic outputs; the fallback gptme reply() uses
+        # whatever the model's default is (varies by model). Explicit 0.5 is more predictable.
         temperature=0.5,
     )
 
