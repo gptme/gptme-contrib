@@ -75,6 +75,60 @@ Environment variables:
 - `EMAIL_ALLOWLIST`: Comma-separated list of allowed sender addresses
 - `EMAIL_WORKSPACE`: Path to email workspace directory
 
+## Credentials
+
+**Best practice: use `pass` (the Unix password manager) for all email credentials.**
+
+Storing passwords in plaintext files (`~/.email-password`, etc.) is convenient but insecure.
+Agents running in server contexts should use `pass` instead:
+
+```bash
+# Install pass
+sudo apt install pass
+
+# Initialize a GPG key for the agent (no passphrase — required for autonomous contexts)
+gpg --batch --gen-key <<EOF
+Key-Type: RSA
+Key-Length: 4096
+Name-Real: Alice Agent
+Name-Email: agent@example.com
+Expire-Date: 0
+%no-protection
+EOF
+
+# Initialize the password store
+pass init "agent@example.com"
+
+# Store the email password
+pass insert email/agent-account
+# (or: echo "mypassword" | pass insert --echo email/agent-account)
+```
+
+Then reference it in your mail config files:
+
+**`~/.mbsyncrc`** (IMAP sync via isync):
+```ini
+IMAPAccount gmail
+Host imap.gmail.com
+User agent@gmail.com
+PassCmd "pass email/agent-account"
+SSLType IMAPS
+```
+
+**`~/.msmtprc`** (SMTP sending):
+```ini
+account gmail
+host smtp.gmail.com
+from agent@gmail.com
+auth on
+user agent@gmail.com
+passwordeval "pass email/agent-account"
+tls on
+```
+
+This ensures passwords are stored encrypted at rest and never appear in config files,
+logs, or version control.
+
 ## Architecture
 
 The package structure:
