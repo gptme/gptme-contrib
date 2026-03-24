@@ -3,6 +3,7 @@
 # requires-python = ">=3.10,<3.12"
 # dependencies = [
 #   "gptme @ git+https://github.com/ErikBjare/gptme.git",
+#   "openai>=1.0.0",
 #   "pyyaml>=6.0.0",
 # ]
 # [tool.uv]
@@ -453,6 +454,9 @@ def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
         temperature=0.5,
     )
 
+    if not response.choices:
+        logging.warning("LLM returned empty choices list")
+        return Message("assistant", "")
     content = response.choices[0].message.content or ""
     return Message("assistant", content)
 
