@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find duplicate and near-duplicate files across gptme ecosystem.
+"""Find duplicate and near-duplicate files across a repository.
 
 Replaces fdupes for exact duplicates, with optional jscpd integration
 for near-duplicate (copy-paste) detection.
@@ -9,6 +9,7 @@ Usage:
     python3 scripts/find-dupes.py --near-dupes       # Also run jscpd
     python3 scripts/find-dupes.py --ext .py .sh      # Filter by extension
     python3 scripts/find-dupes.py --min-lines 10     # Skip tiny files
+    python3 scripts/find-dupes.py path/to/dir        # Scan specific dirs
 """
 
 import argparse
@@ -16,23 +17,34 @@ import hashlib
 import json
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-# Default scan directories (relative to workspace root)
+
+def get_repo_root() -> Path:
+    """Get git repository root, falling back to CWD."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return Path.cwd()
+
+
+# Default scan directories (relative to repo root)
 DEFAULT_SCAN_DIRS = [
     "scripts",
     "packages",
-    "gptme-contrib/scripts",
-    "gptme-contrib/packages",
-    "gptme-contrib/plugins",
+    "plugins",
 ]
 
-# Cross-repo directories (absolute paths)
-CROSS_REPO_DIRS = [
-    Path.home() / "gptme" / "gptme",
-    Path.home() / "gptme" / "scripts",
-]
+# Cross-repo directories (absolute paths) — empty by default; use --cross-repo-dir to add
+CROSS_REPO_DIRS: list[Path] = []
 
 # Patterns to exclude
 EXCLUDE_PATTERNS = {
@@ -154,34 +166,35 @@ def find_near_duplicates(
     if not dirs:
         return None
 
-    # Build jscpd config
-    cmd = [
-        jscpd,
-        *dirs,
-        "--min-lines",
-        str(min_lines),
-        "--min-tokens",
-        str(min_tokens),
-        "--threshold",
-        str(threshold),
-        "--reporters",
-        "json",
-        "--output",
-        "/tmp/jscpd-report",
-        "--ignore",
-        "**/__pycache__/**,**/.egg-info/**,**/node_modules/**,**/.venv/**,**/.git/**",
-    ]
+    # Use a secure temporary directory to avoid symlink-attack via predictable /tmp paths
+    with tempfile.TemporaryDirectory(prefix="jscpd-report-") as jscpd_outdir:
+        cmd = [
+            jscpd,
+            *dirs,
+            "--min-lines",
+            str(min_lines),
+            "--min-tokens",
+            str(min_tokens),
+            "--threshold",
+            str(threshold),
+            "--reporters",
+            "json",
+            "--output",
+            jscpd_outdir,
+            "--ignore",
+            "**/__pycache__/**,**/.egg-info/**,**/node_modules/**,**/.venv/**,**/.git/**",
+        ]
 
-    try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        # jscpd exits 0 even with dupes
-        report_path = Path("/tmp/jscpd-report/jscpd-report.json")
-        if report_path.exists():
-            with open(report_path) as f:
-                data: dict[str, object] = json.load(f)
-                return data
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"jscpd error: {e}", file=sys.stderr)
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            # jscpd exits 0 even with dupes
+            report_path = Path(jscpd_outdir) / "jscpd-report.json"
+            if report_path.exists():
+                with open(report_path) as f:
+                    data: dict[str, object] = json.load(f)
+                    return data
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"jscpd error: {e}", file=sys.stderr)
 
     return None
 
@@ -199,7 +212,7 @@ def format_path(path: Path, workspace: Path) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Find duplicate files across gptme ecosystem"
+        description="Find duplicate files across a repository"
     )
     parser.add_argument(
         "--ext",
@@ -216,21 +229,28 @@ def main():
         help="Also run jscpd for near-duplicate detection",
     )
     parser.add_argument(
-        "--cross-repo", action="store_true", help="Include cross-repo dirs (~/gptme/)"
+        "--cross-repo-dir",
+        action="append",
+        dest="cross_repo_dirs",
+        metavar="DIR",
+        help="Additional cross-repo directory to include (can be specified multiple times)",
     )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
-    parser.add_argument("dirs", nargs="*", help="Additional directories to scan")
+    parser.add_argument(
+        "dirs", nargs="*", help="Directories to scan (overrides defaults)"
+    )
     args = parser.parse_args()
 
-    workspace = Path("/home/bob/bob")
+    workspace = get_repo_root()
     extensions = set(args.ext) if args.ext else DEFAULT_EXTENSIONS
 
-    # Build scan dirs
-    scan_dirs = [workspace / d for d in DEFAULT_SCAN_DIRS]
-    if args.cross_repo:
-        scan_dirs.extend(CROSS_REPO_DIRS)
-    for d in args.dirs:
-        scan_dirs.append(Path(d).resolve())
+    # Build scan dirs: explicit dirs override defaults; cross-repo dirs are always additive
+    if args.dirs:
+        scan_dirs = [Path(d).resolve() for d in args.dirs]
+    else:
+        scan_dirs = [workspace / d for d in DEFAULT_SCAN_DIRS]
+    if args.cross_repo_dirs:
+        scan_dirs.extend(Path(d).resolve() for d in args.cross_repo_dirs)
 
     # Collect files
     files = collect_files(scan_dirs, extensions, args.min_lines)
