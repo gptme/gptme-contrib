@@ -7,6 +7,7 @@
 #   "python-dotenv>=1.0.0",
 #   "click>=8.0.0",
 #   "flask>=3.0.0",
+#   "gptmail[oauth] @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=packages/gptmail",
 # ]
 # [tool.uv]
 # exclude-newer = "2024-01-01T00:00:00Z"

@@ -113,7 +113,7 @@ def main() -> None:
     from gptmail.communication_utils.state.tracking import (  # type: ignore[import-not-found]
         ConversationTracker,
     )
-    from gptmail.communication_utils.state.tracking import (  # type: ignore[import-not-found]
+    from gptmail.communication_utils.state.tracking import (
         MessageState as MsgState,
     )
     from gptme.chat import step
