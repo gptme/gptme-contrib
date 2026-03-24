@@ -474,7 +474,11 @@ class AgentEmail:
         ]
 
         subject_lower = subject.lower()
-        content_lower = content.lower()
+        # Strip quoted content (lines starting with >) to avoid false positives
+        # from quoted email footers (e.g. GitHub notification links in replies)
+        original_lines = content.split("\n")
+        unquoted_lines = [line for line in original_lines if not line.startswith(">")]
+        content_lower = "\n".join(unquoted_lines).lower()
 
         for pattern in notification_patterns:
             if re.search(pattern, subject_lower) or re.search(pattern, content_lower):
