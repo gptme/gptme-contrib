@@ -31,13 +31,13 @@ When workspace structure changes:
 
 ```shell
 # Check if package is installed
-uv pip list | grep metaproductivity
+uv pip list | grep <package-name>
 
 # If missing, sync all packages
 uv sync --all-packages
 
 # Verify installation
-python3 -c "import metaproductivity; print('OK')"
+python3 -c "import <package_name>; print('OK')"
 ```
 
 ## Outcome

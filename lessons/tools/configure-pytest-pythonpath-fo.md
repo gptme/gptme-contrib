@@ -24,16 +24,13 @@ Pytest runs in its own execution context and cannot automatically discover works
 - No pythonpath configuration exists in pyproject.toml [tool.pytest.ini_options]
 
 ## Pattern
-Add pythonpath to pyproject.toml:
+Add pythonpath to pyproject.toml (list all workspace package src directories):
 ```toml
 [tool.pytest.ini_options]
 pythonpath = [
-    "packages/context/src",
-    "packages/metaproductivity/src",
-    "packages/tasks/src",
-    "packages/lessons/src",
-    "packages/lib/src",
-    "packages/rag/src",
+    "packages/mypkg1/src",
+    "packages/mypkg2/src",
+    # add one entry per workspace package
 ]
 ```
 
