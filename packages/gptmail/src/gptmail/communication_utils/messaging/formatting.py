@@ -119,8 +119,11 @@ def format_for_platform(
         Formatted text respecting platform limits
 
     Examples:
-        >>> format_for_platform("A" * 300, platform="twitter")
-        'AAA...'  # Truncated to 280 chars + suffix
+        >>> result = format_for_platform("A" * 300, platform="twitter")
+        >>> len(result)
+        280
+        >>> result.endswith("...")
+        True
     """
     # Platform defaults
     platform_limits = {

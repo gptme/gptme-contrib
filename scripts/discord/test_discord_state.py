@@ -7,15 +7,13 @@ Tests verify:
 """
 
 import asyncio
-import sys
 from pathlib import Path
 
 import pytest
-
-# Add scripts to path for communication_utils import
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from communication_utils.state import ConversationTracker, MessageState
+from gptmail.communication_utils.state import (  # type: ignore[import-not-found]
+    ConversationTracker,
+    MessageState,
+)
 
 
 class TestStateTracking:

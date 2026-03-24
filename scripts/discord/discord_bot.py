@@ -33,16 +33,18 @@ from typing import (
 )
 
 import discord
-from communication_utils.monitoring.metrics import MetricsCollector
-from communication_utils.state.tracking import (
-    ConversationTracker,
-    MessageState,
-)
 from discord.ext import commands
 
 # Import per-user rate limiting and state management
 from discord.rate_limiting import PerUserRateLimiter
 from dotenv import load_dotenv
+from gptmail.communication_utils.monitoring.metrics import (  # type: ignore[import-not-found]
+    MetricsCollector,
+)
+from gptmail.communication_utils.state.tracking import (  # type: ignore[import-not-found]
+    ConversationTracker,
+    MessageState,
+)
 from gptme.chat import Message, step
 from gptme.config import get_project_config
 from gptme.dirs import get_project_gptme_dir

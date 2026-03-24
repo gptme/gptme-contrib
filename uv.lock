@@ -831,6 +831,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+oauth = [
+    { name = "flask" },
+    { name = "python-dotenv" },
+    { name = "werkzeug" },
+]
 test = [
     { name = "mypy" },
     { name = "pytest" },
@@ -841,15 +846,18 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
+    { name = "flask", marker = "extra == 'oauth'", specifier = ">=2.0" },
     { name = "markdown", specifier = ">=3.4" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
     { name = "python-dateutil", specifier = ">=2.8" },
+    { name = "python-dotenv", marker = "extra == 'oauth'", specifier = ">=0.19" },
     { name = "requests", specifier = ">=2.28" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.1" },
+    { name = "werkzeug", marker = "extra == 'oauth'", specifier = ">=2.0" },
 ]
-provides-extras = ["test"]
+provides-extras = ["oauth", "test"]
 
 [[package]]
 name = "gptme"

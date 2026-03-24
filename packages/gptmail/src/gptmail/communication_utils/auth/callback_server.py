@@ -91,9 +91,7 @@ class CallbackServer:
             return  # Already running
 
         self.server = make_server("localhost", self.port, self.app, threaded=True)
-        self.server_thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True
-        )
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
 
     def stop(self) -> None:
@@ -112,9 +110,7 @@ class CallbackServer:
         self.server = None
         self.server_thread = None
 
-    def wait_for_callback(
-        self, timeout: int | None = None
-    ) -> tuple[str | None, str | None]:
+    def wait_for_callback(self, timeout: int | None = None) -> tuple[str | None, str | None]:
         """
         Wait for OAuth callback with authorization code.
 

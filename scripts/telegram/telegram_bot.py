@@ -110,11 +110,10 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Import shared utilities from communication_utils
-    from communication_utils.state.tracking import (
+    from gptmail.communication_utils.state.tracking import (  # type: ignore[import-not-found]
         ConversationTracker,
     )
-    from communication_utils.state.tracking import (
+    from gptmail.communication_utils.state.tracking import (
         MessageState as MsgState,
     )
     from gptme.chat import step

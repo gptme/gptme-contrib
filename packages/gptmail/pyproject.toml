@@ -36,6 +36,11 @@ Issues = "https://github.com/gptme/gptme-contrib/issues"
 gptmail = "gptmail.cli:cli"
 
 [project.optional-dependencies]
+oauth = [
+    "flask>=2.0",
+    "werkzeug>=2.0",
+    "python-dotenv>=0.19",
+]
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
