@@ -19,7 +19,7 @@ Pytest runs in its own execution context and cannot automatically discover works
 
 ## Detection
 - Pytest fails with 'ModuleNotFoundError: No module named "<package>"' when running tests
-- Tests attempt to import from workspace packages (e.g., 'from context import ...')
+- Tests attempt to import from workspace packages (e.g., 'from mypkg import ...')
 - Project has multiple packages under a packages/ directory structure
 - No pythonpath configuration exists in pyproject.toml [tool.pytest.ini_options]
 
