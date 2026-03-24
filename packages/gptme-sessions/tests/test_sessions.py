@@ -851,7 +851,7 @@ def test_extract_signals_cc_background_bash_commits(tmp_path: Path):
 
 
 def test_extract_signals_cc_gh_pr_merge():
-    """CC trajectory: gh pr merge success output is detected as a commit signal."""
+    """CC trajectory: gh pr merge success output is detected as a pr_merges signal."""
     bash_id = "bash_merge_001"
     msgs = [
         {
@@ -886,8 +886,11 @@ def test_extract_signals_cc_gh_pr_merge():
         },
     ]
     sigs = extract_signals_cc(msgs)
-    assert len(sigs["git_commits"]) == 1
-    assert "merge PR #1725" in sigs["git_commits"][0]
+    # Merges are now in pr_merges (not git_commits) for distinct grade weighting
+    assert len(sigs["git_commits"]) == 0
+    assert sigs["pr_merges"] == ["PR #1725"]
+    # deliverables still includes the merge
+    assert any("merge PR #1725" in d for d in sigs["deliverables"])
 
 
 @pytest.mark.parametrize(
@@ -934,8 +937,117 @@ def test_extract_signals_cc_gh_pr_merge_variants(merge_output: str):
         },
     ]
     sigs = extract_signals_cc(msgs)
-    assert len(sigs["git_commits"]) == 1
-    assert "merge PR #42" in sigs["git_commits"][0]
+    # Merges are now in pr_merges (not git_commits) for distinct grade weighting
+    assert len(sigs["git_commits"]) == 0
+    assert sigs["pr_merges"] == ["PR #42"]
+    assert any("merge PR #42" in d for d in sigs["deliverables"])
+
+
+def _make_bash_exchange(cmd: str, result: str, bash_id: str = "bash_001") -> list[dict]:
+    """Helper: build a minimal CC assistant+user pair for a single Bash call."""
+    return [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": bash_id, "name": "Bash", "input": {"command": cmd}}
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": result,
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def test_extract_signals_cc_reviews_submitted():
+    """gh pr review commands increment reviews_submitted (and gh_interactions)."""
+    sigs = extract_signals_cc(_make_bash_exchange("gh pr review 42 --approve", "Approved"))
+    assert sigs["reviews_submitted"] == 1
+    assert sigs["gh_interactions"] >= 1  # aggregate still counted
+
+
+def test_extract_signals_cc_comments_posted_pr():
+    """gh pr comment increments comments_posted."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange("gh pr comment 42 --body 'LGTM'", "Added comment")
+    )
+    assert sigs["comments_posted"] == 1
+    assert sigs["gh_interactions"] >= 1
+
+
+def test_extract_signals_cc_comments_posted_issue():
+    """gh issue comment increments comments_posted."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange("gh issue comment 99 --body 'Fixed'", "Added comment")
+    )
+    assert sigs["comments_posted"] == 1
+
+
+def test_extract_signals_cc_issues_created():
+    """gh issue create increments issues_created (and gh_interactions aggregate)."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange(
+            "gh issue create --title 'Bug' --body 'desc'",
+            "https://github.com/org/repo/issues/123",
+        )
+    )
+    assert sigs["issues_created"] == 1
+    assert sigs["gh_interactions"] >= 1  # aggregate still counted
+
+
+def test_extract_signals_cc_pr_merge_grade():
+    """PR merges score at 1.5x in grade_signals (above PR submit at 1.2x)."""
+    # A session that merges one PR should grade higher than one that only submits one PR
+    sigs_merge = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 1},
+        "pr_merges": ["PR #10"],
+        "prs_submitted": [],
+        "issues_closed": 0,
+        "gh_interactions": 1,
+    }
+    sigs_submit = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 1},
+        "pr_merges": [],
+        "prs_submitted": ["PR #10"],
+        "issues_closed": 0,
+        "gh_interactions": 1,
+    }
+    assert grade_signals(sigs_merge) > grade_signals(sigs_submit)
+
+
+def test_extract_signals_cc_pr_merge_not_in_git_commits():
+    """PR merges are in pr_merges, NOT in git_commits (to avoid double-counting)."""
+    msgs = _make_bash_exchange(
+        "gh pr merge 99 --squash",
+        "✓ Squashed and merged pull request #99 (feat: new thing)",
+    )
+    sigs = extract_signals_cc(msgs)
+    assert sigs["pr_merges"] == ["PR #99"]
+    assert all("merge PR" not in c for c in sigs["git_commits"])
+    assert any("merge PR #99" in d for d in sigs["deliverables"])
 
 
 def test_grade_signals_dead_session():

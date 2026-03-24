@@ -68,6 +68,21 @@ _PR_CREATE_URL_RE = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)"
 # Tracks explicit issue closures as a forward-progress signal (blocker removal).
 _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 
+# Fine-grained gh interaction regexes — split gh_interactions into signal types.
+# These are detected on the command input side (same as _GH_INTERACTION_RE).
+# The aggregate gh_interactions count is kept for backward compatibility.
+
+# PR code reviews submitted (gh pr review — higher value than plain comments)
+_GH_PR_REVIEW_CMD_RE = re.compile(r"gh\s+pr\s+review\b")
+
+# Comments posted: PR comments, issue comments, and direct API comment endpoints
+_GH_COMMENT_CMD_RE = re.compile(
+    r"gh\s+(?:pr|issue)\s+comment\b" r"|gh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/comments\b"
+)
+
+# Issues created (gh issue create — creation event, analogous to prs_submitted)
+_GH_ISSUE_CREATE_CMD_RE = re.compile(r"\bgh\s+issue\s+create\b")
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -265,10 +280,10 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
     - Error rate penalty
     - Retry penalty
 
-    Uses *effective_units* = commits + 1.2*prs_submitted + 0.4*issues_closed
+    Uses *effective_units* = commits + 1.5*pr_merges + 1.2*prs_submitted + 0.4*issues_closed
     so that sessions with no direct commits but high forward progress (e.g.
-    submitting two PRs in worktrees) are graded comparably to commit-producing
-    sessions.
+    submitting two PRs in worktrees, or merging reviewed PRs) are graded
+    comparably to commit-producing sessions.
 
     Args:
         signals: Raw signal dict from extract_signals* functions.
@@ -292,16 +307,18 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
     # GitHub interactions (PR reviews, issue comments) count as productive work
     gh_interactions = signals.get("gh_interactions", 0)
 
-    # Forward-progress signals: PR submissions and issue closures.
+    # Forward-progress signals: PR merges, submissions, and issue closures.
     # These represent high-value work that may not produce direct commits
     # (e.g. PRs submitted from /tmp/worktrees without touching the main repo).
+    pr_merges = len(signals.get("pr_merges", []))
     prs_submitted = len(signals.get("prs_submitted", []))
     issues_closed = signals.get("issues_closed", 0)
 
     # Effective work units: weighted sum of all forward-progress signals.
-    # Weights reflect relative value: commit=1.0, PR submit=1.2, issue close=0.4.
-    # PR submission scored slightly above a commit because it bundles work + review loop.
-    effective_units = commits + 1.2 * prs_submitted + 0.4 * issues_closed
+    # Weights reflect relative value: merge=1.5, commit=1.0, PR submit=1.2, issue close=0.4.
+    # Merges scored above commits because they close a review loop (PR submit + reviewer feedback
+    # + address + merge). PR submission scored above a commit for similar compound-work reasons.
+    effective_units = commits + 1.5 * pr_merges + 1.2 * prs_submitted + 0.4 * issues_closed
 
     # Categories where gh_interactions and file_writes are the PRIMARY output,
     # not commits. For these, a single useful interaction is sufficient for the
@@ -354,6 +371,7 @@ def is_productive(signals: dict) -> bool:
         or len(set(signals["file_writes"])) >= 2
         or signals.get("gh_interactions", 0) >= 1
         or signals.get("prs_submitted")  # any PR submitted = productive
+        or signals.get("pr_merges")  # any PR merged = productive
         or signals.get("issues_closed", 0) >= 1  # confirmed issue close = productive
     )
 
@@ -387,9 +405,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # Per-tool-call timing: map tool_use_id → (tool_name, dispatch_timestamp, batch_size)
     tool_dispatch: dict[str, tuple[str, datetime, int]] = {}
     tool_durations: dict[str, list[float]] = {}  # tool_name → list of durations (seconds)
-    # Forward-progress signals: PR submissions and issue closures.
+    # Forward-progress signals: PR submissions, merges, and issue closures.
     prs_submitted: list[str] = []  # PR numbers/URLs for PRs created this session
+    pr_merges: list[
+        str
+    ] = []  # PR numbers confirmed merged this session (higher weight than submit)
     issues_closed: int = 0  # count of confirmed successful gh issue close commands
+    # Fine-grained gh interaction signals (alongside aggregate gh_interactions).
+    reviews_submitted: int = 0  # count of gh pr review commands (code review)
+    comments_posted: int = 0  # count of gh pr/issue comment + api comment posts
+    issues_created: int = 0  # count of gh issue create commands
     _pr_create_pending: set[str] = set()  # tool_use_ids awaiting pr create result
     _issue_close_pending: set[str] = set()  # tool_use_ids awaiting issue close result
 
@@ -452,6 +477,15 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     cmd = item.get("input", {}).get("command", "")
                     if _GH_INTERACTION_RE.search(cmd):
                         gh_interactions += 1
+
+                    # Fine-grained gh interaction signal tracking.
+                    # Populated alongside the aggregate gh_interactions count.
+                    if _GH_PR_REVIEW_CMD_RE.search(cmd):
+                        reviews_submitted += 1
+                    if _GH_COMMENT_CMD_RE.search(cmd):
+                        comments_posted += 1
+                    if _GH_ISSUE_CREATE_CMD_RE.search(cmd):
+                        issues_created += 1
 
                     # Track PR creation commands for output-side URL detection.
                     # gh pr create does not appear in _GH_INTERACTION_RE intentionally —
@@ -601,9 +635,12 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # gh pr merge detection: output format is
                     # "✓ Squashed and merged pull request #N (title)"
                     # which doesn't match _COMMIT_RE (no branch/hash format).
+                    # Tracked separately from git_commits so grade_signals can
+                    # weight merges at 1.5× (closing a review loop is higher-value
+                    # than a standalone commit).
                     for merge_match in _PR_MERGE_RE.finditer(result_str):
                         pr_num = merge_match.group(1)
-                        git_commits.append(f"merge PR #{pr_num}")
+                        pr_merges.append(f"PR #{pr_num}")
 
                     # gh pr create detection: successful output contains a PR URL.
                     # Only check when this tool_use_id was flagged as a pr create command.
@@ -625,7 +662,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     if len(timestamps) >= 2:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
 
-    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    # pr_merges entries in deliverables: "merge PR #N" format for readability
+    deliverables = list(
+        dict.fromkeys(git_commits + [f"merge {m}" for m in pr_merges] + file_writes)
+    )
 
     # Summarize per-tool-call timing: total and max per tool name.
     # Enables detection of slow tests, long pre-commit hooks, and stalled tools.
@@ -651,7 +691,11 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "retry_count": len(retry_candidates),
         "gh_interactions": gh_interactions,
         "prs_submitted": prs_submitted,
+        "pr_merges": pr_merges,
         "issues_closed": issues_closed,
+        "reviews_submitted": reviews_submitted,
+        "comments_posted": comments_posted,
+        "issues_created": issues_created,
         "deliverables": deliverables,
     }
 
