@@ -113,7 +113,7 @@ def ensure_dirs() -> None:
 
 def make_message_filename(sender: str, subject: str) -> str:
     """Generate a unique message filename."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     safe_sender = "".join(c if c.isalnum() or c in "-_" else "-" for c in sender)
     safe_sender = safe_sender[:20].strip("-")
     safe_subject = "".join(c if c.isalnum() or c in "-_" else "-" for c in subject)
@@ -205,7 +205,7 @@ def send_message(
                 "-o",
                 "BatchMode=yes",
                 str(local_path),
-                f"{ssh_target}:{remote_inbox}{filename}",
+                f"{ssh_target}:{shlex.quote(str(remote_inbox) + filename)}",
             ],
             check=True,
             capture_output=True,
