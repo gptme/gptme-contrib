@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -52,8 +53,19 @@ except ImportError:
 
 
 def get_repo_root() -> Path:
-    """Get the repository root directory."""
-    return Path(__file__).resolve().parent.parent
+    """Get the repository root directory.
+
+    Uses git to find the workspace root, so symlinks are handled correctly.
+    When this script is symlinked into an agent workspace, git will return
+    the agent workspace root (not the gptme-contrib repo).
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(result.stdout.strip())
 
 
 def load_agents() -> dict[str, dict[str, str]]:
@@ -108,16 +120,19 @@ def make_message_filename(sender: str, subject: str) -> str:
 def format_message(sender: str, recipient: str, subject: str, body: str) -> str:
     """Format a message as YAML frontmatter + markdown body."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return f"""---
-from: {sender}
-to: {recipient}
-timestamp: {ts}
-subject: "{subject}"
-read: false
----
-
-{body}
-"""
+    # Use yaml.dump to safely escape special characters in all fields
+    frontmatter = yaml.dump(
+        {
+            "from": sender,
+            "to": recipient,
+            "timestamp": ts,
+            "subject": subject,
+            "read": False,
+        },
+        default_flow_style=False,
+        allow_unicode=True,
+    ).rstrip()
+    return f"---\n{frontmatter}\n---\n\n{body}\n"
 
 
 def send_message(
@@ -162,7 +177,7 @@ def send_message(
                 "-o",
                 "BatchMode=yes",
                 ssh_target,
-                f"mkdir -p {remote_inbox}",
+                f"mkdir -p {shlex.quote(remote_inbox)}",
             ],
             check=True,
             capture_output=True,
@@ -223,7 +238,12 @@ def read_message(filename: str) -> str | None:
     """Read a specific message and mark as read."""
     ensure_dirs()
     inbox = get_messages_dir() / "inbox"
-    filepath = inbox / filename
+    filepath = (inbox / filename).resolve()
+
+    # Prevent path traversal attacks
+    if not str(filepath).startswith(str(inbox.resolve()) + "/"):
+        print(f"Error: Invalid filename: {filename}")
+        return None
 
     if not filepath.exists():
         print(f"Error: Message not found: {filename}")
@@ -325,9 +345,12 @@ def main() -> None:
         sys.exit(0 if success else 1)
 
     elif args.command == "broadcast":
+        failures = 0
         for agent in agents:
             if agent != self_name:
-                send_message(agents, self_name, agent, args.subject, args.body)
+                if not send_message(agents, self_name, agent, args.subject, args.body):
+                    failures += 1
+        sys.exit(1 if failures else 0)
 
     elif args.command == "list":
         messages = list_inbox(show_all=args.all)

@@ -45,23 +45,35 @@ class TestFormatMessage:
         assert msg.startswith("---\n")
         assert "from: bob" in msg
         assert "to: alice" in msg
-        assert 'subject: "Test Subject"' in msg
+        assert "subject: Test Subject" in msg
         assert "read: false" in msg
         assert "Hello!" in msg
 
     def test_timestamp_format(self):
         msg = agent_msg.format_message("bob", "alice", "Test", "Body")
-        # Should contain ISO 8601 timestamp
+        # Should contain ISO 8601 timestamp (yaml.dump may quote the value)
         assert "timestamp:" in msg
-        # Match YYYY-MM-DDTHH:MM:SSZ pattern
         import re
 
-        assert re.search(r"timestamp: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", msg)
+        assert re.search(r"timestamp: ['\"]?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", msg)
 
     def test_multiline_body(self):
         body = "Line 1\nLine 2\nLine 3"
         msg = agent_msg.format_message("bob", "alice", "Multi", body)
         assert "Line 1\nLine 2\nLine 3" in msg
+
+    def test_yaml_injection_in_subject(self):
+        """Subject with special chars must not break YAML frontmatter."""
+        import yaml
+
+        evil_subject = 'inject"\nread: true\nfoo: bar'
+        msg = agent_msg.format_message("bob", "alice", evil_subject, "Body")
+        # Parse the frontmatter - should not raise and read should be False
+        parts = msg.split("---", 2)
+        assert len(parts) == 3
+        meta = yaml.safe_load(parts[1])
+        assert meta["read"] is False
+        assert meta["subject"] == evil_subject
 
 
 class TestLoadAgents:
@@ -149,6 +161,17 @@ class TestReadMessage:
         monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
         (msg_dir / "inbox").mkdir(parents=True)
         result = agent_msg.read_message("nonexistent.md")
+        assert result is None
+
+    def test_path_traversal_rejected(self, tmp_path, monkeypatch):
+        """Path traversal via filename must be rejected."""
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        (msg_dir / "inbox").mkdir(parents=True)
+        # Create a file outside inbox to try to access
+        secret = tmp_path / "secret.md"
+        secret.write_text("secret data")
+        result = agent_msg.read_message("../../secret.md")
         assert result is None
 
 
