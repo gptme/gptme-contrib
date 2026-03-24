@@ -10,9 +10,11 @@
 # the PR is definitively merged/closed.
 #
 # Environment variables:
-#   WORKTREE_DIR   Directory containing worktrees (default: /tmp/worktrees)
-#   GH_USERNAME    GitHub username for cross-fork PR lookup
-#                  (default: auto-detected via `gh api user`)
+#   WORKTREE_DIR    Directory containing worktrees (default: /tmp/worktrees)
+#   GH_USERNAME     GitHub username for cross-fork PR lookup
+#                   (default: auto-detected via `gh api user`)
+#   UPSTREAM_ORGS   Comma-separated list of upstream orgs to check for fork PRs
+#                   (default: gptme,ActivityWatch)
 
 set -euo pipefail
 
@@ -67,15 +69,19 @@ for dir in "$WORKTREE_DIR"/*/; do
 
     # Check for PR with this branch — try the repo first, then upstream if it's a fork
     pr_info=$(gh pr list --repo "$repo" --state all --head "$branch" \
-        --json number,state --jq '.[0] | "\(.number) \(.state)"' 2>/dev/null || echo "")
+        --json number,state \
+        --jq 'if length > 0 then .[0] | "\(.number) \(.state)" else "" end' 2>/dev/null || echo "")
 
     # If no PR found and username is known, check upstream org repos with cross-fork syntax
+    # UPSTREAM_ORGS: comma-separated list of orgs to check (default: gptme,ActivityWatch)
     if [[ -z "$pr_info" && -n "$GH_USERNAME" && "$repo" == "$GH_USERNAME"/* ]]; then
         upstream_name="${repo#"$GH_USERNAME"/}"
-        for org in gptme ActivityWatch; do
+        IFS=',' read -ra upstream_orgs <<< "${UPSTREAM_ORGS:-gptme,ActivityWatch}"
+        for org in "${upstream_orgs[@]}"; do
             pr_info=$(gh pr list --repo "$org/$upstream_name" --state all \
                 --head "$GH_USERNAME:$branch" \
-                --json number,state --jq '.[0] | "\(.number) \(.state)"' 2>/dev/null || echo "")
+                --json number,state \
+                --jq 'if length > 0 then .[0] | "\(.number) \(.state)" else "" end' 2>/dev/null || echo "")
             [[ -n "$pr_info" ]] && repo="$org/$upstream_name" && break
         done
     fi
@@ -132,7 +138,22 @@ else
     echo ""
     echo "Deleting ${#SAFE_TO_DELETE[@]} stale worktrees..."
     for name in "${SAFE_TO_DELETE[@]}"; do
-        rm -rf "${WORKTREE_DIR:?}/$name"
+        target="${WORKTREE_DIR:?}/$name"
+        if [[ -f "$target/.git" ]]; then
+            # Linked worktree: use git worktree remove to clean up .git/worktrees/ metadata
+            gitdir=$(sed 's/^gitdir: //' "$target/.git")
+            # Navigate: .git/worktrees/<name> -> .git/ -> repo root
+            main_git_dir=$(dirname "$(dirname "$gitdir")")
+            main_repo=$(git --git-dir="$main_git_dir" rev-parse --show-toplevel 2>/dev/null || echo "")
+            if [[ -n "$main_repo" ]]; then
+                git -C "$main_repo" worktree remove --force "$target" 2>/dev/null \
+                    || rm -rf "$target"
+            else
+                rm -rf "$target"
+            fi
+        else
+            rm -rf "$target"
+        fi
         echo "  Deleted: $name"
     done
 
