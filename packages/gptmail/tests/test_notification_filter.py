@@ -20,6 +20,7 @@ def test_subject_match(agent: AgentEmail):
     """Notification patterns in subject are detected."""
     assert agent._is_notification_email("Security Alert for your account", "")
     assert agent._is_notification_email("Your verification code is 123456", "")
+    assert agent._is_notification_email("New login to your account", "")
     assert agent._is_notification_email("Password Reset requested", "")
 
 

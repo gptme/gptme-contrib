@@ -462,7 +462,7 @@ class AgentEmail:
             True if the email matches notification patterns, False otherwise.
         """
         notification_patterns = [
-            r"New login to",
+            r"new login to",
             r"security alert",
             r"verification code",
             r"password reset",
