@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    import yaml  # type: ignore[import-untyped]
+    import yaml
 
     HAS_YAML = True
 except ImportError:
