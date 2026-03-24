@@ -163,6 +163,42 @@ def test_claude_code_executor_basic_execution():
         assert cmd[0] == "claude"
         assert cmd[1] == "-p"
         assert cmd[2] == "test prompt"
+        # Default: skip permissions for autonomous operation
+        assert "--dangerously-skip-permissions" in cmd
+
+
+def test_claude_code_executor_skip_permissions_default():
+    """Test that --dangerously-skip-permissions is included by default."""
+    executor = ClaudeCodeExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        executor.execute(
+            prompt="test",
+            workspace=Path("/tmp"),
+            timeout=60,
+        )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+
+
+def test_claude_code_executor_skip_permissions_disabled():
+    """Test that --dangerously-skip-permissions can be disabled."""
+    executor = ClaudeCodeExecutor(skip_permissions=False)
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        executor.execute(
+            prompt="test",
+            workspace=Path("/tmp"),
+            timeout=60,
+        )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" not in cmd
 
 
 def test_claude_code_executor_strips_claudecode_env():
