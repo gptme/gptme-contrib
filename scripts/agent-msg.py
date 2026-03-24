@@ -116,6 +116,10 @@ def make_message_filename(sender: str, subject: str) -> str:
 
 def format_message(sender: str, recipient: str, subject: str, body: str) -> str:
     """Format a message as YAML frontmatter + markdown body."""
+    if not HAS_YAML:
+        raise RuntimeError(
+            "PyYAML is required to send messages. Install with: pip install pyyaml"
+        )
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Use yaml.dump to safely escape special characters in all fields
     frontmatter = yaml.dump(
@@ -265,7 +269,15 @@ def cmd_status(agents: dict[str, dict[str, str]], self_name: str) -> None:
     inbox = get_messages_dir() / "inbox"
     outbox = get_messages_dir() / "outbox"
     inbox_count = len(list(inbox.glob("*.md")))
-    unread = len([f for f in inbox.glob("*.md") if "read: false" in f.read_text()])
+
+    def _is_unread(f: Path) -> bool:
+        content = f.read_text()
+        if not content.startswith("---"):
+            return False
+        parts = content.split("---", 2)
+        return len(parts) >= 3 and "read: false" in parts[1]
+
+    unread = len([f for f in inbox.glob("*.md") if _is_unread(f)])
     outbox_count = len(list(outbox.glob("*.md")))
 
     print(f"Agent: {self_name}")
