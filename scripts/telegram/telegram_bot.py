@@ -110,7 +110,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    from gptmail.communication_utils.state.tracking import (
+    from gptmail.communication_utils.state.tracking import (  # type: ignore[import-not-found]
         ConversationTracker,
     )
     from gptmail.communication_utils.state.tracking import (
