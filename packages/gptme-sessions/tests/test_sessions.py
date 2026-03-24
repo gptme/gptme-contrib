@@ -1167,6 +1167,88 @@ def test_extract_signals_cc_ci_fixed_not_triggered_on_empty_output():
     assert sigs["ci_fixed"] is False
 
 
+def test_extract_signals_cc_ci_fixed_background_task(tmp_path: Path):
+    """ci_fixed=False when --log-failed runs in background mode with empty output file.
+
+    When CC runs a Bash command in background mode, result_str is a non-empty
+    pointer string like "Output is being written to: /tmp/.../TASKID.output".
+    Without the background-task guard, this non-empty pointer would falsely
+    trigger _ci_failure_found=True. The fix reads the actual output file instead.
+    """
+    # Write an empty background output file (no CI failures)
+    bg_output = tmp_path / "ci_check.output"
+    bg_output.write_text("")
+
+    ci_id = "bash_ci_bg_001"
+    commit_id = "bash_commit_bg_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": ci_id,
+                        "name": "Bash",
+                        "input": {"command": "gh run view 99999 --log-failed"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": ci_id,
+                        "is_error": False,
+                        # Background task pointer — non-empty but not CI log output
+                        "content": f"Command running in background with ID: bg001. Output is being written to: {bg_output}",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:01:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": commit_id,
+                        "name": "Bash",
+                        "input": {"command": "git commit fix.py -m 'fix: address ci failure'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:01:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": commit_id,
+                        "is_error": False,
+                        "content": "[master c3d4e5f] fix: address ci failure",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Should be False: background output file was empty (no real CI failures found)
+    assert sigs["ci_fixed"] is False
+
+
 def test_extract_signals_cc_ci_fixed_grade_boost():
     """ci_fixed contributes 0.8 effective units to grade_signals."""
     base_sigs = {
