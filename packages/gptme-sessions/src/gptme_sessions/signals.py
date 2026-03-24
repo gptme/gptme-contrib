@@ -43,6 +43,18 @@ _BG_TASK_RE = re.compile(r"Output is being written to: (.+\.output)")
 # This does NOT match _COMMIT_RE (no branch/hash format), so needs separate detection.
 _PR_MERGE_RE = re.compile(r"(?:Squashed and merged|Rebased and merged|Merged) pull request #(\d+)")
 
+# Regex for GitHub CLI interactions that represent productive work but don't
+# produce commits or file writes (PR reviews, issue comments, PR comments).
+# These should count toward session productivity to avoid floor-grading
+# review/triage sessions. Matches the command being invoked, not just output.
+_GH_INTERACTION_RE = re.compile(
+    r"gh\s+(?:"
+    r"pr\s+(?:review|comment|close|reopen|merge|edit)"
+    r"|issue\s+(?:comment|close|reopen|edit|create)"
+    r"|api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
+    r")"
+)
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -249,11 +261,15 @@ def grade_signals(signals: dict) -> float:
     # to running out of context or timing out). Small bonus for structured completion.
     has_complete = "complete" in signals["tool_calls"]
 
-    if commits == 0 and writes == 0:
+    # GitHub interactions (PR reviews, issue comments) count as productive work
+    gh_interactions = signals.get("gh_interactions", 0)
+
+    if commits == 0 and writes == 0 and gh_interactions == 0:
         # Distinguish dead sessions (zero tool calls) from active-but-unproductive ones
         reward = 0.10 if total_tools == 0 else 0.25
     elif commits == 0:
-        if writes >= 3:
+        effective_writes = writes + gh_interactions
+        if effective_writes >= 3:
             reward = 0.55
         else:
             reward = 0.40
@@ -286,7 +302,11 @@ def grade_signals(signals: dict) -> float:
 
 def is_productive(signals: dict) -> bool:
     """Quick binary productive/noop classification from trajectory signals."""
-    return bool(signals["git_commits"] or len(set(signals["file_writes"])) >= 2)
+    return bool(
+        signals["git_commits"]
+        or len(set(signals["file_writes"])) >= 2
+        or signals.get("gh_interactions", 0) >= 1
+    )
 
 
 def extract_signals_cc(msgs: list[dict]) -> dict:
@@ -300,10 +320,12 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     Tool names for file writes: Write, Edit (input.file_path), NotebookEdit (input.notebook_path).
     Errors: tool_result items with is_error=True.
     Git commits: detected from Bash tool output content via regex.
+    GitHub interactions: detected from Bash tool input commands (gh pr review, etc.).
     """
     tool_calls: dict[str, int] = {}
     error_count = 0
     warning_phrase_count = 0  # soft error signal: "error", "failed", etc. in output
+    gh_interactions = 0  # count of productive GitHub CLI commands (reviews, comments)
     git_commits: list[str] = []
     file_writes: list[str] = []
     journal_paths: list[str] = []
@@ -371,11 +393,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # No else: tool calls without extractable paths are not counted as
                     # file writes — same rationale as the gptme path above.
                 elif tool == "Bash":
+                    # Detect GitHub CLI interactions (PR reviews, issue comments, etc.)
+                    # These represent productive work but don't produce commits/writes.
+                    cmd = item.get("input", {}).get("command", "")
+                    if _GH_INTERACTION_RE.search(cmd):
+                        gh_interactions += 1
+
                     # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
                     # rather than the Write tool, so Write/Edit alone misses them.
                     # Note: tee redirects are not currently handled (intentional scope limit).
-                    cmd = item.get("input", {}).get("command", "")
                     if "/journal/" in cmd:
                         for m in re.finditer(
                             r"cat\s*>>?\s*(.*?\.md)(?:\s+<<|\s*$)",
@@ -529,6 +556,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "tool_time_total": tool_time_total,
         "tool_time_max": tool_time_max,
         "retry_count": len(retry_candidates),
+        "gh_interactions": gh_interactions,
         "deliverables": deliverables,
     }
 
