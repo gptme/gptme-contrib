@@ -65,8 +65,13 @@ def save_token_to_env(
     """
     # Find .env file if not provided
     if env_path is None:
-        from dotenv import find_dotenv
-
+        try:
+            from dotenv import find_dotenv
+        except ImportError:
+            raise ImportError(
+                "python-dotenv is required when env_path is not provided. "
+                "Install it with: pip install gptmail[oauth]"
+            ) from None
         env_path_str = find_dotenv()
         if not env_path_str:
             return False
