@@ -1010,6 +1010,198 @@ def test_extract_signals_cc_issues_created():
     assert sigs["gh_interactions"] >= 1  # aggregate still counted
 
 
+def test_extract_signals_cc_ci_fixed_basic():
+    """ci_fixed=True when --log-failed returns non-empty output and session has commits."""
+    commit_output = "[master a1b2c3d] fix(ci): address mypy error in signals.py"
+    # Two-exchange session: first check CI failures, then commit the fix
+    ci_id = "bash_ci_001"
+    commit_id = "bash_commit_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": ci_id,
+                        "name": "Bash",
+                        "input": {"command": "gh run view 12345 --log-failed"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": ci_id,
+                        "is_error": False,
+                        "content": "FAILED test_something.py::test_foo\nAssertionError: expected True",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:01:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": commit_id,
+                        "name": "Bash",
+                        "input": {
+                            "command": "git commit fix.py -m 'fix(ci): address mypy error in signals.py'"
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:01:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": commit_id,
+                        "is_error": False,
+                        "content": commit_output,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["ci_fixed"] is True
+    assert len(sigs["git_commits"]) == 1
+
+
+def test_extract_signals_cc_ci_fixed_not_triggered_without_commits():
+    """ci_fixed=False when --log-failed returns failures but session has no commits."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange(
+            "gh run view 12345 --log-failed",
+            "FAILED test_something.py::test_foo\nAssertionError",
+        )
+    )
+    assert sigs["ci_fixed"] is False
+
+
+def test_extract_signals_cc_ci_fixed_not_triggered_on_empty_output():
+    """ci_fixed=False when --log-failed returns empty output (no failures)."""
+    # We need to also have a commit to confirm that empty output is the blocker
+    ci_id = "bash_ci_001"
+    commit_id = "bash_commit_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": ci_id,
+                        "name": "Bash",
+                        "input": {"command": "gh run view 12345 --log-failed"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": ci_id,
+                        "is_error": False,
+                        "content": "",  # empty = no failures
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:01:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": commit_id,
+                        "name": "Bash",
+                        "input": {"command": "git commit fix.py -m 'chore: update something'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:01:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": commit_id,
+                        "is_error": False,
+                        "content": "[master b2c3d4e] chore: update something",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["ci_fixed"] is False
+
+
+def test_extract_signals_cc_ci_fixed_grade_boost():
+    """ci_fixed contributes 0.8 effective units to grade_signals."""
+    base_sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 3},
+        "pr_merges": [],
+        "prs_submitted": [],
+        "issues_closed": 0,
+        "gh_interactions": 0,
+        "ci_fixed": False,
+    }
+    ci_fixed_sigs = {**base_sigs, "ci_fixed": True}
+    # ci_fixed session should grade higher
+    assert grade_signals(ci_fixed_sigs) > grade_signals(base_sigs)
+    # 0.8 effective units → should hit the 0.60 tier
+    assert grade_signals(ci_fixed_sigs) == pytest.approx(0.60)
+
+
+def test_is_productive_ci_fixed():
+    """is_productive returns True when ci_fixed is True, even with no other signals."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "pr_merges": [],
+        "issues_closed": 0,
+        "ci_fixed": True,
+    }
+    assert is_productive(sigs) is True
+
+
 def test_extract_signals_cc_pr_merge_grade():
     """PR merges score at 1.5x in grade_signals (above PR submit at 1.2x)."""
     # A session that merges one PR should grade higher than one that only submits one PR

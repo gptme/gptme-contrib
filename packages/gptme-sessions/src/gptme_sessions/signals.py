@@ -83,6 +83,12 @@ _GH_COMMENT_CMD_RE = re.compile(
 # Issues created (gh issue create — creation event, analogous to prs_submitted)
 _GH_ISSUE_CREATE_CMD_RE = re.compile(r"\bgh\s+issue\s+create\b")
 
+# Regex for CI failure investigation: `gh run view --log-failed` examines failing CI logs.
+# Detecting this command confirms the agent actively investigated a CI failure (not just
+# glanced at the summary). Only credited when the check returns non-empty output (real
+# failures found) AND the session subsequently produces commits (agent fixed something).
+_CI_FAILURE_LOG_CMD_RE = re.compile(r"gh\s+run\s+view\b.*--log-failed")
+
 
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
@@ -274,15 +280,17 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
 
     Based on ground-truth evidence from the transcript:
     - Git commits (strongest signal)
+    - PR merges (gh pr merge → counted as ~1.5 commits)
     - PRs submitted (gh pr create → counted as ~1.2 commits)
+    - CI fixed (gh run view --log-failed → fix → push → counted as ~0.8 commits)
     - Issues closed (blocker removal → counted as ~0.4 commits)
     - File writes / patches
     - Error rate penalty
     - Retry penalty
 
     Uses *effective_units* = commits + 1.5*pr_merges + 1.2*prs_submitted + 0.4*issues_closed
-    so that sessions with no direct commits but high forward progress (e.g.
-    submitting two PRs in worktrees, or merging reviewed PRs) are graded
+    + 0.8*ci_fixed so that sessions with no direct commits but high forward progress
+    (e.g. submitting two PRs in worktrees, or merging reviewed PRs) are graded
     comparably to commit-producing sessions.
 
     Args:
@@ -307,18 +315,22 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
     # GitHub interactions (PR reviews, issue comments) count as productive work
     gh_interactions = signals.get("gh_interactions", 0)
 
-    # Forward-progress signals: PR merges, submissions, and issue closures.
+    # Forward-progress signals: PR merges, submissions, issue closures, and CI fixes.
     # These represent high-value work that may not produce direct commits
     # (e.g. PRs submitted from /tmp/worktrees without touching the main repo).
     pr_merges = len(signals.get("pr_merges", []))
     prs_submitted = len(signals.get("prs_submitted", []))
     issues_closed = signals.get("issues_closed", 0)
+    ci_fixed = int(signals.get("ci_fixed", False))
 
     # Effective work units: weighted sum of all forward-progress signals.
-    # Weights reflect relative value: merge=1.5, commit=1.0, PR submit=1.2, issue close=0.4.
+    # Weights: merge=1.5, commit=1.0, PR submit=1.2, ci_fixed=0.8, issue close=0.4.
     # Merges scored above commits because they close a review loop (PR submit + reviewer feedback
-    # + address + merge). PR submission scored above a commit for similar compound-work reasons.
-    effective_units = commits + 1.5 * pr_merges + 1.2 * prs_submitted + 0.4 * issues_closed
+    # + address + merge). CI fix scored at 0.8 commits: significant debugging work (log
+    # investigation, root-cause analysis, fix, push) but may produce only 1 small commit.
+    effective_units = (
+        commits + 1.5 * pr_merges + 1.2 * prs_submitted + 0.4 * issues_closed + 0.8 * ci_fixed
+    )
 
     # Categories where gh_interactions and file_writes are the PRIMARY output,
     # not commits. For these, a single useful interaction is sufficient for the
@@ -373,6 +385,7 @@ def is_productive(signals: dict) -> bool:
         or signals.get("prs_submitted")  # any PR submitted = productive
         or signals.get("pr_merges")  # any PR merged = productive
         or signals.get("issues_closed", 0) >= 1  # confirmed issue close = productive
+        or signals.get("ci_fixed", False)  # CI failure investigated and fixed = productive
     )
 
 
@@ -417,6 +430,11 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     issues_created: int = 0  # count of gh issue create commands
     _pr_create_pending: set[str] = set()  # tool_use_ids awaiting pr create result
     _issue_close_pending: set[str] = set()  # tool_use_ids awaiting issue close result
+    # CI fix tracking: detect sessions that investigated CI failures and then pushed fixes.
+    # Credited when: (1) gh run view --log-failed returns non-empty output (real failures),
+    # AND (2) the session produces git commits (agent actually fixed something).
+    _ci_failure_check_pending: set[str] = set()  # tool_use_ids awaiting CI failure log result
+    _ci_failure_found: bool = False  # True when a --log-failed check returned non-empty output
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -499,6 +517,12 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     if _ISSUE_CLOSE_CMD_RE.search(cmd):
                         if tool_id:
                             _issue_close_pending.add(tool_id)
+
+                    # Track CI failure log checks for output-side confirmation.
+                    # gh run view --log-failed returns non-empty output when failures exist.
+                    if _CI_FAILURE_LOG_CMD_RE.search(cmd):
+                        if tool_id:
+                            _ci_failure_check_pending.add(tool_id)
 
                     # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
@@ -658,9 +682,22 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         _issue_close_pending.discard(tool_use_id)
                         issues_closed += 1
 
+                    # CI failure log check confirmation: non-empty output means failures exist.
+                    # We don't require a subsequent CI pass in the same session — committing
+                    # after finding failures is sufficient evidence of debugging/fix work.
+                    if tool_use_id in _ci_failure_check_pending:
+                        _ci_failure_check_pending.discard(tool_use_id)
+                        if result_str.strip():
+                            _ci_failure_found = True
+
     duration_s = 0
     if len(timestamps) >= 2:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    # ci_fixed: True when the session investigated CI failures (--log-failed returned
+    # non-empty output) AND produced commits (agent actually fixed the failure).
+    # Session-level signal (not per-cycle) since most sessions address one CI issue.
+    ci_fixed = _ci_failure_found and bool(git_commits)
 
     # pr_merges entries in deliverables: "merge PR #N" format for readability
     deliverables = list(
@@ -696,6 +733,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "reviews_submitted": reviews_submitted,
         "comments_posted": comments_posted,
         "issues_created": issues_created,
+        "ci_fixed": ci_fixed,
         "deliverables": deliverables,
     }
 
