@@ -54,29 +54,24 @@ import os
 import sys
 from datetime import datetime, timedelta
 from functools import lru_cache
-from pathlib import Path
 
 import click
 import tweepy
 from dotenv import load_dotenv
-from rich.console import Console
-
-# Add parent directory to path for imports
-_SCRIPT_DIR = Path(__file__).parent
-_SCRIPTS_DIR = _SCRIPT_DIR.parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-# Import shared utilities (type: ignore for mypy - paths are dynamic)
-from communication_utils.auth import (  # noqa: E402
+from gptmail.communication_utils.auth import (  # type: ignore[import-not-found]
     run_oauth_callback,
     save_token_to_env,
 )
-from communication_utils.auth.oauth import OAuthManager  # noqa: E402
-from communication_utils.auth.tokens import TokenInfo  # noqa: E402
-from communication_utils.messaging import (  # noqa: E402
+from gptmail.communication_utils.auth.oauth import (  # type: ignore[import-not-found]
+    OAuthManager,
+)
+from gptmail.communication_utils.auth.tokens import (  # type: ignore[import-not-found]
+    TokenInfo,
+)
+from gptmail.communication_utils.messaging import (  # type: ignore[import-not-found]
     split_thread,
 )
+from rich.console import Console
 
 DEFAULT_SINCE = "7d"
 DEFAULT_LIMIT = 10

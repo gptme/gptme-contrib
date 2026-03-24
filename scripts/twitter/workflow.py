@@ -34,8 +34,6 @@ from pathlib import Path as _Path
 # Add current directory to path FIRST so local twitter/ is found
 # This prevents conflict with any installed 'twitter' package
 sys.path.insert(0, str(_Path(__file__).parent))
-# Add parent directory for shared communication_utils
-sys.path.insert(0, str(_Path(__file__).parent.parent))
 
 import json
 import logging
@@ -55,7 +53,10 @@ import click
 import yaml
 
 # Import monitoring utilities
-from communication_utils.monitoring import MetricsCollector, get_logger
+from gptmail.communication_utils.monitoring import (  # type: ignore[import-not-found]
+    MetricsCollector,
+    get_logger,
+)
 from gptme.init import init as init_gptme
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
