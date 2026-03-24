@@ -113,21 +113,12 @@ class ClaudeCodeExecutor(Executor):
     Invokes `claude -p` with the given prompt. Handles the CLAUDECODE
     env var to allow nesting (running claude from within a claude session).
 
-    For autonomous operation (run loops), passes --dangerously-skip-permissions
-    so the agent can execute tools without human approval. This flag is required
-    for non-interactive tool execution in Claude Code.
+    Run loops are non-interactive by design, so always pass
+    --dangerously-skip-permissions to allow tool execution without human
+    approval.
     """
 
     name = "claude-code"
-
-    def __init__(self, *, skip_permissions: bool = True):
-        """Initialize Claude Code executor.
-
-        Args:
-            skip_permissions: Pass --dangerously-skip-permissions for autonomous
-                tool execution. Default True since run loops are non-interactive.
-        """
-        self._skip_permissions = skip_permissions
 
     @property
     def _binary_name(self) -> str:
@@ -160,10 +151,7 @@ class ClaudeCodeExecutor(Executor):
                 "and will be ignored."
             )
 
-        cmd = ["claude", "-p", prompt]
-
-        if self._skip_permissions:
-            cmd.append("--dangerously-skip-permissions")
+        cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
 
         if system_prompt_file and system_prompt_file.exists():
             cmd += ["--append-system-prompt", system_prompt_file.read_text()]
