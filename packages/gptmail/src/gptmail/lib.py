@@ -477,7 +477,7 @@ class AgentEmail:
         # Strip quoted content (lines starting with >) to avoid false positives
         # from quoted email footers (e.g. GitHub notification links in replies)
         original_lines = content.split("\n")
-        unquoted_lines = [line for line in original_lines if not line.startswith(">")]
+        unquoted_lines = [line for line in original_lines if not line.lstrip().startswith(">")]
         content_lower = "\n".join(unquoted_lines).lower()
 
         for pattern in notification_patterns:
