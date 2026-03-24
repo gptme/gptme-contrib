@@ -147,6 +147,18 @@ class LessonValidator:
         """Check for required YAML frontmatter and validate structure.
 
         Ensures frontmatter exists, is valid YAML, and contains only allowed fields.
+
+        Frontmatter philosophy — only stable, human-authored metadata belongs here:
+        - ``match`` / ``status``: Core lesson routing and lifecycle fields.
+        - ``automated_by`` / ``automated_date``: Set once when a lesson is automated.
+        - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
+        - ``archived_reason`` / ``archived_date``: Set once on archival.
+
+        Do NOT add auto-computed or frequently-updated scores here (e.g. ``confidence``,
+        ``effectiveness``, ``score``).  Such values are recalculated on every analysis
+        run, which would produce a noisy stream of lesson-file diffs and make git history
+        hard to read.  Store them in dedicated state files instead
+        (e.g. ``state/lesson-confidence/``).
         """
         if not self.content.startswith("---"):
             self.errors.append("Missing YAML frontmatter")
@@ -162,7 +174,7 @@ class LessonValidator:
                 self.errors.append("Empty frontmatter")
                 return
 
-            # Check for minimal frontmatter (should primarily be 'match' with keywords)
+            # Only stable, human-authored fields are allowed — see docstring above.
             allowed_fields = {
                 "match",
                 "status",
