@@ -148,7 +148,7 @@ class LessonValidator:
 
         Ensures frontmatter exists, is valid YAML, and contains only allowed fields.
 
-        Frontmatter philosophy — only stable, human-authored metadata belongs here:
+        Frontmatter philosophy — only stable, write-once metadata belongs here:
         - ``match`` / ``status``: Core lesson routing and lifecycle fields.
         - ``automated_by`` / ``automated_date``: Set once when a lesson is automated.
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
@@ -174,7 +174,7 @@ class LessonValidator:
                 self.errors.append("Empty frontmatter")
                 return
 
-            # Only stable, human-authored fields are allowed — see docstring above.
+            # Only stable, write-once fields are allowed — see docstring above.
             allowed_fields = {
                 "match",
                 "status",
