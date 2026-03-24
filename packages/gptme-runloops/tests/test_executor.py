@@ -163,6 +163,7 @@ def test_claude_code_executor_basic_execution():
         assert cmd[0] == "claude"
         assert cmd[1] == "-p"
         assert cmd[2] == "test prompt"
+        assert "--dangerously-skip-permissions" in cmd
 
 
 def test_claude_code_executor_strips_claudecode_env():

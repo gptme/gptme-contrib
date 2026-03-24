@@ -112,6 +112,9 @@ class ClaudeCodeExecutor(Executor):
 
     Invokes `claude -p` with the given prompt. Handles the CLAUDECODE
     env var to allow nesting (running claude from within a claude session).
+
+    Always passes --dangerously-skip-permissions to allow tool execution
+    without prompting.
     """
 
     name = "claude-code"
@@ -147,7 +150,7 @@ class ClaudeCodeExecutor(Executor):
                 "and will be ignored."
             )
 
-        cmd = ["claude", "-p", prompt]
+        cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
 
         if system_prompt_file and system_prompt_file.exists():
             cmd += ["--append-system-prompt", system_prompt_file.read_text()]
