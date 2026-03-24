@@ -86,11 +86,11 @@ Agents running in server contexts should use `pass` instead:
 # Install pass
 sudo apt install pass
 
-# Initialize a GPG key for the agent (no passphrase — required for autonomous contexts)
+# Initialize a GPG key for the agent (no passphrase)
 gpg --batch --gen-key <<EOF
 Key-Type: RSA
 Key-Length: 4096
-Name-Real: Alice Agent
+Name-Real: Your Agent Name
 Name-Email: agent@example.com
 Expire-Date: 0
 %no-protection
@@ -99,9 +99,8 @@ EOF
 # Initialize the password store
 pass init "agent@example.com"
 
-# Store the email password
+# Store the email password (type it interactively when prompted)
 pass insert email/agent-account
-# (or: echo "mypassword" | pass insert --echo email/agent-account)
 ```
 
 Then reference it in your mail config files:
