@@ -35,6 +35,11 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).parent))
 # Add parent directory so `from twitter.llm import ...` resolves to scripts/twitter/
 sys.path.insert(0, str(_Path(__file__).parent.parent))
+# Add the packaged twitter source so workflow can share the stable client layer.
+sys.path.insert(
+    0,
+    str(_Path(__file__).resolve().parents[2] / "packages" / "gptwitter" / "src"),
+)
 
 import json
 import logging
@@ -59,6 +64,10 @@ from gptmail.communication_utils.monitoring import (  # type: ignore[import-not-
     get_logger,
 )
 from gptme.init import init as init_gptme
+from gptwitter.api import (  # type: ignore[import-not-found]
+    cached_get_me,
+    load_twitter_client,
+)
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from trusted_users import is_trusted_user  # type: ignore
@@ -68,7 +77,6 @@ from twitter.llm import (
     process_tweet,
     verify_draft,
 )
-from twitter.twitter import cached_get_me, load_twitter_client
 
 logger = get_logger(__name__, "twitter")
 metrics = MetricsCollector()

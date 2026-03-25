@@ -7,6 +7,10 @@ from pathlib import Path
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[2] / "packages" / "gptwitter" / "src"),
+)
 
 from dotenv import load_dotenv
 
@@ -18,14 +22,16 @@ load_dotenv(override=True)
 
 def get_twitter_client():
     """Get authenticated Twitter client using OAuth 2.0."""
-    from twitter.twitter import load_twitter_client
+    from gptwitter.api import load_twitter_client  # type: ignore[import-not-found]
 
     return load_twitter_client(require_auth=True)
 
 
 def get_my_user_id(client):
     """Get my user ID."""
-    me = client.get_me(user_auth=False)  # Use OAuth 2.0
+    from gptwitter.api import cached_get_me
+
+    me = cached_get_me(client, user_auth=False)
     if me.data:
         return me.data.id
     return None
