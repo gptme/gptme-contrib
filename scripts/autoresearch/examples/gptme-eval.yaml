@@ -1,0 +1,38 @@
+# Example autoresearch experiment: gptme eval improvement
+#
+# Iteratively improves gptme's pass rate on an eval suite by proposing
+# code changes, running the eval, and keeping changes that improve the score.
+#
+# Usage:
+#   ARTIFACT_DIR=/path/to/gptme ./scripts/autoresearch/autoresearch-loop.sh gptme-eval
+#
+# Or set artifact_dir below to avoid the env var.
+
+# The eval suite to run (must be a valid gptme eval suite name)
+suite: practical5
+
+# Budget: max iterations per 24h period
+period_budget: 15
+
+# Model candidates for the agent (tries in order, skips if quota exhausted)
+model_candidates: openrouter/anthropic/claude-sonnet-4-6
+
+# Model candidates for running the eval (cheaper/faster models preferred)
+eval_model_candidates: openrouter/anthropic/claude-sonnet-4-6
+
+# Path to the gptme repo being improved (required — no default)
+# artifact_dir: /path/to/gptme
+
+# Agent harness: which runner to use (gptme or claude-code)
+agent_harness: gptme
+
+# Program spec: instruction file for the agent (default: gptme-eval-program.md)
+# program_spec: scripts/autoresearch/examples/gptme-eval-program.md
+
+# Auto-create PR when best_score - baseline_score >= this value
+publish_threshold: 0.05
+
+# Self-diagnose after N consecutive rejections
+diagnosis_after_stuck_iters: 5
+
+enabled: true
