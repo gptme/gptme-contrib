@@ -7,15 +7,21 @@
 # total is reached (experiment is considered complete — not just paused until tomorrow).
 #
 # Usage:
-#   autoresearch-loop.sh [EXPERIMENT]
-#   EXPERIMENT defaults to "gptme-practical5"
+#   autoresearch-loop.sh EXPERIMENT
+#   Or set EXPERIMENT env var before calling.
 #
 # As a persistent service (Type=simple), this loops forever. systemd restart policy
 # handles crashes. The experiment name is passed as the first argument (or via env).
 
 set -euo pipefail
 
-EXPERIMENT="${1:-${EXPERIMENT:-gptme-practical5}}"
+EXPERIMENT="${1:-${EXPERIMENT:-}}"
+if [[ -z "${EXPERIMENT}" ]]; then
+    echo "ERROR: EXPERIMENT name required. Usage: $(basename "$0") EXPERIMENT" >&2
+    echo "  Example: $(basename "$0") gptme-eval" >&2
+    echo "  See experiments/ for available configs." >&2
+    exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
 STATE_DIR="${REPO_ROOT}/state/autoresearch"

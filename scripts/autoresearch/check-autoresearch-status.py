@@ -83,8 +83,8 @@ def get_last_review_time() -> str:
 
 
 def get_score_delta_from_log() -> str:
-    """Read the latest overnight log and extract score progression."""
-    logs = list(STATE_DIR.glob("overnight-*.log")) + list(STATE_DIR.glob("iter_*.log"))
+    """Read the latest session log and extract score progression."""
+    logs = list(STATE_DIR.glob("session_*_iter_*.log"))
     if not logs:
         return "no logs found"
     latest = max(logs, key=lambda p: p.stat().st_mtime)

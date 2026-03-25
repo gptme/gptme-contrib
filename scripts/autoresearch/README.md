@@ -132,6 +132,7 @@ cat state/autoresearch/budget/*.json | python3 -m json.tool
 | `BRANCH` | merge-reject | Branch for commits (default: `autoresearch/eval-improvement`) |
 | `MAX_ITERATIONS` | merge-reject | Max iterations per run |
 | `PUBLISH_THRESHOLD` | merge-reject | Min score delta for auto-PR |
+| `GITHUB_REPO` | merge-reject | Target repo for auto-filed issues and PRs (default: `gptme/gptme`) |
 | `AUTORESEARCH_STATE_DIR` | check-status | State directory path |
 
 ## Examples

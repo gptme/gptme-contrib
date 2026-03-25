@@ -614,7 +614,7 @@ The autoresearch loop ran **${CONSECUTIVE_REJECTIONS} consecutive rejections** w
 See: \`state/autoresearch/session_${SESSION_ID}_diagnosis_iter${stuck_at_iter}.txt\`
 
 *Auto-filed by autoresearch self-diagnosis — operator review requested*" \
-            --label "bug" 2>&1 >&2 || echo "Warning: failed to file GitHub issue" >&2
+            --label "bug" >&2 2>&1 || echo "Warning: failed to file GitHub issue" >&2
     fi
 
     # Return only the next_focus suggestion to stdout (captured by caller)
@@ -889,20 +889,33 @@ ${CROSS_SESSION_HISTORY}${WITHIN_SESSION_HISTORY}"
     fi
 
     # Log iteration result (session log + cross-session history)
-    _iter_record="$(python3 -c "
-import json, sys
+    # Use env vars to avoid single-quote injection from filenames in CHANGED_FILES
+    _iter_record="$(
+        _AR_SESSION="${SESSION_ID}" \
+        _AR_ITER="${i}" \
+        _AR_BEFORE="${PREV_BEST_SCORE}" \
+        _AR_NEW="${NEW_SCORE}" \
+        _AR_STATUS="${STATUS}" \
+        _AR_BEFORE_COMMIT="${BEFORE_COMMIT}" \
+        _AR_COMMIT="$(git rev-parse HEAD)" \
+        _AR_EVAL_MODEL="${NEW_EVAL_MODEL}" \
+        _AR_AGENT_MODEL="$(cat "${ITER_LOG}.model" 2>/dev/null || true)" \
+        _AR_FILES="${CHANGED_FILES}" \
+        python3 -c "
+import json, os
 print(json.dumps({
-    'session': '${SESSION_ID}',
-    'iteration': ${i},
-    'before_score': '${PREV_BEST_SCORE}',
-    'new_score': '${NEW_SCORE}',
-    'status': '${STATUS}',
-    'before_commit': '${BEFORE_COMMIT}',
-    'commit': '$(git rev-parse HEAD)',
-    'eval_model': '${NEW_EVAL_MODEL}',
-    'agent_model': '$(cat "${ITER_LOG}.model" 2>/dev/null || true)',
-    'files': '${CHANGED_FILES}',
-}))")"
+    'session': os.environ['_AR_SESSION'],
+    'iteration': int(os.environ['_AR_ITER']),
+    'before_score': os.environ['_AR_BEFORE'],
+    'new_score': os.environ['_AR_NEW'],
+    'status': os.environ['_AR_STATUS'],
+    'before_commit': os.environ['_AR_BEFORE_COMMIT'],
+    'commit': os.environ['_AR_COMMIT'],
+    'eval_model': os.environ['_AR_EVAL_MODEL'],
+    'agent_model': os.environ['_AR_AGENT_MODEL'],
+    'files': os.environ['_AR_FILES'],
+}))"
+    )"
     echo "${_iter_record}" >> "${SESSION_LOG}"
     echo "${_iter_record}" >> "${ATTEMPT_HISTORY_FILE}" 2>/dev/null || true
 done

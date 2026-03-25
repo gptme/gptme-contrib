@@ -190,7 +190,7 @@ class TestScoreDelta:
     def test_extracts_score_lines(self, tmp_path: Path):
         """Extracts score-related lines from log file."""
         state_dir = tmp_path / "state"
-        log_file = state_dir / "overnight-test.log"
+        log_file = state_dir / "session_20260101_120000_iter_1.log"
         log_file.write_text(
             "Starting iteration 1\n"
             "Baseline: 0.667\n"
