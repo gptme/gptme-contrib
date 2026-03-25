@@ -1,6 +1,7 @@
 """Tests for gptme-sessions package."""
 
 import json
+import logging
 from pathlib import Path
 
 from gptme_sessions import SessionRecord, SessionStore
@@ -2933,6 +2934,25 @@ def test_post_session_metadata_fields(tmp_path: Path):
     assert r.duration_seconds == 2700
     assert r.journal_path == "/home/bob/bob/journal/2026-01-01/session.md"
     assert r.session_id == "test1234"
+
+
+def test_post_session_warns_on_duplicate_journal_path(tmp_path: Path, caplog):
+    """Duplicate journal_path reuse across session_ids logs a warning."""
+    store = SessionStore(sessions_dir=tmp_path)
+    journal_path = "/home/bob/bob/journal/2026-03-25/autonomous-session-abcd.md"
+    store.append(SessionRecord(harness="gptme", session_id="first", journal_path=journal_path))
+
+    with caplog.at_level(logging.WARNING):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            journal_path=journal_path,
+            session_id="second",
+        )
+
+    assert result.record.journal_path == journal_path
+    assert "already used by other session_ids" in caplog.text
+    assert "first" in caplog.text
 
 
 def test_post_session_noop_overridden_by_deliverables(tmp_path: Path):

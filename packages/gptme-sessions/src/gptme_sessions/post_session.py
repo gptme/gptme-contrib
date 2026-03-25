@@ -302,6 +302,18 @@ def post_session(
         record_kwargs["trajectory_grade"] = grade
 
     record = SessionRecord(**record_kwargs)
+    if journal_path is not None:
+        existing_session_ids = [
+            r.session_id
+            for r in store.load_all()
+            if r.journal_path == journal_path and r.session_id != record.session_id
+        ]
+        if existing_session_ids:
+            logger.warning(
+                "journal_path %s already used by other session_ids: %s",
+                journal_path,
+                ", ".join(existing_session_ids[:8]),
+            )
     store.append(record)
 
     return PostSessionResult(
