@@ -1335,17 +1335,16 @@ def test_extract_signals_cc_pr_merge_no_false_positive_from_file_read():
     """
     # A Read of a test file that contains example pr-merge output strings
     fixture_content = (
-        "def test_merge():\n"
+        'def test_merge():\n'
         '    assert "✓ Squashed and merged pull request #1725" in output\n'
         '    assert "✓ Squashed and merged pull request #42" in other\n'
     )
     # Use a cat command (not gh pr merge) — simulates reading a test file
-    msgs = _make_bash_exchange(
-        "cat packages/gptme-sessions/tests/test_sessions.py", fixture_content
-    )
+    msgs = _make_bash_exchange("cat packages/gptme-sessions/tests/test_sessions.py", fixture_content)
     sigs = extract_signals_cc(msgs)
     assert sigs["pr_merges"] == [], (
-        "Reading test fixtures must not credit pr_merges: " f"got {sigs['pr_merges']}"
+        "Reading test fixtures must not credit pr_merges: "
+        f"got {sigs['pr_merges']}"
     )
 
 
@@ -1362,15 +1361,13 @@ def test_extract_signals_cc_git_commits_deduplicated_across_tool_calls():
     commit_line = f"[master {hash_val}] {commit_msg}\n 3 files changed, 10 insertions(+)"
 
     # Two separate Bash calls both returning output that contains the same commit
-    first_call = _make_bash_exchange(
-        "git commit -m 'feat: my feature'", commit_line, bash_id="bash_001"
-    )
+    first_call = _make_bash_exchange("git commit -m 'feat: my feature'", commit_line, bash_id="bash_001")
     second_call = _make_bash_exchange("git show HEAD --stat", commit_line, bash_id="bash_002")
     msgs = first_call + second_call
     sigs = extract_signals_cc(msgs)
-    assert sigs["git_commits"] == [
-        f"{commit_msg} ({hash_val})"
-    ], f"Expected exactly 1 commit entry, got: {sigs['git_commits']}"
+    assert sigs["git_commits"] == [f"{commit_msg} ({hash_val})"], (
+        f"Expected exactly 1 commit entry, got: {sigs['git_commits']}"
+    )
 
 
 def test_grade_signals_dead_session():
