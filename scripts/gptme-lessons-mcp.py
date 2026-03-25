@@ -149,10 +149,13 @@ def load_lesson(
     )
 
     # Attach effectiveness score if available
-    # Key by "category/stem" (matches Lesson.id) to avoid collisions across categories
+    # Try "category/stem" first (avoids collisions), fall back to bare stem
     if effectiveness:
         lesson_key = f"{path.parent.name}/{path.stem}"
-        lesson.effectiveness_score = effectiveness.get(lesson_key)
+        score = effectiveness.get(lesson_key)
+        if score is None:
+            score = effectiveness.get(path.stem)
+        lesson.effectiveness_score = score
 
     return lesson
 
@@ -165,10 +168,19 @@ def load_lessons(lessons_dir: Path, state_file: Path | None = None) -> list[Less
     if state_file and state_file.exists():
         try:
             data = json.loads(state_file.read_text())
-            # Expected format: {"category/stem": score, ...} (e.g. "workflow/autonomous-run")
-            effectiveness = {
-                k: v for k, v in data.items() if isinstance(v, int | float)
-            }
+            if "results" in data and isinstance(data["results"], list):
+                # LOO state format: {"meta": ..., "results": [{"path": stem, "delta": score}]}
+                effectiveness = {
+                    r["path"]: r["delta"]
+                    for r in data["results"]
+                    if isinstance(r.get("path"), str)
+                    and isinstance(r.get("delta"), int | float)
+                }
+            else:
+                # Simple dict format: {"category/stem": score}
+                effectiveness = {
+                    k: v for k, v in data.items() if isinstance(v, int | float)
+                }
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -362,11 +374,20 @@ def main():
         default=Path(__file__).parent.parent / "lessons",
         help="Path to lessons directory (default: ../lessons)",
     )
+    # Auto-discover LOO state file relative to lessons-dir (agent workspace convention)
+    _default_loo = (
+        Path(__file__).parent.parent / "state" / "lesson-thompson" / "loo-results.json"
+    )
     parser.add_argument(
         "--effectiveness-file",
         type=Path,
-        default=None,
-        help="Path to JSON file with lesson effectiveness scores",
+        default=_default_loo if _default_loo.exists() else None,
+        help=(
+            "Path to JSON file with lesson effectiveness scores. "
+            "Supports both {'category/stem': score} and the LOO state format "
+            "({'results': [{'path': stem, 'delta': score}]}). "
+            f"Auto-detected from: {_default_loo}"
+        ),
     )
     parser.add_argument(
         "--list",
