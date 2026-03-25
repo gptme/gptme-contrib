@@ -70,7 +70,7 @@ if [[ -n "${PROGRAM_SPEC:-}" ]]; then
         PROGRAM_SPEC="${REPO_ROOT}/${PROGRAM_SPEC}"
     fi
 else
-    PROGRAM_SPEC="${SCRIPT_DIR}/gptme-eval-program.md"
+    PROGRAM_SPEC="${SCRIPT_DIR}/examples/gptme-eval-program.md"
 fi
 
 # Parse args

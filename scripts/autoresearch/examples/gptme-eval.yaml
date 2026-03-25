@@ -26,7 +26,7 @@ eval_model_candidates: openrouter/anthropic/claude-sonnet-4-6
 # Agent harness: which runner to use (gptme or claude-code)
 agent_harness: gptme
 
-# Program spec: instruction file for the agent (default: gptme-eval-program.md)
+# Program spec: instruction file for the agent (default: examples/gptme-eval-program.md)
 # program_spec: scripts/autoresearch/examples/gptme-eval-program.md
 
 # Auto-create PR when best_score - baseline_score >= this value
