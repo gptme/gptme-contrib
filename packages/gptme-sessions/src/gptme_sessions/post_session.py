@@ -319,7 +319,7 @@ def post_session(
                 logger.warning(
                     "journal_path %s already used by other session_ids: %s%s",
                     journal_path,
-                    ", ".join(truncated),
+                    ", ".join(str(sid) for sid in truncated),
                     suffix,
                 )
         except Exception as e:
