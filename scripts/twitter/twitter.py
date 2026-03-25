@@ -245,6 +245,10 @@ def load_twitter_client(
                     console.print(
                         "[yellow]Starting new OAuth 2.0 flow to get complete credentials..."
                     )
+            elif headless:
+                console.print(
+                    "[yellow]No saved OAuth 2.0 token in headless mode — skipping interactive OAuth 2.0, falling back to OAuth 1.0a"
+                )
 
             if not headless:
                 try:
