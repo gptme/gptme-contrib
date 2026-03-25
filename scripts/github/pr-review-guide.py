@@ -69,6 +69,13 @@ LOCKFILE_PATTERNS = {
 
 _ALLOWED_CI_CONCLUSIONS = {"SUCCESS", "SKIPPED", "NEUTRAL"}
 
+_CATEGORY_ICONS: dict[str, str] = {
+    "quick": "⚡",
+    "normal": "📋",
+    "deep": "🔍",
+    "heavy": "🏋️",
+}
+
 
 def get_tracked_repos() -> list[str]:
     """Return repos to scan, from env var or defaults."""
@@ -446,9 +453,7 @@ def estimate_review(
 
 def format_estimate(est: ReviewEstimate, rank: int) -> str:
     """Format a single estimate for display."""
-    icon = {"quick": "⚡", "normal": "📋", "deep": "🔍", "heavy": "🏋️"}.get(
-        est.category, "📋"
-    )
+    icon = _CATEGORY_ICONS.get(est.category, "📋")
 
     lines = [
         f"  {rank}. {icon} [{est.category.upper()}] {est.repo}#{est.number} "
@@ -472,9 +477,7 @@ def format_context(estimates: list[ReviewEstimate]) -> str:
     """Compact format for context injection."""
     lines = ["PR Review Guide (easiest first):"]
     for i, est in enumerate(estimates, 1):
-        icon = {"quick": "⚡", "normal": "📋", "deep": "🔍", "heavy": "🏋️"}.get(
-            est.category, "📋"
-        )
+        icon = _CATEGORY_ICONS.get(est.category, "📋")
         ci = "✅" if est.ci_green else "❌"
         conflict = " ⚠️CONFLICT" if est.has_conflicts else ""
         lines.append(
@@ -582,6 +585,9 @@ def main() -> int:
     )
     print()
 
+    # Pre-compute global rank map to avoid O(n²) list.index() calls
+    rank_map = {id(e): i + 1 for i, e in enumerate(estimates)}
+
     # Group by category
     for category, label in [
         ("quick", "⚡ QUICK REVIEWS (start here)"),
@@ -599,7 +605,7 @@ def main() -> int:
         print()
 
         for e in cat_estimates:
-            global_rank = estimates.index(e) + 1
+            global_rank = rank_map[id(e)]
             print(format_estimate(e, global_rank))
             print()
 
