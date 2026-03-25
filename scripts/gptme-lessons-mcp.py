@@ -165,11 +165,10 @@ def load_lessons(lessons_dir: Path, state_file: Path | None = None) -> list[Less
     if state_file and state_file.exists():
         try:
             data = json.loads(state_file.read_text())
-            # Expected format: {"lesson_name.md": score, ...}
+            # Expected format: {"category/stem": score, ...} (e.g. "workflow/autonomous-run")
             effectiveness = {
                 k: v for k, v in data.items() if isinstance(v, int | float)
             }
-            # Expected format: {"category/stem": score, ...} (e.g. "workflow/autonomous-run")
         except (json.JSONDecodeError, OSError):
             pass
 
