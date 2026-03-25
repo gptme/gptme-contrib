@@ -386,7 +386,7 @@ def main():
             "Path to JSON file with lesson effectiveness scores. "
             "Supports both {'category/stem': score} and the LOO state format "
             "({'results': [{'path': stem, 'delta': score}]}). "
-            f"Auto-detected: {_default_loo} (present: {_default_loo.exists()})"
+            f"Auto-detected from: {_default_loo}"
         ),
     )
     parser.add_argument(
