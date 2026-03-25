@@ -32,7 +32,7 @@ Mypy requires explicit source paths in its configuration to discover packages, e
 ```toml
 # In pyproject.toml
 [tool.mypy]
-mypy_path = "packages/metaproductivity/src,packages/context/src,packages/NEW_PACKAGE/src"
+mypy_path = "packages/package-a/src,packages/package-b/src,packages/NEW_PACKAGE/src"
 ```
 
 ## Outcome
