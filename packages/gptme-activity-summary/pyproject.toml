@@ -44,7 +44,8 @@ test = [
 ]
 
 [project.scripts]
-summarize = "gptme_activity_summary.cli:main"
+gptme-activity-summary = "gptme_activity_summary.cli:main"
+summarize = "gptme_activity_summary.cli:main"  # deprecated alias
 
 [build-system]
 requires = ["hatchling"]
