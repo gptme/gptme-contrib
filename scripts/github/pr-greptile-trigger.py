@@ -48,11 +48,14 @@ DEFAULT_GREPTILE_REPOS = [
     "gptme/gptme-cloud",
 ]
 
-# `needs-re-review` is the primary actionable state; `stale` and `none` are
-# kept for backward-compat but should not appear after PR #497 in gptme-contrib
-# (March 2026).  greptile-helper.sh never triggers initial reviews —
-# unreviewed PRs return `awaiting-initial-review`, not `none`.
-ACTIONABLE_STATES = {"none", "stale", "needs-re-review"}
+# `needs-re-review` is the primary actionable state; `stale` is kept because it
+# represents a stuck re-review cycle that may need a safe retry.
+#
+# Critically, `none` is NOT actionable. Treating `none` as actionable risks
+# reintroducing manual initial-review triggers if the helper ever regresses or a
+# legacy caller returns `none` for an unreviewed PR. Initial reviews must remain
+# auto-triggered by Greptile.
+ACTIONABLE_STATES = {"stale", "needs-re-review"}
 
 SAFE_HELPER = Path(__file__).with_name("greptile-helper.sh")
 
@@ -324,9 +327,7 @@ def _run(args: argparse.Namespace) -> int:
 
     print(f"PRs needing Greptile re-review: {len(actionable)}\n")
     for pr in actionable:
-        label = {"none": "⬜", "stale": "⚠️", "needs-re-review": "🔄"}.get(
-            pr.review_state, "•"
-        )
+        label = {"stale": "⚠️", "needs-re-review": "🔄"}.get(pr.review_state, "•")
         print(f"  {label} {pr.repo}#{pr.number}: {pr.title[:60]}")
 
     if not args.execute:
