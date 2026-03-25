@@ -28,6 +28,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -148,8 +149,10 @@ def load_lesson(
     )
 
     # Attach effectiveness score if available
+    # Key by "category/stem" (matches Lesson.id) to avoid collisions across categories
     if effectiveness:
-        lesson.effectiveness_score = effectiveness.get(path.name)
+        lesson_key = f"{path.parent.name}/{path.stem}"
+        lesson.effectiveness_score = effectiveness.get(lesson_key)
 
     return lesson
 
@@ -166,6 +169,7 @@ def load_lessons(lessons_dir: Path, state_file: Path | None = None) -> list[Less
             effectiveness = {
                 k: v for k, v in data.items() if isinstance(v, int | float)
             }
+            # Expected format: {"category/stem": score, ...} (e.g. "workflow/autonomous-run")
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -240,7 +244,7 @@ def build_server(lessons: list[Lesson]):
             for ls in cat_lessons:
                 eff = (
                     f" [eff={ls.effectiveness_score:.2f}]"
-                    if ls.effectiveness_score
+                    if ls.effectiveness_score is not None
                     else ""
                 )
                 lines.append(f"- `{ls.id}`: {ls.title}{eff}")
@@ -284,7 +288,7 @@ def build_server(lessons: list[Lesson]):
         for ls in results:
             eff = (
                 f" (effectiveness: {ls.effectiveness_score:.2f})"
-                if ls.effectiveness_score
+                if ls.effectiveness_score is not None
                 else ""
             )
             kws = ", ".join(ls.keywords[:3]) if ls.keywords else "none"
@@ -339,8 +343,6 @@ def build_server(lessons: list[Lesson]):
     @mcp.tool()
     def list_categories() -> str:
         """List all lesson categories with lesson counts."""
-        from collections import Counter
-
         counts = Counter(ls.category for ls in lessons if ls.status == "active")
         lines = ["Available lesson categories:\n"]
         for cat, count in sorted(counts.items()):
@@ -374,20 +376,29 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.lessons_dir.exists():
-        print(f"Error: lessons dir not found: {args.lessons_dir}", file=sys.stderr)
+    lessons_dir = args.lessons_dir.expanduser()
+    effectiveness_file = (
+        args.effectiveness_file.expanduser() if args.effectiveness_file else None
+    )
+
+    if not lessons_dir.exists():
+        print(f"Error: lessons dir not found: {lessons_dir}", file=sys.stderr)
         sys.exit(1)
 
-    lessons = load_lessons(args.lessons_dir, args.effectiveness_file)
+    lessons = load_lessons(lessons_dir, effectiveness_file)
 
     if args.list:
         for ls in lessons:
-            eff = f" [{ls.effectiveness_score:.2f}]" if ls.effectiveness_score else ""
+            eff = (
+                f" [{ls.effectiveness_score:.2f}]"
+                if ls.effectiveness_score is not None
+                else ""
+            )
             print(f"{ls.id}{eff}")
         print(f"\nTotal: {len(lessons)} lessons", file=sys.stderr)
         return
 
-    print(f"Loaded {len(lessons)} lessons from {args.lessons_dir}", file=sys.stderr)
+    print(f"Loaded {len(lessons)} lessons from {lessons_dir}", file=sys.stderr)
     mcp = build_server(lessons)
     mcp.run()
 
