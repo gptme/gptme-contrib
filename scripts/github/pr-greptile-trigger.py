@@ -268,6 +268,7 @@ def _run(args: argparse.Namespace) -> int:
     actionable = [p for p in all_prs if p.review_state in ACTIONABLE_STATES]
     in_progress = [p for p in all_prs if p.review_state == "in-progress"]
     awaiting = [p for p in all_prs if p.review_state == "awaiting-initial-review"]
+    none_state = [p for p in all_prs if p.review_state == "none"]
     errors = [p for p in all_prs if p.review_state == "error"]
 
     if args.status:
@@ -278,6 +279,8 @@ def _run(args: argparse.Namespace) -> int:
         print(f"  🔄 Actionable: {len(actionable)}")
         print(f"  ⏳ In progress: {len(in_progress)}")
         print(f"  🆕 Awaiting initial: {len(awaiting)}")
+        if none_state:
+            print(f"  ⬜ Legacy (none): {len(none_state)}")
         print(f"  ❌ Errors: {len(errors)}")
         print()
         for pr in all_prs:
