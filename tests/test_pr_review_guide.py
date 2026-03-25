@@ -278,6 +278,21 @@ def test_checks_green_rejects_completed_without_conclusion():
     assert not checks_green([{"status": "COMPLETED", "conclusion": None}])
 
 
+def test_checks_green_status_context_success():
+    """Legacy StatusContext with state=SUCCESS should be treated as green."""
+    assert checks_green([{"state": "SUCCESS"}])
+
+
+def test_checks_green_status_context_failure():
+    """Legacy StatusContext with state=FAILURE should not be green."""
+    assert not checks_green([{"state": "FAILURE"}])
+
+
+def test_checks_green_status_context_pending():
+    """Legacy StatusContext with state=PENDING should not be green."""
+    assert not checks_green([{"state": "PENDING"}])
+
+
 def test_estimate_review_marks_pending_ci_not_green():
     pr = _make_pr(loc=100)
     pr["statusCheckRollup"] = [{"status": "QUEUED", "conclusion": None}]

@@ -92,8 +92,14 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     for check in status_checks:
         conclusion = (check.get("conclusion") or "").upper()
         status = (check.get("status") or "").upper()
+        state = (check.get("state") or "").upper()  # StatusContext (legacy API)
+
+        # StatusContext path: no status/conclusion fields, use state directly
         if not status and not conclusion:
-            return False
+            if state not in ("SUCCESS", "NEUTRAL"):
+                return False
+            continue
+
         if status and status != "COMPLETED":
             return False
         if status == "COMPLETED" and not conclusion:
