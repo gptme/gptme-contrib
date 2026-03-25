@@ -46,6 +46,12 @@ DEFAULT_PER_REPO_LIMITS: dict[str, int] = {
     "gptme/gptme-agent-template": 2,
 }
 DEFAULT_PER_REPO_LIMIT = 2  # Fallback limit for repos not in DEFAULT_PER_REPO_LIMITS
+PR_LIST_LIMIT = 100
+
+
+def warn(message: str) -> None:
+    """Emit a warning to stderr without aborting the run."""
+    print(f"warn: {message}", file=sys.stderr)
 
 
 def get_per_repo_limits() -> dict[str, int]:
@@ -54,10 +60,20 @@ def get_per_repo_limits() -> dict[str, int]:
     env = os.environ.get("GPTME_PR_LIMITS", "")
     if env:
         try:
-            overrides: dict[str, int] = json.loads(env)
-            limits.update(overrides)
-        except json.JSONDecodeError:
-            pass
+            overrides = json.loads(env)
+        except json.JSONDecodeError as exc:
+            warn(f"invalid GPTME_PR_LIMITS JSON: {exc}")
+        else:
+            if not isinstance(overrides, dict):
+                warn("GPTME_PR_LIMITS must be a JSON object mapping repo to limit")
+            else:
+                for repo, limit in overrides.items():
+                    try:
+                        limits[str(repo)] = int(limit)
+                    except (TypeError, ValueError):
+                        warn(
+                            f"ignoring non-integer GPTME_PR_LIMITS entry for {repo!r}: {limit!r}"
+                        )
     return limits
 
 
@@ -68,25 +84,34 @@ PR_STALE_DAYS = 7
 PR_ANCIENT_DAYS = 14
 
 
-def run_gh(args: list[str]) -> str:
+def run_gh(args: list[str]) -> str | None:
     """Run a gh CLI command and return stdout."""
-    result = subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"gh command timed out: gh {' '.join(args)}")
+        return None
     if result.returncode != 0:
-        return ""
+        stderr = result.stderr.strip()
+        if stderr:
+            warn(f"gh {' '.join(args)} failed: {stderr}")
+        else:
+            warn(f"gh {' '.join(args)} failed with exit code {result.returncode}")
+        return None
     return result.stdout.strip()
 
 
 def get_gh_user() -> str:
     """Get the authenticated GitHub username."""
-    return run_gh(["api", "user", "-q", ".login"])
+    return run_gh(["api", "user", "-q", ".login"]) or ""
 
 
-def fetch_prs_for_repo(repo: str, author: str) -> list[dict[str, Any]]:
+def fetch_prs_for_repo(repo: str, author: str) -> list[dict[str, Any]] | None:
     """Fetch open PRs for a specific repo by author."""
     raw = run_gh(
         [
@@ -98,21 +123,32 @@ def fetch_prs_for_repo(repo: str, author: str) -> list[dict[str, Any]]:
             author,
             "--state",
             "open",
+            "--limit",
+            str(PR_LIST_LIMIT),
             "--json",
             "number,title,createdAt,updatedAt,reviewDecision,statusCheckRollup,headRefName,url",
         ]
     )
+    if raw is None:
+        return None
     if not raw:
-        return []
+        warn(f"empty response from gh pr list for {repo}")
+        return None
     try:
-        result: list[dict[str, Any]] = json.loads(raw)
-        return result
-    except json.JSONDecodeError:
-        return []
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        warn(f"invalid JSON from gh pr list for {repo}: {exc}")
+        return None
+    if not isinstance(result, list):
+        warn(f"unexpected gh pr list payload for {repo}: expected list")
+        return None
+    return result
 
 
-def parse_datetime(dt_str: str) -> datetime:
+def parse_datetime(dt_str: str) -> datetime | None:
     """Parse GitHub datetime string."""
+    if not dt_str:
+        return None
     for fmt in ["%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"]:
         try:
             dt = datetime.strptime(dt_str, fmt)
@@ -121,7 +157,7 @@ def parse_datetime(dt_str: str) -> datetime:
             return dt
         except ValueError:
             continue
-    return datetime.now(timezone.utc)
+    return None
 
 
 def get_ci_status(pr: dict[str, Any]) -> str:
@@ -163,8 +199,10 @@ def classify_age(days: float) -> str:
     return "ancient"
 
 
-def format_age(days: float) -> str:
+def format_age(days: float | None) -> str:
     """Human-readable age string."""
+    if days is None:
+        return "n/a"
     if days < 1:
         hours = int(days * 24)
         return f"{hours}h" if hours > 0 else "<1h"
@@ -213,7 +251,7 @@ def health_emoji(level: str) -> str:
     return {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(level, "⚪")
 
 
-def main() -> None:
+def main() -> int:
     args = set(sys.argv[1:])
     detail = "--detail" in args
     as_json = "--json" in args
@@ -225,7 +263,7 @@ def main() -> None:
             "Error: could not determine GitHub user (is gh CLI authenticated?)",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return 1
 
     tracked_repos = get_tracked_repos()
     per_repo_limits = get_per_repo_limits()
@@ -233,13 +271,25 @@ def main() -> None:
 
     all_prs: list[dict[str, Any]] = []
     repo_counts: dict[str, int] = {}
+    fetch_failures: list[str] = []
+    invalid_timestamp_prs = 0
 
     for repo in tracked_repos:
         prs = fetch_prs_for_repo(repo, user)
+        if prs is None:
+            fetch_failures.append(repo)
+            repo_counts[repo] = 0
+            continue
         repo_counts[repo] = len(prs)
         for pr in prs:
             created = parse_datetime(pr.get("createdAt", ""))
             updated = parse_datetime(pr.get("updatedAt", ""))
+            if created is None or updated is None:
+                invalid_timestamp_prs += 1
+                warn(
+                    f"skipping {repo}#{pr.get('number', '?')} due to invalid createdAt/updatedAt timestamp"
+                )
+                continue
             age_days = (now - created).total_seconds() / 86400
             idle_days = (now - updated).total_seconds() / 86400
 
@@ -260,12 +310,32 @@ def main() -> None:
                 }
             )
 
+    if fetch_failures and len(fetch_failures) == len(tracked_repos):
+        print(
+            "Error: failed to fetch PRs for all tracked repositories",
+            file=sys.stderr,
+        )
+        return 2
+    if fetch_failures:
+        warn(
+            "partial data: failed to fetch PRs for " + ", ".join(sorted(fetch_failures))
+        )
+    if invalid_timestamp_prs:
+        warn(
+            f"skipped {invalid_timestamp_prs} PRs with invalid timestamps when computing age-based metrics"
+        )
+
     all_prs.sort(key=lambda p: p["age_days"], reverse=True)
 
-    total = len(all_prs)
+    total = sum(repo_counts.values())
+    valid_age_count = len(all_prs)
     repos_over, repos_at = compute_per_repo_violations(repo_counts, per_repo_limits)
     level = health_level(total, repos_over)
-    avg_age = sum(p["age_days"] for p in all_prs) / max(total, 1)
+    avg_age = (
+        sum(p["age_days"] for p in all_prs) / valid_age_count
+        if valid_age_count
+        else None
+    )
     stale_count = sum(1 for p in all_prs if p["age_class"] in ("stale", "ancient"))
     failing_ci = sum(1 for p in all_prs if p["ci_status"] == "failing")
     needs_changes = sum(1 for p in all_prs if p["review_status"] == "changes_requested")
@@ -280,7 +350,7 @@ def main() -> None:
         output = {
             "total": total,
             "health": level,
-            "avg_age_days": round(avg_age, 1),
+            "avg_age_days": round(avg_age, 1) if avg_age is not None else None,
             "stale": stale_count,
             "failing_ci": failing_ci,
             "needs_changes": needs_changes,
@@ -289,10 +359,12 @@ def main() -> None:
             "by_repo": {k: v for k, v in repo_counts.items() if v > 0},
             "repos_over_limit": repos_over,
             "repos_at_limit": repos_at,
+            "fetch_failures": fetch_failures,
+            "skipped_invalid_timestamps": invalid_timestamp_prs,
             "prs": all_prs,
         }
         print(json.dumps(output, indent=2))
-        return
+        return 0
 
     if as_context:
         print("## PR Queue Health")
@@ -329,7 +401,7 @@ def main() -> None:
             for repo, count in sorted(active_repos.items(), key=lambda x: -x[1]):
                 limit = per_repo_limits.get(repo, DEFAULT_PER_REPO_LIMIT)
                 print(f"  {repo}: {count}/{limit}")
-        return
+        return 0
 
     # Default: summary view
     emoji = health_emoji(level)
@@ -427,7 +499,8 @@ def main() -> None:
         print("Recommendations:")
         for rec in recommendations:
             print(f"  • {rec}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
