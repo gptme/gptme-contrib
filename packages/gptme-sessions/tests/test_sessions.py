@@ -2942,7 +2942,7 @@ def test_post_session_warns_on_duplicate_journal_path(tmp_path: Path, caplog):
     journal_path = "/home/bob/bob/journal/2026-03-25/autonomous-session-abcd.md"
     store.append(SessionRecord(harness="gptme", session_id="first", journal_path=journal_path))
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="gptme_sessions.post_session"):
         result = post_session(
             store=store,
             harness="gptme",
