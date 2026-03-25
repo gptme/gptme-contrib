@@ -62,7 +62,7 @@ find_latest_csv() {
     local newer_than="$1"
     local search_roots=(
         "${GPTME_DIR}/eval_results"
-        "${GPTME_DIR}/eval_results"
+        "${ARTIFACT_DIR}/eval_results"
     )
     local root=""
 

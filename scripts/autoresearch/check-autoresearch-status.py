@@ -9,7 +9,7 @@ Used by the operator prompt during Phase 1 diagnostics.
 
 Configuration via environment variables:
   ARTIFACT_DIR — path to the artifact repo (default: current directory)
-  AUTORESEARCH_STATE_DIR — path to autoresearch state (default: ./state/autoresearch)
+  AUTORESEARCH_STATE_DIR — path to autoresearch state (default: <git-repo-root>/state/autoresearch)
 """
 
 import json
@@ -21,12 +21,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ARTIFACT_DIR = Path(os.environ.get("ARTIFACT_DIR", os.getcwd()))
-STATE_DIR = Path(
-    os.environ.get(
-        "AUTORESEARCH_STATE_DIR",
-        str(Path(os.getcwd()) / "state" / "autoresearch"),
-    )
-)
+
+
+def _default_state_dir() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        return str(Path(result.stdout.strip()) / "state" / "autoresearch")
+    except subprocess.CalledProcessError:
+        return str(Path(os.getcwd()) / "state" / "autoresearch")
+
+
+STATE_DIR = Path(os.environ.get("AUTORESEARCH_STATE_DIR", _default_state_dir()))
 LAST_REVIEW_FILE = STATE_DIR / "last-operator-review.txt"
 BRANCH_PREFIX = "autoresearch/eval-improvement"
 BUDGET_DIR = STATE_DIR / "budget"
