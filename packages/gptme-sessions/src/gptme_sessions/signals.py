@@ -570,9 +570,11 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                 session_end = max(timestamps).timestamp() if timestamps else 0
                                 matches = sorted(
                                     _glob.glob(pattern),
-                                    key=lambda p: abs(os.path.getmtime(p) - session_end)
-                                    if os.path.exists(p)
-                                    else float("inf"),
+                                    key=lambda p: (
+                                        abs(os.path.getmtime(p) - session_end)
+                                        if os.path.exists(p)
+                                        else float("inf")
+                                    ),
                                 )
                                 if matches:
                                     jpath = matches[0]
