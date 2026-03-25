@@ -4,17 +4,17 @@ CLI for activity summarization — journals, GitHub, sessions, tweets, email.
 Supports two modes:
 
 Agent mode (journal-based, default):
-    summarize daily [--date DATE]
-    summarize weekly [--week WEEK]
-    summarize monthly [--month MONTH]
-    summarize smart [--date DATE]  # Daily job that auto-runs weekly/monthly when due
-    summarize backfill [--from DATE] [--to DATE]
-    summarize stats
+    gptme-activity-summary daily [--date DATE]
+    gptme-activity-summary weekly [--week WEEK]
+    gptme-activity-summary monthly [--month MONTH]
+    gptme-activity-summary smart [--date DATE]  # Daily job that auto-runs weekly/monthly when due
+    gptme-activity-summary backfill [--from DATE] [--to DATE]
+    gptme-activity-summary stats
 
 Human mode (AW time tracking + optional GitHub):
-    summarize daily --mode human [--date DATE] [--github-user USER] [--raw]
-    summarize weekly --mode human [--week WEEK] [--github-user USER] [--raw]
-    summarize monthly --mode human [--month MONTH] [--github-user USER] [--raw]
+    gptme-activity-summary daily --mode human [--date DATE] [--github-user USER] [--raw]
+    gptme-activity-summary weekly --mode human [--week WEEK] [--github-user USER] [--raw]
+    gptme-activity-summary monthly --mode human [--month MONTH] [--github-user USER] [--raw]
 
 All summarization uses Claude Code backend for high-quality results.
 """

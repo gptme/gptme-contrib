@@ -24,16 +24,16 @@ pip install gptme-activity-summary
 
 ```bash
 # Daily summary
-summarize daily --date yesterday
+gptme-activity-summary daily --date yesterday
 
 # Weekly summary
-summarize weekly --week last
+gptme-activity-summary weekly --week last
 
 # Monthly summary
-summarize monthly --month last
+gptme-activity-summary monthly --month last
 
 # Smart mode (auto-triggers weekly/monthly when appropriate)
-summarize smart --date yesterday
+gptme-activity-summary smart --date yesterday
 ```
 
 ### GitHub User Mode (human activity)
@@ -42,16 +42,16 @@ Summarize any GitHub user's activity without requiring a journal or agent worksp
 
 ```bash
 # Weekly GitHub activity summary
-summarize github --user ErikBjare --period weekly
+gptme-activity-summary github --user ErikBjare --period weekly
 
 # Monthly summary
-summarize github --user ErikBjare --period monthly
+gptme-activity-summary github --user ErikBjare --period monthly
 
 # Raw data (no LLM summarization)
-summarize github --user ErikBjare --period weekly --raw
+gptme-activity-summary github --user ErikBjare --period weekly --raw
 
 # Custom date range reference
-summarize github --user ErikBjare --period weekly --date 2026-02-10
+gptme-activity-summary github --user ErikBjare --period weekly --date 2026-02-10
 ```
 
 ## Integration with gptme
