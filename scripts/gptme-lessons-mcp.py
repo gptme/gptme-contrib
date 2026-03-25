@@ -228,17 +228,17 @@ def build_server(lessons: list[Lesson]):
         sys.exit(1)
 
     mcp = FastMCP("gptme-lessons")
-    lesson_by_id = {ls.id: ls for ls in lessons}
+    active_lessons = [ls for ls in lessons if ls.status == "active"]
+    lesson_by_id = {ls.id: ls for ls in active_lessons}
 
     # ── Resources ────────────────────────────────────────────────────────────
 
     @mcp.resource("lessons://index")
     def get_index() -> str:
         """Index of all available lessons with metadata."""
-        active = [ls for ls in lessons if ls.status == "active"]
-        lines = [f"# gptme Lessons Index ({len(active)} lessons)\n"]
-        for cat in sorted({ls.category for ls in active}):
-            cat_lessons = [ls for ls in active if ls.category == cat]
+        lines = [f"# gptme Lessons Index ({len(active_lessons)} lessons)\n"]
+        for cat in sorted({ls.category for ls in active_lessons}):
+            cat_lessons = [ls for ls in active_lessons if ls.category == cat]
             lines.append(f"\n## {cat} ({len(cat_lessons)})")
             for ls in cat_lessons:
                 eff = (
@@ -252,7 +252,7 @@ def build_server(lessons: list[Lesson]):
     @mcp.resource("lessons://category/{category}")
     def get_category(category: str) -> str:
         """All lessons in a category."""
-        cat_lessons = [ls for ls in lessons if ls.category == category]
+        cat_lessons = [ls for ls in active_lessons if ls.category == category]
         if not cat_lessons:
             return f"No lessons found in category: {category}"
         lines = [f"# {category.title()} Lessons\n"]
@@ -280,7 +280,7 @@ def build_server(lessons: list[Lesson]):
             query: Search query (natural language or keyword)
             category: Optional filter by category (e.g. 'workflow', 'tools', 'patterns')
         """
-        results = search_lessons_by_query(lessons, query, category)
+        results = search_lessons_by_query(active_lessons, query, category)
         if not results:
             return f"No lessons found matching: {query!r}"
         lines = [f"Found {len(results)} lesson(s) for {query!r}:\n"]
@@ -305,7 +305,7 @@ def build_server(lessons: list[Lesson]):
         """
         effective = [
             ls
-            for ls in lessons
+            for ls in active_lessons
             if ls.effectiveness_score is not None
             and ls.effectiveness_score >= min_effectiveness
         ]
@@ -327,7 +327,7 @@ def build_server(lessons: list[Lesson]):
         Args:
             situation: Description of what you're doing or what went wrong
         """
-        results = search_lessons_by_query(lessons, situation)
+        results = search_lessons_by_query(active_lessons, situation)
         if not results[:3]:
             return f"No relevant lessons found for: {situation!r}"
         lines = [f"Relevant lessons for: {situation!r}\n"]
@@ -342,7 +342,7 @@ def build_server(lessons: list[Lesson]):
     @mcp.tool()
     def list_categories() -> str:
         """List all lesson categories with lesson counts."""
-        counts = Counter(ls.category for ls in lessons if ls.status == "active")
+        counts = Counter(ls.category for ls in active_lessons)
         lines = ["Available lesson categories:\n"]
         for cat, count in sorted(counts.items()):
             lines.append(f"- **{cat}** ({count} lessons)")
