@@ -31,9 +31,10 @@ import email.message  # noqa: F401
 import sys
 from pathlib import Path as _Path
 
-# Add current directory to path FIRST so local twitter/ is found
-# This prevents conflict with any installed 'twitter' package
+# Add current directory to path FIRST so local imports (trusted_users etc.) are found
 sys.path.insert(0, str(_Path(__file__).parent))
+# Add parent directory so `from twitter.llm import ...` resolves to scripts/twitter/
+sys.path.insert(0, str(_Path(__file__).parent.parent))
 
 import json
 import logging
