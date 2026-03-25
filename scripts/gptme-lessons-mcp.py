@@ -152,9 +152,10 @@ def load_lesson(
     # Try "category/stem" first (avoids collisions), fall back to bare stem
     if effectiveness:
         lesson_key = f"{path.parent.name}/{path.stem}"
-        lesson.effectiveness_score = effectiveness.get(lesson_key) or effectiveness.get(
-            path.stem
-        )
+        score = effectiveness.get(lesson_key)
+        if score is None:
+            score = effectiveness.get(path.stem)
+        lesson.effectiveness_score = score
 
     return lesson
 
@@ -172,7 +173,8 @@ def load_lessons(lessons_dir: Path, state_file: Path | None = None) -> list[Less
                 effectiveness = {
                     r["path"]: r["delta"]
                     for r in data["results"]
-                    if isinstance(r.get("delta"), int | float)
+                    if isinstance(r.get("path"), str)
+                    and isinstance(r.get("delta"), int | float)
                 }
             else:
                 # Simple dict format: {"category/stem": score}
