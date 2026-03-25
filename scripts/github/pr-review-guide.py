@@ -182,26 +182,40 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]]:
 def fetch_greptile_status(repo: str, pr_number: int) -> dict[str, Any]:
     """Check if Greptile has reviewed this PR and count unresolved findings."""
     owner, name = repo.split("/", 1)
-    query = f"""
-    {{
-      repository(owner:"{owner}", name:"{name}") {{
-        pullRequest(number:{pr_number}) {{
-          reviewThreads(first:50) {{
-            nodes {{
+    query = """
+    query($owner: String!, $name: String!, $prNumber: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $prNumber) {
+          reviewThreads(first: 50) {
+            nodes {
               isResolved
-              comments(first:1) {{
-                nodes {{
-                  author {{ login }}
-                }}
-              }}
-            }}
-          }}
-        }}
-      }}
-    }}
+              comments(first: 1) {
+                nodes {
+                  author { login }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     """
 
-    raw = run_gh(["api", "graphql", "-f", f"query={query}"], timeout=15)
+    raw = run_gh(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"prNumber={pr_number}",
+        ],
+        timeout=15,
+    )
     if not raw:
         return {"has_review": False, "unresolved": 0, "total": 0}
 
