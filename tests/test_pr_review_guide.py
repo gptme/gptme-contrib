@@ -24,6 +24,7 @@ estimate_review = mod.estimate_review
 format_context = mod.format_context
 format_estimate = mod.format_estimate
 get_tracked_repos = mod.get_tracked_repos
+_DEFAULT_TRACKED_REPOS = mod._DEFAULT_TRACKED_REPOS
 ReviewEstimate = mod.ReviewEstimate
 
 
@@ -63,6 +64,13 @@ def test_tracked_repos_env_empty_entries(monkeypatch):
     monkeypatch.setenv("GPTME_TRACKED_REPOS", "foo/bar,,baz/qux,")
     repos = get_tracked_repos()
     assert repos == ["foo/bar", "baz/qux"]
+
+
+def test_tracked_repos_env_whitespace_only(monkeypatch):
+    """Whitespace-only env var falls back to defaults, not empty list."""
+    monkeypatch.setenv("GPTME_TRACKED_REPOS", "   ")
+    repos = get_tracked_repos()
+    assert repos == _DEFAULT_TRACKED_REPOS
 
 
 # --- classify_files ---

@@ -79,7 +79,7 @@ _CATEGORY_ICONS: dict[str, str] = {
 
 def get_tracked_repos() -> list[str]:
     """Return repos to scan, from env var or defaults."""
-    env = os.environ.get("GPTME_TRACKED_REPOS", "")
+    env = os.environ.get("GPTME_TRACKED_REPOS", "").strip()
     if env:
         return [r.strip() for r in env.split(",") if r.strip()]
     return _DEFAULT_TRACKED_REPOS
