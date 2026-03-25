@@ -15,7 +15,7 @@ status: active
 # Triggering Greptile PR Reviews
 
 ## Rule
-Use "@greptileai review" comment to trigger fresh code quality reviews on PRs after making improvements.
+Never post raw `@greptileai review` comments directly. Use `greptile-helper.sh` for all Greptile triggers.
 
 ## Context
 When working on PRs that:
@@ -25,47 +25,57 @@ When working on PRs that:
 - Are ready for re-review after addressing feedback
 
 ## Detection
-Observable signals that you need to trigger Greptile review:
-- PR has existing Greptile review with low score (e.g., 3/5)
-- Made improvements (fixed bugs, added tests, improved coverage)
-- Want to verify improvements meet quality standards before requesting human review
-- Codecov shows improved coverage but no new Greptile review
-
-Common scenario:
-```text
-1. PR receives Greptile review: 3/5 (critical bugs found)
-2. You fix the bugs and add comprehensive tests
-3. Need to verify the fixes improved quality
-4. Trigger new review with "@greptileai review"
-```
+Observable signals that indicate you need a Greptile re-review:
+- PR has an existing Greptile review with a low score (for example 3/5)
+- You made improvements (fixed bugs, added tests, improved coverage)
+- You want to verify the improvements before requesting human review
+- Coverage or test results improved, but there is no new Greptile review yet
 
 ## Pattern
-Trigger review with comment:
+Always route re-reviews through the helper:
 ```shell
-# After making improvements to PR
-gh pr comment <pr-url> --body "@greptileai review"
+# Trigger safely
+bash scripts/github/greptile-helper.sh trigger OWNER/REPO PR_NUMBER
 
-# Wait 5-10 minutes for Greptile to analyze
-# Check PR for new review comment
-
-# Example:
-gh pr comment https://github.com/gptme/gptme/pull/841 --body "@greptileai review"
+# Or inspect state first
+bash scripts/github/greptile-helper.sh status OWNER/REPO PR_NUMBER
+# Returns: already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | error
 ```
 
-**Note**: Greptile should auto-review new PRs, but manual trigger is useful for:
-- Re-review after improvements
-- Validating quality before requesting human review
-- Ensuring fixes addressed previous issues
+Do not use raw comments:
+```shell
+# ❌ Wrong — bypasses anti-spam guards
+gh pr comment PR_NUMBER --repo OWNER/REPO --body "@greptileai review"
+
+# ✅ Correct — single enforcement point with all guards
+bash scripts/github/greptile-helper.sh trigger OWNER/REPO PR_NUMBER
+```
+
+**Critical**: One trigger path only. Concurrent sessions and API propagation delay caused real Greptile spam incidents, so direct comments are banned.
+
+The helper centralizes the anti-spam guards:
+- file lock to prevent concurrent duplicate triggers
+- recent-trigger cooldown
+- bot-ack detection and grace period
+- fail-safe handling for API/rate-limit errors
+- re-review logic only when new commits exist after a low-scoring review
+
+Greptile should auto-review new PRs. Use the helper only for re-review after improvements, or when the helper explicitly indicates `needs-re-review`.
 
 ## Outcome
 Following this pattern results in:
 - **Quality validation**: Confirms improvements are effective
-- **Professional workflow**: Shows attention to code quality
+- **Spam prevention**: Avoids duplicate raw trigger comments
 - **Faster human review**: Pre-validated PRs get approved faster
-- **Learning**: Understand what "good" looks like per Greptile's analysis
+- **Single enforcement point**: Future guard improvements automatically apply everywhere
 
 Benefits:
 - 5-10 minute turnaround for quality check
 - Specific feedback on remaining issues
 - Score improvement visible (3/5 → 5/5)
-- Catches issues before human reviewers see them
+- No regression to the old spam-prone raw-comment workflow
+
+## Related
+- [gh-pr-review Extension](./gh-pr-review-extension.md) - Manage PR review threads after fixes land
+- [gh pr checks --watch Exits 8](./gh-pr-checks-exit-code-8.md) - Pending checks are not failures
+- `scripts/github/greptile-helper.sh` - Safe single enforcement point for re-review triggers
