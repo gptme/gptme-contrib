@@ -160,12 +160,11 @@ def post_session(
     """
     if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
-            f"Invalid context_tier {context_tier!r}. "
-            f"Expected one of {sorted(VALID_CONTEXT_TIERS)}"
+            f"Invalid context_tier {context_tier!r}. Expected one of {sorted(VALID_CONTEXT_TIERS)}"
         )
     if ab_group is not None and ab_group not in VALID_AB_GROUPS:
         raise ValueError(
-            f"Invalid ab_group {ab_group!r}. " f"Expected one of {sorted(VALID_AB_GROUPS)}"
+            f"Invalid ab_group {ab_group!r}. Expected one of {sorted(VALID_AB_GROUPS)}"
         )
 
     grade: float | None = None

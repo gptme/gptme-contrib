@@ -1326,6 +1326,53 @@ def test_extract_signals_cc_pr_merge_not_in_git_commits():
     assert any("merge PR #99" in d for d in sigs["deliverables"])
 
 
+def test_extract_signals_cc_pr_merge_no_false_positive_from_file_read():
+    """Reading a test file containing 'Merged pull request' strings must NOT credit a merge.
+
+    Root cause of the bug: _PR_MERGE_RE was applied to ALL Bash results, so reading
+    test fixtures (which contain example gh pr merge output strings) falsely incremented
+    pr_merges. Fix: gate detection on _pr_merge_pending (set only when `gh pr merge` cmd).
+    """
+    # A Read of a test file that contains example pr-merge output strings
+    fixture_content = (
+        "def test_merge():\n"
+        '    assert "✓ Squashed and merged pull request #1725" in output\n'
+        '    assert "✓ Squashed and merged pull request #42" in other\n'
+    )
+    # Use a cat command (not gh pr merge) — simulates reading a test file
+    msgs = _make_bash_exchange(
+        "cat packages/gptme-sessions/tests/test_sessions.py", fixture_content
+    )
+    sigs = extract_signals_cc(msgs)
+    assert (
+        sigs["pr_merges"] == []
+    ), f"Reading test fixtures must not credit pr_merges: got {sigs['pr_merges']}"
+
+
+def test_extract_signals_cc_git_commits_deduplicated_across_tool_calls():
+    """Same commit hash appearing in two separate Bash results must be counted once.
+
+    Root cause: _direct_hashes was re-initialised per tool call, so if git commit
+    output (containing the hash) appeared in both a 'git commit' result AND a later
+    'git show HEAD' or 'git log' result, the commit was added twice to git_commits.
+    Fix: use a session-level set (_all_direct_commit_hashes) across all Bash results.
+    """
+    hash_val = "abc1234"
+    commit_msg = "feat: my feature"
+    commit_line = f"[master {hash_val}] {commit_msg}\n 3 files changed, 10 insertions(+)"
+
+    # Two separate Bash calls both returning output that contains the same commit
+    first_call = _make_bash_exchange(
+        "git commit -m 'feat: my feature'", commit_line, bash_id="bash_001"
+    )
+    second_call = _make_bash_exchange("git show HEAD --stat", commit_line, bash_id="bash_002")
+    msgs = first_call + second_call
+    sigs = extract_signals_cc(msgs)
+    assert sigs["git_commits"] == [
+        f"{commit_msg} ({hash_val})"
+    ], f"Expected exactly 1 commit entry, got: {sigs['git_commits']}"
+
+
 def test_grade_signals_dead_session():
     """Grade is very low (0.10) for dead sessions with zero tool calls."""
     sigs = extract_signals_cc([])

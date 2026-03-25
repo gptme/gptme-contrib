@@ -68,6 +68,11 @@ _PR_CREATE_URL_RE = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)"
 # Tracks explicit issue closures as a forward-progress signal (blocker removal).
 _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 
+# Regex for gh pr merge command detection (from Bash input).
+# Must be command-gated (not just output-gated) because _PR_MERGE_RE patterns
+# can appear in test files, file-read results, and other non-merge contexts.
+_GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
+
 # Fine-grained gh interaction regexes — split gh_interactions into signal types.
 # These are detected on the command input side (same as _GH_INTERACTION_RE).
 # The aggregate gh_interactions count is kept for backward compatibility.
@@ -435,6 +440,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # AND (2) the session produces git commits (agent actually fixed something).
     _ci_failure_check_pending: set[str] = set()  # tool_use_ids awaiting CI failure log result
     _ci_failure_found: bool = False  # True when a --log-failed check returned non-empty output
+    _pr_merge_pending: set[str] = set()  # tool_use_ids awaiting pr merge result
+    _all_direct_commit_hashes: set[str] = set()  # session-wide dedup for git commits
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -524,6 +531,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         if tool_id:
                             _ci_failure_check_pending.add(tool_id)
 
+                    # Track PR merge commands for output-side confirmation.
+                    # Must be command-gated: _PR_MERGE_RE can false-positive on
+                    # test fixtures and file reads that contain example output.
+                    if _GH_PR_MERGE_CMD_RE.search(cmd):
+                        if tool_id:
+                            _pr_merge_pending.add(tool_id)
+
                     # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
                     # rather than the Write tool, so Write/Edit alone misses them.
@@ -556,9 +570,11 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                 session_end = max(timestamps).timestamp() if timestamps else 0
                                 matches = sorted(
                                     _glob.glob(pattern),
-                                    key=lambda p: abs(os.path.getmtime(p) - session_end)
-                                    if os.path.exists(p)
-                                    else float("inf"),
+                                    key=lambda p: (
+                                        abs(os.path.getmtime(p) - session_end)
+                                        if os.path.exists(p)
+                                        else float("inf")
+                                    ),
                                 )
                                 if matches:
                                     jpath = matches[0]
@@ -626,33 +642,36 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 # Other tools (Read, Glob, Write) can return content containing
                 # commit-like patterns from files, which would be false positives.
                 if tool_id_to_name.get(tool_use_id) == "Bash":
-                    # Track hashes found in result_str to deduplicate against bg file.
-                    # CC background tasks stream the full output into result_str when
-                    # the command finishes, so the commit line appears in BOTH the
-                    # direct result and the background output file. Without dedup,
-                    # the same commit gets appended twice.
-                    _direct_hashes: set[str] = set()
+                    # Deduplicate commits across ALL Bash results in the session using
+                    # _all_direct_commit_hashes (session-level, not per-tool-call).
+                    # Rationale: the same commit can appear in multiple tool results
+                    # (e.g., git commit output, then git show/log in a later call).
+                    # Using a session-level set prevents double-counting when the same
+                    # hash appears in two separate Bash tool results.
                     for commit_match in _COMMIT_RE.finditer(result_str):
                         commit_hash = commit_match.group(1)
+                        if commit_hash in _all_direct_commit_hashes:
+                            continue  # already seen in an earlier tool result
                         commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
-                        _direct_hashes.add(commit_hash)
+                        _all_direct_commit_hashes.add(commit_hash)
 
                     # Background bash tasks: when CC runs a command in background mode,
                     # the tool result only contains a pointer to an output file like:
                     # "Command running in background with ID: X. Output is being written to: PATH"
                     # The actual git commit output (matching _COMMIT_RE) is in that file.
-                    # Skip hashes already found in result_str to avoid double-counting.
+                    # Skip hashes already seen in any direct result to avoid double-counting.
                     for bg_match in _BG_TASK_RE.finditer(result_str):
                         bg_path = bg_match.group(1)
                         try:
                             bg_content = Path(bg_path).read_text(errors="replace")
                             for commit_match in _COMMIT_RE.finditer(bg_content):
                                 commit_hash = commit_match.group(1)
-                                if commit_hash in _direct_hashes:
-                                    continue  # already captured from result_str
+                                if commit_hash in _all_direct_commit_hashes:
+                                    continue  # already captured from a direct result
                                 commit_msg = commit_match.group(2).strip()
                                 git_commits.append(f"{commit_msg} ({commit_hash})")
+                                _all_direct_commit_hashes.add(commit_hash)
                         except OSError:
                             pass  # File may not exist if session ran on a different host
 
@@ -662,9 +681,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # Tracked separately from git_commits so grade_signals can
                     # weight merges at 1.5× (closing a review loop is higher-value
                     # than a standalone commit).
-                    for merge_match in _PR_MERGE_RE.finditer(result_str):
-                        pr_num = merge_match.group(1)
-                        pr_merges.append(f"PR #{pr_num}")
+                    # MUST be command-gated: _PR_MERGE_RE can false-positive on test
+                    # fixtures and file reads that contain example "Merged pull request"
+                    # strings. Only credit a merge when the command was `gh pr merge`.
+                    if tool_use_id in _pr_merge_pending:
+                        _pr_merge_pending.discard(tool_use_id)
+                        for merge_match in _PR_MERGE_RE.finditer(result_str):
+                            pr_num = merge_match.group(1)
+                            pr_merges.append(f"PR #{pr_num}")
 
                     # gh pr create detection: successful output contains a PR URL.
                     # Only check when this tool_use_id was flagged as a pr create command.
