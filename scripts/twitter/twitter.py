@@ -103,8 +103,17 @@ def cached_get_me(client, user_auth: bool = False):
     return client.get_me(user_auth=user_auth)
 
 
-def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
+def load_twitter_client(
+    require_auth: bool = False, headless: bool = False
+) -> tweepy.Client:
     """Initialize Twitter client with credentials from .env
+
+    Args:
+        require_auth: If True, authenticate with user context (needed for posting).
+        headless: If True, skip interactive OAuth 2.0 flow (browser-based) and
+            fall back directly to OAuth 1.0a when the saved token/refresh fails.
+            Use this in automated/headless environments where no user can interact
+            with a browser.
 
     Note: We use override=True with load_dotenv() to ensure we always get
     the latest tokens from .env. This is critical because after token refresh,
@@ -218,122 +227,135 @@ def load_twitter_client(require_auth: bool = False) -> tweepy.Client:
                         return client
                 except Exception as e:
                     console.print(f"[yellow]Saved token/refresh failed: {e}")
-                    console.print("[yellow]Starting new OAuth 2.0 flow...")
+                    if headless:
+                        console.print(
+                            "[yellow]Headless mode — skipping interactive OAuth 2.0, falling back to OAuth 1.0a"
+                        )
+                    else:
+                        console.print("[yellow]Starting new OAuth 2.0 flow...")
             elif saved_token:
                 console.print(
                     "[yellow]Saved token exists but missing refresh token or expiry"
                 )
-                console.print(
-                    "[yellow]Starting new OAuth 2.0 flow to get complete credentials..."
-                )
-
-            try:
-                # Initialize OAuth 2.0 handler
-                oauth2_user_handler = tweepy.OAuth2UserHandler(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri="http://localhost:9876/callback",
-                    scope=[
-                        "tweet.read",
-                        "tweet.write",
-                        "users.read",
-                        "follows.write",
-                        "offline.access",
-                    ],
-                )
-
-                # Get authorization URL and provide it to the user
-                auth_url = oauth2_user_handler.get_authorization_url()
-                console.print(
-                    "[yellow]Please open this URL in your browser to authorize the application:"
-                )
-                console.print(f"[blue]{auth_url}")
-
-                # Wait for OAuth callback using shared utility
-                console.print(
-                    "[yellow]Waiting for authorization (timeout: 5 minutes)..."
-                )
-                try:
-                    response_code, full_url = run_oauth_callback(port=9876, timeout=300)
-                    console.print("[green]Authorization received!")
-                except TimeoutError as e:
-                    console.print("[red]Error: Authorization timeout")
-                    console.print(f"[red]Details: {str(e)}")
-                    raise
-                except Exception as e:
-                    console.print("[red]Error: Authorization failed")
-                    console.print(f"[red]Details: {str(e)}")
-                    raise
-
-                # Get access token using the full callback URL
-                access_token = oauth2_user_handler.fetch_token(
-                    authorization_response=full_url
-                )
-                print(f"{access_token=}")
-
-                # Save all tokens to .env using shared utility
-                try:
-                    save_token_to_env(
-                        "TWITTER_OAUTH2_ACCESS_TOKEN",
-                        access_token["access_token"],
-                        comment="OAuth 2.0 User Context access token",
-                    )
-
-                    # Save refresh token if present
-                    if "refresh_token" in access_token:
-                        save_token_to_env(
-                            "TWITTER_OAUTH2_REFRESH_TOKEN",
-                            access_token["refresh_token"],
-                            comment="OAuth 2.0 refresh token",
-                        )
-
-                    # Calculate and save expiration time
-                    if "expires_in" in access_token:
-                        expires_at = datetime.now() + timedelta(
-                            seconds=access_token["expires_in"]
-                        )
-                        save_token_to_env(
-                            "TWITTER_OAUTH2_EXPIRES_AT",
-                            expires_at.isoformat(),
-                            comment="OAuth 2.0 token expiration time",
-                        )
-
-                    if "refresh_token" in access_token:
-                        console.print(
-                            "[yellow]Saved OAuth 2.0 tokens with refresh capability"
-                        )
-                    else:
-                        console.print(
-                            "[yellow]Warning: No refresh token received (add 'offline.access' scope)"
-                        )
-                except Exception as e:
-                    console.print(f"[red]Error saving token: {str(e)}")
-                    sys.exit(1)
-
-                # Create client with OAuth 2.0 User Context authentication
-                client = tweepy.Client(
-                    access_token[
-                        "access_token"
-                    ],  # Pass access token directly as first argument
-                    wait_on_rate_limit=True,
-                )
-
-                # Test the credentials with OAuth 2.0
-                test = cached_get_me(client, user_auth=False)
-                if test.data:
+                if headless:
                     console.print(
-                        f"[green]Successfully authenticated as @{test.data.username}"
+                        "[yellow]Headless mode — skipping interactive OAuth 2.0, falling back to OAuth 1.0a"
                     )
-                    return client
                 else:
                     console.print(
-                        "[red]Could not get user info after OAuth 2.0 authentication"
+                        "[yellow]Starting new OAuth 2.0 flow to get complete credentials..."
                     )
-                    sys.exit(1)
 
-            except tweepy.TweepyException as e:
-                console.print(f"[red]OAuth 2.0 authentication failed: {str(e)}")
-                console.print("[yellow]Falling back to OAuth 1.0a...")
+            if not headless:
+                try:
+                    # Initialize OAuth 2.0 handler
+                    oauth2_user_handler = tweepy.OAuth2UserHandler(
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        redirect_uri="http://localhost:9876/callback",
+                        scope=[
+                            "tweet.read",
+                            "tweet.write",
+                            "users.read",
+                            "follows.write",
+                            "offline.access",
+                        ],
+                    )
+
+                    # Get authorization URL and provide it to the user
+                    auth_url = oauth2_user_handler.get_authorization_url()
+                    console.print(
+                        "[yellow]Please open this URL in your browser to authorize the application:"
+                    )
+                    console.print(f"[blue]{auth_url}")
+
+                    # Wait for OAuth callback using shared utility
+                    console.print(
+                        "[yellow]Waiting for authorization (timeout: 5 minutes)..."
+                    )
+                    try:
+                        response_code, full_url = run_oauth_callback(
+                            port=9876, timeout=300
+                        )
+                        console.print("[green]Authorization received!")
+                    except TimeoutError as e:
+                        console.print("[red]Error: Authorization timeout")
+                        console.print(f"[red]Details: {str(e)}")
+                        raise
+                    except Exception as e:
+                        console.print("[red]Error: Authorization failed")
+                        console.print(f"[red]Details: {str(e)}")
+                        raise
+
+                    # Get access token using the full callback URL
+                    access_token = oauth2_user_handler.fetch_token(
+                        authorization_response=full_url
+                    )
+                    print(f"{access_token=}")
+
+                    # Save all tokens to .env using shared utility
+                    try:
+                        save_token_to_env(
+                            "TWITTER_OAUTH2_ACCESS_TOKEN",
+                            access_token["access_token"],
+                            comment="OAuth 2.0 User Context access token",
+                        )
+
+                        # Save refresh token if present
+                        if "refresh_token" in access_token:
+                            save_token_to_env(
+                                "TWITTER_OAUTH2_REFRESH_TOKEN",
+                                access_token["refresh_token"],
+                                comment="OAuth 2.0 refresh token",
+                            )
+
+                        # Calculate and save expiration time
+                        if "expires_in" in access_token:
+                            expires_at = datetime.now() + timedelta(
+                                seconds=access_token["expires_in"]
+                            )
+                            save_token_to_env(
+                                "TWITTER_OAUTH2_EXPIRES_AT",
+                                expires_at.isoformat(),
+                                comment="OAuth 2.0 token expiration time",
+                            )
+
+                        if "refresh_token" in access_token:
+                            console.print(
+                                "[yellow]Saved OAuth 2.0 tokens with refresh capability"
+                            )
+                        else:
+                            console.print(
+                                "[yellow]Warning: No refresh token received (add 'offline.access' scope)"
+                            )
+                    except Exception as e:
+                        console.print(f"[red]Error saving token: {str(e)}")
+                        sys.exit(1)
+
+                    # Create client with OAuth 2.0 User Context authentication
+                    client = tweepy.Client(
+                        access_token[
+                            "access_token"
+                        ],  # Pass access token directly as first argument
+                        wait_on_rate_limit=True,
+                    )
+
+                    # Test the credentials with OAuth 2.0
+                    test = cached_get_me(client, user_auth=False)
+                    if test.data:
+                        console.print(
+                            f"[green]Successfully authenticated as @{test.data.username}"
+                        )
+                        return client
+                    else:
+                        console.print(
+                            "[red]Could not get user info after OAuth 2.0 authentication"
+                        )
+                        sys.exit(1)
+
+                except tweepy.TweepyException as e:
+                    console.print(f"[red]OAuth 2.0 authentication failed: {str(e)}")
+                    console.print("[yellow]Falling back to OAuth 1.0a...")
 
         # Fall back to OAuth 1.0a if OAuth 2.0 fails or isn't configured
         console.print("[yellow]Debug: Using OAuth 1.0a authentication")

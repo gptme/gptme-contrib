@@ -1377,7 +1377,9 @@ def process_timeline_tweets(
                             f"[green]Auto-posting reply to trusted user @{author_username}"
                         )
                         try:
-                            client_for_post = load_twitter_client(require_auth=True)
+                            client_for_post = load_twitter_client(
+                                require_auth=True, headless=True
+                            )
                             post_response = client_for_post.create_tweet(
                                 text=draft.text,
                                 in_reply_to_tweet_id=draft.in_reply_to,
@@ -1522,7 +1524,7 @@ def monitor(
     console.print(f"[blue]Draft limit: {max_drafts}")
 
     # Initialize Twitter client
-    client = load_twitter_client(require_auth=True)
+    client = load_twitter_client(require_auth=True, headless=True)
 
     def check_timeline():
         """Check timeline and generate drafts"""
@@ -1667,7 +1669,7 @@ def auto(
 
     # Step 1: Monitor sources and generate drafts
     console.print("\n[bold]Step 1: Monitoring for new content[/bold]")
-    client = load_twitter_client(require_auth=True)
+    client = load_twitter_client(require_auth=True, headless=True)
 
     # Get our user ID for mentions
     me = cached_get_me(client, user_auth=False)
