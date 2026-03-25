@@ -67,6 +67,8 @@ LOCKFILE_PATTERNS = {
     "go.sum",
 }
 
+_ALLOWED_CI_CONCLUSIONS = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+
 
 def get_tracked_repos() -> list[str]:
     """Return repos to scan, from env var or defaults."""
@@ -74,6 +76,24 @@ def get_tracked_repos() -> list[str]:
     if env:
         return [r.strip() for r in env.split(",") if r.strip()]
     return _DEFAULT_TRACKED_REPOS
+
+
+def checks_green(status_checks: list[dict[str, Any]]) -> bool:
+    """Return True if all reported checks are terminal and non-blocking."""
+    if not status_checks:
+        return True
+    for check in status_checks:
+        conclusion = (check.get("conclusion") or "").upper()
+        status = (check.get("status") or "").upper()
+        if not status and not conclusion:
+            return False
+        if status and status != "COMPLETED":
+            return False
+        if status == "COMPLETED" and not conclusion:
+            return False
+        if conclusion and conclusion not in _ALLOWED_CI_CONCLUSIONS:
+            return False
+    return True
 
 
 @dataclass
@@ -287,8 +307,7 @@ def estimate_review(
     # --- CI status ---
     checks = pr.get("statusCheckRollup", [])
     if isinstance(checks, list):
-        failed = [c for c in checks if c.get("conclusion") == "FAILURE"]
-        est.ci_green = len(failed) == 0
+        est.ci_green = checks_green(checks)
     else:
         est.ci_green = True  # Assume green if no data
 

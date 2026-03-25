@@ -19,6 +19,7 @@ spec.loader.exec_module(mod)
 
 classify_files = mod.classify_files
 compute_loc_excluding_lockfiles = mod.compute_loc_excluding_lockfiles
+checks_green = mod.checks_green
 estimate_review = mod.estimate_review
 format_context = mod.format_context
 format_estimate = mod.format_estimate
@@ -259,6 +260,22 @@ def test_ci_failing_increases_difficulty():
     assert est_red.difficulty_score > est_green.difficulty_score
     assert not est_red.ci_green
     assert "CI failing" in est_red.factors
+
+
+def test_checks_green_rejects_pending_checks():
+    assert not checks_green([{"status": "IN_PROGRESS", "conclusion": None}])
+
+
+def test_checks_green_rejects_completed_without_conclusion():
+    assert not checks_green([{"status": "COMPLETED", "conclusion": None}])
+
+
+def test_estimate_review_marks_pending_ci_not_green():
+    pr = _make_pr(loc=100)
+    pr["statusCheckRollup"] = [{"status": "QUEUED", "conclusion": None}]
+    est = estimate_review(pr, fetch_greptile=False)
+    assert not est.ci_green
+    assert "CI failing" in est.factors
 
 
 def test_sparse_description_increases_difficulty():
