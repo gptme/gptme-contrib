@@ -15,7 +15,7 @@ status: active
 # Triggering Greptile PR Reviews
 
 ## Rule
-Never post raw `@greptileai review` comments directly. Use `greptile-helper.sh` for all Greptile triggers.
+Use `greptile-helper.sh` for all Greptile triggers so re-reviews stay safe, idempotent, and spam-free.
 
 ## Context
 When working on PRs that:
@@ -39,7 +39,7 @@ bash scripts/github/greptile-helper.sh trigger OWNER/REPO PR_NUMBER
 
 # Or inspect state first
 bash scripts/github/greptile-helper.sh status OWNER/REPO PR_NUMBER
-# Returns: already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | error
+# Returns: already-reviewed | needs-re-review | in-progress | awaiting-initial-review
 ```
 
 Do not use raw comments:
