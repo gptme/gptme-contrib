@@ -1605,6 +1605,173 @@ def classify(
             click.echo(f"  {cat:<16} {count}")
 
 
+def _discover_journal_entries(
+    journal_dir: Path,
+    last: int,
+) -> list[Path]:
+    """Discover autonomous session journal entries, sorted chronologically."""
+    entries: list[Path] = []
+    for day_dir in sorted(journal_dir.iterdir()):
+        if day_dir.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
+            entries.extend(sorted(day_dir.glob("*autonomous-session-*.md")))
+    return entries[-last:] if last > 0 else entries
+
+
+@cli.command("classify-stats")
+@click.option(
+    "--journal-dir",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Path to journal directory (default: ./journal)",
+)
+@click.option("--last", type=int, default=20, help="Number of sessions to analyze (default: 20)")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--diversity-window", type=int, default=5, help="Window for diversity check (default: 5)"
+)
+def classify_stats(
+    journal_dir: Path | None,
+    last: int,
+    as_json: bool,
+    diversity_window: int,
+) -> None:
+    """Show classification stats and session diversity alerts.
+
+    Classifies recent sessions using the fast keyword classifier and shows
+    category breakdown, productivity rate, trends, and diversity warnings.
+    """
+    from collections import Counter
+
+    from .classification import classify_by_keywords
+
+    if journal_dir is None:
+        journal_dir = Path.cwd() / "journal"
+    if not journal_dir.is_dir():
+        raise click.BadParameter(f"{journal_dir} is not a directory", param_hint="'--journal-dir'")
+
+    entries = _discover_journal_entries(journal_dir, last)
+    if not entries:
+        click.echo("No autonomous session journal entries found.", err=True)
+        return
+
+    # Classify all entries (keyword-only for speed)
+    results: list[dict] = []
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        result = classify_by_keywords(text)
+        row = {
+            "date": entry.parent.name,
+            **result.to_dict(),
+        }
+        results.append(row)
+
+    if not results:
+        click.echo("No sessions could be classified.", err=True)
+        return
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+
+    total = len(results)
+    productive = sum(1 for r in results if r.get("productive"))
+    cats = Counter(r["category"] for r in results)
+
+    # Multi-label counts (primary + secondary)
+    cats_multi: Counter[str] = Counter()
+    for r in results:
+        cats_multi[r["category"]] += 1
+        sec = r.get("secondary_category")
+        if sec:
+            cats_multi[sec] += 1
+
+    click.echo(f"Session Classification Stats (last {total} sessions)")
+    click.echo("=" * 50)
+    click.echo(f"Productive: {productive}/{total} ({productive * 100 // total}%)")
+    click.echo(f"NOOP:       {total - productive}/{total} ({(total - productive) * 100 // total}%)")
+    click.echo()
+    click.echo("Category Breakdown (primary):")
+    for cat, count in cats.most_common():
+        pct = count * 100 // total
+        bar = "#" * (pct // 2)
+        click.echo(f"  {cat:15s} {count:3d} ({pct:2d}%) {bar}")
+
+    # Multi-label view
+    has_secondary = any(r.get("secondary_category") for r in results)
+    if has_secondary:
+        click.echo()
+        click.echo("Category Presence (primary + secondary):")
+        for cat, count in cats_multi.most_common():
+            pct = count * 100 // total
+            bar = "#" * (pct // 2)
+            primary_count = cats.get(cat, 0)
+            secondary_count = count - primary_count
+            detail = f"{primary_count}p"
+            if secondary_count > 0:
+                detail += f"+{secondary_count}s"
+            click.echo(f"  {cat:15s} {count:3d} ({pct:2d}%) {bar}  [{detail}]")
+
+    # Missing categories
+    productive_cats = {
+        "code",
+        "infrastructure",
+        "triage",
+        "strategic",
+        "content",
+        "cross-repo",
+        "research",
+    }
+    present_cats = set(cats_multi.keys())
+    missing = productive_cats - present_cats
+    if missing:
+        click.echo(f"\n  Missing categories: {', '.join(sorted(missing))}")
+
+    # Trend (last 5 vs previous 5)
+    if total >= 10:
+        recent = results[-5:]
+        earlier = results[-10:-5]
+        recent_prod = sum(1 for c in recent if c.get("productive"))
+        earlier_prod = sum(1 for c in earlier if c.get("productive"))
+        if recent_prod > earlier_prod:
+            trend = "improving"
+        elif recent_prod < earlier_prod:
+            trend = "declining"
+        else:
+            trend = "stable"
+        click.echo(f"\nTrend: {trend} (recent 5: {recent_prod}/5, previous 5: {earlier_prod}/5)")
+
+    # Diversity check
+    if len(results) >= diversity_window:
+        click.echo()
+        click.echo(f"Session Diversity (last {diversity_window}):")
+        recent_cats = [r["category"] for r in results[-diversity_window:]]
+        alerts: list[str] = []
+
+        if len(set(recent_cats[:3])) == 1:
+            alerts.append(f"3+ consecutive '{recent_cats[0]}' sessions — consider diversifying")
+
+        non_code = sum(1 for c in recent_cats if c in ("triage", "monitoring"))
+        if non_code >= 3:
+            alerts.append(
+                f"{non_code}/{diversity_window} sessions were triage/monitoring — pivot to code or ideas"
+            )
+
+        code_sessions = sum(1 for c in recent_cats if c == "code")
+        if code_sessions == 0 and diversity_window >= 5:
+            alerts.append("No code sessions in last 5 — consider picking up a coding task")
+
+        if alerts:
+            for alert in alerts:
+                click.echo(f"  ⚠️  {alert}")
+        else:
+            unique = len(set(recent_cats))
+            cats_str = ", ".join(f"{c}({recent_cats.count(c)})" for c in dict.fromkeys(recent_cats))
+            click.echo(f"  ✅ Good diversity: {unique}/{diversity_window} categories — {cats_str}")
+
+
 def main() -> int:
     """Entry point for console_scripts (backward-compatible wrapper).
 
