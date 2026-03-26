@@ -34,8 +34,7 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
 
     Raises:
         subprocess.TimeoutExpired: If the command times out
-        subprocess.CalledProcessError: If the command fails
-        RuntimeError: If all retries return empty responses
+        subprocess.CalledProcessError: If the command fails (non-zero exit)
     """
     import os
 
