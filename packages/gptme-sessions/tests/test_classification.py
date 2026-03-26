@@ -747,6 +747,11 @@ class TestNormalizeCategory:
     def test_parenthesized_label(self) -> None:
         assert normalize_category("code(bugfix)") == "code"
 
+    def test_parenthesized_outer_prefix(self) -> None:
+        # Outer prefix like "code (tool improvements)" should resolve via "code"
+        assert normalize_category("code (tool improvements)") == "code"
+        assert normalize_category("infrastructure (maintenance)") == "infrastructure"
+
     def test_unknown_passthrough(self) -> None:
         assert normalize_category("totally-unknown") == "totally-unknown"
 
@@ -761,3 +766,11 @@ class TestNormalizeCategory:
         # With custom categories, "code" is unknown since it's not in the custom list
         result = normalize_category("trading", categories=custom)
         assert result == "trading"
+
+    def test_alias_not_in_custom_categories(self) -> None:
+        # Alias targets should be validated against the custom valid set
+        # "bug-fix" aliases to "code", but "code" is not in custom_cats
+        custom = [Category(name="trading", description="Financial trading")]
+        result = normalize_category("bug-fix", categories=custom)
+        # Should NOT return "code" since "code" is not in custom valid set
+        assert result == "bug-fix"

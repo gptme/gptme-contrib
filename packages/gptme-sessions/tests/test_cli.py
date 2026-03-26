@@ -475,3 +475,54 @@ class TestTopLevelCli:
         rc, out = _invoke([], tmp_path)
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
+
+
+# -- classify-stats ----------------------------------------------------------
+
+
+def _seed_journal(journal_dir: Path, sessions: list[tuple[str, str]]) -> None:
+    """Create journal entries with (date, content) pairs for classify-stats tests."""
+    for i, (date, content) in enumerate(sessions):
+        day_dir = journal_dir / date
+        day_dir.mkdir(parents=True, exist_ok=True)
+        (day_dir / f"autonomous-session-{i:04x}.md").write_text(content)
+
+
+class TestClassifyStatsCommand:
+    def test_diversity_alert_triggers_on_last_three(self, tmp_path: Path) -> None:
+        """Bug 3 regression: alert fires on LAST 3 sessions, not oldest 3 ([:3] → [-3:] fix).
+
+        Setup: 5 sessions — first 2 monitoring, last 3 code.
+        Old bug ([:3]) checks [monitoring, monitoring, code] → no alert.
+        Fix ([-3:]) checks [code, code, code] → alert fires.
+        """
+        journal_dir = tmp_path / "journal"
+        sessions = [
+            ("2026-01-01", "# Monitoring: project checks\nChecked repos, all green."),
+            ("2026-01-02", "# Monitoring: project checks\nChecked repos, all green."),
+            ("2026-01-03", "# Code: implement feature\nOpened PR, tests passing."),
+            ("2026-01-04", "# Code: implement feature\nOpened PR, tests passing."),
+            ("2026-01-05", "# Code: implement feature\nOpened PR, tests passing."),
+        ]
+        _seed_journal(journal_dir, sessions)
+        rc, out = _invoke(
+            ["classify-stats", "--journal-dir", str(journal_dir), "--diversity-window", "5"],
+            tmp_path,
+        )
+        assert rc == 0
+        assert "consecutive" in out.lower() or "diversifying" in out.lower()
+
+    def test_diversity_alert_not_triggered_below_threshold(self, tmp_path: Path) -> None:
+        """Diversity alert guard: fewer than 3 sessions in window does not fire alert."""
+        journal_dir = tmp_path / "journal"
+        sessions = [
+            ("2026-01-01", "# Code: implement feature\nOpened PR, tests passing."),
+            ("2026-01-02", "# Code: implement feature\nOpened PR, tests passing."),
+        ]
+        _seed_journal(journal_dir, sessions)
+        rc, out = _invoke(
+            ["classify-stats", "--journal-dir", str(journal_dir), "--diversity-window", "5"],
+            tmp_path,
+        )
+        assert rc == 0
+        assert "consecutive" not in out.lower()

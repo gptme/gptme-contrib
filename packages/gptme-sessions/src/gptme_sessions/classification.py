@@ -591,11 +591,17 @@ def _resolve_category(category: str, valid: set[str]) -> str | None:
         return category
 
     direct = _CATEGORY_ALIASES.get(category)
-    if direct:
+    if direct and direct in valid:
         return direct
 
-    # Handle parenthesized sub-labels like "code(bugfix)"
+    # Handle parenthesized sub-labels like "code (tool improvements)" or "code(bugfix)"
+    # Try outer prefix first, then inner content
     if "(" in category and ")" in category:
+        outer = category.split("(", 1)[0].strip()
+        if outer:
+            resolved = _resolve_category(outer, valid)
+            if resolved:
+                return resolved
         inner = category.split("(", 1)[1].rsplit(")", 1)[0].strip().lower().replace("_", "-")
         resolved = _resolve_category(inner, valid)
         if resolved:
