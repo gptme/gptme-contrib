@@ -58,8 +58,10 @@ from gptodo.checker import (
 # Import dependency tree visualization (Issue #255)
 from gptodo.deptree import (
     build_dependency_graph,
+    compute_unblocking_power,
     detect_circular_dependencies,
     get_dependency_tree,
+    render_full_dag_ascii,
 )
 
 # Import core business logic from lib
@@ -2001,10 +2003,16 @@ def next_(output_json, use_cache):
         console.print("[dim]Run [bold]gptodo ready --state both[/] to see all ready work[/]")
         return
 
-    # Sort tasks by priority (high to low) and then by creation date (oldest first)
+    # Compute unblocking power to use as a secondary sort key
+    # Tasks that unblock more downstream work are preferred over equal-priority tasks
+    nodes = build_dependency_graph(all_tasks)
+    power = compute_unblocking_power(nodes)
+
+    # Sort tasks: priority (high first), then unblocking power (high first), then age (oldest first)
     ready_tasks.sort(
         key=lambda t: (
             -t.priority_rank,
+            -power.get(t.name, 0),
             t.created,
         )
     )
@@ -4580,6 +4588,79 @@ def dep_check(output_json: bool):
                 console.print(f"  • {' → '.join(cycle)}")
         else:
             console.print("[green]✓ No circular dependencies found[/]")
+
+
+@dep_group.command("dag")
+@click.option(
+    "--state",
+    "-s",
+    multiple=True,
+    help="Filter by state (can repeat: --state active --state backlog). Default: all non-terminal.",
+)
+@click.option(
+    "--power",
+    "show_power",
+    is_flag=True,
+    default=True,
+    help="Show unblocking power scores [N↑] (default: on)",
+)
+@click.option(
+    "--no-power",
+    "show_power",
+    flag_value=False,
+    help="Hide unblocking power scores",
+)
+def dep_dag(state: tuple[str, ...], show_power: bool):
+    """Show the full workspace dependency graph.
+
+    Renders all tasks with their dependency relationships as an ASCII graph,
+    with optional unblocking power scores showing which tasks unlock the most
+    downstream work.
+
+    Examples:
+
+    \b
+        gptodo dep dag                    # Full graph, non-terminal tasks
+        gptodo dep dag --state active     # Active tasks only
+        gptodo dep dag --no-power         # Hide unblocking power scores
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    from .utils import load_tasks
+
+    tasks = load_tasks(tasks_dir)
+    nodes = build_dependency_graph(tasks)
+
+    # Default: exclude terminal states
+    filter_states: set[str] | None = None
+    if state:
+        filter_states = set(state)
+    else:
+        terminal = {"done", "cancelled"}
+        filter_states = {
+            node.state
+            for node in nodes.values()
+            if not node.is_external and node.state not in terminal
+        }
+
+    power = compute_unblocking_power(nodes) if show_power else None
+
+    dag = render_full_dag_ascii(nodes, unblocking_power=power, filter_states=filter_states)
+
+    if not dag.strip():
+        console.print("[yellow]No tasks with dependencies found.[/]")
+        return
+
+    title = "Workspace Dependency DAG"
+    if filter_states:
+        title += f" ({', '.join(sorted(filter_states))})"
+    console.print(f"[bold]{title}[/]\n")
+    console.print(dag)
+
+    if show_power:
+        console.print("\n[dim][N↑] = unblocking power (# tasks transitively unblocked)[/]")
 
 
 # ============================================================================
