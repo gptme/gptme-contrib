@@ -44,6 +44,7 @@ from .classification import (
     classify_by_llm,
     classify_session,
     judge_and_classify,
+    normalize_category,
 )
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
@@ -56,6 +57,7 @@ __all__ = [
     "classify_by_llm",
     "classify_session",
     "judge_and_classify",
+    "normalize_category",
     "SessionRecord",
     "SessionStore",
     "MODEL_ALIASES",

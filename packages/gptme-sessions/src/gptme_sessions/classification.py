@@ -433,6 +433,83 @@ DEFAULT_CATEGORIES: list[Category] = [
         ],
     ),
     Category(
+        name="novelty",
+        description="Novel exploration — new tools, experiments, unconventional approaches",
+        title_keywords=[
+            "novel",
+            "experiment",
+            "new approach",
+            "unconventional",
+            "first time",
+            "prototype",
+            "proof of concept",
+            "spike",
+            "exploration —",
+        ],
+        outcome_keywords=[
+            "novel approach",
+            "experimented",
+            "prototype",
+            "proof of concept",
+            "first attempt",
+            "new technique",
+            "unconventional",
+        ],
+        execution_keywords=[
+            "experimented with",
+            "tried new",
+            "prototype built",
+            "proof of concept",
+            "spike completed",
+            "novel technique",
+            "unconventional approach",
+        ],
+        deliverable_keywords=[
+            "prototype",
+            "proof of concept",
+            "experiment",
+            "spike",
+            "novel",
+        ],
+    ),
+    Category(
+        name="news",
+        description="News consumption — reading RSS, HN, timelines, summarizing finds",
+        title_keywords=[
+            "rss",
+            "hacker news",
+            "news feed",
+            "timeline",
+            "reading list",
+            "news —",
+            "news scan",
+        ],
+        outcome_keywords=[
+            "read rss",
+            "read hacker news",
+            "summarized articles",
+            "news digest",
+            "news summary",
+        ],
+        execution_keywords=[
+            "read feeds",
+            "news summary",
+            "hacker news",
+            "rss digest",
+            "reading session",
+            "github trending",
+        ],
+        deliverable_keywords=[
+            "rss",
+            "hacker news",
+            "hn",
+            "timeline",
+            "news feed",
+            "reading list",
+            "summarized articles",
+        ],
+    ),
+    Category(
         name="noop-hard",
         description="Nothing happened — error, timeout, empty session",
         title_keywords=[],
@@ -475,6 +552,94 @@ class ClassificationResult:
         if self.secondary_category:
             d["secondary_category"] = self.secondary_category
         return d
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Category normalization (noisy labels → canonical names)
+# ──────────────────────────────────────────────────────────────────────
+
+# Common aliases for category labels found in journals, session records, etc.
+_CATEGORY_ALIASES: dict[str, str] = {
+    "cross-repo-contribution": "cross-repo",
+    "documentation": "content",
+    "docs": "content",
+    "blog": "content",
+    "feature": "code",
+    "coding": "code",
+    "development": "code",
+    "bug-fix": "code",
+    "bugfix": "code",
+    "pr-followup": "code",
+    "hygiene": "infrastructure",
+    "task-hygiene": "infrastructure",
+    "maintenance": "infrastructure",
+    "infra-maintenance": "infrastructure",
+    "self-improvement": "strategic",
+    "lesson-quality": "strategic",
+    "product": "strategic",
+    "planning": "strategic",
+    "coordination": "strategic",
+    "metaproductivity": "strategic",
+}
+
+_FRAGMENT_SPLIT_RE = re.compile(r"[,+|/]")
+
+
+def _resolve_category(category: str, valid: set[str]) -> str | None:
+    """Try to resolve a single normalized label to a valid category."""
+    if category in valid:
+        return category
+
+    direct = _CATEGORY_ALIASES.get(category)
+    if direct:
+        return direct
+
+    # Handle parenthesized sub-labels like "code(bugfix)"
+    if "(" in category and ")" in category:
+        inner = category.split("(", 1)[1].rsplit(")", 1)[0].strip().lower().replace("_", "-")
+        resolved = _resolve_category(inner, valid)
+        if resolved:
+            return resolved
+
+    # Handle composite labels like "code, infrastructure" or "code/infra"
+    for fragment in _FRAGMENT_SPLIT_RE.split(category):
+        fragment = fragment.strip().lower().replace("_", "-")
+        if not fragment or fragment == category:
+            continue
+        resolved = _resolve_category(fragment, valid)
+        if resolved:
+            return resolved
+
+    return None
+
+
+def normalize_category(
+    category: str,
+    categories: list[Category] | None = None,
+) -> str:
+    """Map noisy category labels onto canonical category names.
+
+    Handles common aliases, composite labels (comma/slash-separated),
+    and parenthesized sub-labels. Returns the input unchanged if no
+    mapping is found.
+
+    Args:
+        category: A raw category label (e.g. "bug-fix", "code/infra").
+        categories: Valid category definitions. Defaults to DEFAULT_CATEGORIES.
+
+    Returns:
+        The canonical category name, or the original input if unresolvable.
+    """
+    if categories is None:
+        categories = DEFAULT_CATEGORIES
+    valid = {c.name for c in categories}
+
+    normalized = category.strip().lower().replace("_", "-")
+    if not normalized:
+        return ""
+
+    resolved = _resolve_category(normalized, valid)
+    return resolved or normalized
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ from gptme_sessions.classification import (
     classify_by_llm,
     classify_session,
     judge_and_classify,
+    normalize_category,
 )
 
 
@@ -99,6 +100,35 @@ SAMPLE_STRATEGIC_JOURNAL = """\
 ### Deliverables
 - Design doc: knowledge/technical-designs/new-feature-design.md
 - Roadmap updated
+"""
+
+SAMPLE_NOVELTY_JOURNAL = """\
+## Session e4f2 — Novel experiment with WebAssembly agents
+
+### Work
+
+- Experimented with WASM-based agent sandboxing
+- Built proof of concept for isolated tool execution
+- Tried new approach to context compression via WASM modules
+
+### Deliverables
+- Prototype: packages/wasm-sandbox/
+- Experiment results documented
+"""
+
+SAMPLE_NEWS_JOURNAL = """\
+## Session f7a1 — News scan: GitHub trending + HN highlights
+
+### Work
+
+- Scanned GitHub trending for relevant projects
+- Read Hacker News top stories
+- Summarized articles on agent architectures
+- RSS digest of AI research feeds
+
+### Deliverables
+- News summary in journal
+- 2 ideas added to backlog from reading list
 """
 
 
@@ -661,3 +691,73 @@ class TestDataclasses:
         )
         d = result.to_dict()
         assert "secondary_category" not in d
+
+    def test_default_categories_include_novelty_and_news(self) -> None:
+        names = {c.name for c in DEFAULT_CATEGORIES}
+        assert "novelty" in names
+        assert "news" in names
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tests: new categories (novelty, news)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestNewCategories:
+    def test_novelty_session(self) -> None:
+        result = classify_by_keywords(SAMPLE_NOVELTY_JOURNAL)
+        assert result.category == "novelty"
+        assert result.productive is True
+
+    def test_news_session(self) -> None:
+        result = classify_by_keywords(SAMPLE_NEWS_JOURNAL)
+        assert result.category == "news"
+        assert result.productive is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tests: normalize_category
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestNormalizeCategory:
+    def test_canonical_unchanged(self) -> None:
+        assert normalize_category("code") == "code"
+        assert normalize_category("infrastructure") == "infrastructure"
+
+    def test_alias_resolution(self) -> None:
+        assert normalize_category("bug-fix") == "code"
+        assert normalize_category("bugfix") == "code"
+        assert normalize_category("docs") == "content"
+        assert normalize_category("documentation") == "content"
+        assert normalize_category("planning") == "strategic"
+
+    def test_case_insensitive(self) -> None:
+        assert normalize_category("Code") == "code"
+        assert normalize_category("BUG-FIX") == "code"
+
+    def test_underscore_to_dash(self) -> None:
+        assert normalize_category("bug_fix") == "code"
+        assert normalize_category("task_hygiene") == "infrastructure"
+
+    def test_composite_label(self) -> None:
+        assert normalize_category("code, infrastructure") == "code"
+        assert normalize_category("code/infra") == "code"
+
+    def test_parenthesized_label(self) -> None:
+        assert normalize_category("code(bugfix)") == "code"
+
+    def test_unknown_passthrough(self) -> None:
+        assert normalize_category("totally-unknown") == "totally-unknown"
+
+    def test_empty_string(self) -> None:
+        assert normalize_category("") == ""
+
+    def test_whitespace_stripped(self) -> None:
+        assert normalize_category("  code  ") == "code"
+
+    def test_custom_categories(self) -> None:
+        custom = [Category(name="trading", description="Financial trading")]
+        # With custom categories, "code" is unknown since it's not in the custom list
+        result = normalize_category("trading", categories=custom)
+        assert result == "trading"
