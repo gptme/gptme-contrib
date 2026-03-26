@@ -3,6 +3,7 @@
 
 Provides ASCII and Mermaid visualizations of task dependencies,
 showing what each task requires and what depends on it.
+Also provides unblocking power computation for priority scoring.
 """
 
 from dataclasses import dataclass, field
@@ -107,6 +108,136 @@ def detect_circular_dependencies(
         dfs(name, [])
 
     return cycles
+
+
+def compute_unblocking_power(
+    nodes: dict[str, DependencyNode],
+    exclude_states: set[str] | None = None,
+) -> dict[str, int]:
+    """Compute how many tasks each task transitively unblocks.
+
+    A task's unblocking power = number of non-terminal tasks that transitively
+    depend on it (i.e., tasks that can't start until this one is done).
+    Higher scores mean completing this task would unlock more downstream work.
+
+    Args:
+        nodes: Dependency graph from build_dependency_graph
+        exclude_states: Task states to exclude from count
+                        (default: {"done", "cancelled"} — terminal states)
+
+    Returns:
+        Dict mapping task name to unblocking power score (0 = unblocks nothing)
+    """
+    if exclude_states is None:
+        exclude_states = {"done", "cancelled"}
+
+    def _dependents(name: str, seen: set[str]) -> set[str]:
+        """Collect unique transitive dependents (deduplicates diamond patterns)."""
+        result: set[str] = set()
+        node = nodes.get(name)
+        if not node:
+            return result
+        for dep in node.required_by:
+            if dep.name in seen:
+                continue
+            if dep.state not in exclude_states:
+                result.add(dep.name)
+                seen.add(dep.name)
+                result.update(_dependents(dep.name, seen))
+        return result
+
+    return {name: len(_dependents(name, set())) for name in nodes}
+
+
+def render_full_dag_ascii(
+    nodes: dict[str, DependencyNode],
+    unblocking_power: dict[str, int] | None = None,
+    filter_states: set[str] | None = None,
+) -> str:
+    """Render the full workspace dependency graph as ASCII.
+
+    Shows all tasks with dependencies, grouped by whether they have any edges.
+    Tasks with no dependencies or dependents are listed compactly.
+
+    Args:
+        nodes: Full dependency graph from build_dependency_graph
+        unblocking_power: Optional dict of unblocking power scores to display
+        filter_states: If set, only show tasks in these states
+
+    Returns:
+        ASCII representation of the full DAG
+    """
+    lines: list[str] = []
+
+    def state_marker(state: str) -> str:
+        markers = {
+            "done": "✅",
+            "cancelled": "❌",
+            "active": "🏃",
+            "ready_for_review": "👀",
+            "waiting": "⏳",
+            "todo": "📋",
+            "backlog": "📥",
+            "blocked": "🚫",
+            "external": "🔗",
+        }
+        return markers.get(state, "❓")
+
+    # Collect non-external nodes
+    task_nodes = {n: node for n, node in nodes.items() if not node.is_external}
+    if filter_states:
+        task_nodes = {n: node for n, node in task_nodes.items() if node.state in filter_states}
+
+    # Separate into connected (have deps) and isolated (no deps)
+    connected = {n: node for n, node in task_nodes.items() if node.requires or node.required_by}
+    isolated = {n: node for n, node in task_nodes.items() if n not in connected}
+
+    # Render connected tasks: roots first (tasks with no requires of their own)
+    rendered: set[str] = set()
+
+    def render_chain(node: DependencyNode, prefix: str, is_last: bool, depth: int) -> None:
+        if depth > 8 or node.name in rendered:
+            return
+        rendered.add(node.name)
+        connector = "└── " if is_last else "├── "
+        power_str = f" [{unblocking_power[node.name]}↑]" if unblocking_power else ""
+        lines.append(f"{prefix}{connector}{state_marker(node.state)} {node.name}{power_str}")
+        new_prefix = prefix + ("    " if is_last else "│   ")
+        deps = [d for d in node.required_by if not d.is_external and d.name in task_nodes]
+        for i, dep in enumerate(deps):
+            render_chain(dep, new_prefix, i == len(deps) - 1, depth + 1)
+
+    roots = [
+        n for n, node in connected.items() if not any(r.name in task_nodes for r in node.requires)
+    ]
+    for i, root_name in enumerate(sorted(roots)):
+        root = connected[root_name]
+        power_str = f" [{unblocking_power[root_name]}↑]" if unblocking_power else ""
+        lines.append(f"{state_marker(root.state)} {root_name}{power_str}")
+        deps = [d for d in root.required_by if not d.is_external and d.name in task_nodes]
+        for j, dep in enumerate(deps):
+            render_chain(dep, "", j == len(deps) - 1, 1)
+        if i < len(roots) - 1:
+            lines.append("")
+
+    # Render remaining connected tasks not yet shown (non-root connected)
+    for name in sorted(connected):
+        if name not in rendered and name not in [r for r in roots]:
+            node = connected[name]
+            power_str = f" [{unblocking_power[name]}↑]" if unblocking_power else ""
+            lines.append(f"{state_marker(node.state)} {name}{power_str}")
+
+    # Render isolated tasks compactly
+    if isolated:
+        if lines:
+            lines.append("")
+        lines.append("── No dependencies ──")
+        for name in sorted(isolated):
+            node = isolated[name]
+            power_str = f" [{unblocking_power[name]}↑]" if unblocking_power else ""
+            lines.append(f"  {state_marker(node.state)} {name}{power_str}")
+
+    return "\n".join(lines)
 
 
 def render_tree_ascii(
