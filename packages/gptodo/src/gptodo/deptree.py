@@ -188,8 +188,18 @@ def render_full_dag_ascii(
     if filter_states:
         task_nodes = {n: node for n, node in task_nodes.items() if node.state in filter_states}
 
-    # Separate into connected (have deps) and isolated (no deps)
-    connected = {n: node for n, node in task_nodes.items() if node.requires or node.required_by}
+    def has_visible_edges(node: DependencyNode) -> bool:
+        return any(not dep.is_external and dep.name in task_nodes for dep in node.requires) or any(
+            not dep.is_external and dep.name in task_nodes for dep in node.required_by
+        )
+
+    def power_label(name: str) -> str:
+        if not unblocking_power:
+            return ""
+        return f" [{unblocking_power.get(name, 0)}↑]"
+
+    # Separate into connected (have visible deps) and isolated (no visible deps)
+    connected = {n: node for n, node in task_nodes.items() if has_visible_edges(node)}
     isolated = {n: node for n, node in task_nodes.items() if n not in connected}
 
     # Render connected tasks: roots first (tasks with no requires of their own)
@@ -200,7 +210,7 @@ def render_full_dag_ascii(
             return
         rendered.add(node.name)
         connector = "└── " if is_last else "├── "
-        power_str = f" [{unblocking_power[node.name]}↑]" if unblocking_power else ""
+        power_str = power_label(node.name)
         lines.append(f"{prefix}{connector}{state_marker(node.state)} {node.name}{power_str}")
         new_prefix = prefix + ("    " if is_last else "│   ")
         deps = [d for d in node.required_by if not d.is_external and d.name in task_nodes]
@@ -212,7 +222,7 @@ def render_full_dag_ascii(
     ]
     for i, root_name in enumerate(sorted(roots)):
         root = connected[root_name]
-        power_str = f" [{unblocking_power[root_name]}↑]" if unblocking_power else ""
+        power_str = power_label(root_name)
         lines.append(f"{state_marker(root.state)} {root_name}{power_str}")
         deps = [d for d in root.required_by if not d.is_external and d.name in task_nodes]
         for j, dep in enumerate(deps):
@@ -224,7 +234,7 @@ def render_full_dag_ascii(
     for name in sorted(connected):
         if name not in rendered and name not in [r for r in roots]:
             node = connected[name]
-            power_str = f" [{unblocking_power[name]}↑]" if unblocking_power else ""
+            power_str = power_label(name)
             lines.append(f"{state_marker(node.state)} {name}{power_str}")
 
     # Render isolated tasks compactly
@@ -234,7 +244,7 @@ def render_full_dag_ascii(
         lines.append("── No dependencies ──")
         for name in sorted(isolated):
             node = isolated[name]
-            power_str = f" [{unblocking_power[name]}↑]" if unblocking_power else ""
+            power_str = power_label(name)
             lines.append(f"  {state_marker(node.state)} {name}{power_str}")
 
     return "\n".join(lines)

@@ -239,3 +239,17 @@ class TestRenderFullDagAscii:
         result = render_full_dag_ascii(nodes, filter_states={"active"})
         assert "active-task" in result
         assert "done-task" not in result
+
+    def test_filter_states_hidden_edges_become_isolated(self):
+        """Tasks connected only to filtered-out nodes should render as isolated."""
+        tasks = [
+            make_task("done-base", state="done"),
+            make_task("active-child", state="active", requires=["done-base"]),
+        ]
+        nodes = build_dependency_graph(tasks)
+
+        result = render_full_dag_ascii(nodes, filter_states={"active"})
+
+        assert result.startswith("── No dependencies ──")
+        assert "active-child" in result
+        assert "done-base" not in result

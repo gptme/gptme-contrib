@@ -4639,10 +4639,6 @@ def dep_dag(state: tuple[str, ...], show_power: bool):
         filter_states = set(state)
     else:
         terminal = {"done", "cancelled"}
-        filter_states = {s for s in {"backlog", "todo", "active", "waiting", "ready_for_review"}}
-        # include all non-terminal states by default (None means all)
-        filter_states = None  # show everything including terminal for full picture
-        # but we want to skip done/cancelled from the DAG display to reduce noise
         filter_states = {
             node.state
             for node in nodes.values()
