@@ -6,19 +6,28 @@ This provides better quality summaries and saves tokens in the main gptme sessio
 """
 
 import json
+import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
-def call_claude_code(prompt: str, timeout: int = 120) -> str:
+# Retry configuration for empty CC responses (nesting detection, transient failures)
+_MAX_RETRIES = 3
+_RETRY_DELAY_S = 5
+
+
+def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RETRIES) -> str:
     """
-    Call Claude Code CLI with a prompt.
+    Call Claude Code CLI with a prompt, retrying on empty responses.
 
     Args:
         prompt: The prompt to send to Claude Code
         timeout: Maximum time to wait for response (seconds)
+        max_retries: Maximum number of retry attempts on empty response
 
     Returns:
         The response text from Claude Code
@@ -26,28 +35,53 @@ def call_claude_code(prompt: str, timeout: int = 120) -> str:
     Raises:
         subprocess.TimeoutExpired: If the command times out
         subprocess.CalledProcessError: If the command fails
+        RuntimeError: If all retries return empty responses
     """
-    # Allow nesting: unset CLAUDECODE to avoid the nested-session guard
-    # when called from within a Claude Code session (e.g. systemd timer).
     import os
 
     env = os.environ.copy()
+    # Allow nesting: unset env vars that trigger CC's nested-session guard
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
-    result = subprocess.run(
-        ["claude", "-p", "-"],
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode, ["claude", "-p"], result.stdout, result.stderr
+    for attempt in range(1, max_retries + 1):
+        result = subprocess.run(
+            ["claude", "-p", "-"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
         )
-    return result.stdout.strip()
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, ["claude", "-p"], result.stdout, result.stderr
+            )
+
+        output = result.stdout.strip()
+        if output:
+            return output
+
+        # Empty response — likely nesting detection or transient failure
+        logger.warning(
+            "claude -p returned empty response (attempt %d/%d). " "stderr: %s",
+            attempt,
+            max_retries,
+            result.stderr.strip()[:200] if result.stderr else "(none)",
+        )
+
+        if attempt < max_retries:
+            time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
+
+    # All retries exhausted — return empty string (callers handle gracefully)
+    logger.error(
+        "claude -p returned empty response after %d attempts. "
+        "This usually means CC nesting detection blocked the subprocess. "
+        "Prompt length: %d chars",
+        max_retries,
+        len(prompt),
+    )
+    return ""
 
 
 def extract_json_from_response(response: str) -> dict[str, Any]:
@@ -155,6 +189,8 @@ Journal Entry:
 Return ONLY the JSON, no additional text."""
 
     response = call_claude_code(prompt, timeout=timeout)
+    if not response:
+        logger.warning("CC returned empty for journal summary (%s), using defaults", entry_date)
     result = extract_json_from_response(response)
 
     # Ensure all expected keys exist with defaults
@@ -172,6 +208,9 @@ Return ONLY the JSON, no additional text."""
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
+
+    if not response:
+        result["_cc_failed"] = True
 
     return result
 
@@ -259,6 +298,8 @@ Journal Entries ({len(entries)} total):
 Return ONLY the JSON."""
 
     response = call_claude_code(prompt, timeout=timeout)
+    if not response:
+        logger.warning("CC returned empty for daily summary (%s), using defaults", target_date)
     result = extract_json_from_response(response)
 
     # Ensure defaults
@@ -277,6 +318,9 @@ Return ONLY the JSON."""
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
+
+    if not response:
+        result["_cc_failed"] = True
 
     return result
 
@@ -358,6 +402,8 @@ Daily Summaries:
 Return ONLY the JSON."""
 
     response = call_claude_code(prompt, timeout=timeout)
+    if not response:
+        logger.warning("CC returned empty for weekly summary (%s), using defaults", week_id)
     result = extract_json_from_response(response)
 
     # Ensure defaults
@@ -373,6 +419,9 @@ Return ONLY the JSON."""
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
+
+    if not response:
+        result["_cc_failed"] = True
 
     return result
 
@@ -424,6 +473,10 @@ Guidelines:
 Return ONLY the JSON."""
 
     response = call_claude_code(prompt, timeout=timeout)
+    if not response:
+        logger.warning(
+            "CC returned empty for GitHub summary (%s/%s), using defaults", username, period
+        )
     result = extract_json_from_response(response)
 
     defaults: dict[str, Any] = {
@@ -442,6 +495,9 @@ Return ONLY the JSON."""
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
+
+    if not response:
+        result["_cc_failed"] = True
 
     return result
 
@@ -485,6 +541,10 @@ Guidelines:
 Return ONLY the JSON."""
 
     response = call_claude_code(prompt, timeout=timeout)
+    if not response:
+        logger.warning(
+            "CC returned empty for human day summary (%s/%s), using defaults", username, day
+        )
     result = extract_json_from_response(response)
 
     defaults: dict[str, Any] = {
@@ -497,6 +557,9 @@ Return ONLY the JSON."""
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
+
+    if not response:
+        result["_cc_failed"] = True
 
     return result
 
@@ -579,6 +642,8 @@ Weekly Summaries:
 Return ONLY the JSON."""
 
     response = call_claude_code(prompt, timeout=timeout)
+    if not response:
+        logger.warning("CC returned empty for monthly summary (%s), using defaults", month)
     result = extract_json_from_response(response)
 
     # Ensure defaults
@@ -595,5 +660,8 @@ Return ONLY the JSON."""
     for key, default in defaults.items():
         if key not in result:
             result[key] = default
+
+    if not response:
+        result["_cc_failed"] = True
 
     return result
