@@ -240,6 +240,15 @@ class TestRenderFullDagAscii:
         assert "active-task" in result
         assert "done-task" not in result
 
+    def test_empty_filter_states_hides_all_tasks(self):
+        """An empty filter set should hide everything, not disable filtering."""
+        tasks = [make_task("done-task", state="done")]
+        nodes = build_dependency_graph(tasks)
+
+        result = render_full_dag_ascii(nodes, filter_states=set())
+
+        assert result == ""
+
     def test_filter_states_hidden_edges_become_isolated(self):
         """Tasks connected only to filtered-out nodes should render as isolated."""
         tasks = [

@@ -4602,7 +4602,7 @@ def dep_check(output_json: bool):
     "show_power",
     is_flag=True,
     default=True,
-    help="Show unblocking power scores [Nup] (default: on)",
+    help="Show unblocking power scores [N↑] (default: on)",
 )
 @click.option(
     "--no-power",
@@ -4660,7 +4660,7 @@ def dep_dag(state: tuple[str, ...], show_power: bool):
     console.print(dag)
 
     if show_power:
-        console.print("\n[dim][Nup] = unblocking power (# tasks transitively unblocked)[/]")
+        console.print("\n[dim][N↑] = unblocking power (# tasks transitively unblocked)[/]")
 
 
 # ============================================================================

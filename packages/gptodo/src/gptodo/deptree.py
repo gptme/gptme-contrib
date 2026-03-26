@@ -185,7 +185,7 @@ def render_full_dag_ascii(
 
     # Collect non-external nodes
     task_nodes = {n: node for n, node in nodes.items() if not node.is_external}
-    if filter_states:
+    if filter_states is not None:
         task_nodes = {n: node for n, node in task_nodes.items() if node.state in filter_states}
 
     def has_visible_edges(node: DependencyNode) -> bool:
