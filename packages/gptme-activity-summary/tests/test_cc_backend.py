@@ -176,22 +176,41 @@ def test_call_claude_code_linear_backoff(mock_run, mock_sleep):
 
 
 @patch("subprocess.run")
-def test_call_claude_code_unsets_env_vars(mock_run):
-    """Test that CLAUDECODE and CLAUDE_CODE_ENTRYPOINT are unset."""
+def test_call_claude_code_unsets_all_cc_env_vars(mock_run):
+    """Test that all CC-related env vars are stripped from subprocess."""
     mock_run.return_value = _make_completed_process(stdout="ok")
 
     import os
 
-    os.environ["CLAUDECODE"] = "1"
-    os.environ["CLAUDE_CODE_ENTRYPOINT"] = "/usr/bin/claude"
+    cc_vars = {
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_ENTRYPOINT": "/usr/bin/claude",
+        "CC_SESSION_ID": "test-session-id",
+        "CC_MODEL": "opus",
+    }
+    for k, v in cc_vars.items():
+        os.environ[k] = v
     try:
         call_claude_code("test")
         env_used = mock_run.call_args.kwargs["env"]
-        assert "CLAUDECODE" not in env_used
-        assert "CLAUDE_CODE_ENTRYPOINT" not in env_used
+        for var in cc_vars:
+            assert var not in env_used, f"CC env var {var} should be stripped"
     finally:
-        os.environ.pop("CLAUDECODE", None)
-        os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        for k in cc_vars:
+            os.environ.pop(k, None)
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_uses_no_session_persistence(mock_run, mock_sleep):
+    """Verify --no-session-persistence flag prevents silent empty output when nested."""
+    mock_run.return_value = _make_completed_process(stdout="test output")
+    call_claude_code("test prompt")
+    cmd = mock_run.call_args[0][0]
+    assert "--no-session-persistence" in cmd, (
+        "Must pass --no-session-persistence to prevent CC session persistence "
+        "from hijacking output when running as a subprocess of another CC session"
+    )
 
 
 # --- Tests for _cc_failed flag propagation ---
