@@ -1750,8 +1750,8 @@ def classify_stats(
         recent_cats = [r["category"] for r in results[-diversity_window:]]
         alerts: list[str] = []
 
-        if len(set(recent_cats[:3])) == 1:
-            alerts.append(f"3+ consecutive '{recent_cats[0]}' sessions — consider diversifying")
+        if len(recent_cats) >= 3 and len(set(recent_cats[-3:])) == 1:
+            alerts.append(f"3+ consecutive '{recent_cats[-1]}' sessions — consider diversifying")
 
         non_code = sum(1 for c in recent_cats if c in ("triage", "monitoring"))
         if non_code >= 3:
