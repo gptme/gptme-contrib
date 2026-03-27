@@ -210,7 +210,7 @@ sleep_until_next_period() {
     midnight="$(python3 -c "
 import datetime
 import time
-now = datetime.datetime.utcnow()
+now = datetime.datetime.now(datetime.timezone.utc)
 tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
 print(int(tomorrow.timestamp()))
 ")"

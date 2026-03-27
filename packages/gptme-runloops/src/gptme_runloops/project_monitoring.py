@@ -4,7 +4,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
@@ -868,7 +868,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                     try:
                         error_dt = datetime.fromisoformat(error_time)
                         age_hours = (
-                            datetime.utcnow() - error_dt
+                            datetime.now(timezone.utc) - error_dt
                         ).total_seconds() / 3600
                         if age_hours > 24:
                             self.logger.debug(
