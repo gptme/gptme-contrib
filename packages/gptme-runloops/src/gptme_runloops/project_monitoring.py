@@ -875,7 +875,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                                 f"Skipping old notification: {filepath.name} ({age_hours:.1f}h old)"
                             )
                             continue
-                    except ValueError:
+                    except (ValueError, TypeError):
                         pass
 
                 session = payload.get("agentSession", {})
