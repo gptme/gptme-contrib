@@ -60,7 +60,7 @@ ENABLED="$(get_config enabled true)"
 
 # General autoresearch fields — support any artifact, eval, harness, and program spec.
 # These replace gptme-specific hardcoded defaults and allow running arbitrary experiments.
-ARTIFACT_DIR="$(get_config artifact_dir "$(pwd)")"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$(get_config artifact_dir "$(pwd)")}"
 AGENT_HARNESS="$(get_config agent_harness gptme)"
 EVAL_CMD="$(get_config eval_cmd "")"           # Optional: custom eval command (stdout → float)
 PROGRAM_SPEC="$(get_config program_spec "")"   # Optional: path to agent program spec
