@@ -10,6 +10,10 @@
 #   autoresearch-loop.sh EXPERIMENT
 #   Or set EXPERIMENT env var before calling.
 #
+# Environment overrides:
+#   CONFIG_DIR   Directory containing YAML experiment configs (default: ./experiments/)
+#   ARTIFACT_DIR Directory for build artifacts (default: current working directory)
+#
 # As a persistent service (Type=simple), this loops forever. systemd restart policy
 # handles crashes. The experiment name is passed as the first argument (or via env).
 
@@ -25,7 +29,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
 STATE_DIR="${REPO_ROOT}/state/autoresearch"
-CONFIG_DIR="${SCRIPT_DIR}/experiments"
+# CONFIG_DIR can be overridden via env var to support thin wrapper deployments
+# where experiment configs live outside the gptme-contrib repo (e.g. agent workspaces)
+CONFIG_DIR="${CONFIG_DIR:-${SCRIPT_DIR}/experiments}"
 BUDGET_DIR="${STATE_DIR}/budget"
 GLOBAL_CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 
