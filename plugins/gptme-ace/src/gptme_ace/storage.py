@@ -37,7 +37,7 @@ Example:
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List
 
@@ -183,7 +183,7 @@ class InsightStorage:
         # Create metadata
         metadata = InsightMetadata(
             insight_id=insight_id,
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             source_agent="generator",
             status="pending",
         )
@@ -255,7 +255,7 @@ class InsightStorage:
         # Create metadata
         metadata = InsightMetadata(
             insight_id=insight_id,
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             source_agent="reflector",
             status="pending",
         )
@@ -349,7 +349,9 @@ class InsightStorage:
         insight.metadata.status = new_status
         if reviewer:
             insight.metadata.reviewed_by = reviewer
-            insight.metadata.reviewed_at = datetime.utcnow().isoformat() + "Z"
+            insight.metadata.reviewed_at = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
         if converted_to_lesson:
             insight.metadata.converted_to_lesson = converted_to_lesson
 

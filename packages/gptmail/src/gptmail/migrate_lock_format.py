@@ -3,7 +3,7 @@
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 lock_file = Path("email/locks/email.json")
@@ -45,8 +45,8 @@ for key, entry in list(messages.items()):
         "to_user": None,
         "subject": None,
         "state": entry.get("state", "pending"),
-        "created_at": entry.get("created_at", datetime.utcnow().isoformat()),
-        "updated_at": entry.get("updated_at", datetime.utcnow().isoformat()),
+        "created_at": entry.get("created_at", datetime.now(timezone.utc).isoformat()),
+        "updated_at": entry.get("updated_at", datetime.now(timezone.utc).isoformat()),
         "error": entry.get("error"),
     }
 

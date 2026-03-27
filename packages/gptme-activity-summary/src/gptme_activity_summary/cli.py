@@ -20,7 +20,7 @@ All summarization uses Claude Code backend for high-quality results.
 """
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import click
 
@@ -358,7 +358,7 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
             total_tokens=session_stats.total_tokens,
             total_cost=session_stats.total_cost,
         ),
-        generated_at=datetime.utcnow(),
+        generated_at=datetime.now(timezone.utc),
     )
 
 
@@ -438,7 +438,7 @@ def generate_weekly_summary_cc(week: str, verbose: bool = False):
             total_tokens=session_stats.total_tokens,
             total_cost=session_stats.total_cost,
         ),
-        generated_at=datetime.utcnow(),
+        generated_at=datetime.now(timezone.utc),
     )
 
 
@@ -549,7 +549,7 @@ def generate_monthly_summary_cc(month: str, verbose: bool = False):
             total_tokens=session_stats.total_tokens,
             total_cost=session_stats.total_cost,
         ),
-        generated_at=datetime.utcnow(),
+        generated_at=datetime.now(timezone.utc),
     )
 
 

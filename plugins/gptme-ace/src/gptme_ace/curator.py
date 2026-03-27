@@ -27,7 +27,7 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -136,7 +136,7 @@ class CuratorAgent:
         delta_id = self._generate_delta_id(insight)
         delta = Delta(
             delta_id=delta_id,
-            created=datetime.utcnow().isoformat() + "Z",
+            created=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             source="ace_curator",
             source_insights=[insight.metadata.insight_id],
             lesson_id=self._determine_lesson_id(insight, lesson_content),
@@ -401,8 +401,8 @@ Generate the delta operations now:"""
         ]
 
         return Delta(
-            delta_id=f"d_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_mock",
-            created=datetime.utcnow().isoformat() + "Z",
+            delta_id=f"d_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_mock",
+            created=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             source="ace_curator",
             source_insights=[insight.metadata.insight_id],
             lesson_id=f"{insight.category}_mock_lesson",
@@ -448,7 +448,7 @@ Generate the delta operations now:"""
 
     def _generate_delta_id(self, insight: StoredInsight) -> str:
         """Generate unique delta ID"""
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         insight_hash = insight.metadata.insight_id[:8]
         return f"d_{timestamp}_{insight_hash}"
 
