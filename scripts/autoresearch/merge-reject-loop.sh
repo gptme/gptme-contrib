@@ -451,11 +451,12 @@ run_agent_with_fallback() {
                 gptme_cmd+=("${prompt}")
                 ;;
             claude-code|cc)
-                # Claude Code headless mode. Unset CLAUDECODE to allow nesting.
-                # Note: --model accepts short names (e.g. sonnet) or full model IDs.
+                # Claude Code headless mode. Disable persistence for nested runs
+                # and clear inherited session env to prevent silent empty output.
+                # See: gptme/gptme-contrib#585 for the root cause.
                 gptme_cmd=(
-                    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT
-                    claude -p "${prompt}"
+                    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CC_SESSION_ID -u CC_MODEL
+                    claude -p --no-session-persistence "${prompt}"
                     --cwd "${GPTME_DIR}"
                 )
                 if [[ -n "${candidate}" ]]; then
@@ -577,8 +578,8 @@ NEXT_FOCUS: <one concrete specific action the next iteration should take, differ
             gptme --non-interactive -m "${diag_model}" "${diag_prompt}" > "${diagnosis_log}" 2>&1
             ;;
         claude-code|cc)
-            env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
-                claude -p "${diag_prompt}" --model "${diag_model}" > "${diagnosis_log}" 2>&1
+            env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CC_SESSION_ID -u CC_MODEL \
+                claude -p --no-session-persistence "${diag_prompt}" --model "${diag_model}" > "${diagnosis_log}" 2>&1
             ;;
     esac
     set -e
