@@ -112,6 +112,23 @@ def _get_user_auth(client) -> bool:
     return getattr(client, "_use_user_auth", False)
 
 
+def _verify_account_identity(username: str, console) -> None:
+    """Safety guard: verify the authenticated account matches the expected identity.
+
+    Prevents posting from the wrong account when misconfigured OAuth tokens
+    are present (e.g. a human's personal tokens used by an agent).
+    See ErikBjare/bob#479 for the incident that motivated this check.
+    """
+    expected = os.getenv("TWITTER_EXPECTED_USERNAME", "TimeToBuildBob")
+    if username.lower() != expected.lower():
+        console.print(
+            f"[red]SECURITY: Authenticated as @{username} but expected @{expected}!"
+        )
+        console.print("[red]Aborting to prevent posting from the wrong account.")
+        console.print("[red]Check TWITTER_ACCESS_TOKEN / TWITTER_ACCESS_SECRET in .env")
+        sys.exit(1)
+
+
 def load_twitter_client(
     require_auth: bool = False, headless: bool = False
 ) -> tweepy.Client:
@@ -231,6 +248,7 @@ def load_twitter_client(
                     # Test the credentials
                     test = cached_get_me(client, user_auth=False)
                     if test.data:
+                        _verify_account_identity(test.data.username, console)
                         console.print(
                             f"[green]Successfully authenticated as @{test.data.username}"
                         )
@@ -358,6 +376,7 @@ def load_twitter_client(
                     # Test the credentials with OAuth 2.0
                     test = cached_get_me(client, user_auth=False)
                     if test.data:
+                        _verify_account_identity(test.data.username, console)
                         console.print(
                             f"[green]Successfully authenticated as @{test.data.username}"
                         )
@@ -435,6 +454,7 @@ def load_twitter_client(
         console.print("[yellow]Debug: Testing OAuth credentials...")
         test = cached_get_me(client, user_auth=True)
         if test.data:
+            _verify_account_identity(test.data.username, console)
             console.print(f"[green]Successfully authenticated as @{test.data.username}")
         else:
             console.print("[red]Could not get user info after authentication")
