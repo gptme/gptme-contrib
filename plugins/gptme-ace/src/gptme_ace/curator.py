@@ -136,7 +136,7 @@ class CuratorAgent:
         delta_id = self._generate_delta_id(insight)
         delta = Delta(
             delta_id=delta_id,
-            created=datetime.now(timezone.utc).isoformat() + "Z",
+            created=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             source="ace_curator",
             source_insights=[insight.metadata.insight_id],
             lesson_id=self._determine_lesson_id(insight, lesson_content),
@@ -402,7 +402,7 @@ Generate the delta operations now:"""
 
         return Delta(
             delta_id=f"d_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_mock",
-            created=datetime.now(timezone.utc).isoformat() + "Z",
+            created=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             source="ace_curator",
             source_insights=[insight.metadata.insight_id],
             lesson_id=f"{insight.category}_mock_lesson",

@@ -104,8 +104,12 @@ class LessonEmbedder:
                 "model_name": f"sentence-transformers/{self.model_name}",
                 "embedding_dim": 384,  # all-MiniLM-L6-v2 dimension
                 "index_type": "IndexFlatL2",
-                "created_at": datetime.now(timezone.utc).isoformat() + "Z",
-                "last_updated": datetime.now(timezone.utc).isoformat() + "Z",
+                "created_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "last_updated": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
                 "lesson_count": 0,
             }
             self._save_config()
@@ -379,7 +383,9 @@ class LessonEmbedder:
             self.metadata[lesson_id] = {
                 "lesson_id": lesson_id,
                 "text_hash": text_hash,
-                "embedded_at": datetime.now(timezone.utc).isoformat() + "Z",
+                "embedded_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
                 "model": self.model_name,
                 "path": str(lesson_path.relative_to(self.lessons_dir)),
                 "index": (
@@ -392,7 +398,9 @@ class LessonEmbedder:
         # Save everything
         self._save_index()
         self._save_metadata()
-        self.config["last_updated"] = datetime.now(timezone.utc).isoformat() + "Z"
+        self.config["last_updated"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
         self.config["lesson_count"] = len(self.metadata)
         self._save_config()
 
@@ -784,7 +792,9 @@ class LessonEmbedder:
             self.metadata[lesson_id] = {
                 "lesson_id": lesson_id,
                 "text_hash": text_hash,
-                "embedded_at": datetime.now(timezone.utc).isoformat() + "Z",
+                "embedded_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
                 "model": self.model_name,
                 "path": str(lesson_path.relative_to(self.lessons_dir)),
                 "index": idx,
@@ -796,7 +806,9 @@ class LessonEmbedder:
             # Save everything
             self._save_index()
             self._save_metadata()
-            self.config["last_updated"] = datetime.now(timezone.utc).isoformat() + "Z"
+            self.config["last_updated"] = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
             self.config["lesson_count"] = len(self.metadata)
             self._save_config()
 
