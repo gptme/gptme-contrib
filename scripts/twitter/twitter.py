@@ -103,6 +103,15 @@ def cached_get_me(client, user_auth: bool = False):
     return client.get_me(user_auth=user_auth)
 
 
+def _get_user_auth(client) -> bool:
+    """Get the correct user_auth flag for a tweepy Client.
+
+    OAuth 1.0a clients need user_auth=True; OAuth 2.0 use False.
+    Set by load_twitter_client() as client._use_user_auth.
+    """
+    return getattr(client, "_use_user_auth", False)
+
+
 def load_twitter_client(
     require_auth: bool = False, headless: bool = False
 ) -> tweepy.Client:
@@ -217,6 +226,7 @@ def load_twitter_client(
 
                     # Create client with current token
                     client = tweepy.Client(saved_token, wait_on_rate_limit=True)
+                    client._use_user_auth = False  # OAuth 2.0: use bearer token
 
                     # Test the credentials
                     test = cached_get_me(client, user_auth=False)
@@ -343,6 +353,7 @@ def load_twitter_client(
                         ],  # Pass access token directly as first argument
                         wait_on_rate_limit=True,
                     )
+                    client._use_user_auth = False  # OAuth 2.0: use bearer token
 
                     # Test the credentials with OAuth 2.0
                     test = cached_get_me(client, user_auth=False)
@@ -418,6 +429,7 @@ def load_twitter_client(
             access_token_secret=access_secret,
             wait_on_rate_limit=True,
         )
+        client._use_user_auth = True  # OAuth 1.0a: must use user context
 
         # Test the credentials with a simple API call
         console.print("[yellow]Debug: Testing OAuth credentials...")
@@ -530,8 +542,7 @@ def me(limit: int) -> None:
     """Read your own recent tweets"""
     client = load_twitter_client(require_auth=True)
 
-    # needs user_auth=False to use OAuth 2.0 and not get the "Consumer key must be string or bytes, not NoneType" error
-    me = cached_get_me(client, user_auth=False)
+    me = cached_get_me(client, user_auth=_get_user_auth(client))
     username = me.data.username
 
     # Remove @ if present
@@ -579,7 +590,7 @@ def post(text: str, reply_to: str | None, thread: bool) -> None:
             response = client.create_tweet(
                 text=message.text,
                 in_reply_to_tweet_id=reply_to_id,
-                user_auth=False,
+                user_auth=_get_user_auth(client),
             )
             if not response.data:
                 console.print("[red]Error: No response data from tweet creation")
@@ -600,7 +611,7 @@ def post(text: str, reply_to: str | None, thread: bool) -> None:
     else:
         # Single tweet
         response = client.create_tweet(
-            text=text, in_reply_to_tweet_id=reply_to, user_auth=False
+            text=text, in_reply_to_tweet_id=reply_to, user_auth=_get_user_auth(client)
         )
         if not response.data:
             console.print("[red]Error: No response data from tweet creation")
@@ -697,7 +708,7 @@ def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
                 )
                 continue
 
-            response = client.follow_user(target_id, user_auth=False)
+            response = client.follow_user(target_id, user_auth=_get_user_auth(client))
             if response.data:
                 if response.data.get("following"):
                     console.print(f"[green]Now following @{username}")
@@ -820,8 +831,7 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
     """Check replies to our tweets"""
     client = load_twitter_client(require_auth=True)
 
-    # Get our user ID with OAuth 2.0
-    me = cached_get_me(client, user_auth=False)
+    me = cached_get_me(client, user_auth=_get_user_auth(client))
     if not me.data:
         console.print("[red]Could not get user information")
         sys.exit(1)
@@ -832,7 +842,7 @@ def replies(since: str, limit: int, unanswered: bool) -> None:
         me.data.id,
         max_results=limit,
         start_time=start_time,
-        user_auth=False,
+        user_auth=_get_user_auth(client),
         expansions=["author_id", "in_reply_to_user_id"],
         tweet_fields=["created_at", "author_id", "public_metrics"],
     )
@@ -871,7 +881,7 @@ def quotes(since: str, limit: int, unanswered: bool) -> None:
     client = load_twitter_client(require_auth=True)
 
     # Get our user ID with OAuth 2.0
-    me = client.get_me(user_auth=False)
+    me = client.get_me(user_auth=_get_user_auth(client))
     if not me.data:
         console.print("[red]Could not get user information")
         sys.exit(1)
@@ -955,7 +965,7 @@ def timeline(since: str, limit: int, list_id: str | None) -> None:
                 tweet_fields=["created_at", "author_id", "public_metrics"],
                 expansions=["author_id"],
                 user_fields=["username"],
-                user_auth=False,
+                user_auth=_get_user_auth(client),
             )
             source = f"list {list_id}"
         except tweepy.TweepyException as e:
@@ -970,7 +980,7 @@ def timeline(since: str, limit: int, list_id: str | None) -> None:
                 tweet_fields=["created_at", "author_id", "public_metrics"],
                 expansions=["author_id"],
                 user_fields=["username"],
-                user_auth=False,
+                user_auth=_get_user_auth(client),
             )
             source = "home timeline"
         except tweepy.TweepyException as e:
