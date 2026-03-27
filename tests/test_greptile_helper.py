@@ -368,6 +368,29 @@ def test_score_5_is_already_reviewed():
     assert status.stdout.strip() == "already-reviewed"
 
 
+def test_score_5_with_new_commits_needs_rereview():
+    """Score 5/5 is not terminal once new commits land after the review."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 124,
+        "raw_comments": [
+            _make_greptile_comment(
+                5, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),
+        ],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    result = _run_helper("check", fixture)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "needs-re-review"
+
+
 def test_trigger_skips_unreviewed_pr_initial_review():
     """Trigger on old PR with no review → skips (awaiting Greptile auto-review)."""
     fixture = {
@@ -421,6 +444,29 @@ def test_trigger_re_reviews_on_low_score_with_new_commits():
     assert (
         gh_log
     ), "comment was never posted (neither gh pr comment nor gh api REST call)"
+    assert "@greptileai review" in gh_log
+
+
+def test_trigger_re_reviews_after_score_5_when_new_commits_land():
+    """A 5/5 review still needs a fresh pass if the PR head changed afterward."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 778,
+        "raw_comments": [
+            _make_greptile_comment(
+                5, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+        ],
+        "raw_commits": [
+            _make_commit(_iso_ago(minutes=10)),
+        ],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
+    assert gh_log, "comment was never posted"
     assert "@greptileai review" in gh_log
 
 

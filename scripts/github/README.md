@@ -212,8 +212,9 @@ These scripts are designed to be integrated into gptme agent workflows:
 Batch-trigger safe Greptile re-review requests for open PRs.
 
 Scans open PRs authored by the authenticated user, identifies which ones need a
-re-review (new commits since the last Greptile review), and routes triggers through
-`greptile-helper.sh`. Never triggers initial reviews — Greptile auto-reviews new PRs.
+re-review because new commits landed since the last Greptile review, and routes
+triggers through `greptile-helper.sh`. Never triggers initial reviews — Greptile
+auto-reviews new PRs.
 
 **Features:**
 - Safe re-review triggering (no spam — uses greptile-helper.sh guards)

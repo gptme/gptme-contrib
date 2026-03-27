@@ -19,15 +19,16 @@ Use `greptile-helper.sh` for all Greptile triggers so re-reviews stay safe, idem
 
 ## Context
 When working on PRs that:
-- Previously received low code quality scores from Greptile
-- Have been improved with bug fixes or additional tests
-- Need validation that quality improvements were effective
-- Are ready for re-review after addressing feedback
+- Already have a Greptile review
+- Have changed since that review (for example bug fixes, new tests, or follow-up commits)
+- Need validation that the latest head still looks good before human review
+- Are ready for re-review after addressing feedback or otherwise changing the PR
 
 ## Detection
 Observable signals that indicate you need a Greptile re-review:
-- PR has an existing Greptile review with a low score (for example 3/5)
+- PR has an existing Greptile review, but the head changed afterward
 - You made improvements (fixed bugs, added tests, improved coverage)
+- You pushed follow-up commits after a prior 5/5 review and want a fresh snapshot
 - You want to verify the improvements before requesting human review
 - Coverage or test results improved, but there is no new Greptile review yet
 
@@ -59,7 +60,7 @@ The helper centralizes the anti-spam guards:
 - recent-trigger cooldown
 - bot-ack detection and grace period
 - fail-safe handling for API/rate-limit errors
-- re-review logic only when new commits exist after a low-scoring review
+- re-review logic only when new commits exist after the latest Greptile review
 
 Greptile should auto-review new PRs. Use the helper only for re-review after improvements, or when the helper explicitly indicates `needs-re-review`. `status` is safe for inspection; `trigger` is the only mutation path.
 

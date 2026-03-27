@@ -8,17 +8,18 @@
 #     already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | error
 #
 # Exit codes for 'check':
-#   0 = safe to trigger (re-review needed: score < 5/5 + new commits)
+#   0 = safe to trigger (re-review needed: new commits since the last Greptile review)
 #   1 = skip: no review yet (awaiting Greptile auto-review), or re-review trigger in-flight
-#   2 = skip: reviewed by greptile-apps[bot], score=5/5 or no new commits since review
+#   2 = skip: reviewed by greptile-apps[bot], and no new commits since review
 #   3 = api error (fail-safe = skip)
 #
 # Erik's requests (ErikBjare/bob#434):
 #   1. Reduce 30min age guard → 15min (reviews complete in 5-15min)
-#   2. Re-request after addressing feedback: if score < 5/5 AND new commits → trigger
+#   2. Re-request after addressing feedback once new commits land after a Greptile review
 #
 # Initial review policy: Greptile automatically reviews all new PRs. We NEVER manually
-# trigger initial reviews. Only re-reviews (score < 5/5 + new commits) are triggered.
+# trigger initial reviews. Only re-reviews (new commits after the latest Greptile
+# review) are triggered.
 # Status 'awaiting-initial-review' is returned for ALL unreviewed PRs regardless of age.
 #
 # Root cause of spam incidents:
@@ -124,20 +125,14 @@ _has_greptile_review() {
     echo "$info" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('has_review') else 1)" 2>/dev/null
 }
 
-# --- Helper: check if re-review is needed (not 5/5 + new commits since review) ---
+# --- Helper: check if re-review is needed (new commits since latest review) ---
 # Returns 0 = re-review needed, 1 = no re-review needed
 _needs_re_review() {
-    local info score reviewed_at new_commits
+    local info reviewed_at new_commits
     info=$(_greptile_review_info) || return 1
-    score=$(echo "$info" | python3 -c "import sys,json; d=json.load(sys.stdin); s=d.get('score'); print(s) if s is not None else print('none')" 2>/dev/null) || score="none"
     reviewed_at=$(echo "$info" | _json_field "reviewed_at") || reviewed_at=""
 
-    # Score 5 or unknown → no re-review
-    if [ "$score" = "5" ] || [ "$score" = "none" ]; then
-        return 1
-    fi
-
-    # Score < 5 → check for new commits since review
+    # No review timestamp → can't determine whether review is stale.
     if [ -z "$reviewed_at" ]; then
         return 1
     fi
@@ -172,7 +167,9 @@ _our_trigger_status() {
             # which always have a non-empty cutoff, so this invariant holds.
             local _ts_in_cycle=0  # 1 = TS is from current review cycle; 0 = skip fast-path
             if [ -n "$review_cutoff" ]; then
-                _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null && _ts_in_cycle=1 || true
+                if _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null; then
+                    _ts_in_cycle=1
+                fi
             fi
             if [ "$_ts_in_cycle" -eq 1 ]; then
                 local _local_age
@@ -269,7 +266,7 @@ case "${1:-}" in
 check)
     # Check if safe to trigger
     if _has_greptile_review; then
-        # Already reviewed — check if re-review is needed (score < 5/5 + new commits)
+        # Already reviewed — check if re-review is needed (new commits since review)
         if _needs_re_review; then
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
             # Eligible for re-review — but check trigger isn't in-flight
@@ -279,7 +276,7 @@ check)
             fi
             exit 0  # Re-review needed
         fi
-        exit 2  # Reviewed and 5/5 (or no new commits)
+        exit 2  # Reviewed and no new commits since latest review
     fi
     # No review yet — Greptile auto-reviews new PRs. Never manually trigger initial review.
     exit 1
@@ -309,7 +306,7 @@ trigger)
                 echo "  [greptile] Re-review trigger in-flight on $REPO#$PR_NUMBER. Skipping."
                 exit 0
             fi
-            echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (score < 5/5 + new commits)..."
+            echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (new commits landed after the last review)..."
             # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
             # separate 5000/hour quota that's rarely exhausted.
             if gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null; then
@@ -324,7 +321,7 @@ trigger)
                 echo "  [greptile] Trigger failed (non-fatal)."
             fi
         else
-            echo "  [greptile] Already reviewed on $REPO#$PR_NUMBER (5/5 or no new commits). Skipping."
+            echo "  [greptile] Already reviewed on $REPO#$PR_NUMBER (no new commits since latest review). Skipping."
         fi
         exit 0
     fi
