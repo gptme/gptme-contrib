@@ -217,9 +217,14 @@ prepare_worktree() {
     # Without this, `make typecheck` fails with "Can't find package 'X'"
     # because the worktree has no .venv.
     if [[ -f "${WORKTREE_DIR}/pyproject.toml" ]]; then
+        local sync_err=""
         echo "Installing packages in worktree..."
-        (cd "${WORKTREE_DIR}" && uv sync --all-packages --quiet 2>/dev/null) || \
-            echo "Warning: uv sync failed (non-fatal, pre-commit hooks may fail)"
+        sync_err=$(cd "${WORKTREE_DIR}" && uv sync --all-packages --quiet 2>&1) || {
+            echo "Warning: uv sync failed (non-fatal, pre-commit hooks may fail)" >&2
+            if [[ -n "${sync_err}" ]]; then
+                printf '%s\n' "${sync_err}" >&2
+            fi
+        }
     fi
 
     GPTME_DIR="${WORKTREE_DIR}"
