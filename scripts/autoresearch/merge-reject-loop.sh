@@ -213,6 +213,15 @@ prepare_worktree() {
         fi
     done
 
+    # Install Python packages so pre-commit hooks (mypy, tests) work.
+    # Without this, `make typecheck` fails with "Can't find package 'X'"
+    # because the worktree has no .venv.
+    if [[ -f "${WORKTREE_DIR}/pyproject.toml" ]]; then
+        echo "Installing packages in worktree..."
+        (cd "${WORKTREE_DIR}" && uv sync --all-packages --quiet 2>/dev/null) || \
+            echo "Warning: uv sync failed (non-fatal, pre-commit hooks may fail)"
+    fi
+
     GPTME_DIR="${WORKTREE_DIR}"
 }
 
