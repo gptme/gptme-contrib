@@ -177,6 +177,21 @@ class TestFilterBlockedTasks:
         result = gen.filter_blocked_tasks(tasks)
         assert len(result) == 0
 
+    def test_waiting_for_filters_task_without_requires(self, workspace: Path) -> None:
+        """Tasks with waiting_for are blocked even without explicit requires."""
+        write_task(
+            workspace / "tasks",
+            "task-a",
+            state="active",
+            priority="high",
+            waiting_for="Erik review",
+        )
+
+        gen = QueueGenerator(workspace)
+        tasks = [Task(id="task-a", title="A", priority="high", state="active", source="tasks")]
+        result = gen.filter_blocked_tasks(tasks)
+        assert len(result) == 0
+
 
 class TestComputeUnblockingPower:
     def test_no_dependents(self, workspace: Path) -> None:

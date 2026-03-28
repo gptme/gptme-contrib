@@ -399,6 +399,15 @@ class QueueGenerator:
 
         ready_tasks = []
         for task in tasks:
+            task_file = self.tasks_dir / f"{task.id}.md"
+            if task_file.exists():
+                try:
+                    post = frontmatter.load(task_file)
+                    if post.metadata.get("state") == "waiting" or post.metadata.get("waiting_for"):
+                        continue
+                except Exception:
+                    pass
+
             if not task.requires:
                 ready_tasks.append(task)
                 continue
