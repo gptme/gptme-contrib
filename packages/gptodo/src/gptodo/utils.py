@@ -326,6 +326,14 @@ class TaskInfo:
 # =============================================================================
 
 
+def task_has_waiting_blocker(task: TaskInfo) -> bool:
+    """Return True when a task is explicitly waiting on an external condition."""
+    state = normalize_state(task.state or "", warn=False) if task.state else ""
+    if state == "waiting":
+        return True
+    return bool(task.metadata.get("waiting_for"))
+
+
 def find_repo_root(start_path: Path) -> Path:
     """Find the workspace root by looking for workspace markers.
 
@@ -853,6 +861,9 @@ def is_task_ready(
     Returns:
         True if task is ready, False if blocked
     """
+    if task_has_waiting_blocker(task):
+        return False
+
     # Use requires (canonical field, includes deprecated depends/blocks)
     requires = task.requires
     if not requires:
@@ -918,6 +929,9 @@ def compute_effective_state(
     if task.state in ("done", "cancelled"):
         return task.state or "unknown"
 
+    if task_has_waiting_blocker(task):
+        return "waiting"
+
     # Check if task is blocked by dependencies
     requires = task.requires
     if not requires:
@@ -970,6 +984,12 @@ def get_blocking_reasons(
     # Terminal states are never blocked
     if task.state in ("done", "cancelled"):
         return []
+
+    if task_has_waiting_blocker(task):
+        waiting_for = task.metadata.get("waiting_for")
+        if waiting_for:
+            return [f"Waiting on: {waiting_for}"]
+        return ["Waiting on external dependency"]
 
     requires = task.requires
     if not requires:
