@@ -7,7 +7,7 @@ from environment variables with secure defaults.
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass
@@ -30,7 +30,12 @@ class TokenInfo:
             return False  # No expiry info means we assume valid
 
         buffer = timedelta(seconds=buffer_seconds)
-        return datetime.now() >= (self.expires_at - buffer)
+        now = datetime.now(timezone.utc)
+        # Handle naive datetimes (assume UTC) for backwards compatibility
+        expires = self.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return now >= (expires - buffer)
 
     def is_valid(self) -> bool:
         """Check if token is valid (exists and not expired)."""

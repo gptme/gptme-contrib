@@ -162,7 +162,7 @@ class OAuthManager:
         Returns:
             TokenInfo with token details
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         access_token = response_data["access_token"]
         token_type = response_data.get("token_type", "Bearer")
@@ -171,7 +171,7 @@ class OAuthManager:
 
         expires_at = None
         if expires_in:
-            expires_at = datetime.now() + timedelta(seconds=int(expires_in))
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
 
         return TokenInfo(
             token=access_token,

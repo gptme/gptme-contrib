@@ -6,7 +6,7 @@ for email, Twitter, Discord, and other platforms.
 """
 
 from .oauth import OAuthManager
-from .token_storage import save_token_to_env
+from .token_storage import save_token_to_env, save_tokens_to_env
 from .tokens import TokenInfo, TokenManager
 
 # Flask-dependent OAuth callback server (requires gptmail[oauth])
@@ -20,6 +20,13 @@ try:
         "TokenManager",
         "run_oauth_callback",
         "save_token_to_env",
+        "save_tokens_to_env",
     ]
 except ImportError:
-    __all__ = ["OAuthManager", "TokenInfo", "TokenManager", "save_token_to_env"]
+    __all__ = [
+        "OAuthManager",
+        "TokenInfo",
+        "TokenManager",
+        "save_token_to_env",
+        "save_tokens_to_env",
+    ]
