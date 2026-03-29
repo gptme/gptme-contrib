@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
+from requests.auth import HTTPBasicAuth
 
 from .tokens import TokenInfo
 
@@ -23,6 +24,7 @@ class OAuthConfig:
     auth_url: str  # Authorization endpoint
     token_url: str  # Token exchange endpoint
     scopes: list[str]
+    token_endpoint_auth_method: str = "body"
 
     def get_authorization_url(self, state: str | None = None) -> str:
         """
@@ -88,16 +90,19 @@ class OAuthManager:
         Returns:
             Tuple of (TokenInfo, error_message)
         """
-        data = {
-            "grant_type": "authorization_code",
-            "code": authorization_code,
-            "redirect_uri": self.config.redirect_uri,
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
-        }
+        data = self._build_token_request_data(
+            grant_type="authorization_code",
+            code=authorization_code,
+            redirect_uri=self.config.redirect_uri,
+        )
 
         try:
-            response = requests.post(self.config.token_url, data=data, timeout=30)
+            response = requests.post(
+                self.config.token_url,
+                data=data,
+                auth=self._get_token_request_auth(),
+                timeout=30,
+            )
             response.raise_for_status()
 
             token_data = response.json()
@@ -116,15 +121,18 @@ class OAuthManager:
         Returns:
             Tuple of (TokenInfo, error_message)
         """
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
-        }
+        data = self._build_token_request_data(
+            grant_type="refresh_token",
+            refresh_token=refresh_token,
+        )
 
         try:
-            response = requests.post(self.config.token_url, data=data, timeout=30)
+            response = requests.post(
+                self.config.token_url,
+                data=data,
+                auth=self._get_token_request_auth(),
+                timeout=30,
+            )
             response.raise_for_status()
 
             token_data = response.json()
@@ -132,6 +140,22 @@ class OAuthManager:
 
         except requests.RequestException as e:
             return None, f"Token refresh failed: {e}"
+
+    def _get_token_request_auth(self) -> HTTPBasicAuth | None:
+        """Return token endpoint auth for providers that require client Basic auth."""
+        if self.config.token_endpoint_auth_method == "basic":
+            return HTTPBasicAuth(self.config.client_id, self.config.client_secret)
+        return None
+
+    def _build_token_request_data(self, grant_type: str, **extra_fields: str) -> dict[str, str]:
+        """Build token endpoint form data for the provider's auth mode."""
+        data = {"grant_type": grant_type, "client_id": self.config.client_id}
+        data.update(extra_fields)
+
+        if self.config.token_endpoint_auth_method != "basic":
+            data["client_secret"] = self.config.client_secret
+
+        return data
 
     @staticmethod
     def parse_callback_url(callback_url: str) -> tuple[str | None, str | None]:
@@ -199,6 +223,7 @@ class OAuthManager:
             auth_url="https://twitter.com/i/oauth2/authorize",
             token_url="https://api.twitter.com/2/oauth2/token",
             scopes=["tweet.read", "tweet.write", "users.read", "offline.access"],
+            token_endpoint_auth_method="basic",
         )
         return cls(config)
 
