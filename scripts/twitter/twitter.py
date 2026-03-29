@@ -55,6 +55,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
 
 import click
 import tweepy
@@ -149,6 +150,16 @@ def load_twitter_client(
     """
     load_dotenv(override=True)
 
+    # Resolve the .env path from THIS script's frame — critical because
+    # save_tokens_to_env() calls find_dotenv() from gptmail's installed location
+    # (often ~/.cache/uv/...) which can't find our workspace .env file.
+    from dotenv import find_dotenv
+
+    _env_path_str = find_dotenv()
+    _env_path = Path(_env_path_str) if _env_path_str else None
+    if not _env_path:
+        console.print("[yellow]Warning: could not locate .env file for token storage")
+
     # Check for bearer token (required for read operations)
     bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
     if not bearer_token:
@@ -201,7 +212,7 @@ def load_twitter_client(
                         )
 
                         if error or not new_token_info:
-                            raise Exception(f"Token refresh failed: {error}")
+                            raise Exception(error or "No token returned")
 
                         # Fallback: if no expires_at from response, default to 2h
                         if not new_token_info.expires_at:
@@ -228,9 +239,14 @@ def load_twitter_client(
                             tokens_to_save["TWITTER_OAUTH2_EXPIRES_AT"] = (
                                 new_token_info.expires_at.isoformat()
                             )
-                        save_tokens_to_env(
-                            tokens_to_save, comment="OAuth 2.0 tokens (auto-refreshed)"
-                        )
+                        if not save_tokens_to_env(
+                            tokens_to_save,
+                            env_path=_env_path,
+                            comment="OAuth 2.0 tokens (auto-refreshed)",
+                        ):
+                            console.print(
+                                "[red]Warning: failed to save refreshed tokens to .env"
+                            )
 
                         # Also update os.environ so subsequent calls in the same
                         # process use the new tokens (refresh tokens are single-use)
@@ -310,6 +326,12 @@ def load_twitter_client(
                         response_code, full_url = run_oauth_callback(
                             port=9876, timeout=300
                         )
+                        # run_oauth_callback returns (None, None) on timeout
+                        # instead of raising — handle this explicitly
+                        if not response_code or not full_url:
+                            raise TimeoutError(
+                                "No authorization callback received within timeout"
+                            )
                         console.print("[green]Authorization received!")
                     except TimeoutError as e:
                         console.print("[red]Error: Authorization timeout")
@@ -358,7 +380,14 @@ def load_twitter_client(
                             )
                         new_tokens["TWITTER_OAUTH2_EXPIRES_AT"] = expires_at.isoformat()
 
-                        save_tokens_to_env(new_tokens, comment="OAuth 2.0 tokens")
+                        if not save_tokens_to_env(
+                            new_tokens,
+                            env_path=_env_path,
+                            comment="OAuth 2.0 tokens",
+                        ):
+                            console.print(
+                                "[red]Warning: failed to save OAuth tokens to .env"
+                            )
 
                         # Update os.environ so subsequent calls in same process use new tokens
                         for key, value in new_tokens.items():
