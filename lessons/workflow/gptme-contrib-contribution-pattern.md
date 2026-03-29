@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: ["contribute lesson", "contrib PR", "external contribution", "submit lesson", "upstream lesson", "upstream to gptme-contrib", "gptme-contrib PR"]
+  keywords: ["contribute lesson", "contrib PR", "external contribution", "submit lesson", "upstream lesson", "upstream to gptme-contrib"]
 status: active
 ---
 
