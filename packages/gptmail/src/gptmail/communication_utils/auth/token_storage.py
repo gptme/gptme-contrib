@@ -98,3 +98,51 @@ def save_token_to_env(
 
     # Write atomically
     return _write_env_atomically(env_path, env_lines)
+
+
+def save_tokens_to_env(
+    tokens: dict[str, str],
+    env_path: Path | None = None,
+    comment: str | None = None,
+) -> bool:
+    """Save multiple tokens to .env file in a single atomic write.
+
+    This avoids race conditions where partial writes leave the .env file
+    in an inconsistent state (e.g., new access_token but stale expires_at).
+
+    Args:
+        tokens: Dict of {env_var_name: value} to save
+        env_path: Path to .env file (defaults to find_dotenv())
+        comment: Optional comment for newly appended tokens
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if env_path is None:
+        try:
+            from dotenv import find_dotenv
+        except ImportError:
+            raise ImportError(
+                "python-dotenv is required when env_path is not provided. "
+                "Install it with: pip install gptmail[oauth]"
+            ) from None
+        env_path_str = find_dotenv()
+        if not env_path_str:
+            return False
+        env_path = Path(env_path_str)
+
+    env_lines = _read_env_lines(env_path)
+
+    for token_name, token_value in tokens.items():
+        token_line_idx = _find_token_line_index(env_lines, token_name)
+        new_token_line = f"{token_name}={token_value}\n"
+
+        if token_line_idx is not None:
+            env_lines[token_line_idx] = new_token_line
+        else:
+            if comment:
+                env_lines.extend(["\n", f"# {comment}\n", new_token_line])
+            else:
+                env_lines.append(new_token_line)
+
+    return _write_env_atomically(env_path, env_lines)

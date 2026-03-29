@@ -53,7 +53,7 @@ For OAuth 2.0 setup:
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
 import click
@@ -61,7 +61,7 @@ import tweepy
 from dotenv import load_dotenv
 from gptmail.communication_utils.auth import (  # type: ignore[import-not-found]
     run_oauth_callback,
-    save_token_to_env,
+    save_tokens_to_env,
 )
 from gptmail.communication_utils.auth.oauth import (  # type: ignore[import-not-found]
     OAuthManager,
@@ -203,38 +203,39 @@ def load_twitter_client(
                         if error or not new_token_info:
                             raise Exception(f"Token refresh failed: {error}")
 
-                        # Save new tokens to .env file
-                        save_token_to_env(
-                            "TWITTER_OAUTH2_ACCESS_TOKEN",
-                            new_token_info.token,
-                            comment="OAuth 2.0 User Context access token (auto-refreshed)",
-                        )
-                        if new_token_info.refresh_token:
-                            save_token_to_env(
-                                "TWITTER_OAUTH2_REFRESH_TOKEN",
-                                new_token_info.refresh_token,
-                                comment="OAuth 2.0 refresh token",
+                        # Fallback: if no expires_at from response, default to 2h
+                        if not new_token_info.expires_at:
+                            new_token_info = TokenInfo(
+                                token=new_token_info.token,
+                                expires_at=datetime.now(timezone.utc)
+                                + timedelta(hours=2),
+                                refresh_token=new_token_info.refresh_token,
+                                token_type=new_token_info.token_type,
                             )
-                        if new_token_info.expires_at:
-                            save_token_to_env(
-                                "TWITTER_OAUTH2_EXPIRES_AT",
-                                new_token_info.expires_at.isoformat(),
-                                comment="OAuth 2.0 token expiration time",
+                            console.print(
+                                "[yellow]No expires_in in response, defaulting to 2h expiry"
                             )
 
-                        # CRITICAL: Also update os.environ with new tokens
-                        # This ensures subsequent calls in the same process use new tokens
-                        # Twitter refresh tokens are single-use, so the old refresh token
-                        # is now invalid and must not be reused
-                        os.environ["TWITTER_OAUTH2_ACCESS_TOKEN"] = new_token_info.token
+                        # Save all tokens atomically to .env file
+                        tokens_to_save: dict[str, str] = {
+                            "TWITTER_OAUTH2_ACCESS_TOKEN": new_token_info.token,
+                        }
                         if new_token_info.refresh_token:
-                            os.environ["TWITTER_OAUTH2_REFRESH_TOKEN"] = (
+                            tokens_to_save["TWITTER_OAUTH2_REFRESH_TOKEN"] = (
                                 new_token_info.refresh_token
                             )
                         if new_token_info.expires_at:
-                            os.environ["TWITTER_OAUTH2_EXPIRES_AT"] = (
+                            tokens_to_save["TWITTER_OAUTH2_EXPIRES_AT"] = (
                                 new_token_info.expires_at.isoformat()
                             )
+                        save_tokens_to_env(
+                            tokens_to_save, comment="OAuth 2.0 tokens (auto-refreshed)"
+                        )
+
+                        # Also update os.environ so subsequent calls in the same
+                        # process use the new tokens (refresh tokens are single-use)
+                        for key, value in tokens_to_save.items():
+                            os.environ[key] = value
 
                         saved_token = new_token_info.token
                         console.print("[green]Token refreshed successfully")
@@ -323,34 +324,45 @@ def load_twitter_client(
                     access_token = oauth2_user_handler.fetch_token(
                         authorization_response=full_url
                     )
-                    print(f"{access_token=}")
+                    # Log the raw response for debugging token persistence issues
+                    console.print(
+                        f"[dim]fetch_token response keys: {list(access_token.keys())}"
+                    )
+                    console.print(
+                        f"[dim]  expires_in={access_token.get('expires_in', 'MISSING')}"
+                    )
+                    console.print(
+                        f"[dim]  refresh_token={'present' if 'refresh_token' in access_token else 'MISSING'}"
+                    )
 
-                    # Save all tokens to .env using shared utility
+                    # Save all tokens atomically to .env
                     try:
-                        save_token_to_env(
-                            "TWITTER_OAUTH2_ACCESS_TOKEN",
-                            access_token["access_token"],
-                            comment="OAuth 2.0 User Context access token",
-                        )
+                        new_tokens: dict[str, str] = {
+                            "TWITTER_OAUTH2_ACCESS_TOKEN": access_token["access_token"],
+                        }
 
-                        # Save refresh token if present
                         if "refresh_token" in access_token:
-                            save_token_to_env(
-                                "TWITTER_OAUTH2_REFRESH_TOKEN",
-                                access_token["refresh_token"],
-                                comment="OAuth 2.0 refresh token",
-                            )
+                            new_tokens["TWITTER_OAUTH2_REFRESH_TOKEN"] = access_token[
+                                "refresh_token"
+                            ]
 
-                        # Calculate and save expiration time
+                        # Calculate expiration time (fallback to 2h if expires_in absent)
                         if "expires_in" in access_token:
-                            expires_at = datetime.now() + timedelta(
+                            expires_at = datetime.now(timezone.utc) + timedelta(
                                 seconds=access_token["expires_in"]
                             )
-                            save_token_to_env(
-                                "TWITTER_OAUTH2_EXPIRES_AT",
-                                expires_at.isoformat(),
-                                comment="OAuth 2.0 token expiration time",
+                        else:
+                            expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+                            console.print(
+                                "[yellow]No expires_in in response, defaulting to 2h expiry"
                             )
+                        new_tokens["TWITTER_OAUTH2_EXPIRES_AT"] = expires_at.isoformat()
+
+                        save_tokens_to_env(new_tokens, comment="OAuth 2.0 tokens")
+
+                        # Update os.environ so subsequent calls in same process use new tokens
+                        for key, value in new_tokens.items():
+                            os.environ[key] = value
 
                         if "refresh_token" in access_token:
                             console.print(
