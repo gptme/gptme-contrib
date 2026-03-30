@@ -212,7 +212,14 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
         recent = store.query(since_days=_default_since)
         s = store.stats(recent)
         if s.get("total", 0) == 0:
-            _show_discovery_fallback()
+            if store.stats(records).get("total", 0) > 0:
+                # Records exist but all fall outside the default window
+                click.echo(
+                    f"No records in the last {_default_since} days. "
+                    "Use 'gptme-sessions stats --since all' for all-time data."
+                )
+            else:
+                _show_discovery_fallback()
         else:
             click.echo(
                 f"Last {_default_since} days (use 'gptme-sessions stats --since all' for all-time):\n"
@@ -440,6 +447,11 @@ def stats(
         has_filters = any([model, run_type, category, harness, outcome, project, since])
         if has_filters:
             click.echo("No records match your filters.")
+        elif store.stats(store.load_all()).get("total", 0) > 0:
+            # Records exist but all fall outside the implicit 30-day window
+            click.echo(
+                f"No records in the last {since_days} days. Use --since all for all-time data."
+            )
         else:
             _show_discovery_fallback(since_days=30)
     else:

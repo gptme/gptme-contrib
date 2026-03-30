@@ -610,6 +610,23 @@ class TestStatsDefaults:
         data = json.loads(out)
         assert data["total"] == 5
 
+    def test_stats_old_records_no_misleading_fallback(self, tmp_path: Path):
+        """stats on store with only old records shows a helpful message, not 'run sync'."""
+        store = SessionStore(sessions_dir=tmp_path)
+        # Insert a record with a timestamp far in the past (outside the implicit 30d window)
+        old_record = SessionRecord(
+            harness="claude-code",
+            model="opus",
+            timestamp="2020-01-01T00:00:00+00:00",
+        )
+        store.append(old_record)
+        rc, out = _invoke(["stats"], tmp_path)
+        assert rc == 0
+        # Should NOT tell the user to run sync (misleading — data is already synced)
+        assert "sync" not in out.lower()
+        # Should point to --since all for all-time data
+        assert "all" in out.lower()
+
 
 # -- project filter ----------------------------------------------------------
 
