@@ -80,8 +80,8 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
         # Read the two most recent entries from the remote branch reflog.
         # If the previous entry is NOT an ancestor of the current entry, a
         # force-reset (non-fast-forward update) occurred.
-        reflog_current=$(git reflog show "refs/remotes/origin/$_remote_branch" --pretty=format:'%H' 2>/dev/null | sed -n '1p')
-        reflog_prev=$(git reflog show "refs/remotes/origin/$_remote_branch" --pretty=format:'%H' 2>/dev/null | sed -n '2p')
+        reflog_current=$(git reflog show "refs/remotes/origin/$_remote_branch" --pretty=format:'%H' 2>/dev/null | sed -n '1p' || true)
+        reflog_prev=$(git reflog show "refs/remotes/origin/$_remote_branch" --pretty=format:'%H' 2>/dev/null | sed -n '2p' || true)
 
         if [ -n "$reflog_prev" ] && [ -n "$reflog_current" ]; then
             if ! git merge-base --is-ancestor "$reflog_prev" "$reflog_current" 2>/dev/null; then
