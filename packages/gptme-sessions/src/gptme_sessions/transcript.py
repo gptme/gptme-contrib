@@ -65,7 +65,7 @@ class NormalizedMessage:
     is_error: bool = False
 
     def to_dict(self) -> dict:
-        """Serialize to JSON-compatible dict (omits None values for compactness)."""
+        """Serialize to JSON-compatible dict (omits ``None`` and ``False`` values)."""
         d = asdict(self)
         return {k: v for k, v in d.items() if v is not None and v is not False}
 
@@ -181,8 +181,9 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
             content_list = record.get("message", {}).get("content", [])
             if not isinstance(content_list, list):
                 continue
-            # Extract text and tool_use items
+            # Combine assistant text into one turn, then emit tool calls after it.
             text_parts: list[str] = []
+            tool_messages: list[NormalizedMessage] = []
             for item in content_list:
                 if not isinstance(item, dict):
                     continue
@@ -191,7 +192,7 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
                 elif item.get("type") == "tool_use":
                     tool_name = item.get("name", "")
                     tool_input = item.get("input") or {}
-                    normalized.append(
+                    tool_messages.append(
                         NormalizedMessage(
                             role="assistant",
                             content="",
@@ -204,6 +205,7 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
             text = "\n".join(p for p in text_parts if p).strip()
             if text:
                 normalized.append(NormalizedMessage(role="assistant", content=text, timestamp=ts))
+            normalized.extend(tool_messages)
 
         elif rec_type == "user":
             content_list = record.get("message", {}).get("content", [])

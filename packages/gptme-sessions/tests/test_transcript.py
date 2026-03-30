@@ -222,6 +222,14 @@ class TestNormalizeCc:
         assert len(text_msgs) == 1
         assert "write a test" in text_msgs[0].content.lower()
 
+    def test_text_turn_precedes_tool_calls(self, cc_jsonl: Path):
+        records = [json.loads(line) for line in cc_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_cc(records)
+        assert norm[0].role == "assistant"
+        assert norm[0].tool_name is None
+        assert "write a test" in norm[0].content.lower()
+        assert norm[1].tool_name == "Write"
+
     def test_error_tool_result(self, tmp_path: Path):
         records = [
             {
@@ -419,6 +427,7 @@ class TestTranscriptCli:
         assert result.exit_code == 0, result.output
         assert "gptme" in result.output
         assert "Messages:" in result.output
+        assert "Last activity: " in result.output
 
     def test_transcript_missing_file(self, tmp_path: Path):
         from click.testing import CliRunner

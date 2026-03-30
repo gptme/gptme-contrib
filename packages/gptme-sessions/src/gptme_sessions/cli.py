@@ -1072,7 +1072,7 @@ def transcript(path: Path, as_json: bool, messages_only: bool) -> None:
     if t.started_at:
         click.echo(f"Started at:   {t.started_at}")
     if t.last_activity:
-        click.echo(f"Last activity:{t.last_activity}")
+        click.echo(f"Last activity: {t.last_activity}")
     click.echo(f"Messages:     {len(t.messages)}")
     click.echo(f"Capabilities: {', '.join(t.capabilities) or 'none'}")
     click.echo(f"Schema:       v{t.schema_version}")
