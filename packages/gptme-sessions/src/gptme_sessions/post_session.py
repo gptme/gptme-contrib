@@ -152,10 +152,11 @@ def post_session(
     1. ``exit_code not in (0, 124)`` → ``"failed"``
     2. Trajectory ``is_productive()`` → ``"productive"`` / ``"noop"``
     3. Git HEAD comparison (``start_commit != end_commit``) → productive / noop
-    4. ``exit_code == 124`` (timeout, no other evidence) → ``"noop"``
+    4. ``exit_code == 124`` (timeout, no other evidence) → ``"unknown"``
     5. Default: ``"unknown"`` (no signal available — callers should not
        treat this as productive *or* penalize it in bandits)
-    6. Override: if step 2–5 yielded ``"noop"`` but ``deliverables`` is
+    6. Override: if step 2–5 yielded ``"noop"`` or ``"unknown"`` but
+       ``deliverables`` is
        non-empty, upgrade to ``"productive"`` (trajectory may miss commits
        detected by the caller via ``git diff``).
     """
@@ -251,7 +252,8 @@ def post_session(
     # do not trigger this override.
     if outcome in ("noop", "unknown") and caller_deliverables:
         logger.info(
-            "Overriding outcome noop→productive: %d caller-supplied deliverable(s)",
+            "Overriding outcome %s→productive: %d caller-supplied deliverable(s)",
+            outcome,
             len(caller_deliverables),
         )
         outcome = "productive"
