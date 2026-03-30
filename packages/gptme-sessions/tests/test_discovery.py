@@ -17,6 +17,8 @@ from gptme_sessions.discovery import (
     discover_copilot_sessions,
     discover_gptme_sessions,
     extract_cc_model,
+    extract_project,
+    extract_session_name,
     parse_gptme_config,
 )
 
@@ -381,3 +383,105 @@ def test_discover_copilot_sessions_sorted_by_date(tmp_path: Path) -> None:
     # Should be sorted by date: early session first, late session second
     assert result[0].parent.name == "zzz-early"
     assert result[1].parent.name == "aaa-late"
+
+
+# --- extract_session_name ---
+
+
+class TestExtractSessionName:
+    def test_gptme_strips_date_prefix(self, tmp_path: Path) -> None:
+        """gptme: strips YYYY-MM-DD- prefix from dir name."""
+        session_dir = tmp_path / "2026-03-05-dancing-blue-fish"
+        session_dir.mkdir()
+        assert extract_session_name("gptme", session_dir) == "dancing-blue-fish"
+
+    def test_gptme_jsonl_inside_dir(self, tmp_path: Path) -> None:
+        """gptme: works with conversation.jsonl path (uses parent dir name)."""
+        session_dir = tmp_path / "2026-03-05-my-session"
+        session_dir.mkdir()
+        jsonl = session_dir / "conversation.jsonl"
+        jsonl.touch()
+        assert extract_session_name("gptme", jsonl) == "my-session"
+
+    def test_gptme_short_name(self, tmp_path: Path) -> None:
+        """gptme: returns full name if no date prefix."""
+        session_dir = tmp_path / "test-session"
+        session_dir.mkdir()
+        assert extract_session_name("gptme", session_dir) == "test-session"
+
+    def test_cc_uses_first_8_chars(self, tmp_path: Path) -> None:
+        """claude-code: uses first 8 chars of JSONL filename."""
+        jsonl = tmp_path / "abc12345-def6-7890-abcd-ef1234567890.jsonl"
+        jsonl.touch()
+        assert extract_session_name("claude-code", jsonl) == "abc12345"
+
+    def test_codex_uses_stem(self, tmp_path: Path) -> None:
+        """codex: uses first 8 chars of JSONL stem."""
+        jsonl = tmp_path / "session-rollout-123.jsonl"
+        jsonl.touch()
+        assert extract_session_name("codex", jsonl) == "session-"
+
+    def test_copilot_uses_parent_dir(self, tmp_path: Path) -> None:
+        """copilot: uses first 8 chars of parent dir name."""
+        session_dir = tmp_path / "abcdefgh-1234-5678"
+        session_dir.mkdir()
+        events = session_dir / "events.jsonl"
+        events.touch()
+        assert extract_session_name("copilot", events) == "abcdefgh"
+
+
+# --- extract_project ---
+
+
+class TestExtractProject:
+    def test_cc_decodes_project_dir(self, tmp_path: Path) -> None:
+        """claude-code: decodes project dir name to filesystem path."""
+        project_dir = tmp_path / "-Users-erb-myproject"
+        project_dir.mkdir()
+        jsonl = project_dir / "session.jsonl"
+        jsonl.touch()
+        assert extract_project("claude-code", jsonl) == "/Users/erb/myproject"
+
+    def test_gptme_reads_workspace(self, tmp_path: Path) -> None:
+        """gptme: reads workspace from config.toml."""
+        session_dir = tmp_path / "2026-03-05-session"
+        session_dir.mkdir()
+        config = session_dir / "config.toml"
+        config.write_text('[chat]\nworkspace = "/home/bob/gptme"\n')
+        assert extract_project("gptme", session_dir) == "/home/bob/gptme"
+
+    def test_gptme_jsonl_path(self, tmp_path: Path) -> None:
+        """gptme: works with conversation.jsonl path."""
+        session_dir = tmp_path / "2026-03-05-session"
+        session_dir.mkdir()
+        config = session_dir / "config.toml"
+        config.write_text('[chat]\nworkspace = "/home/bob/gptme"\n')
+        jsonl = session_dir / "conversation.jsonl"
+        jsonl.touch()
+        assert extract_project("gptme", jsonl) == "/home/bob/gptme"
+
+    def test_gptme_no_config(self, tmp_path: Path) -> None:
+        """gptme: returns None when config.toml is missing."""
+        session_dir = tmp_path / "2026-03-05-session"
+        session_dir.mkdir()
+        assert extract_project("gptme", session_dir) is None
+
+    def test_gptme_empty_workspace(self, tmp_path: Path) -> None:
+        """gptme: returns None when workspace is empty."""
+        session_dir = tmp_path / "2026-03-05-session"
+        session_dir.mkdir()
+        config = session_dir / "config.toml"
+        config.write_text("[chat]\nmodel = 'opus'\n")
+        assert extract_project("gptme", session_dir) is None
+
+    def test_codex_returns_none(self, tmp_path: Path) -> None:
+        """codex: returns None (no project info available)."""
+        jsonl = tmp_path / "session.jsonl"
+        jsonl.touch()
+        assert extract_project("codex", jsonl) is None
+
+    def test_copilot_returns_none(self, tmp_path: Path) -> None:
+        """copilot: returns None (no project info available)."""
+        events = tmp_path / "events.jsonl"
+        events.touch()
+        assert extract_project("copilot", events) is None

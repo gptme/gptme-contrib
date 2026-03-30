@@ -25,6 +25,8 @@ from .discovery import (
     discover_copilot_sessions,
     discover_gptme_sessions,
     extract_cc_model,
+    extract_project,
+    extract_session_name,
     parse_gptme_config,
     session_date_from_path,
 )
@@ -73,6 +75,8 @@ def _discover_all(
                     "path": resolved,
                     "model": model,
                     "session_date": session_date_from_path("gptme", resolved),
+                    "session_name": extract_session_name("gptme", resolved),
+                    "project": extract_project("gptme", resolved),
                 }
             )
     if harness_filter in (None, "claude-code"):
@@ -84,6 +88,8 @@ def _discover_all(
                     "path": p,
                     "model": model,
                     "session_date": session_date_from_path("claude-code", p),
+                    "session_name": extract_session_name("claude-code", p),
+                    "project": extract_project("claude-code", p),
                 }
             )
     if harness_filter in (None, "codex"):
@@ -93,6 +99,8 @@ def _discover_all(
                     "harness": "codex",
                     "path": p,
                     "session_date": session_date_from_path("codex", p),
+                    "session_name": extract_session_name("codex", p),
+                    "project": extract_project("codex", p),
                 }
             )
     if harness_filter in (None, "copilot"):
@@ -102,6 +110,8 @@ def _discover_all(
                     "harness": "copilot",
                     "path": p,
                     "session_date": session_date_from_path("copilot", p),
+                    "session_name": extract_session_name("copilot", p),
+                    "project": extract_project("copilot", p),
                 }
             )
 
@@ -164,8 +174,10 @@ def _show_discovery_fallback(since_days: int = 30) -> None:
 
 
 def _parse_since(since: str | None) -> int | None:
-    """Parse a --since value like '7d' or '30' into days."""
+    """Parse a --since value like '7d', '30', or 'all' into days (None = no filter)."""
     if not since:
+        return None
+    if since.lower() == "all":
         return None
     try:
         if since.endswith("d"):
@@ -173,7 +185,7 @@ def _parse_since(since: str | None) -> int | None:
         return int(since)
     except ValueError:
         raise click.BadParameter(
-            f"invalid value {since!r} (expected e.g. 7d, 30d)",
+            f"invalid value {since!r} (expected e.g. 7d, 30d, or 'all')",
             param_hint="'--since'",
         )
 
@@ -183,7 +195,7 @@ def _parse_since(since: str | None) -> int | None:
     "--sessions-dir",
     type=click.Path(path_type=Path),  # type: ignore[type-var]
     default=None,
-    help="Path to sessions directory (default: ./state/sessions)",
+    help="Path to sessions directory (default: ~/.local/share/gptme-sessions/)",
 )
 @click.pass_context
 def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
@@ -192,12 +204,19 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
     ctx.obj["sessions_dir"] = sessions_dir
     if ctx.invoked_subcommand is None:
         _unsync_window = 14  # days to scan for unsynced sessions
+        _default_since = 30  # default stats window
         store = SessionStore(sessions_dir=sessions_dir)
         records = store.load_all()
-        s = store.stats(records)
+
+        # Default to last 30 days for top-level stats
+        recent = store.query(since_days=_default_since)
+        s = store.stats(recent)
         if s.get("total", 0) == 0:
             _show_discovery_fallback()
         else:
+            click.echo(
+                f"Last {_default_since} days (use 'gptme-sessions stats --since all' for all-time):\n"
+            )
             format_stats(s)
             unsynced = _count_unsynced(store, records=records, since_days=_unsync_window)
             if unsynced > 0:
@@ -221,7 +240,14 @@ def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
             click.option("--category", default=None, help="Filter by category"),
             click.option("--harness", default=None, help="Filter by harness"),
             click.option("--outcome", default=None, help="Filter by outcome"),
-            click.option("--since", default=None, help="Filter by recency (e.g. 7d, 30d)"),
+            click.option(
+                "--project", default=None, help="Filter by project name (substring match)"
+            ),
+            click.option(
+                "--since",
+                default=None,
+                help="Filter by recency (e.g. 7d, 30d, or 'all')",
+            ),
             click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
         ]
     ):
@@ -243,6 +269,7 @@ def query(
     category: str | None,
     harness: str | None,
     outcome: str | None,
+    project: str | None,
     since: str | None,
     as_json: bool,
     show_stats: bool,
@@ -259,6 +286,7 @@ def query(
             harness=harness,
             outcome=outcome,
             since_days=since_days,
+            project=project,
         )
         s = store.stats(records)
         if as_json:
@@ -274,6 +302,7 @@ def query(
         harness=harness,
         outcome=outcome,
         since_days=since_days,
+        project=project,
     )
     if as_json:
         click.echo(json.dumps([r.to_dict() for r in records], indent=2))
@@ -282,9 +311,17 @@ def query(
             status = "+" if r.outcome == "productive" else "-"
             cat = r.category or "?"
             dur = f"{r.duration_seconds // 60:3d}m" if r.duration_seconds > 0 else "   ?"
+            # Show date only (not time) for compactness
+            date_str = r.timestamp[:10] if r.timestamp else "????"
+            # Session name or short ID
+            name = r.session_name or r.session_id[:8]
+            # Project: last path component
+            proj = ""
+            if r.project:
+                proj = r.project.rstrip("/").rsplit("/", 1)[-1] if "/" in r.project else r.project
             click.echo(
-                f"[{status}] {r.timestamp[:16]}  {(r.model_normalized or 'unknown'):8s}  "
-                f"{(r.run_type or 'unknown'):12s}  {cat:14s}  {dur}  {r.outcome}"
+                f"[{status}] {date_str}  {name:20s}  {(r.model_normalized or 'unknown'):8s}  "
+                f"{cat:14s}  {dur}  {proj}"
             )
         click.echo(f"\n{len(records)} records")
 
@@ -324,7 +361,11 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
         return
 
     status = "+" if record.outcome == "productive" else "-"
-    click.echo(f"[{status}] {record.session_id}  {record.timestamp[:16]}")
+    click.echo(f"[{status}] {record.session_id}  {record.timestamp[:10]}")
+    if record.session_name:
+        click.echo(f"  {'Name:':<14}{record.session_name}")
+    if record.project:
+        click.echo(f"  {'Project:':<14}{record.project}")
     click.echo(f"  {'Harness:':<14}{record.harness or 'unknown'}")
     click.echo(f"  {'Model:':<14}{record.model or 'unknown'}")
     click.echo(f"  {'Run type:':<14}{record.run_type or 'unknown'}")
@@ -372,12 +413,17 @@ def stats(
     category: str | None,
     harness: str | None,
     outcome: str | None,
+    project: str | None,
     since: str | None,
     as_json: bool,
 ) -> None:
-    """Show summary statistics."""
+    """Show summary statistics.
+
+    Defaults to last 30 days. Use --since all for all-time stats.
+    """
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
-    since_days = _parse_since(since)
+    # Default to 30d when no --since specified
+    since_days = _parse_since(since) if since else 30
     records = store.query(
         model=model,
         run_type=run_type,
@@ -385,17 +431,20 @@ def stats(
         harness=harness,
         outcome=outcome,
         since_days=since_days,
+        project=project,
     )
     s = store.stats(records)
     if as_json:
         click.echo(json.dumps(s, indent=2))
     elif s.get("total", 0) == 0:
-        has_filters = any([model, run_type, category, harness, outcome, since_days])
+        has_filters = any([model, run_type, category, harness, outcome, project, since])
         if has_filters:
             click.echo("No records match your filters.")
         else:
             _show_discovery_fallback(since_days=30)
     else:
+        if not since:
+            click.echo(f"Last {since_days} days (use --since all for all-time):\n")
         format_stats(s)
 
 
@@ -980,6 +1029,11 @@ def signals(
     help="Extract productivity signals from each trajectory (slower but richer)",
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be imported without writing")
+@click.option(
+    "--fix-timestamps",
+    is_flag=True,
+    help="Backfill correct timestamps for existing records from their trajectory paths",
+)
 @click.pass_context
 def sync(
     ctx: click.Context,
@@ -987,6 +1041,7 @@ def sync(
     since: str,
     with_signals: bool,
     dry_run: bool,
+    fix_timestamps: bool,
 ) -> None:
     """Discover trajectory files and import them into the session store.
 
@@ -1003,6 +1058,41 @@ def sync(
     have ``outcome=unknown`` (no signals yet) will be updated in-place.
     """
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+
+    # Handle --fix-timestamps: correct timestamps on existing records using
+    # session dates extracted from their trajectory paths.
+    if fix_timestamps:
+        existing_records = store.load_all()
+        if not existing_records:
+            click.echo("No records in store to fix.")
+            return
+        fixed = 0
+        for rec in existing_records:
+            if not rec.trajectory_path:
+                continue
+            h = rec.harness or "unknown"
+            sd = session_date_from_path(h, Path(rec.trajectory_path))
+            if sd is None:
+                continue
+            correct_ts = f"{sd.isoformat()}T00:00:00+00:00"
+            # Only fix if the existing timestamp doesn't match the session date
+            if not rec.timestamp.startswith(sd.isoformat()):
+                if dry_run:
+                    click.echo(
+                        f"  would fix: {rec.session_id}  "
+                        f"{rec.timestamp[:10]} → {sd.isoformat()}"
+                    )
+                else:
+                    rec.timestamp = correct_ts
+                fixed += 1
+        if not dry_run and fixed:
+            store.rewrite(existing_records)
+        click.echo(
+            f"{'Would fix' if dry_run else 'Fixed'} {fixed} timestamp(s) "
+            f"out of {len(existing_records)} record(s)."
+        )
+        return
+
     since_days = _parse_since(since) or 14
     discovered = _discover_all(since_days=since_days, harness_filter=harness)
 
@@ -1042,6 +1132,14 @@ def sync(
             entry_model = entry.get("model")
             if entry_model and (not existing.model or existing.model == "unknown"):
                 existing.model = entry_model
+                needs_update = True
+
+            # Backfill session_name and project if missing.
+            if not existing.session_name and entry.get("session_name"):
+                existing.session_name = entry["session_name"]
+                needs_update = True
+            if not existing.project and entry.get("project"):
+                existing.project = entry["project"]
                 needs_update = True
 
             # With --signals, backfill records that have no outcome yet.
@@ -1084,16 +1182,14 @@ def sync(
                     updated += 1
             continue
 
+        # Build the record with correct timestamp from session_date (not now()).
+        # Without this, all bulk-synced records get today's timestamp and
+        # skew daily stats (e.g. 7102 records appearing as "today").
+        session_date: date | None = entry.get("session_date")
         record_kwargs: dict = {
             "harness": entry["harness"],
             "trajectory_path": path_str,  # used for deduplication on re-sync
         }
-        if entry.get("model"):
-            record_kwargs["model"] = entry["model"]
-        # Use the actual session date as timestamp, not the sync time.
-        # Without this, all bulk-synced records get today's timestamp and
-        # skew daily stats (e.g. 7102 records appearing as "today").
-        session_date: date | None = entry.get("session_date")
         if session_date:
             record_kwargs["timestamp"] = datetime(
                 session_date.year,
@@ -1104,6 +1200,12 @@ def sync(
                 0,
                 tzinfo=timezone.utc,
             ).isoformat()
+        if entry.get("model"):
+            record_kwargs["model"] = entry["model"]
+        if entry.get("session_name"):
+            record_kwargs["session_name"] = entry["session_name"]
+        if entry.get("project"):
+            record_kwargs["project"] = entry["project"]
 
         if with_signals and traj_path.is_file() and not dry_run:
             try:
