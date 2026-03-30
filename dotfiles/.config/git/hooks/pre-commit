@@ -15,21 +15,43 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# --- Part 0: Tree size safety check ---
-# Refuse to commit if staged changes would delete >50% of tracked files.
-# Catches catastrophic commits (e.g. git add -u from wrong working tree state).
-TRACKED_COUNT=$(git ls-tree -r HEAD --name-only 2>/dev/null | wc -l)
-if [ "$TRACKED_COUNT" -gt 100 ]; then
-    STAGED_DELETIONS=$(git diff --cached --diff-filter=D --name-only | wc -l)
-    if [ "$STAGED_DELETIONS" -gt $((TRACKED_COUNT / 2)) ]; then
-        echo -e "${RED}ABORT: commit would delete $STAGED_DELETIONS of $TRACKED_COUNT tracked files${NC}"
-        echo -e "${RED}This looks like a catastrophic commit. Refusing to proceed.${NC}"
-        exit 1
-    fi
-fi
-
 # Get the hooks directory for sourcing config
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# --- Part 0: Mass-deletion guard (~1ms, runs unconditionally) ---
+# This MUST run before the prek/pre-commit availability check below,
+# because when prek is missing, the hook may exit 0 and all guards are skipped.
+# Uses a shared guard library with configurable thresholds and submodule filtering.
+# Bypass: ALLOW_MASS_DELETE=1 git commit ...
+_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+_GUARD_SCRIPT=""
+# Check for guard script in: 1) repo scripts/git/, 2) gptme-contrib scripts/git/
+if [ -n "$_REPO_ROOT" ] && [ -f "$_REPO_ROOT/scripts/git/guard-mass-delete.sh" ]; then
+    _GUARD_SCRIPT="$_REPO_ROOT/scripts/git/guard-mass-delete.sh"
+elif [ -n "$HOOK_DIR" ]; then
+    # Hook location: gptme-contrib/dotfiles/.config/git/hooks/pre-commit
+    # scripts/git/ is 4 levels up from hooks/
+    _GPTME_CONTRIB_DIR="$(cd "$HOOK_DIR/../../../.." 2>/dev/null && pwd)"
+    if [ -f "$_GPTME_CONTRIB_DIR/scripts/git/guard-mass-delete.sh" ]; then
+        _GUARD_SCRIPT="$_GPTME_CONTRIB_DIR/scripts/git/guard-mass-delete.sh"
+    fi
+fi
+if [ -n "$_GUARD_SCRIPT" ]; then
+    # shellcheck source=../../../scripts/git/guard-mass-delete.sh
+    source "$_GUARD_SCRIPT"
+    guard_mass_delete_staged
+else
+    # Fallback: basic inline check (no submodule filtering, no configurable threshold)
+    TRACKED_COUNT=$(git ls-tree -r HEAD --name-only 2>/dev/null | wc -l)
+    if [ "$TRACKED_COUNT" -gt 100 ]; then
+        STAGED_DELETIONS=$(git diff --cached --diff-filter=D --name-only | wc -l)
+        if [ "$STAGED_DELETIONS" -gt $((TRACKED_COUNT / 2)) ]; then
+            echo -e "${RED}ABORT: commit would delete $STAGED_DELETIONS of $TRACKED_COUNT tracked files${NC}"
+            echo -e "${RED}This looks like a catastrophic commit. Refusing to proceed.${NC}"
+            exit 1
+        fi
+    fi
+fi
 
 # --- Part 1: Prevent master commits (allowlist approach) ---
 # By default, master/main commits are blocked in ALL repos.
