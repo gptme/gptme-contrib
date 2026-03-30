@@ -153,7 +153,8 @@ def post_session(
     2. Trajectory ``is_productive()`` → ``"productive"`` / ``"noop"``
     3. Git HEAD comparison (``start_commit != end_commit``) → productive / noop
     4. ``exit_code == 124`` (timeout, no other evidence) → ``"noop"``
-    5. Default: ``"productive"``
+    5. Default: ``"unknown"`` (no signal available — callers should not
+       treat this as productive *or* penalize it in bandits)
     6. Override: if step 2–5 yielded ``"noop"`` but ``deliverables`` is
        non-empty, upgrade to ``"productive"`` (trajectory may miss commits
        detected by the caller via ``git diff``).
@@ -220,8 +221,11 @@ def post_session(
     # 1. Non-zero exit (except 124) → failed
     # 2. Trajectory productive flag → productive / noop
     # 3. Git HEAD comparison → productive / noop
-    # 4. Timeout (124) with no other evidence → noop
-    # 5. Default → productive
+    # 4. Default → unknown (no signal — don't feed into bandits)
+    #
+    # Rationale: defaulting to "productive" inflates bandit reward signals
+    # when callers omit trajectory/commit data.  "unknown" means "we don't
+    # know" — callers should skip bandit updates rather than guess.
     if exit_code not in (0, 124):
         outcome = "failed"
     elif traj_productive is not None:
@@ -236,20 +240,16 @@ def post_session(
             "end_commit",
             end_commit,
         )
-        # Apply remaining priority steps: timeout → noop, else → productive
-        outcome = "noop" if exit_code == 124 else "productive"
-    elif exit_code == 124:
-        # Timeout with no trajectory or git evidence → noop
-        outcome = "noop"
+        outcome = "unknown"
     else:
-        outcome = "productive"
+        outcome = "unknown"
 
-    # Override noop → productive if *caller-supplied* deliverables exist.
+    # Override noop/unknown → productive if *caller-supplied* deliverables exist.
     # Trajectory signals may miss commits detected by the caller via git diff.
     # Use caller_deliverables (pre-merge) so trajectory-derived items (e.g. a
     # single file write that is_productive() deliberately classifies as noop)
     # do not trigger this override.
-    if outcome == "noop" and caller_deliverables:
+    if outcome in ("noop", "unknown") and caller_deliverables:
         logger.info(
             "Overriding outcome noop→productive: %d caller-supplied deliverable(s)",
             len(caller_deliverables),
