@@ -603,9 +603,14 @@ NEXT_FOCUS: <one concrete specific action the next iteration should take, differ
     echo "---" >&2
 
     local cause bug_detail next_focus
-    cause="$(grep -oE 'CAUSE: [a-z_]+' "${diagnosis_log}" 2>/dev/null | head -1 | cut -d' ' -f2 || echo 'unknown')"
-    bug_detail="$(grep 'BUG_DETAIL:' "${diagnosis_log}" 2>/dev/null | head -1 | sed 's/BUG_DETAIL: //' || echo 'NONE')"
-    next_focus="$(grep 'NEXT_FOCUS:' "${diagnosis_log}" 2>/dev/null | head -1 | sed 's/NEXT_FOCUS: //' || echo '')"
+    local -a diagnosis_fields=()
+    mapfile -t diagnosis_fields < <(
+        python3 "${SCRIPT_DIR}/parse-diagnosis.py" "${diagnosis_log}" 2>/dev/null \
+            || printf 'unknown\nNONE\n\n'
+    )
+    cause="${diagnosis_fields[0]:-unknown}"
+    bug_detail="${diagnosis_fields[1]:-NONE}"
+    next_focus="${diagnosis_fields[2]:-}"
 
     echo "Diagnosis result: cause=${cause}" >&2
 
