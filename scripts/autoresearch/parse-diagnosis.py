@@ -14,6 +14,7 @@ DEFAULTS = {
     "NEXT_FOCUS": "",
 }
 LINE_RE = re.compile(r"^(CAUSE|BUG_DETAIL|NEXT_FOCUS):\s*(.*)$")
+PLACEHOLDER_RE = re.compile(r"^<[^>\n]+>$")
 
 
 def parse_fields(text: str) -> dict[str, str]:
@@ -24,7 +25,10 @@ def parse_fields(text: str) -> dict[str, str]:
         if match is None:
             continue
         field, value = match.groups()
-        parsed[field] = value.strip()
+        value = value.strip()
+        if PLACEHOLDER_RE.match(value):
+            continue
+        parsed[field] = value
     return parsed
 
 
