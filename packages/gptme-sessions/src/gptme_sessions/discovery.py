@@ -333,9 +333,13 @@ def extract_session_name(harness: str, path: Path) -> str | None:
     if harness == "gptme":
         # path is either the session dir or a .jsonl inside it
         dir_name = path.parent.name if path.suffix == ".jsonl" else path.name
-        # Strip YYYY-MM-DD- prefix
+        # Strip YYYY-MM-DD- prefix (only if first 10 chars form a valid date)
         if len(dir_name) > 11 and dir_name[10] == "-":
-            return dir_name[11:]
+            try:
+                date.fromisoformat(dir_name[:10])
+                return dir_name[11:]
+            except ValueError:
+                pass
         return dir_name
     elif harness == "claude-code":
         # JSONL filename is a UUID like "abc12345-...-def67890.jsonl"

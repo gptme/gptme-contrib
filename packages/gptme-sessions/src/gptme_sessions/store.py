@@ -139,11 +139,7 @@ class SessionStore:
         if outcome:
             records = [r for r in records if r.outcome == outcome]
         if project:
-            records = [
-                r
-                for r in records
-                if r.project and (project in r.project or r.project.endswith("/" + project))
-            ]
+            records = [r for r in records if r.project and project in r.project]
         if since_days is not None:
             cutoff = datetime.now(timezone.utc).timestamp() - (since_days * 86400)
             filtered = []
