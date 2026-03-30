@@ -10,8 +10,10 @@ SCRIPT_DIR="$(dirname "$0")"
 
 # Read stdin before any subprocess consumes it.
 # Git provides per line: local_ref local_sha remote_ref remote_sha
+# The `|| [ -n "$local_ref" ]` handles the last line without a trailing newline
+# (e.g. when stdin comes from Python subprocess or echo without -n).
 STDIN_LINES=()
-while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha || [ -n "${local_ref:-}" ]; do
     STDIN_LINES+=("$local_ref $local_sha $remote_ref $remote_sha")
 done
 
