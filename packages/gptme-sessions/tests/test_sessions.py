@@ -2462,7 +2462,8 @@ def test_post_session_basic(tmp_path: Path):
     assert isinstance(result, PostSessionResult)
     assert result.record.harness == "claude-code"
     assert result.record.model == "opus"
-    assert result.record.outcome == "productive"
+    # No trajectory, no commit comparison → default is unknown (no signal)
+    assert result.record.outcome == "unknown"
     assert result.grade is None
     assert result.signals is None
     assert result.token_count is None
@@ -2479,11 +2480,11 @@ def test_post_session_outcome_from_exit_code(tmp_path: Path):
     assert result.record.outcome == "failed"
 
 
-def test_post_session_timeout_is_noop(tmp_path: Path):
-    """Exit code 124 (timeout) marks session as noop, not failed."""
+def test_post_session_timeout_is_unknown(tmp_path: Path):
+    """Exit code 124 (timeout) with no evidence → unknown, not failed."""
     store = SessionStore(sessions_dir=tmp_path)
     result = post_session(store=store, harness="gptme", exit_code=124)
-    assert result.record.outcome == "noop"
+    assert result.record.outcome == "unknown"
 
 
 def test_post_session_timeout_with_productive_trajectory(tmp_path: Path):
@@ -2756,12 +2757,12 @@ def test_post_session_partial_commit_pair_no_crash(tmp_path: Path):
         harness="gptme",
         start_commit="abc123",  # end_commit omitted — shell footgun
     )
-    # No exception; falls through to default → productive
-    assert result.record.outcome == "productive"
+    # No exception; falls through to default → unknown (no signal)
+    assert result.record.outcome == "unknown"
 
 
-def test_post_session_partial_commit_pair_timeout_is_noop(tmp_path: Path):
-    """Partial commit pair + timeout exit code → noop (not UnboundLocalError)."""
+def test_post_session_partial_commit_pair_timeout_is_unknown(tmp_path: Path):
+    """Partial commit pair + timeout exit code → unknown (no full signal)."""
     store = SessionStore(sessions_dir=tmp_path)
     result = post_session(
         store=store,
@@ -2769,7 +2770,7 @@ def test_post_session_partial_commit_pair_timeout_is_noop(tmp_path: Path):
         exit_code=124,
         end_commit="def456",  # start_commit omitted
     )
-    assert result.record.outcome == "noop"
+    assert result.record.outcome == "unknown"
 
 
 def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Path):
@@ -3162,17 +3163,18 @@ def test_post_session_cli_basic(tmp_path: Path, capsys, monkeypatch):
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
-    assert "outcome=productive" in captured.out
+    # No trajectory/commits → default is unknown (no signal)
+    assert "outcome=unknown" in captured.out
 
     # Verify record was written
     store = SessionStore(sessions_dir=tmp_path)
     records = store.load_all()
     assert len(records) == 1
-    assert records[0].outcome == "productive"
+    assert records[0].outcome == "unknown"
 
 
-def test_post_session_cli_noop_exit_code(tmp_path: Path, capsys, monkeypatch):
-    """CLI post-session: exit code 124 → noop."""
+def test_post_session_cli_timeout_exit_code(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session: exit code 124 with no evidence → unknown."""
     import sys
 
     from gptme_sessions.cli import main
@@ -3194,7 +3196,7 @@ def test_post_session_cli_noop_exit_code(tmp_path: Path, capsys, monkeypatch):
     rc = main()
     assert rc == 0
     captured = capsys.readouterr()
-    assert "outcome=noop" in captured.out
+    assert "outcome=unknown" in captured.out
 
 
 def test_post_session_cli_json_output(tmp_path: Path, capsys, monkeypatch):
