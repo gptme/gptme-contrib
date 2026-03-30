@@ -50,8 +50,8 @@ guard_mass_delete_staged() {
         deleted_files=$(echo "$deleted_files" | grep -Ev "$submodule_filter" || true)
     fi
 
-    local deleted_count
-    deleted_count=$(echo "$deleted_files" | grep -c '^' || true)
+    local deleted_count=0
+    [ -n "$deleted_files" ] && deleted_count=$(echo "$deleted_files" | wc -l | tr -d ' ')
 
     if [ "$deleted_count" -gt "$threshold" ]; then
         local total_tracked
@@ -102,7 +102,7 @@ guard_mass_delete_commit() {
     repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
 
     local deleted_files
-    deleted_files=$(git diff-tree --no-commit-id -r --diff-filter=D "$commit" 2>/dev/null | awk '{print $NF}')
+    deleted_files=$(git diff-tree --no-commit-id -r --name-only --diff-filter=D "$commit" 2>/dev/null)
 
     # Filter out submodule paths
     local submodule_filter
@@ -111,8 +111,8 @@ guard_mass_delete_commit() {
         deleted_files=$(echo "$deleted_files" | grep -Ev "$submodule_filter" || true)
     fi
 
-    local deleted_count
-    deleted_count=$(echo "$deleted_files" | grep -c '^' || true)
+    local deleted_count=0
+    [ -n "$deleted_files" ] && deleted_count=$(echo "$deleted_files" | wc -l | tr -d ' ')
 
     if [ "$deleted_count" -gt "$threshold" ]; then
         local commit_msg

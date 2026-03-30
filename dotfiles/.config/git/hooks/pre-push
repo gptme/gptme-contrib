@@ -21,6 +21,8 @@ done
 # Scans every commit in the push range for catastrophic deletions.
 # This is the LAST line of defense before bad commits reach the remote.
 # Bypass: ALLOW_MASS_DELETE=1 git push ...
+ZERO="0000000000000000000000000000000000000000"
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 _GUARD_SCRIPT=""
 if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/scripts/git/guard-mass-delete.sh" ]; then
@@ -35,7 +37,6 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # shellcheck source=../../../scripts/git/guard-mass-delete.sh
     source "$_GUARD_SCRIPT"
 
-    ZERO="0000000000000000000000000000000000000000"
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
 
@@ -64,17 +65,16 @@ fi
 # This guard detects the non-fast-forward reflog transition on origin/master and blocks.
 # Bypass: ALLOW_FORCE_RESET_PUSH=1 git push ...
 if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
-    ZERO="0000000000000000000000000000000000000000"
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
 
         # Only guard pushes to master/main; skip deletions and new branches
-        [[ "$local_ref" != "refs/heads/master" && "$local_ref" != "refs/heads/main" ]] && continue
+        [[ "$remote_ref" != "refs/heads/master" && "$remote_ref" != "refs/heads/main" ]] && continue
         [ "$local_sha" = "$ZERO" ] && continue
         [ "$remote_sha" = "$ZERO" ] && continue
 
         # Fetch to get the latest remote state (updates reflog)
-        _remote_branch="${local_ref#refs/heads/}"
+        _remote_branch="${remote_ref#refs/heads/}"
         git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
 
         # Read the two most recent entries from the remote branch reflog.
