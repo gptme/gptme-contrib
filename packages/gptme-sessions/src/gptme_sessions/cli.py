@@ -1023,6 +1023,89 @@ def signals(
             click.echo(f"  - {d}")
 
 
+# -- transcript --------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("path", type=click.Path(path_type=Path))  # type: ignore[type-var]
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON (default: human-readable)")
+@click.option(
+    "--messages-only",
+    is_flag=True,
+    help="Output only the messages array (implies --json)",
+)
+def transcript(path: Path, as_json: bool, messages_only: bool) -> None:
+    """Read a trajectory file and output a normalized session transcript.
+
+    PATH is the path to a harness JSONL file (gptme conversation.jsonl,
+    Claude Code session UUID.jsonl, Codex rollout.jsonl, or Copilot
+    events.jsonl). The format is auto-detected.
+
+    Use --json for the full stable machine-readable contract (schema_version,
+    session metadata, and messages array). Use --messages-only for just the
+    messages array (useful for piping into other tools).
+
+    The JSON output is a stable, versioned contract (schema_version=1) that
+    external consumers can depend on across harness updates.
+    """
+    from .transcript import read_transcript
+
+    if not path.is_file():
+        if path.is_dir():
+            raise click.BadParameter(
+                f"{path} is a directory, expected a .jsonl file", param_hint="'PATH'"
+            )
+        raise click.BadParameter(f"{path} not found", param_hint="'PATH'")
+
+    try:
+        t = read_transcript(path)
+    except PermissionError:
+        raise click.ClickException(f"cannot read {path}: permission denied")
+    except UnicodeDecodeError:
+        raise click.ClickException(f"{path} contains non-UTF-8 content")
+
+    if messages_only:
+        click.echo(json.dumps([m.to_dict() for m in t.messages], indent=2))
+        return
+
+    if as_json:
+        click.echo(t.to_json())
+        return
+
+    # Human-readable summary
+    click.echo(f"Harness:      {t.harness}")
+    click.echo(f"Session ID:   {t.session_id}")
+    if t.session_name:
+        click.echo(f"Session name: {t.session_name}")
+    if t.project:
+        click.echo(f"Project:      {t.project}")
+    if t.model:
+        click.echo(f"Model:        {t.model}")
+    if t.started_at:
+        click.echo(f"Started at:   {t.started_at}")
+    if t.last_activity:
+        click.echo(f"Last activity: {t.last_activity}")
+    click.echo(f"Messages:     {len(t.messages)}")
+    click.echo(f"Capabilities: {', '.join(t.capabilities) or 'none'}")
+    click.echo(f"Schema:       v{t.schema_version}")
+
+    if t.messages:
+        click.echo("\nTranscript (first 5 messages):")
+        for msg in t.messages[:5]:
+            ts_str = f"[{msg.timestamp[:19]}] " if msg.timestamp else ""
+            if msg.tool_name:
+                click.echo(
+                    f"  {ts_str}{msg.role} → {msg.tool_name}({json.dumps(msg.tool_input or {})})"
+                )
+            elif msg.role == "tool_result":
+                content_preview = (msg.content or "")[:80].replace("\n", "\\n")
+                err_flag = " [ERROR]" if msg.is_error else ""
+                click.echo(f"  {ts_str}tool_result{err_flag}: {content_preview}")
+            else:
+                content_preview = (msg.content or "")[:80].replace("\n", "\\n")
+                click.echo(f"  {ts_str}{msg.role}: {content_preview}")
+
+
 # -- sync --------------------------------------------------------------------
 
 

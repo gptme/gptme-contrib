@@ -48,6 +48,12 @@ from .classification import (
 )
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
+from .transcript import (
+    NormalizedMessage,
+    SessionTranscript,
+    TRANSCRIPT_SCHEMA_VERSION,
+    read_transcript,
+)
 
 __all__ = [
     "Category",
@@ -86,4 +92,8 @@ __all__ = [
     "load_bandit_means",
     "post_session",
     "PostSessionResult",
+    "NormalizedMessage",
+    "SessionTranscript",
+    "TRANSCRIPT_SCHEMA_VERSION",
+    "read_transcript",
 ]
