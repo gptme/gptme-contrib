@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
-    # Anthropic Claude models (bare)
+    # Anthropic Claude models (bare) — dash and dot variants
     "claude-opus-4-6": "opus",
+    "claude-opus-4.6": "opus",
     "claude-opus-4-5": "opus",
+    "claude-opus-4.5": "opus",
     "claude-sonnet-4-6": "sonnet",
+    "claude-sonnet-4.6": "sonnet",
     "claude-sonnet-4-5": "sonnet",
+    "claude-sonnet-4.5": "sonnet",
     "claude-sonnet-4-20250514": "sonnet",
     "claude-haiku-4-5": "haiku",
+    "claude-haiku-4.5": "haiku",
     "claude-3-opus": "opus",
     "claude-3-sonnet": "sonnet",
     "claude-3-haiku": "haiku",
@@ -23,23 +29,32 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-3.5-haiku": "haiku",
     # Anthropic provider-prefixed
     "anthropic/claude-opus-4-6": "opus",
+    "anthropic/claude-opus-4.6": "opus",
     "anthropic/claude-opus-4-5": "opus",
+    "anthropic/claude-opus-4.5": "opus",
     "anthropic/claude-sonnet-4-6": "sonnet",
+    "anthropic/claude-sonnet-4.6": "sonnet",
     "anthropic/claude-sonnet-4-5": "sonnet",
+    "anthropic/claude-sonnet-4.5": "sonnet",
     "anthropic/claude-sonnet-4-20250514": "sonnet",
     "anthropic/sonnet-4-20250514": "sonnet",
     "anthropic/claude-haiku-4-5": "haiku",
+    "anthropic/claude-haiku-4.5": "haiku",
     # OpenRouter Anthropic
     "openrouter/anthropic/claude-opus-4.6": "opus",
     "openrouter/anthropic/claude-opus-4-6": "opus",
     "openrouter/anthropic/claude-opus-4.5": "opus",
     "openrouter/anthropic/claude-opus-4-5": "opus",
     "openrouter/anthropic/claude-sonnet-4-6": "sonnet",
+    "openrouter/anthropic/claude-sonnet-4.6": "sonnet",
     "openrouter/anthropic/claude-sonnet-4-5": "sonnet",
+    "openrouter/anthropic/claude-sonnet-4.5": "sonnet",
     # OpenAI models
+    "openai-subscription/gpt-5.4": "gpt-5.4",
     "openai-subscription/gpt-5.3-codex": "gpt-5.3-codex",
     "openai-subscription/gpt-5.3": "gpt-5.3",
     "openai-subscription/gpt-5.2": "gpt-5.2",
+    "gpt-5.4": "gpt-5.4",
     "gpt-5.3-codex": "gpt-5.3-codex",
     "gpt-4o": "gpt-4o",
     "gpt-4o-mini": "gpt-4o-mini",
@@ -47,13 +62,31 @@ MODEL_ALIASES: dict[str, str] = {
     "openai": "gpt-4o",  # legacy default
     # OpenRouter non-Anthropic
     "openrouter/z-ai/glm-5@z-ai": "glm-5",
+    "openrouter/z-ai/glm-5": "glm-5",
+    "glm-5": "glm-5",
     "openrouter/moonshotai/kimi-k2.5@moonshotai": "kimi-k2.5",
     "openrouter/moonshotai/kimi-k2.5": "kimi-k2.5",
     "openrouter/moonshotai/kimi-k2.5-instruct": "kimi-k2.5",
     "openrouter/minimax/minimax-m2": "minimax-m2",
+    "openrouter/minimax/minimax-m2.5": "minimax-m2.5",
+    "openrouter/minimax/minimax-m2.7": "minimax-m2.7",
+    "minimax-m2.5": "minimax-m2.5",
+    "minimax-m2.7": "minimax-m2.7",
     "openrouter/google/gemini-3-flash": "gemini-3-flash",
+    "openrouter/google/gemini-3.1-flash": "gemini-3.1-flash",
+    "openrouter/google/gemini-3.1-pro": "gemini-3.1-pro",
+    "gemini-3.1-flash": "gemini-3.1-flash",
+    "gemini-3.1-pro": "gemini-3.1-pro",
     "xai/grok-4-1-fast": "grok-4-1",
+    # Qwen models
+    "qwen3.5-coder": "qwen3.5-coder",
+    "openrouter/qwen/qwen3.5-coder": "qwen3.5-coder",
 }
+
+# Regex fallback: strip known provider prefixes for models not in the alias table.
+_PROVIDER_PREFIX_RE = re.compile(
+    r"^(?:openrouter/[^/]+/|anthropic/|openai-subscription/|openai/|xai/)"
+)
 
 
 def normalize_model(raw: str | None) -> str | None:
@@ -63,11 +96,17 @@ def normalize_model(raw: str | None) -> str | None:
     # Exact match first.
     if raw in MODEL_ALIASES:
         return MODEL_ALIASES[raw]
-    # Prefix match — require '/' separator to avoid "openai" absorbing
-    # "openai-subscription/*" or similar unlisted variants.
+    # Prefix match — only for keys that already contain '/' (provider-prefixed
+    # aliases).  Skip bare names like "openai" to avoid absorbing "openai/*".
     for prefix, canonical in MODEL_ALIASES.items():
-        if raw.startswith(prefix + "/"):
+        if "/" in prefix and raw.startswith(prefix + "/"):
             return canonical
+    # Regex fallback: strip provider prefixes for unknown models.
+    stripped = _PROVIDER_PREFIX_RE.sub("", raw)
+    # Strip trailing @provider suffixes (e.g. "glm-5@z-ai" → "glm-5")
+    stripped = re.sub(r"@[^@]+$", "", stripped)
+    if stripped != raw:
+        return stripped
     return raw
 
 
@@ -99,6 +138,8 @@ class SessionRecord:
     # Identity
     session_id: str = ""
     timestamp: str = ""  # ISO 8601
+    session_name: str | None = None  # human-readable name (e.g. "dancing-blue-fish")
+    project: str | None = None  # workspace/project path
 
     # Operational context
     harness: str | None = "unknown"  # claude-code, gptme, codex

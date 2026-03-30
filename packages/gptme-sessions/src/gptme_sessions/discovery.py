@@ -319,6 +319,60 @@ def session_date_from_path(harness: str, path: Path) -> date | None:
         return _quick_date_from_jsonl(path)
 
 
+def extract_session_name(harness: str, path: Path) -> str | None:
+    """Extract a human-readable session name from a discovered session path.
+
+    - **gptme**: strip the date prefix from the directory name
+      (``2026-03-05-dancing-blue-fish`` → ``dancing-blue-fish``)
+    - **claude-code**: first 8 characters of the JSONL filename (UUID)
+    - **codex**: JSONL filename stem
+    - **copilot**: parent directory name (UUID, first 8 chars)
+
+    Returns ``None`` if no meaningful name can be extracted.
+    """
+    if harness == "gptme":
+        # path is either the session dir or a .jsonl inside it
+        dir_name = path.parent.name if path.suffix == ".jsonl" else path.name
+        # Strip YYYY-MM-DD- prefix (only if first 10 chars form a valid date)
+        if len(dir_name) > 11 and dir_name[10] == "-":
+            try:
+                date.fromisoformat(dir_name[:10])
+                return dir_name[11:]
+            except ValueError:
+                pass
+        return dir_name
+    elif harness == "claude-code":
+        # JSONL filename is a UUID like "abc12345-...-def67890.jsonl"
+        return path.stem[:8]
+    elif harness == "codex":
+        return path.stem[:8] if path.stem else None
+    elif harness == "copilot":
+        return path.parent.name[:8]
+    return None
+
+
+def extract_project(harness: str, path: Path) -> str | None:
+    """Extract the project/workspace from a discovered session path.
+
+    - **claude-code**: decode the project directory name via
+      :func:`decode_cc_project_path` (e.g. ``-Users-erb-myproj`` → ``/Users/erb/myproj``)
+    - **gptme**: read ``workspace`` from the session's ``config.toml``
+
+    Returns ``None`` for harnesses where project cannot be determined.
+    """
+    if harness == "claude-code":
+        # path is a JSONL file inside a project dir
+        project_dir_name = path.parent.name
+        return decode_cc_project_path(project_dir_name)
+    elif harness == "gptme":
+        # path is either the session dir or conversation.jsonl inside it
+        session_dir = path.parent if path.suffix == ".jsonl" else path
+        config = parse_gptme_config(session_dir)
+        workspace = config.get("workspace", "")
+        return workspace if workspace else None
+    return None
+
+
 def discover_copilot_sessions(
     start: date,
     end: date,

@@ -521,13 +521,13 @@ def test_stats_group_by_normalized_model(tmp_path: Path):
 
 
 def test_normalize_model_openai_subscription_not_absorbed():
-    """openai-subscription/* models not in aliases pass through unchanged."""
+    """openai-subscription/* models strip prefix via regex fallback (not "openai" catch-all)."""
     from gptme_sessions.record import normalize_model
 
     # Explicitly listed — should normalize
     assert normalize_model("openai-subscription/gpt-5.3-codex") == "gpt-5.3-codex"
-    # Not listed — must NOT silently become "gpt-4o" via "openai" catch-all
-    assert normalize_model("openai-subscription/gpt-future") == "openai-subscription/gpt-future"
+    # Not listed — regex fallback strips "openai-subscription/" prefix
+    assert normalize_model("openai-subscription/gpt-future") == "gpt-future"
     # Bare "openai" legacy still normalizes
     assert normalize_model("openai") == "gpt-4o"
 

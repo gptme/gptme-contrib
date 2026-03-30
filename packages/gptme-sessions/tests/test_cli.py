@@ -526,3 +526,117 @@ class TestClassifyStatsCommand:
         )
         assert rc == 0
         assert "consecutive" not in out.lower()
+
+
+# -- sync timestamp fix ------------------------------------------------------
+
+
+class TestSyncTimestamp:
+    def test_sync_uses_session_date_not_now(self, tmp_path: Path):
+        """sync should use session date from discovery, not datetime.now()."""
+        # Create a gptme session directory with a known date
+        logs_dir = tmp_path / "logs"
+        session_dir = logs_dir / "2026-03-10-test-session"
+        session_dir.mkdir(parents=True)
+        # No conversation.jsonl — path will be the directory itself
+
+        store_dir = tmp_path / "store"
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "--sessions-dir",
+                str(store_dir),
+                "sync",
+                "--since",
+                "30d",
+            ],
+            env={"GPTME_LOGS_DIR": str(logs_dir)},
+        )
+        assert result.exit_code == 0
+
+        # Load the store and check the timestamp
+        store = SessionStore(sessions_dir=store_dir)
+        records = store.load_all()
+        # Should have imported one record
+        gptme_records = [r for r in records if r.harness == "gptme"]
+        if gptme_records:
+            # The timestamp should start with the session date, not today
+            assert gptme_records[0].timestamp.startswith("2026-03-10")
+
+
+class TestSyncFixTimestamps:
+    def test_fix_timestamps_corrects_records(self, tmp_path: Path):
+        """sync --fix-timestamps corrects timestamps from trajectory paths."""
+        store = SessionStore(sessions_dir=tmp_path)
+        # Create a record with wrong timestamp but correct trajectory_path
+        rec = SessionRecord(
+            harness="gptme",
+            timestamp="2026-03-20T12:00:00+00:00",  # wrong: sync date
+            trajectory_path="/fake/logs/2026-03-10-my-session/conversation.jsonl",
+        )
+        store.append(rec)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--sessions-dir", str(tmp_path), "sync", "--fix-timestamps"],
+        )
+        assert result.exit_code == 0
+        assert "Fixed 1 timestamp" in result.output
+
+        # Verify the timestamp was corrected
+        records = store.load_all()
+        assert records[0].timestamp.startswith("2026-03-10")
+
+
+# -- stats defaults ----------------------------------------------------------
+
+
+class TestStatsDefaults:
+    def test_stats_defaults_to_30d(self, tmp_path: Path):
+        """stats without --since defaults to 30d window."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(["stats"], tmp_path)
+        assert rc == 0
+        # Should show the 30-day header
+        assert "30 days" in out.lower() or "all-time" in out.lower()
+
+    def test_stats_since_all(self, tmp_path: Path):
+        """stats --since all shows all-time stats."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(["stats", "--since", "all", "--json"], tmp_path)
+        assert rc == 0
+        data = json.loads(out)
+        assert data["total"] == 5
+
+
+# -- project filter ----------------------------------------------------------
+
+
+class TestProjectFilter:
+    def test_query_filter_by_project(self, tmp_path: Path):
+        """query --project filters records by project name."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                harness="claude-code",
+                model="opus",
+                outcome="productive",
+                project="/Users/erb/myproject",
+            )
+        )
+        store.append(
+            SessionRecord(
+                harness="claude-code",
+                model="sonnet",
+                outcome="noop",
+                project="/Users/erb/other",
+            )
+        )
+
+        rc, out = _invoke(["query", "--project", "myproject", "--json"], tmp_path)
+        assert rc == 0
+        data = json.loads(out)
+        assert len(data) == 1
+        assert data[0]["project"] == "/Users/erb/myproject"

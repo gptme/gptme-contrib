@@ -1,6 +1,8 @@
 """Tests for SessionRecord dataclass."""
 
-from gptme_sessions.record import SessionRecord
+import pytest
+
+from gptme_sessions.record import SessionRecord, normalize_model
 
 
 def test_context_tier_default():
@@ -96,3 +98,109 @@ def test_ab_group_tier_version_none_roundtrip():
     r2 = SessionRecord.from_dict(d)
     assert r2.ab_group is None
     assert r2.tier_version is None
+
+
+# -- project and session_name fields -----------------------------------------
+
+
+def test_project_default():
+    """project defaults to None."""
+    r = SessionRecord()
+    assert r.project is None
+
+
+def test_session_name_default():
+    """session_name defaults to None."""
+    r = SessionRecord()
+    assert r.session_name is None
+
+
+def test_project_session_name_roundtrip():
+    """project and session_name survive to_dict/from_dict round-trip."""
+    import json
+
+    r = SessionRecord(
+        harness="claude-code",
+        model="opus",
+        project="/Users/erb/myproject",
+        session_name="dancing-blue-fish",
+        outcome="productive",
+    )
+    d = r.to_dict()
+    assert d["project"] == "/Users/erb/myproject"
+    assert d["session_name"] == "dancing-blue-fish"
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.project == "/Users/erb/myproject"
+    assert r2.session_name == "dancing-blue-fish"
+
+    # JSON round-trip
+    parsed = json.loads(r.to_json())
+    assert parsed["project"] == "/Users/erb/myproject"
+    assert parsed["session_name"] == "dancing-blue-fish"
+    r3 = SessionRecord.from_dict(parsed)
+    assert r3.project == "/Users/erb/myproject"
+    assert r3.session_name == "dancing-blue-fish"
+
+
+def test_project_session_name_none_roundtrip():
+    """project=None and session_name=None round-trip correctly."""
+    r = SessionRecord(model="sonnet")
+    d = r.to_dict()
+    assert d["project"] is None
+    assert d["session_name"] is None
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.project is None
+    assert r2.session_name is None
+
+
+# -- normalize_model: dot variants and regex fallback ------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Dot variants (new aliases)
+        ("claude-sonnet-4.6", "sonnet"),
+        ("claude-opus-4.5", "opus"),
+        ("anthropic/claude-sonnet-4.6", "sonnet"),
+        ("anthropic/claude-haiku-4.5", "haiku"),
+        # New providers
+        ("openai-subscription/gpt-5.4", "gpt-5.4"),
+        ("minimax-m2.5", "minimax-m2.5"),
+        ("minimax-m2.7", "minimax-m2.7"),
+        ("gemini-3.1-flash", "gemini-3.1-flash"),
+        ("gemini-3.1-pro", "gemini-3.1-pro"),
+        ("qwen3.5-coder", "qwen3.5-coder"),
+        # Existing aliases still work
+        ("claude-opus-4-6", "opus"),
+        ("gpt-4o", "gpt-4o"),
+        ("openrouter/anthropic/claude-opus-4-6", "opus"),
+    ],
+)
+def test_normalize_model_aliases(raw: str, expected: str) -> None:
+    assert normalize_model(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Regex fallback: strip provider prefixes
+        ("openrouter/deepseek/deepseek-r2", "deepseek-r2"),
+        ("anthropic/claude-future-99", "claude-future-99"),
+        ("openai-subscription/gpt-99", "gpt-99"),
+        ("openai/gpt-future", "gpt-future"),
+        ("xai/grok-99", "grok-99"),
+        # Strip @provider suffixes
+        ("openrouter/some-provider/some-model@some-provider", "some-model"),
+        # Already short: returned as-is
+        ("local-llm", "local-llm"),
+        # None stays None
+        (None, None),
+        # Empty string returns empty string (falsy, like None)
+        ("", ""),
+    ],
+)
+def test_normalize_model_regex_fallback(raw: str | None, expected: str | None) -> None:
+    assert normalize_model(raw) == expected

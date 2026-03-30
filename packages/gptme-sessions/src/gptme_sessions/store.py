@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,12 +12,24 @@ from typing import TextIO
 from .record import SessionRecord
 
 
+def _default_sessions_dir() -> Path:
+    """Return the default sessions directory (XDG-compliant).
+
+    Checks ``GPTME_SESSIONS_DIR`` env var first, then falls back to
+    ``~/.local/share/gptme-sessions/``.
+    """
+    env_dir = os.environ.get("GPTME_SESSIONS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / ".local" / "share" / "gptme-sessions"
+
+
 class SessionStore:
     """Append-only JSONL store for session records.
 
     Args:
         sessions_dir: Directory containing the sessions file.
-            Defaults to ``./state/sessions`` relative to cwd.
+            Defaults to ``~/.local/share/gptme-sessions/`` (or ``GPTME_SESSIONS_DIR``).
         sessions_file: Name of the JSONL file within sessions_dir.
     """
 
@@ -26,7 +39,7 @@ class SessionStore:
         sessions_file: str = "session-records.jsonl",
     ):
         if sessions_dir is None:
-            sessions_dir = Path.cwd() / "state" / "sessions"
+            sessions_dir = _default_sessions_dir()
         self.sessions_dir = sessions_dir
         self.sessions_file = sessions_file
         self.path = sessions_dir / sessions_file
@@ -111,6 +124,7 @@ class SessionStore:
         harness: str | None = None,
         outcome: str | None = None,
         since_days: int | None = None,
+        project: str | None = None,
     ) -> list[SessionRecord]:
         """Filter session records by criteria."""
         records = self.load_all()
@@ -124,6 +138,8 @@ class SessionStore:
             records = [r for r in records if r.harness == harness]
         if outcome:
             records = [r for r in records if r.outcome == outcome]
+        if project:
+            records = [r for r in records if r.project and project in r.project]
         if since_days is not None:
             cutoff = datetime.now(timezone.utc).timestamp() - (since_days * 86400)
             filtered = []
@@ -201,6 +217,20 @@ class SessionStore:
             if r.outcome == "productive":
                 harness_model_tab[key]["productive"] += 1
 
+        # Project breakdown
+        project_stats: dict[str, dict[str, int]] = {}
+        for r in records:
+            proj = r.project
+            if not proj:
+                continue
+            # Use last path component for display
+            proj_short = proj.rstrip("/").rsplit("/", 1)[-1] if "/" in proj else proj
+            if proj_short not in project_stats:
+                project_stats[proj_short] = {"total": 0, "productive": 0}
+            project_stats[proj_short]["total"] += 1
+            if r.outcome == "productive":
+                project_stats[proj_short]["productive"] += 1
+
         # Duration stats
         durations = [r.duration_seconds for r in records if r.duration_seconds > 0]
         duration_stats: dict[str, float | int] = {}
@@ -216,7 +246,7 @@ class SessionStore:
         def _rate(s: dict[str, int]) -> dict:
             return {**s, "rate": s["productive"] / s["total"] if s["total"] > 0 else 0}
 
-        return {
+        result: dict = {
             "total": total,
             "productive": productive,
             "noop": noop,
@@ -228,6 +258,9 @@ class SessionStore:
             "by_harness": {h: _rate(s) for h, s in sorted(harness_stats.items())},
             "by_harness_model": {k: _rate(s) for k, s in sorted(harness_model_tab.items())},
         }
+        if project_stats:
+            result["by_project"] = {p: _rate(s) for p, s in sorted(project_stats.items())}
+        return result
 
 
 def format_stats(stats: dict, out: TextIO = sys.stdout) -> None:
@@ -250,11 +283,17 @@ def format_stats(stats: dict, out: TextIO = sys.stdout) -> None:
         )
     out.write("\n")
 
+    # Dynamically compute column width for model names
+    model_width = 12
+    if stats.get("by_model"):
+        model_width = max(model_width, max(len(m) for m in stats["by_model"]))
+
     if stats.get("by_model"):
         out.write("By model:\n")
         for model, ms in stats["by_model"].items():
             out.write(
-                f"  {model:12s}  {ms['productive']:3d}/{ms['total']:3d}  ({ms['rate']:.0%})\n"
+                f"  {model:<{model_width}}  "
+                f"{ms['productive']:3d}/{ms['total']:3d}  ({ms['rate']:.0%})\n"
             )
         out.write("\n")
 
@@ -272,17 +311,42 @@ def format_stats(stats: dict, out: TextIO = sys.stdout) -> None:
             )
         out.write("\n")
 
-    if stats.get("by_model_run_type"):
-        out.write("By model × run type:\n")
-        for key, cs in stats["by_model_run_type"].items():
-            out.write(f"  {key:25s}  {cs['productive']:3d}/{cs['total']:3d}  ({cs['rate']:.0%})\n")
+    if stats.get("by_project"):
+        out.write("By project:\n")
+        proj_width = max(12, max(len(p) for p in stats["by_project"]))
+        for proj, ps in stats["by_project"].items():
+            out.write(
+                f"  {proj:<{proj_width}}  "
+                f"{ps['productive']:3d}/{ps['total']:3d}  ({ps['rate']:.0%})\n"
+            )
         out.write("\n")
 
+    # Only show cross-tabs when both dimensions have 2+ distinct values
+    if stats.get("by_model_run_type"):
+        models = {k.split("×")[0] for k in stats["by_model_run_type"]}
+        run_types = {k.split("×")[1] for k in stats["by_model_run_type"]}
+        if len(models) >= 2 and len(run_types) >= 2:
+            cross_width = max(25, max(len(k) for k in stats["by_model_run_type"]))
+            out.write("By model × run type:\n")
+            for key, cs in stats["by_model_run_type"].items():
+                out.write(
+                    f"  {key:<{cross_width}}  "
+                    f"{cs['productive']:3d}/{cs['total']:3d}  ({cs['rate']:.0%})\n"
+                )
+            out.write("\n")
+
     if stats.get("by_harness_model"):
-        out.write("By harness × model:\n")
-        for key, cs in stats["by_harness_model"].items():
-            out.write(f"  {key:30s}  {cs['productive']:3d}/{cs['total']:3d}  ({cs['rate']:.0%})\n")
-        out.write("\n")
+        harnesses = {k.split("×")[0] for k in stats["by_harness_model"]}
+        models_hm = {k.split("×")[1] for k in stats["by_harness_model"]}
+        if len(harnesses) >= 2 and len(models_hm) >= 2:
+            hm_width = max(30, max(len(k) for k in stats["by_harness_model"]))
+            out.write("By harness × model:\n")
+            for key, cs in stats["by_harness_model"].items():
+                out.write(
+                    f"  {key:<{hm_width}}  "
+                    f"{cs['productive']:3d}/{cs['total']:3d}  ({cs['rate']:.0%})\n"
+                )
+            out.write("\n")
 
 
 def compute_run_analytics(records: list[SessionRecord]) -> dict:
