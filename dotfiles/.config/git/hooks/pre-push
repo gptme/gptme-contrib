@@ -1,15 +1,99 @@
 #!/bin/bash
-# Pre-push hook: blocks direct pushes to master/main and validates worktree tracking
+# Pre-push hook: mass-deletion guard, force-reset guard, branch protection, worktree validation
 #
 # Install globally:
 #   git config --global core.hooksPath ~/.config/git/hooks
 
+set -euo pipefail
+
 SCRIPT_DIR="$(dirname "$0")"
 
-# Store stdin for reuse (git provides: local_ref local_sha remote_ref remote_sha)
-# This is needed because we may read stdin in the master/main check
-# and need it again for worktree tracking validation
-STDIN_CONTENT=$(cat)
+# Read stdin before any subprocess consumes it.
+# Git provides per line: local_ref local_sha remote_ref remote_sha
+STDIN_LINES=()
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    STDIN_LINES+=("$local_ref $local_sha $remote_ref $remote_sha")
+done
+
+# --- Mass-deletion guard (per-commit scan) ---
+# Scans every commit in the push range for catastrophic deletions.
+# This is the LAST line of defense before bad commits reach the remote.
+# Bypass: ALLOW_MASS_DELETE=1 git push ...
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+_GUARD_SCRIPT=""
+if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/scripts/git/guard-mass-delete.sh" ]; then
+    _GUARD_SCRIPT="$REPO_ROOT/scripts/git/guard-mass-delete.sh"
+elif [ -n "$SCRIPT_DIR" ]; then
+    _GPTME_CONTRIB_DIR="$(cd "$SCRIPT_DIR/../../../.." 2>/dev/null && pwd)"
+    if [ -f "$_GPTME_CONTRIB_DIR/scripts/git/guard-mass-delete.sh" ]; then
+        _GUARD_SCRIPT="$_GPTME_CONTRIB_DIR/scripts/git/guard-mass-delete.sh"
+    fi
+fi
+if [ -n "$_GUARD_SCRIPT" ]; then
+    # shellcheck source=../../../scripts/git/guard-mass-delete.sh
+    source "$_GUARD_SCRIPT"
+
+    ZERO="0000000000000000000000000000000000000000"
+    for line in "${STDIN_LINES[@]}"; do
+        read -r local_ref local_sha remote_ref remote_sha <<< "$line"
+
+        # Skip branch deletions
+        [ "$local_sha" = "$ZERO" ] && continue
+
+        # Determine the range of commits being pushed
+        if [ "$remote_sha" = "$ZERO" ]; then
+            # New branch: check commits not reachable from any remote branch
+            range="$local_sha --not --remotes=origin"
+        else
+            range="$remote_sha..$local_sha"
+        fi
+
+        # Check each commit in the range
+        # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
+        for commit in $(git rev-list $range 2>/dev/null); do
+            guard_mass_delete_commit "$commit"
+        done
+    done
+fi
+
+# --- Force-reset guard (re-push protection) ---
+# After a human force-resets origin/master (e.g. to undo a bad push), an autonomous
+# loop may fire and re-push the removed commits before the local branch is also reset.
+# This guard detects the non-fast-forward reflog transition on origin/master and blocks.
+# Bypass: ALLOW_FORCE_RESET_PUSH=1 git push ...
+if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
+    ZERO="0000000000000000000000000000000000000000"
+    for line in "${STDIN_LINES[@]}"; do
+        read -r local_ref local_sha remote_ref remote_sha <<< "$line"
+
+        # Only guard pushes to master/main; skip deletions and new branches
+        [[ "$local_ref" != "refs/heads/master" && "$local_ref" != "refs/heads/main" ]] && continue
+        [ "$local_sha" = "$ZERO" ] && continue
+        [ "$remote_sha" = "$ZERO" ] && continue
+
+        # Fetch to get the latest remote state (updates reflog)
+        _remote_branch="${local_ref#refs/heads/}"
+        git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
+
+        # Read the two most recent entries from the remote branch reflog.
+        # If the previous entry is NOT an ancestor of the current entry, a
+        # force-reset (non-fast-forward update) occurred.
+        reflog_current=$(git reflog show "refs/remotes/origin/$_remote_branch" --pretty=format:'%H' 2>/dev/null | sed -n '1p')
+        reflog_prev=$(git reflog show "refs/remotes/origin/$_remote_branch" --pretty=format:'%H' 2>/dev/null | sed -n '2p')
+
+        if [ -n "$reflog_prev" ] && [ -n "$reflog_current" ]; then
+            if ! git merge-base --is-ancestor "$reflog_prev" "$reflog_current" 2>/dev/null; then
+                echo "ERROR: origin/$_remote_branch was force-reset (non-fast-forward reflog transition)." >&2
+                echo "  Was: $reflog_prev" >&2
+                echo "  Now: $reflog_current" >&2
+                echo "Push blocked — your local branch likely has commits that were deliberately removed." >&2
+                echo "To align with remote:  git reset --hard origin/$_remote_branch" >&2
+                echo "To override (DANGER):  ALLOW_FORCE_RESET_PUSH=1 git push" >&2
+                exit 1
+            fi
+        fi
+    done
+fi
 
 # --- Master/Main Push Protection ---
 # Source allowed repos from config file (shared with pre-commit hook)
@@ -41,7 +125,8 @@ fi
 
 # If not allowed, check for master/main pushes
 if [ "$is_allowed" = false ]; then
-    while read _local_ref _local_sha remote_ref _remote_sha; do
+    for line in "${STDIN_LINES[@]}"; do
+        read -r _local_ref _local_sha remote_ref _remote_sha <<< "$line"
         if [[ "$remote_ref" == "refs/heads/master" || "$remote_ref" == "refs/heads/main" ]]; then
             echo "🚫 ERROR: Direct push to $remote_ref blocked!"
             echo ""
@@ -53,12 +138,14 @@ if [ "$is_allowed" = false ]; then
             echo "  git push -u origin feature-branch"
             exit 1
         fi
-    done <<< "$STDIN_CONTENT"
+    done
 fi
 
 # --- Worktree Tracking Validation ---
 # Pass stored stdin to validation script
-echo "$STDIN_CONTENT" | "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
+printf '%s\n' "${STDIN_LINES[@]}" | "$SCRIPT_DIR/validate-worktree-tracking.sh" "$@"
 
-# Git LFS support (don't fail hook if LFS has issues)
-command -v git-lfs >/dev/null 2>&1 && echo "$STDIN_CONTENT" | git lfs pre-push "$@" 2>/dev/null || true
+# --- Git LFS support (don't fail hook if LFS has issues) ---
+command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lfs pre-push "$@" 2>/dev/null || true
+
+exit 0
