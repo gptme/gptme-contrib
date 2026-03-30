@@ -53,12 +53,18 @@ For OAuth 2.0 setup:
 
 import os
 import sys
+import warnings
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
 import click
-import tweepy
+
+# Silence SyntaxWarning spam from tweepy's invalid escape sequences
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=SyntaxWarning, module="tweepy")
+    import tweepy  # noqa: E402
+
 from dotenv import load_dotenv
 from gptmail.communication_utils.auth import (  # type: ignore[import-not-found]
     run_oauth_callback,
