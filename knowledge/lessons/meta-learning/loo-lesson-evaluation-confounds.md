@@ -106,6 +106,6 @@ Requires 2-4 weeks of `session_category`-tagged sessions to calibrate baselines 
 ## Related
 
 - `lessons/README.md` — lesson keyword selection best practices
-- [Thompson Sampling for Work Categories](../../../lessons/autonomous/thompson-sampling-work-categories.md) — bandit setup that produces the reward signal LOO analyzes
+- [Thompson Sampling for Work Categories](../../../lessons/autonomous/thompson-sampling-work-categories.md) — category selection bandit that uses the same session-grade reward signal LOO analyzes (note: this is a work-category bandit, not a lesson bandit)
 - `packages/gptme-sessions/` — `SessionRecord.recommended_category` field for per-category tracking
 - [GEPA (Genetic-Pareto)](../../../lessons/concepts/gepa-genetic-pareto.md) — lesson optimization that needs a better-than-LOO eval signal
