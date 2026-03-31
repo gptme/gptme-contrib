@@ -33,9 +33,9 @@ git submodule update --remote gptme-contrib
 # 2. Review what changed
 git -C gptme-contrib log --oneline -10
 
-# 3. Commit the update
+# 3. Commit if there are changes (update may be a no-op if already at latest)
 git add gptme-contrib
-git commit -m "chore: update gptme-contrib submodule"
+git diff --cached --quiet || git commit -m "chore: update gptme-contrib submodule"
 
 # 4. Verify key symlinks still point to gptme-contrib
 ls -la dotfiles/install.sh
