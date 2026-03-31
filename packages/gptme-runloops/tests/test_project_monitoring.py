@@ -144,27 +144,23 @@ def test_compute_timeout_unknown_type_uses_default(workspace):
     assert run._compute_timeout(items) == run._DEFAULT_ITEM_TIMEOUT
 
 
-@patch("gptme_runloops.project_monitoring.subprocess.run")
-def test_has_work_sets_timeout_dynamically(mock_run, workspace):
+def test_has_work_sets_timeout_dynamically(workspace):
     """has_work() updates self.timeout based on discovered item complexity."""
-    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
     run = ProjectMonitoringRun(workspace)
     assert run.timeout == 1800  # initial default
 
-    # Inject a cached assigned_issue item and call has_work() indirectly
-    # by setting _discovered_work and calling the timeout computation path
-    run._discovered_work = [
-        WorkItem(
-            repo="r/r",
-            item_type="assigned_issue",
-            number=1,
-            title="t",
-            url="u",
-            details="d",
-        )
-    ]
-    run.timeout = run._compute_timeout(run._discovered_work)
+    item = WorkItem(
+        repo="r/r",
+        item_type="assigned_issue",
+        number=1,
+        title="t",
+        url="u",
+        details="d",
+    )
+    with patch.object(run, "discover_work", return_value=[item]):
+        result = run.has_work()
+
+    assert result is True
     assert run.timeout == 1500  # adjusted for assigned_issue
 
 
