@@ -150,9 +150,9 @@ class LessonValidator:
 
         Frontmatter philosophy — only stable, write-once metadata belongs here:
         - ``match`` / ``status``: Core lesson routing and lifecycle fields.
-        - ``version``: Integer revision counter, incremented on meaningful rewrites.
-          Lets you correlate bandit/LOO data with a specific lesson iteration.
-          Companion doc (``knowledge/lessons/``) serves as the changelog.
+        - ``version``: Optional integer or semver string tracking lesson revision history.
+          Increment when making significant keyword or content changes so effectiveness
+          data can be correlated to a specific lesson variant.
         - ``automated_by`` / ``automated_date``: Set once when a lesson is automated.
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
@@ -195,13 +195,40 @@ class LessonValidator:
                     f"Frontmatter should be minimal. Consider removing: {', '.join(extra_fields)}"
                 )
 
-            if "version" in frontmatter and not isinstance(frontmatter["version"], int):
-                self.warnings.append(
-                    f"version should be an integer (e.g. version: 2), got: {frontmatter['version']!r}"
-                )
+            # Validate version field if present
+            if "version" in frontmatter:
+                self._check_version_field(frontmatter["version"])
 
         except (ValueError, yaml.YAMLError) as e:
             self.errors.append(f"Invalid YAML frontmatter: {e}")
+
+    def _check_version_field(self, value: object) -> None:
+        """Validate the optional ``version`` frontmatter field.
+
+        Accepted forms:
+        - Positive integer  (``1``, ``2``, ``3``, …)
+        - Semver string     (``"1.0"``, ``"2.1.3"``)
+        - Descriptive tag   (``"v2-compact-primary"``) — any non-empty string
+
+        Args:
+            value: The raw value parsed from YAML for the ``version`` key.
+        """
+        if isinstance(value, bool):
+            self.errors.append(
+                f"version must be an integer or a string, got {type(value).__name__}"
+            )
+        elif isinstance(value, int):
+            if value < 1:
+                self.errors.append(
+                    "version must be a positive integer when given as an int"
+                )
+        elif isinstance(value, str):
+            if not value.strip():
+                self.errors.append("version string must not be empty")
+        else:
+            self.errors.append(
+                f"version must be an integer or a string, got {type(value).__name__}"
+            )
 
     def _validate_two_file_format(self):
         """Validate two-file format (concise primary + companion)."""
