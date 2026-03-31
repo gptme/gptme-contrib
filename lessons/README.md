@@ -33,6 +33,8 @@ match:
   keywords:
     - "trigger phrase"
     - "another trigger"
+version: 1  # optional: increment on meaningful rewrites (content/keyword changes)
+status: active  # active | automated | deprecated | archived
 ---
 
 # Lesson Title

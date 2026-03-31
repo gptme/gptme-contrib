@@ -150,6 +150,9 @@ class LessonValidator:
 
         Frontmatter philosophy — only stable, write-once metadata belongs here:
         - ``match`` / ``status``: Core lesson routing and lifecycle fields.
+        - ``version``: Integer revision counter, incremented on meaningful rewrites.
+          Lets you correlate bandit/LOO data with a specific lesson iteration.
+          Companion doc (``knowledge/lessons/``) serves as the changelog.
         - ``automated_by`` / ``automated_date``: Set once when a lesson is automated.
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
@@ -178,6 +181,7 @@ class LessonValidator:
             allowed_fields = {
                 "match",
                 "status",
+                "version",
                 "automated_by",
                 "automated_date",
                 "deprecated_by",
@@ -189,6 +193,11 @@ class LessonValidator:
             if extra_fields:
                 self.warnings.append(
                     f"Frontmatter should be minimal. Consider removing: {', '.join(extra_fields)}"
+                )
+
+            if "version" in frontmatter and not isinstance(frontmatter["version"], int):
+                self.warnings.append(
+                    f"version should be an integer (e.g. version: 2), got: {frontmatter['version']!r}"
                 )
 
         except (ValueError, yaml.YAMLError) as e:
