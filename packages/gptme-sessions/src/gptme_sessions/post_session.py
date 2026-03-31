@@ -269,6 +269,7 @@ def post_session(
         "model": model or "unknown",
         "run_type": run_type or "unknown",
         "outcome": outcome,
+        "exit_code": exit_code,
         "duration_seconds": duration_seconds,
         "deliverables": deliverables,
     }

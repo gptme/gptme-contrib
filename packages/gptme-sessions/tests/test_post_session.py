@@ -128,6 +128,37 @@ def test_post_session_duration_fallback_from_signals(tmp_path: Path):
     assert result.record.duration_seconds == 300
 
 
+def test_post_session_exit_code_persisted(tmp_path: Path):
+    """exit_code is stored in the SessionRecord when passed to post_session."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        exit_code=124,
+        duration_seconds=3000,
+    )
+    assert result.record.exit_code == 124
+
+    # Verify it persists through store reload
+    store2 = SessionStore(sessions_dir=tmp_path)
+    records = store2.load_all()
+    assert len(records) == 1
+    assert records[0].exit_code == 124
+
+
+def test_post_session_exit_code_defaults_zero(tmp_path: Path):
+    """exit_code defaults to 0 when not specified."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="opus",
+        duration_seconds=60,
+    )
+    assert result.record.exit_code == 0
+
+
 def test_post_session_model_fallback_from_signals(tmp_path: Path):
     """model falls back to usage.model from trajectory signals when 'unknown'."""
     store = SessionStore(sessions_dir=tmp_path)

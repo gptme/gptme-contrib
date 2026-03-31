@@ -157,6 +157,7 @@ class SessionRecord:
 
     # Outcome
     outcome: str = "unknown"  # productive, noop, failed
+    exit_code: int | None = None  # process exit code (124 = timeout)
     duration_seconds: int = 0
     token_count: int | None = None
 
