@@ -10,6 +10,11 @@ if [ -z "$current_branch" ]; then
     exit 0  # Not in a git repo
 fi
 
+# Skip check on detached HEAD (common in submodules, rebases, branch deletions)
+if [ "$current_branch" = "HEAD" ]; then
+    exit 0
+fi
+
 # Skip check on master/main branches (usually tracked correctly)
 if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
     exit 0

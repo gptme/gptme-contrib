@@ -275,6 +275,30 @@ class TestWorktreeValidation:
         # The key is that it receives the stdin and processes it
         assert result.returncode == 0
 
+    def test_detached_head_skips_validation(self, hook_env):
+        """Detached HEAD (submodules, rebases) should skip worktree validation."""
+        clean_env = _clean_git_env()
+
+        # Detach HEAD by checking out a specific commit
+        subprocess.run(
+            ["git", "checkout", "--detach", "HEAD"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+
+        # Push from detached HEAD should succeed (validation skipped)
+        result = run_pre_push_hook(
+            hook_env,
+            remote_url="https://github.com/test/repo",
+            ref_info=(
+                "(delete) 0000000000000000000000000000000000000000"
+                " refs/heads/old-branch abc123"
+            ),
+        )
+        assert result.returncode == 0, f"Hook failed on detached HEAD: {result.stderr}"
+
 
 def test_hooks_exist():
     """Verify that required hook files exist."""
