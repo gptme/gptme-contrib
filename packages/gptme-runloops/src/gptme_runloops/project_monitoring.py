@@ -82,6 +82,39 @@ class ProjectMonitoringRun(BaseRunLoop):
         # Cache discovered work between has_work() and generate_prompt()
         self._discovered_work: list[WorkItem] = []
 
+    # Per-item timeout in seconds, mirroring project-monitoring.sh tiers.
+    # Assigned issues need the most time (research + PR + response).
+    # PR updates and CI failures need a mid-tier (fix + re-review cycle).
+    # Simple notifications need the least.
+    _ITEM_TIMEOUTS: dict[str, int] = {
+        "assigned_issue": 1500,  # ~25 min: deep research + PR work + response
+        "pr_update": 1200,  # ~20 min: fix + re-review cycle
+        "ci_failure": 1200,  # ~20 min: investigate + fix
+        "notification": 600,  # ~10 min: simple processing
+    }
+    _DEFAULT_ITEM_TIMEOUT = 900  # ~15 min for unknown types
+    _MAX_TIMEOUT = 3600  # 60 min cap regardless of item count
+
+    def _compute_timeout(self, items: list["WorkItem"]) -> int:
+        """Compute session timeout by summing per-item budgets, capped at _MAX_TIMEOUT.
+
+        Mirrors the complexity-based timeout tiers in project-monitoring.sh:
+          - assigned_issue → 1500s (research + PR work)
+          - pr_update / ci_failure → 1200s (fix + re-review)
+          - notification → 600s (simple)
+
+        Args:
+            items: Discovered work items.
+
+        Returns:
+            Total timeout in seconds, capped at _MAX_TIMEOUT.
+        """
+        total = sum(
+            self._ITEM_TIMEOUTS.get(item.item_type, self._DEFAULT_ITEM_TIMEOUT)
+            for item in items
+        )
+        return min(total, self._MAX_TIMEOUT)
+
     def has_work(self) -> bool:
         """Check if there is work to do BEFORE acquiring lock.
 
@@ -100,6 +133,12 @@ class ProjectMonitoringRun(BaseRunLoop):
         if not self._discovered_work:
             self.logger.info("No project monitoring work found")
             return False
+
+        # Adjust session timeout based on item complexity
+        self.timeout = self._compute_timeout(self._discovered_work)
+        self.logger.info(
+            f"Computed timeout: {self.timeout}s for {len(self._discovered_work)} items"
+        )
 
         # Set work description for calendar
         work_summary = ", ".join(
@@ -964,7 +1003,7 @@ class ProjectMonitoringRun(BaseRunLoop):
 
 **Current Time**: {datetime.now().strftime("%Y-%m-%d %H:%M UTC")}
 **Context Budget**: 200k tokens (use ~160k for work, save ~40k margin)
-**Time Limit**: {self.timeout}s (30 minutes) - wrap up by minute 25
+**Time Limit**: {self.timeout}s ({self.timeout // 60} minutes) - wrap up by minute {max(self.timeout // 60 - 5, 5)}
 
 **Work Found**:
 {work_description}
