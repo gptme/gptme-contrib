@@ -150,6 +150,9 @@ class LessonValidator:
 
         Frontmatter philosophy — only stable, write-once metadata belongs here:
         - ``match`` / ``status``: Core lesson routing and lifecycle fields.
+        - ``version``: Integer revision counter, incremented on meaningful rewrites.
+          Lets you correlate bandit/LOO data with a specific lesson iteration.
+          Companion doc (``knowledge/lessons/``) serves as the changelog.
         - ``automated_by`` / ``automated_date``: Set once when a lesson is automated.
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
@@ -178,6 +181,7 @@ class LessonValidator:
             allowed_fields = {
                 "match",
                 "status",
+                "version",
                 "automated_by",
                 "automated_date",
                 "deprecated_by",
