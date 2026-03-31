@@ -19,7 +19,7 @@ When doing periodic workspace maintenance, update the gptme-contrib submodule an
 Applies when maintaining an existing agent workspace — running routine upkeep, noticing the submodule is behind, or verifying symlinks after a pull/merge. Does NOT apply to initial workspace creation (see `agent-workspace-setup-maintenance.md`).
 
 ## Detection
-- gptme-contrib submodule is stale (`git submodule status` shows `-` or commit behind)
+- gptme-contrib submodule is stale (`git submodule status` shows `+` or commit behind)
 - Symlinks to gptme-contrib are broken or missing
 - About to do periodic maintenance on an agent workspace
 - Hooks or shared scripts are not behaving as expected
@@ -31,7 +31,7 @@ Applies when maintaining an existing agent workspace — running routine upkeep,
 git submodule update --remote gptme-contrib
 
 # 2. Review what changed
-cd gptme-contrib && git log --oneline -10 && cd ..
+git -C gptme-contrib log --oneline -10
 
 # 3. Commit the update
 git add gptme-contrib
