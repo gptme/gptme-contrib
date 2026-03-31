@@ -78,3 +78,14 @@ def test_version_field_allowed():
         assert (
             len(version_warnings) == 0
         ), "version field should be allowed without warnings"
+
+
+def test_version_field_must_be_int():
+    """version field should warn if not an integer."""
+    content = _MINIMAL_LESSON.format(extra='version: "1.0"')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        version_warnings = [w for w in validator.warnings if "version" in w]
+        assert len(version_warnings) > 0, "non-integer version should produce a warning"

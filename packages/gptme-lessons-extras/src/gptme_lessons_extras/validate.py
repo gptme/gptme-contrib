@@ -195,6 +195,11 @@ class LessonValidator:
                     f"Frontmatter should be minimal. Consider removing: {', '.join(extra_fields)}"
                 )
 
+            if "version" in frontmatter and not isinstance(frontmatter["version"], int):
+                self.warnings.append(
+                    f"version should be an integer (e.g. version: 2), got: {frontmatter['version']!r}"
+                )
+
         except (ValueError, yaml.YAMLError) as e:
             self.errors.append(f"Invalid YAML frontmatter: {e}")
 
