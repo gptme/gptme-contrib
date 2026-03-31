@@ -61,7 +61,11 @@ DIAGNOSIS_STUCK_ITERS="${DIAGNOSIS_STUCK_ITERS:-5}"
 GITHUB_REPO="${GITHUB_REPO:-gptme/gptme}"
 WORKTREE_DIR=""
 REPO_ROOT="$(git -C "$(dirname "$0")/../.." rev-parse --show-toplevel)"
-LOG_DIR="${REPO_ROOT}/state/autoresearch"
+# LOG_DIR: overridable via env so callers (e.g. autoresearch-loop.sh) can point to the
+# correct state directory — important when this script lives in a git submodule where
+# REPO_ROOT resolves to the submodule root instead of the caller's workspace.
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/state/autoresearch}"
+mkdir -p "${LOG_DIR}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # PROGRAM_SPEC: path to the agent's instruction file. Relative paths resolved from SCRIPT_DIR.
 # Override via env var or experiment config's program_spec field.
@@ -940,7 +944,7 @@ print(json.dumps({
 }))"
     )"
     echo "${_iter_record}" >> "${SESSION_LOG}"
-    echo "${_iter_record}" >> "${ATTEMPT_HISTORY_FILE}" 2>/dev/null || true
+    echo "${_iter_record}" >> "${ATTEMPT_HISTORY_FILE}"
 done
 
 echo ""
