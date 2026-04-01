@@ -710,6 +710,16 @@ CURRENT_CSV="$(cat "${CURRENT_CSV_REF}")"
 git clean -fd
 echo "Baseline pass rate: ${BASELINE_SCORE} (${CURRENT_EVAL_MODEL})"
 
+# Saturation detection: if baseline is already at/above threshold, no improvement is possible.
+# Exit code 42 signals "saturated" to the outer loop.
+SATURATION_THRESHOLD="${SATURATION_THRESHOLD:-1.0}"
+if awk "BEGIN { exit (${BASELINE_SCORE} >= ${SATURATION_THRESHOLD}) ? 0 : 1 }"; then
+    echo "SATURATED: Baseline score ${BASELINE_SCORE} >= threshold ${SATURATION_THRESHOLD}"
+    echo "No improvement possible — exiting with code 42."
+    cleanup_worktree
+    exit 42
+fi
+
 BEST_SCORE="${BASELINE_SCORE}"
 IMPROVED=0
 REJECTED=0

@@ -67,6 +67,8 @@ PROGRAM_SPEC="$(get_config program_spec "")"   # Optional: path to agent program
 PUBLISH_THRESHOLD="$(get_config publish_threshold 0.05)"  # Min score delta to auto-create PR
 DIAGNOSIS_STUCK_ITERS="$(get_config diagnosis_after_stuck_iters 5)"  # Self-diagnose after N consecutive rejections
 USE_WORKTREE="$(get_config use_worktree "1")"  # Set false for artifacts with broken symlinks in worktrees
+SATURATION_THRESHOLD="$(get_config saturation_threshold 1.0)"  # Auto-disable when baseline >= this
+SATURATION_MAX_CONSECUTIVE="$(get_config saturation_max_consecutive 2)"  # Consecutive saturated runs before auto-disable
 
 if [[ "${ENABLED}" == "false" ]]; then
     echo "Experiment ${EXPERIMENT} is disabled — exiting."
@@ -309,6 +311,15 @@ else
 fi
 echo ""
 
+# Saturation tracking: consecutive runs where baseline is already at ceiling
+# Persisted to disk so service restarts don't reset the counter.
+SATURATION_STATE_FILE="${STATE_DIR}/${EXPERIMENT}-consecutive-saturated.txt"
+if [[ -f "${SATURATION_STATE_FILE}" ]]; then
+    CONSECUTIVE_SATURATED="$(cat "${SATURATION_STATE_FILE}")"
+else
+    CONSECUTIVE_SATURATED=0
+fi
+
 # Main ralph-style loop: run continuously while budget available, sleep when exhausted.
 # If total_budget is configured and reached, EXIT (experiment complete).
 while true; do
@@ -375,12 +386,38 @@ while true; do
     PUBLISH_THRESHOLD="${PUBLISH_THRESHOLD}" \
     DIAGNOSIS_STUCK_ITERS="${DIAGNOSIS_STUCK_ITERS}" \
     USE_WORKTREE="${USE_WORKTREE}" \
+    SATURATION_THRESHOLD="${SATURATION_THRESHOLD}" \
         "${SCRIPT_DIR}/merge-reject-loop.sh"
     exit_code=$?
     set -e
 
-    if [[ ${exit_code} -ne 0 ]]; then
+    if [[ ${exit_code} -eq 42 ]]; then
+        # Saturated: baseline score already at ceiling
+        CONSECUTIVE_SATURATED=$(( CONSECUTIVE_SATURATED + 1 ))
+        echo "${CONSECUTIVE_SATURATED}" > "${SATURATION_STATE_FILE}"
+        echo "Saturation detected (${CONSECUTIVE_SATURATED}/${SATURATION_MAX_CONSECUTIVE} consecutive)."
+        if [[ "${CONSECUTIVE_SATURATED}" -ge "${SATURATION_MAX_CONSECUTIVE}" ]]; then
+            echo "EXPERIMENT SATURATED: ${EXPERIMENT} hit baseline ceiling ${SATURATION_MAX_CONSECUTIVE} consecutive times."
+            echo "Auto-disabling experiment config: ${CONFIG_FILE}"
+            # Robustly disable: replace existing enabled line or append if absent
+            if grep -q '^enabled:' "${CONFIG_FILE}"; then
+                sed -i 's/^enabled:.*/enabled: false  # auto-disabled: saturated (baseline at ceiling)/' "${CONFIG_FILE}"
+            else
+                printf '\nenabled: false  # auto-disabled: saturated (baseline at ceiling)\n' >> "${CONFIG_FILE}"
+            fi
+            echo "Experiment ${EXPERIMENT} auto-disabled. Create a harder benchmark or adjust saturation_threshold."
+            exit 0
+        fi
+        echo "Sleeping until next period (score may vary with different eval models)..."
+        sleep_until_next_period
+        continue
+    elif [[ ${exit_code} -ne 0 ]]; then
+        CONSECUTIVE_SATURATED=0
+        echo "0" > "${SATURATION_STATE_FILE}"
         echo "merge-reject-loop.sh exited with code ${exit_code} — waiting 5 minutes before retry"
         sleep 300
+    else
+        CONSECUTIVE_SATURATED=0
+        echo "0" > "${SATURATION_STATE_FILE}"
     fi
 done
