@@ -3,8 +3,9 @@
 Full reference for `lessons/workflow/agent-workspace-setup-maintenance.md`.
 
 Covers workspace creation, symlink structure, regular maintenance, and troubleshooting.
-The primary lesson only triggers on new-workspace-creation keywords; details here are for
-reference when doing deeper maintenance work.
+The primary setup lesson only triggers on new-workspace-creation keywords. Routine
+maintenance is handled by `lessons/workflow/agent-workspace-maintenance.md`; details
+here are for reference when doing deeper maintenance work.
 
 ## Initial Setup
 
@@ -20,10 +21,10 @@ This handles the clone + fork.sh customization automatically.
 ### Option B: Manual clone + fork.sh
 
 ```bash
-git clone https://github.com/gptme/gptme-agent-template your-agent-name
-cd your-agent-name
+git clone https://github.com/gptme/gptme-agent-template my-agent-name
+cd my-agent-name
 git submodule update --init --recursive
-./fork.sh /path/to/new/agent agent-name
+./fork.sh /path/to/my-agent-name MyAgent
 ```
 
 ### Configure Identity
@@ -37,7 +38,7 @@ Update these files for your agent:
 
 ```bash
 ./install-deps.sh --install  # Install all dependencies
-cd dotfiles && ./install.sh  # Install git hooks
+cd dotfiles && ./install.sh && cd ..  # Install git hooks
 ```
 
 ## Core Infrastructure Symlinks
@@ -87,9 +88,9 @@ git config --global --get core.hooksPath
 
 ```bash
 git submodule update --remote gptme-contrib
-cd gptme-contrib && git log --oneline -10 && cd ..
+git -C gptme-contrib log --oneline -10
 git add gptme-contrib
-git commit -m "chore: update gptme-contrib submodule"
+git diff --cached --quiet || git commit -m "chore: update gptme-contrib submodule"
 ```
 
 ### Check for New Infrastructure
@@ -136,7 +137,7 @@ ln -sf ../gptme-contrib/dotfiles/install.sh dotfiles/install.sh
 
 ### Git Hooks Not Running
 ```bash
-cd dotfiles && ./install.sh
+cd dotfiles && ./install.sh && cd ..
 git config --global core.hooksPath  # Should return ~/.config/git/hooks
 ```
 
@@ -157,6 +158,7 @@ find ~/bob-ref -type l -ls | grep gptme-contrib
 ## Related
 
 - Primary lesson: `lessons/workflow/agent-workspace-setup-maintenance.md`
+- Maintenance lesson: `lessons/workflow/agent-workspace-maintenance.md`
 - gptme-agent-template: https://github.com/gptme/gptme-agent-template
 - Agent Setup Guide: https://gptme.org/docs/agents.html
 - Git workflow: `lessons/workflow/git-workflow.md`
