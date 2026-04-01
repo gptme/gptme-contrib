@@ -713,7 +713,7 @@ echo "Baseline pass rate: ${BASELINE_SCORE} (${CURRENT_EVAL_MODEL})"
 # Saturation detection: if baseline is already at/above threshold, no improvement is possible.
 # Exit code 42 signals "saturated" to the outer loop.
 SATURATION_THRESHOLD="${SATURATION_THRESHOLD:-1.0}"
-if python3 -c "import sys; sys.exit(0 if float('${BASELINE_SCORE}') >= float('${SATURATION_THRESHOLD}') else 1)"; then
+if awk "BEGIN { exit (${BASELINE_SCORE} >= ${SATURATION_THRESHOLD}) ? 0 : 1 }"; then
     echo "SATURATED: Baseline score ${BASELINE_SCORE} >= threshold ${SATURATION_THRESHOLD}"
     echo "No improvement possible — exiting with code 42."
     cleanup_worktree
