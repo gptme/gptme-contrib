@@ -312,7 +312,13 @@ fi
 echo ""
 
 # Saturation tracking: consecutive runs where baseline is already at ceiling
-CONSECUTIVE_SATURATED=0
+# Persisted to disk so service restarts don't reset the counter.
+SATURATION_STATE_FILE="${STATE_DIR}/${EXPERIMENT}-consecutive-saturated.txt"
+if [[ -f "${SATURATION_STATE_FILE}" ]]; then
+    CONSECUTIVE_SATURATED="$(cat "${SATURATION_STATE_FILE}")"
+else
+    CONSECUTIVE_SATURATED=0
+fi
 
 # Main ralph-style loop: run continuously while budget available, sleep when exhausted.
 # If total_budget is configured and reached, EXIT (experiment complete).
@@ -387,13 +393,18 @@ while true; do
 
     if [[ ${exit_code} -eq 42 ]]; then
         # Saturated: baseline score already at ceiling
-        CONSECUTIVE_SATURATED=$(( ${CONSECUTIVE_SATURATED:-0} + 1 ))
+        CONSECUTIVE_SATURATED=$(( CONSECUTIVE_SATURATED + 1 ))
+        echo "${CONSECUTIVE_SATURATED}" > "${SATURATION_STATE_FILE}"
         echo "Saturation detected (${CONSECUTIVE_SATURATED}/${SATURATION_MAX_CONSECUTIVE} consecutive)."
         if [[ "${CONSECUTIVE_SATURATED}" -ge "${SATURATION_MAX_CONSECUTIVE}" ]]; then
             echo "EXPERIMENT SATURATED: ${EXPERIMENT} hit baseline ceiling ${SATURATION_MAX_CONSECUTIVE} consecutive times."
             echo "Auto-disabling experiment config: ${CONFIG_FILE}"
-            # Set enabled: false in experiment config
-            sed -i 's/^enabled: true/enabled: false  # auto-disabled: saturated (baseline at ceiling)/' "${CONFIG_FILE}"
+            # Robustly disable: replace existing enabled line or append if absent
+            if grep -q '^enabled:' "${CONFIG_FILE}"; then
+                sed -i 's/^enabled:.*/enabled: false  # auto-disabled: saturated (baseline at ceiling)/' "${CONFIG_FILE}"
+            else
+                printf '\nenabled: false  # auto-disabled: saturated (baseline at ceiling)\n' >> "${CONFIG_FILE}"
+            fi
             echo "Experiment ${EXPERIMENT} auto-disabled. Create a harder benchmark or adjust saturation_threshold."
             exit 0
         fi
@@ -402,9 +413,11 @@ while true; do
         continue
     elif [[ ${exit_code} -ne 0 ]]; then
         CONSECUTIVE_SATURATED=0
+        echo "0" > "${SATURATION_STATE_FILE}"
         echo "merge-reject-loop.sh exited with code ${exit_code} — waiting 5 minutes before retry"
         sleep 300
     else
         CONSECUTIVE_SATURATED=0
+        echo "0" > "${SATURATION_STATE_FILE}"
     fi
 done
