@@ -3,12 +3,10 @@ status: active
 tags: [inter-agent, correction, orchestration, epistemic-integrity, communication]
 match:
   keywords:
-    - correction
-    - retract
-    - wrong advice
-    - incorrect recommendation
-    - agent message
-    - proactive correction
+    - "retract incorrect recommendation"
+    - "sent wrong advice to agent"
+    - "need to correct prior message"
+    - "earlier message was wrong"
 ---
 
 # Proactive Correction in Agent Messages

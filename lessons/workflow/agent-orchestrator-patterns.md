@@ -2,15 +2,12 @@
 status: active
 match:
   keywords:
-    - orchestrator
-    - agent health
-    - standup
-    - inference utilization
-    - monitor agents
-    - agent team
-    - peripheral agent
-    - chief of staff
-    - agent coordination
+    - "orchestrating multiple agents"
+    - "agent team health check"
+    - "daily agent standup"
+    - "inference utilization across agents"
+    - "monitor agent work queue"
+    - "coordinate parallel agent sessions"
 ---
 
 # Agent Orchestrator Patterns

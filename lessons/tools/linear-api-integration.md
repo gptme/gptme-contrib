@@ -1,11 +1,11 @@
 ---
 match:
   keywords:
-    - "Linear"
-    - "linear api"
-    - "linear graphql"
-    - "linear-activity"
-    - "LINEAR_API_KEY"
+    - "query Linear issues"
+    - "linear-activity.py"
+    - "LINEAR_API_KEY not set"
+    - "Linear GraphQL mutation"
+    - "create Linear ticket"
 category: tools
 status: active
 ---

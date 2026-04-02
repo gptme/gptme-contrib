@@ -3,11 +3,9 @@ match:
   keywords:
   - agentic context engineering
   - ACE context
-  - ACE framework
   - living playbooks
-  - context engineering LLM
-  - LLM context evolution
-  - dynamic context management
+  - context window optimization strategy
+  - dynamically curate LLM context
 status: active
 ---
 

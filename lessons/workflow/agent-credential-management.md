@@ -1,16 +1,11 @@
 ---
 match:
   keywords:
-    - "need credentials for"
-    - "store password securely"
     - "manage API keys"
-    - "credential storage"
-    - "secrets management"
-    - "secure credential"
     - "OAuth blocked at password"
-    - "need to authenticate"
-    - "store API key securely"
-    - "secret management for agent"
+    - "API key for agent workspace"
+    - "store credentials in .env"
+    - "secret rotation for agent"
 status: active
 ---
 

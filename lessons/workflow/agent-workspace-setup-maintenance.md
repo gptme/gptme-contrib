@@ -2,9 +2,8 @@
 match:
   keywords:
     - "setting up new agent workspace"
-    - "fork from gptme-agent-template"
-    - "create new gptme agent"
-    - "agent workspace initial setup"
+    - "initialize gptme agent from template"
+    - "new agent from gptme-agent-template"
 status: active
 ---
 
