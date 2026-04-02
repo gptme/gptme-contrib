@@ -1383,7 +1383,10 @@ def scan_kpi_data(workspace: Path, days: int = 30) -> dict:
 
             today = date.today()
             cutoff_7d = today - timedelta(days=7)
-            cutoff_30d = today - timedelta(days=days)
+            # Fixed 30-day window for "30d" KPIs — independent of the `days` parameter
+            cutoff_30d = today - timedelta(days=30)
+            # Variable cutoff: controls the quality_trend / sparkline window
+            cutoff_days = today - timedelta(days=days)
 
             def _record_date(r: SessionRecord) -> date | None:
                 try:
@@ -1419,8 +1422,9 @@ def scan_kpi_data(workspace: Path, days: int = 30) -> dict:
                     cat = (rec.category or "").lower()
                     if any(k in cat for k in ("research", "strategy", "planning", "triage")):
                         strategic_count_30d += 1
-                    if rec_date >= cutoff_7d and g is not None:
-                        scores_7d.append(g)
+                # 7-day window is independent of the outer cutoff_30d guard
+                if rec_date >= cutoff_7d and g is not None:
+                    scores_7d.append(g)
 
             if scores_7d:
                 kpi["quality_score_7d"] = round(sum(scores_7d) / len(scores_7d), 3)
@@ -1429,11 +1433,11 @@ def scan_kpi_data(workspace: Path, days: int = 30) -> dict:
             if total_count_30d > 0:
                 kpi["strategic_fraction_30d"] = round(strategic_count_30d / total_count_30d, 3)
 
-            # Build daily quality trend (average grade per day)
+            # Build daily quality trend (average grade per day) over `days` window
             daily_grades: dict[str, list[float]] = {}
             for rec in records:
                 rec_date = _record_date(rec)
-                if rec_date is None or rec_date < cutoff_30d:
+                if rec_date is None or rec_date < cutoff_days:
                     continue
                 g = _grade(rec)
                 if g is None:
