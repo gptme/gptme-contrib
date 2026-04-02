@@ -154,11 +154,23 @@ echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
 # Capture originally staged files BEFORE any formatter runs.
 # In multi-session environments, another session could 'git add' files between
 # now and when we check later — capturing here ensures we only re-stage our own files.
-ORIGINALLY_STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+# Use 'while read' instead of 'mapfile' for Bash 3.2 compatibility (macOS default shell).
+ORIGINALLY_STAGED_FILES=()
+while IFS= read -r f; do
+    ORIGINALLY_STAGED_FILES+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+run_precommit() {
+    if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then
+        "$PRECOMMIT_CMD" run
+    else
+        "$PRECOMMIT_CMD" run --files "${ORIGINALLY_STAGED_FILES[@]}"
+    fi
+}
 
 # Run pre-commit checks on staged files only
 set +e
-PRECOMMIT_OUTPUT=$("$PRECOMMIT_CMD" run 2>&1)
+PRECOMMIT_OUTPUT=$(run_precommit 2>&1)
 PRECOMMIT_EXIT=$?
 set -e
 
@@ -182,15 +194,18 @@ else
     # other sessions' changes and causes wrong-file commits.
     # Use 'while read' instead of 'for f in $FILES' to handle filenames with spaces.
     while IFS= read -r f; do
-        if echo "$ORIGINALLY_STAGED" | grep -qxF "$f"; then
-            git add "$f"
-        fi
+        for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
+            if [ "$f" = "$staged_file" ]; then
+                git add "$f"
+                break
+            fi
+        done
     done < <(git diff --name-only --diff-filter=M)
 
     echo -e "${GREEN}Auto-staged formatter fixes. Re-running pre-commit...${NC}"
 
     set +e
-    PRECOMMIT_OUTPUT=$("$PRECOMMIT_CMD" run 2>&1)
+    PRECOMMIT_OUTPUT=$(run_precommit 2>&1)
     PRECOMMIT_EXIT=$?
     set -e
 
