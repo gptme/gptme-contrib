@@ -141,7 +141,14 @@ def load_lesson_dirs(workspace: Path) -> list[Path]:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
-            # Fallback: parse dirs manually from TOML
+            # tomllib/tomli unavailable — warn and fall back to default lessons dir.
+            # Configured dirs in gptme.toml [lessons] dirs are silently ignored.
+            # Fix: install tomli (Python < 3.11) or upgrade to Python 3.11+.
+            print(
+                "Warning: tomllib/tomli not available; gptme.toml [lessons] dirs ignored,"
+                " using default './lessons' only.",
+                file=sys.stderr,
+            )
             return [workspace / "lessons"]
 
     with open(toml_path, "rb") as f:
@@ -541,14 +548,17 @@ def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> lis
         if score > 0:
             results.append({**lesson, "score": score, "matched_by": matched_by})
 
-    # Apply Thompson sampling re-ranking if state exists
+    # Apply Thompson sampling re-ranking (always apply neutral prior for consistency).
+    # If ts_means is empty (no bandit state yet) every lesson gets +0.5, keeping
+    # relative order.  Once partial data exists the guard would produce non-monotonic
+    # ranking — lessons without data would lose the +0.5 boost while lessons with data
+    # gain it, making early bandit accumulation perturb rankings unpredictably.
     if results:
         ts_means = load_ts_means([r["path"] for r in results])
-        if ts_means:
-            for r in results:
-                ts_mean = ts_means.get(r["path"], 0.5)  # 0.5 = neutral prior
-                r["score"] += TS_WEIGHT * ts_mean
-                r["ts_score"] = ts_mean
+        for r in results:
+            ts_mean = ts_means.get(r["path"], 0.5)  # 0.5 = neutral prior
+            r["score"] += TS_WEIGHT * ts_mean
+            r["ts_score"] = ts_mean
 
     results.sort(key=lambda x: -x["score"])
     return results[:max_results]
@@ -579,9 +589,12 @@ def load_session_state(session_id: str) -> dict:
 
 
 def save_session_state(session_id: str, state: dict) -> None:
-    """Save session state."""
+    """Save session state atomically (write-then-rename for POSIX safety)."""
     try:
-        _state_file(session_id).write_text(json.dumps(state))
+        sf = _state_file(session_id)
+        tmp = sf.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(sf)  # atomic on POSIX; avoids partial reads under concurrent hooks
     except Exception:
         pass
 

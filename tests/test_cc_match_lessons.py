@@ -236,3 +236,42 @@ def test_extract_frontmatter_archived_excluded(hook, lesson_dir):
     lessons = hook.scan_lessons([lesson_dir])
     titles = [lesson["title"] for lesson in lessons]
     assert "Archived Lesson" not in titles
+
+
+# --- build_pretool_match_text ---
+
+
+def test_build_pretool_match_text_file_path(hook):
+    """file_path field is extracted for Read/Write tools."""
+    text = hook.build_pretool_match_text("Read", {"file_path": "/path/to/file.py"})
+    assert "/path/to/file.py" in text
+
+
+def test_build_pretool_match_text_command(hook):
+    """command field is extracted for Bash tool."""
+    text = hook.build_pretool_match_text(
+        "Bash", {"command": "git rebase origin/master"}
+    )
+    assert "git rebase origin/master" in text
+
+
+def test_build_pretool_match_text_multiple_fields(hook):
+    """Multiple known fields are all included in output."""
+    text = hook.build_pretool_match_text(
+        "Grep",
+        {"pattern": "merge conflict", "file_path": "src/foo.py"},
+    )
+    assert "merge conflict" in text
+    assert "src/foo.py" in text
+
+
+def test_build_pretool_match_text_unknown_fields_ignored(hook):
+    """Fields not in the known list are ignored."""
+    text = hook.build_pretool_match_text("Bash", {"unknown_key": "should not appear"})
+    assert "should not appear" not in text
+
+
+def test_build_pretool_match_text_empty_input(hook):
+    """Empty tool input returns empty string."""
+    text = hook.build_pretool_match_text("Bash", {})
+    assert text == ""
