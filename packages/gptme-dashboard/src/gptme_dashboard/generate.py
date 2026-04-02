@@ -1277,6 +1277,253 @@ def generate_atom_feed(data: dict, base_url: str, workspace_name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def generate_sparkline_svg(
+    values: list[float],
+    width: int = 120,
+    height: int = 32,
+    color: str = "#58a6ff",
+    fill: bool = True,
+) -> str:
+    """Generate an inline SVG sparkline from a list of float values (0.0–1.0).
+
+    Returns an empty string when *values* has fewer than 2 points.
+    The SVG uses a viewBox so it scales to any CSS size.
+    """
+    if len(values) < 2:
+        return ""
+
+    n = len(values)
+    min_v = min(values)
+    max_v = max(values)
+    span = max_v - min_v or 1.0  # avoid div-by-zero when all values equal
+
+    pad = 2  # pixel padding top/bottom
+    usable_h = height - 2 * pad
+
+    def _xy(i: int, v: float) -> tuple[float, float]:
+        x = i / (n - 1) * width
+        y = pad + (1.0 - (v - min_v) / span) * usable_h
+        return x, y
+
+    points = [_xy(i, v) for i, v in enumerate(values)]
+    polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'width="{width}" height="{height}" aria-hidden="true">',
+    ]
+
+    if fill:
+        # Closed polygon: polyline + baseline corners
+        last_x, _ = points[-1]
+        first_x, _ = points[0]
+        fill_points = (
+            polyline + f" {last_x:.1f},{height - pad:.1f} {first_x:.1f},{height - pad:.1f}"
+        )
+        svg_parts.append(
+            f'<polygon points="{fill_points}" '
+            f'fill="{color}" fill-opacity="0.15" stroke="none"/>'
+        )
+
+    svg_parts.append(
+        f'<polyline points="{polyline}" fill="none" stroke="{color}" '
+        f'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>'
+    )
+    svg_parts.append("</svg>")
+    return "".join(svg_parts)
+
+
+def scan_kpi_data(workspace: Path, days: int = 30) -> dict:
+    """Scan workspace state files to compute KPI metrics.
+
+    Reads from:
+    - ``state/sessions/session-records.jsonl`` – per-session quality scores
+    - ``state/lesson-thompson/loo-results.json`` – leave-one-out lesson deltas
+    - ``state/weekly-goals.yaml`` – goal completion status
+
+    Returns a dict with:
+    - ``quality_score_7d`` (float | None): rolling 7-day avg LLM-judge score
+    - ``quality_score_30d`` (float | None): rolling 30-day avg LLM-judge score
+    - ``strategic_fraction_30d`` (float | None): % strategic/research sessions
+    - ``goal_completion_rate`` (float | None): fraction of weekly goals done
+    - ``lesson_positive_fraction`` (float | None): fraction of lessons with
+      positive LOO delta
+    - ``quality_trend`` (list[dict]): [{date, score}] last *days* days (daily avg)
+    - ``quality_sparkline`` (str): inline SVG sparkline for quality_trend
+    - ``lesson_loo`` (list[dict]): [{name, delta}] top/bottom lessons by LOO
+    - ``pr_latency_p50`` (float | None): median PR open→merge hours (if available)
+    """
+    kpi: dict = {
+        "quality_score_7d": None,
+        "quality_score_30d": None,
+        "strategic_fraction_30d": None,
+        "goal_completion_rate": None,
+        "lesson_positive_fraction": None,
+        "quality_trend": [],
+        "quality_sparkline": "",
+        "lesson_loo": [],
+        "pr_latency_p50": None,
+    }
+
+    # --- Session records ---
+    records_path = workspace / "state" / "sessions" / "session-records.jsonl"
+    if records_path.exists():
+        try:
+            from gptme_sessions.record import SessionRecord  # type: ignore[import-untyped]
+
+            records: list[SessionRecord] = []
+            with open(records_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(SessionRecord.from_dict(json.loads(line)))
+                        except Exception:
+                            continue
+
+            today = date.today()
+            cutoff_7d = today - timedelta(days=7)
+            cutoff_30d = today - timedelta(days=days)
+
+            def _record_date(r: SessionRecord) -> date | None:
+                try:
+                    return date.fromisoformat(r.timestamp[:10])
+                except (ValueError, TypeError):
+                    return None
+
+            # Quality scores (LLM-judge or trajectory grade)
+            def _grade(r: SessionRecord) -> float | None:
+                score = r.llm_judge_score
+                if score is not None:
+                    return float(score)
+                grade = r.trajectory_grade
+                if grade is not None:
+                    return float(grade)
+                return None
+
+            scores_7d = []
+            scores_30d = []
+            strategic_count_30d = 0
+            total_count_30d = 0
+
+            for rec in records:
+                rec_date = _record_date(rec)
+                if rec_date is None:
+                    continue
+                g = _grade(rec)
+                if rec_date >= cutoff_30d:
+                    total_count_30d += 1
+                    if g is not None:
+                        scores_30d.append(g)
+                    # Strategic = research, planning, strategy categories
+                    cat = (rec.category or "").lower()
+                    if any(k in cat for k in ("research", "strategy", "planning", "triage")):
+                        strategic_count_30d += 1
+                    if rec_date >= cutoff_7d and g is not None:
+                        scores_7d.append(g)
+
+            if scores_7d:
+                kpi["quality_score_7d"] = round(sum(scores_7d) / len(scores_7d), 3)
+            if scores_30d:
+                kpi["quality_score_30d"] = round(sum(scores_30d) / len(scores_30d), 3)
+            if total_count_30d > 0:
+                kpi["strategic_fraction_30d"] = round(strategic_count_30d / total_count_30d, 3)
+
+            # Build daily quality trend (average grade per day)
+            daily_grades: dict[str, list[float]] = {}
+            for rec in records:
+                rec_date = _record_date(rec)
+                if rec_date is None or rec_date < cutoff_30d:
+                    continue
+                g = _grade(rec)
+                if g is None:
+                    continue
+                ds = rec_date.isoformat()
+                daily_grades.setdefault(ds, []).append(g)
+
+            trend = [
+                {"date": ds, "score": round(sum(gs) / len(gs), 3)}
+                for ds, gs in sorted(daily_grades.items())
+            ]
+            kpi["quality_trend"] = trend
+
+            if trend:
+                sparkline_values: list[float] = []
+                for t in trend:
+                    v = t.get("score")
+                    try:
+                        sparkline_values.append(float(v))  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        pass
+                kpi["quality_sparkline"] = generate_sparkline_svg(sparkline_values)
+
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("scan_kpi_data: error reading session records: %s", e)
+
+    # --- LOO results ---
+    loo_path = workspace / "state" / "lesson-thompson" / "loo-results.json"
+    if loo_path.exists():
+        try:
+            loo_data = json.loads(loo_path.read_text(encoding="utf-8"))
+            # Format: list of {lesson, delta} or dict {lesson: delta}
+            loo_items: list[dict] = []
+            if isinstance(loo_data, list):
+                for item in loo_data:
+                    if isinstance(item, dict) and "lesson" in item and "delta" in item:
+                        try:
+                            loo_items.append(
+                                {
+                                    "name": str(item["lesson"]),
+                                    "delta": float(item["delta"]),
+                                }
+                            )
+                        except (ValueError, TypeError):
+                            continue
+            elif isinstance(loo_data, dict):
+                for lesson_key, delta_val in loo_data.items():
+                    try:
+                        loo_items.append(
+                            {
+                                "name": str(lesson_key),
+                                "delta": float(delta_val),
+                            }
+                        )
+                    except (ValueError, TypeError):
+                        continue
+            loo_items.sort(key=lambda x: x["delta"], reverse=True)
+            kpi["lesson_loo"] = loo_items
+            if loo_items:
+                positive = sum(1 for x in loo_items if x["delta"] > 0)
+                kpi["lesson_positive_fraction"] = round(positive / len(loo_items), 3)
+        except Exception as e:
+            logger.warning("scan_kpi_data: error reading LOO results: %s", e)
+
+    # --- Weekly goals ---
+    goals_path = workspace / "state" / "weekly-goals.yaml"
+    if goals_path.exists():
+        try:
+            goals_data = yaml.safe_load(goals_path.read_text(encoding="utf-8"))
+            if isinstance(goals_data, dict):
+                goals = goals_data.get("goals", [])
+            elif isinstance(goals_data, list):
+                goals = goals_data
+            else:
+                goals = []
+            if goals:
+                done = sum(
+                    1
+                    for g in goals
+                    if isinstance(g, dict) and str(g.get("status", "")).lower() == "done"
+                )
+                kpi["goal_completion_rate"] = round(done / len(goals), 3)
+        except Exception as e:
+            logger.warning("scan_kpi_data: error reading weekly goals: %s", e)
+
+    return kpi
+
+
 def collect_workspace_data(
     workspace: Path,
     include_sessions: bool = False,
@@ -1421,6 +1668,9 @@ def collect_workspace_data(
     if include_sessions:
         sessions = scan_recent_sessions(workspace, days=sessions_days)
 
+    # Scan KPI data from state files
+    kpi = scan_kpi_data(workspace, days=sessions_days)
+
     # Compute task state counts for stats
     task_states: dict[str, int] = {}
     for task in tasks:
@@ -1462,6 +1712,7 @@ def collect_workspace_data(
         "core_files": config.get("prompt_files", []),
         "submodules": submodule_names,
         "sources": sources,
+        "kpi": kpi,
     }
 
 
