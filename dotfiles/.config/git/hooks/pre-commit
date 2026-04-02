@@ -154,7 +154,11 @@ echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
 # Capture originally staged files BEFORE any formatter runs.
 # In multi-session environments, another session could 'git add' files between
 # now and when we check later — capturing here ensures we only re-stage our own files.
-mapfile -t ORIGINALLY_STAGED_FILES < <(git diff --cached --name-only --diff-filter=ACM)
+# Use 'while read' instead of 'mapfile' for Bash 3.2 compatibility (macOS default shell).
+ORIGINALLY_STAGED_FILES=()
+while IFS= read -r f; do
+    ORIGINALLY_STAGED_FILES+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACM)
 
 run_precommit() {
     if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then
