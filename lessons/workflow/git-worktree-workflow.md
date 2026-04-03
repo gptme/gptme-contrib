@@ -207,5 +207,3 @@ Following this pattern results in:
 - [Git Workflow](./git-workflow.md) - Commit practices and branch verification (read together!)
 - [When to Rebase PRs](./when-to-rebase-prs.md) - Rebase workflow
 - [dotfiles/README.md](../../dotfiles/README.md) - Global git hooks setup (pre-commit, pre-push protection)
-
-> **Note**: `git-remote-branch-pushing.md` has been deprecated and consolidated into this lesson (see "Branch Tracking Issue and Fix" section above).
