@@ -370,6 +370,17 @@ class TestGetReviewThreads:
         )
         assert get_review_threads("owner/repo", 1) == []
 
+    @patch("gptme_runloops.utils.github.subprocess.run")
+    def test_graphql_errors_returns_empty(self, mock_run):
+        """GraphQL-level errors (data: null) return empty list, not AttributeError."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"errors": [{"message": "Could not resolve to a Repository"}], "data": null}',
+            stderr="",
+        )
+        assert get_review_threads("owner/repo", 1) == []
+
 
 class TestHasUnresolvedBotReviews:
     """Tests for has_unresolved_bot_reviews."""

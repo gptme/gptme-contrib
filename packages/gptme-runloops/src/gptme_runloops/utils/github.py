@@ -255,8 +255,10 @@ def get_review_threads(repo: str, pr_number: int) -> list[dict]:
 
         if result.returncode == 0 and result.stdout.strip():
             data = json.loads(result.stdout)
+            if "errors" in data:
+                return []
             threads = (
-                data.get("data", {})
+                (data.get("data") or {})
                 .get("repository", {})
                 .get("pullRequest", {})
                 .get("reviewThreads", {})
