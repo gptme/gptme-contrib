@@ -282,6 +282,14 @@ class TestCommentLoopDetector:
         expected_file = temp_state_dir / "example-repo-pr-42-loop.json"
         assert expected_file.exists()
 
+        # Verify content structure
+        state = json.loads(expected_file.read_text())
+        assert "comments" in state
+        assert len(state["comments"]) == 1
+        assert "hash" in state["comments"][0]
+        assert "type" in state["comments"][0]
+        assert "timestamp" in state["comments"][0]
+
 
 class TestGetReviewThreads:
     """Tests for get_review_threads (GraphQL-based)."""
@@ -346,7 +354,7 @@ class TestGetReviewThreads:
         assert "api" in cmd
         assert "graphql" in cmd
         # Must NOT use 'pr view --json' (broken for reviewThreads)
-        assert "pr" not in cmd or "view" not in cmd
+        assert "pr" not in cmd and "view" not in cmd
 
     @patch("gptme_runloops.utils.github.subprocess.run")
     def test_timeout_returns_empty(self, mock_run):
