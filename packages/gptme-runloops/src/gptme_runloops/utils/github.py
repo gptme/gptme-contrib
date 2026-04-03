@@ -203,26 +203,50 @@ class CommentLoopDetector:
 def get_review_threads(repo: str, pr_number: int) -> list[dict]:
     """Get review threads from a PR.
 
+    Uses GraphQL API because reviewThreads is not available via
+    ``gh pr view --json`` (REST-only fields).
+
     Args:
         repo: Repository name (owner/repo)
         pr_number: PR number
 
     Returns:
-        List of review thread dicts
+        List of review thread dicts with keys: isResolved, comments
+    """
+    owner, name = repo.split("/", 1)
+    query = """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 50) {
+            nodes {
+              isResolved
+              comments(first: 5) {
+                nodes {
+                  body
+                  author { login }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     """
     try:
         result = subprocess.run(
             [
                 "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--repo",
-                repo,
-                "--json",
-                "reviewThreads",
-                "--jq",
-                ".reviewThreads",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={pr_number}",
             ],
             capture_output=True,
             text=True,
@@ -230,7 +254,15 @@ def get_review_threads(repo: str, pr_number: int) -> list[dict]:
         )
 
         if result.returncode == 0 and result.stdout.strip():
-            return list(json.loads(result.stdout))
+            data = json.loads(result.stdout)
+            threads = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("pullRequest", {})
+                .get("reviewThreads", {})
+                .get("nodes", [])
+            )
+            return list(threads)
     except Exception:
         pass
 

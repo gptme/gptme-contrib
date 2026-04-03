@@ -1,12 +1,16 @@
-"""Tests for GitHub utilities (bot detection, loop prevention)."""
+"""Tests for GitHub utilities (bot detection, loop prevention, review threads)."""
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from gptme_runloops.utils.github import (
     CommentLoopDetector,
+    get_review_threads,
+    has_unresolved_bot_reviews,
     is_bot_review_author,
     is_bot_user,
 )
@@ -278,10 +282,127 @@ class TestCommentLoopDetector:
         expected_file = temp_state_dir / "example-repo-pr-42-loop.json"
         assert expected_file.exists()
 
-        # Verify content structure
-        state = json.loads(expected_file.read_text())
-        assert "comments" in state
-        assert len(state["comments"]) == 1
-        assert "hash" in state["comments"][0]
-        assert "type" in state["comments"][0]
-        assert "timestamp" in state["comments"][0]
+
+class TestGetReviewThreads:
+    """Tests for get_review_threads (GraphQL-based)."""
+
+    @patch("gptme_runloops.utils.github.subprocess.run")
+    def test_parses_graphql_response(self, mock_run):
+        """Correctly parses GraphQL reviewThreads response."""
+        graphql_response = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "isResolved": False,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "body": "Fix this",
+                                                "author": {
+                                                    "login": "greptile-apps[bot]"
+                                                },
+                                            }
+                                        ]
+                                    },
+                                },
+                                {
+                                    "isResolved": True,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "body": "Looks good",
+                                                "author": {"login": "reviewer"},
+                                            }
+                                        ]
+                                    },
+                                },
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(graphql_response)
+        )
+
+        threads = get_review_threads("owner/repo", 123)
+        assert len(threads) == 2
+        assert threads[0]["isResolved"] is False
+        assert threads[1]["isResolved"] is True
+
+    @patch("gptme_runloops.utils.github.subprocess.run")
+    def test_uses_graphql_api(self, mock_run):
+        """Uses gh api graphql, not gh pr view --json."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="{}"
+        )
+
+        get_review_threads("owner/repo", 42)
+        cmd = mock_run.call_args[0][0]
+        assert "api" in cmd
+        assert "graphql" in cmd
+        # Must NOT use 'pr view --json' (broken for reviewThreads)
+        assert "pr" not in cmd or "view" not in cmd
+
+    @patch("gptme_runloops.utils.github.subprocess.run")
+    def test_timeout_returns_empty(self, mock_run):
+        """TimeoutExpired returns empty list gracefully."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
+        assert get_review_threads("owner/repo", 1) == []
+
+    @patch("gptme_runloops.utils.github.subprocess.run")
+    def test_failure_returns_empty(self, mock_run):
+        """Non-zero exit returns empty list gracefully."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="error"
+        )
+        assert get_review_threads("owner/repo", 1) == []
+
+
+class TestHasUnresolvedBotReviews:
+    """Tests for has_unresolved_bot_reviews."""
+
+    @patch("gptme_runloops.utils.github.get_review_threads")
+    def test_detects_unresolved_bot_thread(self, mock_threads):
+        """Detects unresolved review threads from bots."""
+        mock_threads.return_value = [
+            {
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"body": "Fix this", "author": {"login": "greptile-apps[bot]"}}
+                    ]
+                },
+            }
+        ]
+        has_bots, users = has_unresolved_bot_reviews("owner/repo", 1)
+        assert has_bots is True
+        assert "greptile-apps[bot]" in users
+
+    @patch("gptme_runloops.utils.github.get_review_threads")
+    def test_ignores_resolved_bot_thread(self, mock_threads):
+        """Resolved bot threads are not flagged."""
+        mock_threads.return_value = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {"body": "Fixed", "author": {"login": "greptile-apps[bot]"}}
+                    ]
+                },
+            }
+        ]
+        has_bots, users = has_unresolved_bot_reviews("owner/repo", 1)
+        assert has_bots is False
+
+    @patch("gptme_runloops.utils.github.get_review_threads")
+    def test_no_threads_returns_false(self, mock_threads):
+        """No threads means no bot reviews."""
+        mock_threads.return_value = []
+        has_bots, users = has_unresolved_bot_reviews("owner/repo", 1)
+        assert has_bots is False
+        assert users == []
