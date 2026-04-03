@@ -4,7 +4,7 @@ match:
     - "setting up new agent workspace"
     - "initialize gptme agent from template"
     - "new agent from gptme-agent-template"
-status: active
+status: archived
 ---
 
 # Agent Workspace Setup
