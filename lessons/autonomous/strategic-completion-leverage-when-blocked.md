@@ -9,7 +9,7 @@ match:
   - stakeholder approval needed
   - productive while blocked
   - create value while waiting
-status: active
+status: archived
 ---
 
 # Strategic Completion Leverage When Blocked

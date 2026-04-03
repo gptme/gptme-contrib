@@ -6,7 +6,7 @@ match:
   - "write tests for"
   - "pytest coverage"
   - "missing tests"
-status: active
+status: archived
 ---
 
 # Code Coverage Principle

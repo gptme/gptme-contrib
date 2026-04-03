@@ -6,7 +6,7 @@ match:
   - living playbooks
   - context window optimization strategy
   - dynamically curate LLM context
-status: active
+status: archived
 ---
 
 # ACE (Agentic Context Engineering)

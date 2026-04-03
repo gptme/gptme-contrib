@@ -7,7 +7,7 @@ match:
     - agent branding
     - visual representation
     - agent design
-status: active
+status: archived
 ---
 
 # Agent Visual Identity Establishment
