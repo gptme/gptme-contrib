@@ -6,7 +6,7 @@ match:
   - untrusted content
   - external communication
   - prompt injection
-status: archived
+status: active
 ---
 
 # Autonomous Operation Safety
