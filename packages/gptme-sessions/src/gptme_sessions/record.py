@@ -181,7 +181,12 @@ class SessionRecord:
             self.timestamp = datetime.now(timezone.utc).isoformat()
         elif "T24:" in self.timestamp:
             # Fix invalid hour 24 from filenames like 240000-session.md
-            self.timestamp = self.timestamp.replace("T24:00:00", "T23:59:59")
+            if "T24:00:00" in self.timestamp:
+                # ISO 8601 T24:00:00 = midnight; map to end of previous day
+                self.timestamp = self.timestamp.replace("T24:00:00", "T23:59:59")
+            else:
+                # Non-midnight T24 (truly invalid) — map to T23 to at least parse
+                self.timestamp = re.sub(r"T24:(\d{2}:\d{2})", r"T23:\1", self.timestamp)
         # Guard against JSON null for integer field
         if self.duration_seconds is None:
             self.duration_seconds = 0
