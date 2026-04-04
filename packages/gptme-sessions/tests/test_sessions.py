@@ -273,6 +273,12 @@ def test_session_record_hour_24_fix():
     assert "T23:59:59" in r.timestamp
 
 
+def test_session_record_hour_24_non_midnight_fix():
+    """Non-midnight T24 timestamps (e.g. T24:30:45) are mapped to T23:MM:SS."""
+    r = SessionRecord(timestamp="2026-03-04T24:30:45+00:00")
+    assert "T23:30:45" in r.timestamp
+
+
 def test_format_stats_empty():
     """format_stats handles empty stats gracefully."""
     import io
