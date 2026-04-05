@@ -84,8 +84,6 @@ def normalize_state(state: str, warn: bool = True) -> str:
         >>> normalize_state("active")
         'active'
     """
-    import warnings
-
     if state in DEPRECATED_STATE_ALIASES:
         canonical = DEPRECATED_STATE_ALIASES[state]
         if warn:
