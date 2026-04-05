@@ -1271,8 +1271,6 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
             if all_resolved:
                 resolved_count += 1
                 if fix:
-                    import frontmatter
-
                     post = frontmatter.load(task.path)
                     post.metadata.pop("waiting_for", None)
                     post.metadata.pop("waiting_since", None)
@@ -1628,7 +1626,6 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 completed_task_ids.append(task.id)
 
                 # Run task completion hook if configured via env var
-                import os
                 import subprocess
 
                 hook_cmd = os.environ.get("HOOK_TASK_DONE")
@@ -4076,8 +4073,6 @@ def sessions_cmd(status: str | None, as_json: bool):
     sessions = list_sessions(repo_root, status)
 
     if as_json:
-        import json as json_mod
-
         data = [
             {
                 "session_id": s.session_id,
@@ -4089,7 +4084,7 @@ def sessions_cmd(status: str | None, as_json: bool):
             }
             for s in sessions
         ]
-        console.print(json_mod.dumps(data, indent=2))
+        console.print(json.dumps(data, indent=2))
         return
 
     if not sessions:

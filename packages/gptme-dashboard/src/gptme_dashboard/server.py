@@ -653,11 +653,10 @@ def create_app(
 
     # Restart token — read from env → gptme.toml [dashboard] → auto-generate.
     # Printed at startup so the user can find it in the server log.
-    import os as _os
     import secrets as _secrets
 
     _MIN_TOKEN_LEN = 32
-    _restart_token = _os.environ.get("GPTME_DASHBOARD_RESTART_TOKEN", "")
+    _restart_token = os.environ.get("GPTME_DASHBOARD_RESTART_TOKEN", "")
     if _restart_token and len(_restart_token) < _MIN_TOKEN_LEN:
         logger.warning(
             "GPTME_DASHBOARD_RESTART_TOKEN is too short (%d chars, minimum %d); "
