@@ -285,14 +285,14 @@ class LessonValidator:
 
     def _check_companion_doc(self):
         """Check for companion doc existence and linking."""
-        # Check if companion doc exists
-        companion_path = COMPANION_DIR / f"{self.filepath.stem}.md"
-        has_companion = companion_path.exists()
+        # Check if companion doc exists (search subdirectories too)
+        companion_matches = list(COMPANION_DIR.rglob(f"{self.filepath.stem}.md"))
+        has_companion = len(companion_matches) > 0
 
-        # Check if linked in Related section
+        # Check if linked in Related section (allow optional subdirectory component)
         has_companion_link = bool(
             re.search(
-                rf"knowledge/lessons/{self.filepath.stem}\.md",
+                rf"knowledge/lessons/(?:[^/]+/)?{re.escape(self.filepath.stem)}\.md",
                 self.content,
                 re.IGNORECASE,
             )
