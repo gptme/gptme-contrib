@@ -25,14 +25,17 @@ When LOO analysis shows a lesson with statistically significant negative delta (
 
 ## Pattern
 ```bash
-# 1. Diagnose underperformers
+# 1. Diagnose underperformers (agent-workspace script)
 python3 scripts/gepa-lesson-optimizer.py --bottom 5 --diagnose
 
-# 2. Run Sonnet mutations (not GPT-4o — too generic)
-python3 scripts/gepa-lesson-optimizer.py --bottom 5 --mutate --apply
+# 2. Run Sonnet mutations — generates candidates, does NOT apply yet
+python3 scripts/gepa-lesson-optimizer.py --bottom 5 --mutate
 
-# 3. Validate with LLM-as-judge (after applying)
+# 3. Validate with LLM-as-judge BEFORE applying
 python3 scripts/gepa-lesson-optimizer.py --bottom 5 --judge
+
+# 4. Apply only after judge passes
+python3 scripts/gepa-lesson-optimizer.py --bottom 5 --apply
 ```
 
 ## Common fixes
@@ -46,6 +49,6 @@ python3 scripts/gepa-lesson-optimizer.py --bottom 5 --judge
 - Bottom-N pool shrinks toward noise floor
 
 ## Related
-- `scripts/gepa-lesson-optimizer.py` — mutation + judge tooling
-- `scripts/lesson-loo-analysis.py` — effectiveness signal
+- Agent-workspace: `scripts/gepa-lesson-optimizer.py` — mutation + judge tooling
+- Agent-workspace: `scripts/lesson-loo-analysis.py` — effectiveness signal
 - `knowledge/lessons/` — companion docs with full detail
