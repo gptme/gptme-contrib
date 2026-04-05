@@ -359,11 +359,11 @@ class LessonValidator:
                 found_verbose.append(section)
 
         if found_verbose:
-            companion_path = COMPANION_DIR / f"{self.filepath.stem}.md"
-            if not companion_path.exists():
+            companion_matches = list(COMPANION_DIR.rglob(f"{self.filepath.stem}.md"))
+            if not companion_matches:
                 self.warnings.append(
                     f"Contains sections better suited for companion doc: {', '.join(found_verbose)}. "
-                    f"Consider creating: knowledge/lessons/{self.filepath.stem}.md"
+                    f"Consider creating: knowledge/lessons/<subdir>/{self.filepath.stem}.md"
                 )
 
     def _check_failure_signals(self):
