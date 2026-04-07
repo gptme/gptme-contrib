@@ -12,7 +12,7 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
     # Parse origin remote URL directly — gh repo view can pick wrong remote
     # in multi-remote setups (e.g. returns upstream instead of origin)
     ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "")
-    if [ -n "$ORIGIN_URL" ]; then
+    if [ -n "$ORIGIN_URL" ] && echo "$ORIGIN_URL" | grep -q "github\.com"; then
         REPO=$(echo "$ORIGIN_URL" | sed -E 's#.*github\.com[:/]##; s#\.git$##')
     else
         REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "")
