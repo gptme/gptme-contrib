@@ -28,17 +28,17 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    import frontmatter as fm
+    from gptodo.frontmatter_compat import Post as fmPost
 
-# Lazy import frontmatter to avoid import issues in uv scripts
+# Lazy import compatibility wrapper to avoid broken frontmatter package conflicts
 _frontmatter = None
 
 
 def _get_frontmatter():
-    """Lazy import frontmatter."""
+    """Lazy import frontmatter compatibility wrapper."""
     global _frontmatter
     if _frontmatter is None:
-        import frontmatter
+        from gptodo.frontmatter_compat import frontmatter
 
         _frontmatter = frontmatter
     return _frontmatter
@@ -524,7 +524,7 @@ def count_subtasks(content: str) -> SubtaskCount:
 # =============================================================================
 
 
-def validate_task_file(file: Path, post: fm.Post) -> List[str]:
+def validate_task_file(file: Path, post: fmPost) -> List[str]:
     """Validate a task file's format and required fields.
 
     Args:
@@ -604,7 +604,7 @@ def validate_task_file(file: Path, post: fm.Post) -> List[str]:
     return issues
 
 
-def load_task(file: Path) -> Tuple[fm.Post, SubtaskCount]:
+def load_task(file: Path) -> Tuple[fmPost, SubtaskCount]:
     """Load a single task file and count its subtasks."""
     frontmatter = _get_frontmatter()
     post = frontmatter.load(file)

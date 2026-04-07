@@ -2,12 +2,12 @@
 category: communication
 match:
   keywords:
-  - code review feedback
-  - pull request review
-  - maintainer feedback
-  - respond to review
-  - review comments
-  - address review feedback
+  - "received code review feedback on PR"
+  - "maintainer requested changes on pull request"
+  - "respond to review feedback"
+  - "address reviewer suggestions"
+  - "review feedback needs response"
+  - "address review feedback"
 status: active
 ---
 
