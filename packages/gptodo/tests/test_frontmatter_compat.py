@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gptodo.frontmatter_compat import frontmatter
+from gptodo.frontmatter_compat import Post, dumps, load, loads
 
 
 def test_loads_frontmatter_file(tmp_path: Path) -> None:
@@ -14,7 +14,7 @@ def test_loads_frontmatter_file(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    post = frontmatter.load(task)
+    post = load(task)
 
     assert post.metadata["state"] == "waiting"
     assert post.metadata["tags"] == ["alice"]
@@ -22,10 +22,10 @@ def test_loads_frontmatter_file(tmp_path: Path) -> None:
 
 
 def test_dumps_roundtrips_post_metadata() -> None:
-    post = frontmatter.Post(content="# Task\n", state="done", created="2026-04-06")
+    post = Post(content="# Task\n", state="done", created="2026-04-06")
 
-    rendered = frontmatter.dumps(post)
-    reparsed = frontmatter.loads(rendered)
+    rendered = dumps(post)
+    reparsed = loads(rendered)
 
     assert reparsed.metadata == {"state": "done", "created": "2026-04-06"}
     assert reparsed.content == "# Task\n"

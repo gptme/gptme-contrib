@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
+import re
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -21,18 +20,19 @@ class Post(dict[str, Any]):
 
 
 _DELIM = "---"
+_DELIM_RE = re.compile(r"^---\s*$", re.MULTILINE)
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not text.startswith(f"{_DELIM}\n") and text != _DELIM:
         return {}, text
 
-    parts = text.split(_DELIM, 2)
-    if len(parts) < 3:
+    matches = list(_DELIM_RE.finditer(text))
+    if len(matches) < 2:
         return {}, text
 
-    raw_metadata = parts[1].strip()
-    body = parts[2]
+    raw_metadata = text[matches[0].end() : matches[1].start()].strip()
+    body = text[matches[1].end() :]
     if body.startswith("\n"):
         body = body[1:]
 
@@ -72,37 +72,15 @@ def dump(post: Post, fd: TextIO) -> None:
 
 
 def _load_real_frontmatter() -> Any:
-    """Try to load the real python-frontmatter package for full compatibility.
-
-    Falls back gracefully if the package has relative imports that break
-    when loaded outside its normal package context (e.g. frontmatter 3.x).
-    """
-    repo_root = Path(__file__).resolve().parents[5]
-    candidate = (
-        repo_root
-        / ".venv"
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
-        / "frontmatter"
-        / "__init__.py"
-    )
-    if not candidate.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("python_frontmatter_real", candidate)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
+    """Try to load the real python-frontmatter package for full compatibility."""
     try:
-        spec.loader.exec_module(module)
-    except (ModuleNotFoundError, ImportError):
-        # Package has relative imports that break when loaded under a
-        # different module name (e.g. frontmatter 3.x does "from .util import u").
-        # Fall back to our built-in compat implementation.
+        import frontmatter as _real_fm
+
+        if hasattr(_real_fm, "load") and hasattr(_real_fm, "dumps") and hasattr(_real_fm, "Post"):
+            return _real_fm
         return None
-    if hasattr(module, "load") and hasattr(module, "dumps") and hasattr(module, "Post"):
-        return module
-    return None
+    except ImportError:
+        return None
 
 
 frontmatter = _load_real_frontmatter()
