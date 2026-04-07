@@ -5,10 +5,11 @@ match:
     - "PR received low quality score from greptile"
     - "validate quality improvements before human review"
     - "@greptileai review comment"
-    - "@greptileai"
-    - "greptile review"
-    - "greptile PR"
-    - "request greptile review"
+    - "post @greptileai"
+    - "request greptile re-review"
+    - "greptile found issues in PR"
+    - "greptile score"
+    - "trigger greptile"
 status: active
 ---
 
