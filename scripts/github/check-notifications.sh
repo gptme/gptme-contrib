@@ -131,6 +131,42 @@ is_item_open() {
     esac
 }
 
+# Suppress notifications for PRs that are already merge-ready and where Bob has
+# already left a maintainer-facing "waiting only on a maintainer click" status
+# comment. These stay OPEN from the notification system's perspective, but
+# revisiting them produces fake-ready work and repeated comment churn.
+is_permission_blocked_merge_ready_pr() {
+    local repo=$1
+    local number=$2
+    local pr_json
+
+    pr_json=$(gh pr view "$number" --repo "$repo" \
+        --json state,mergeStateStatus,isDraft,statusCheckRollup 2>/dev/null) || return 1
+
+    local state merge_state is_draft non_success_count
+    state=$(echo "$pr_json" | jq -r '.state // ""')
+    merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus // ""')
+    is_draft=$(echo "$pr_json" | jq -r '.isDraft // false')
+    non_success_count=$(echo "$pr_json" | jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" and .conclusion != "SKIPPED")] | length')
+
+    [[ "$state" == "OPEN" ]] || return 1
+    [[ "$merge_state" == "CLEAN" ]] || return 1
+    [[ "$is_draft" == "false" ]] || return 1
+    [[ "$non_success_count" == "0" ]] || return 1
+
+    local last_bob_comment
+    last_bob_comment=$(gh api "repos/$repo/issues/$number/comments" \
+        --jq '[.[] | select(.user.login == "TimeToBuildBob")][-1].body // ""' 2>/dev/null) || return 1
+
+    [[ -n "$last_bob_comment" ]] || return 1
+    case "$last_bob_comment" in
+        *"waiting only on a maintainer click"*|*"waiting only on a maintainer merge click"*) ;;
+        *) return 1 ;;
+    esac
+
+    return 0
+}
+
 # Helper function to format compactly with smart timestamps (limit 10 per category)
 format_compact() {
     local category=$1
@@ -145,6 +181,10 @@ format_compact() {
             number=$(echo "$url" | grep -oP '\d+$')
             if ! is_item_open "$repo" "$number" "$type"; then
                 continue  # Skip closed/merged items
+            fi
+
+            if [[ "$type" == "PullRequest" ]] && is_permission_blocked_merge_ready_pr "$repo" "$number"; then
+                continue  # Skip fake-ready PR churn already blocked on maintainer merge permission
             fi
         fi
 

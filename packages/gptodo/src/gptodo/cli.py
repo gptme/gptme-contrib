@@ -34,7 +34,7 @@ from typing import (
 )
 
 import click
-import frontmatter
+from gptodo.frontmatter_compat import frontmatter
 from rich.console import Console
 from rich.markup import escape as markup_escape
 from rich.table import Table

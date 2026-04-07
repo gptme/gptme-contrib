@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-import frontmatter
+from gptodo.frontmatter_compat import frontmatter
 
 from gptodo.unblock import auto_unblock_tasks, find_dependent_tasks
 from gptodo.utils import SubtaskCount, TaskInfo

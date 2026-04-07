@@ -10,7 +10,7 @@ When a task is marked as done, automatically update dependent tasks:
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import frontmatter
+from gptodo.frontmatter_compat import frontmatter
 
 from gptodo.utils import TaskInfo
 from gptodo.waiting import WaitType, parse_waiting_for

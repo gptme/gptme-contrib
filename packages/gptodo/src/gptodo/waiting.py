@@ -29,7 +29,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-import frontmatter
+from gptodo.frontmatter_compat import frontmatter
 
 
 class WaitType(str, Enum):
