@@ -72,6 +72,11 @@ def dump(post: Post, fd: TextIO) -> None:
 
 
 def _load_real_frontmatter() -> Any:
+    """Try to load the real python-frontmatter package for full compatibility.
+
+    Falls back gracefully if the package has relative imports that break
+    when loaded outside its normal package context (e.g. frontmatter 3.x).
+    """
     repo_root = Path(__file__).resolve().parents[5]
     candidate = (
         repo_root
@@ -88,7 +93,13 @@ def _load_real_frontmatter() -> Any:
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except (ModuleNotFoundError, ImportError):
+        # Package has relative imports that break when loaded under a
+        # different module name (e.g. frontmatter 3.x does "from .util import u").
+        # Fall back to our built-in compat implementation.
+        return None
     if hasattr(module, "load") and hasattr(module, "dumps") and hasattr(module, "Post"):
         return module
     return None
