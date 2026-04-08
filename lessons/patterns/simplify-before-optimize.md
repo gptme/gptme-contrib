@@ -8,6 +8,12 @@ match:
   - improve efficiency
   - simplify before optimize
   - premature optimization
+  - "caching layer"
+  - "performance optimization"
+  - "too slow"
+  - "needs caching"
+  - "optimize the code"
+  - "add memoization"
 status: active
 ---
 

@@ -8,6 +8,12 @@ match:
   - function extraction for nesting
   - arrow code smell
   - too many indentation levels
+  - "deeply nested"
+  - "flatten the code"
+  - "nesting level"
+  - "guard clauses"
+  - "early return"
+  - "refactor nesting"
 status: active
 ---
 

@@ -6,6 +6,12 @@ match:
   - task selection in autonomous
   - session startup workflow
   - select what to work on
+  - "autonomous session"
+  - "CASCADE"
+  - "PRIMARY SECONDARY TERTIARY"
+  - "task selection"
+  - "what to work on"
+  - "work queue"
 status: active
 ---
 
