@@ -10,8 +10,8 @@ match:
   - "broad exception"
   - "except Exception"
   - "try/except"
-  - "error handling"
   - "split the try block"
+  - "large try block"
 status: active
 ---
 

@@ -12,7 +12,6 @@ match:
   - "python executable"
   - "python not installed"
   - "use python3"
-  - "python script"
 status: active
 ---
 

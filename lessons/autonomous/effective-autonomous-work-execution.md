@@ -7,7 +7,6 @@ match:
   - session startup workflow
   - select what to work on
   - "autonomous session"
-  - "CASCADE"
   - "PRIMARY SECONDARY TERTIARY"
   - "task selection"
   - "what to work on"
