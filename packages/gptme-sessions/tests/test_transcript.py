@@ -362,6 +362,24 @@ class TestReadTranscript:
             assert "tool_name" not in d or d["tool_name"] is not None
             assert "tool_input" not in d or d["tool_input"] is not None
 
+    def test_gptme_session_directory(self, gptme_jsonl: Path):
+        """read_transcript resolves gptme session dirs to conversation.jsonl."""
+        # gptme_jsonl is a file; move it into a dir as conversation.jsonl
+        session_dir = gptme_jsonl.parent / "2026-04-07-test-session"
+        session_dir.mkdir()
+        dest = session_dir / "conversation.jsonl"
+        dest.write_text(gptme_jsonl.read_text())
+        t = read_transcript(session_dir)
+        assert t.harness == "gptme"
+        assert len(t.messages) == 3
+
+    def test_directory_without_conversation_jsonl(self, tmp_path: Path):
+        """read_transcript raises FileNotFoundError for dirs without conversation.jsonl."""
+        empty_dir = tmp_path / "empty-session"
+        empty_dir.mkdir()
+        with pytest.raises(FileNotFoundError, match="conversation.jsonl"):
+            read_transcript(empty_dir)
+
 
 class TestNormalizedMessageSerialization:
     def test_to_dict_basic(self):
