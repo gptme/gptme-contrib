@@ -395,13 +395,23 @@ def read_transcript(path: Path) -> SessionTranscript:
     ----------
     path:
         Path to a harness JSONL file (conversation.jsonl, session UUID.jsonl,
-        codex rollout.jsonl, or copilot events.jsonl).
+        codex rollout.jsonl, or copilot events.jsonl), or a gptme session
+        directory containing ``conversation.jsonl``.
 
     Returns
     -------
     SessionTranscript
         Normalized transcript with schema_version=1.
     """
+    # gptme sessions are directories; resolve to the JSONL file inside
+    if path.is_dir():
+        jsonl = path / "conversation.jsonl"
+        if jsonl.exists():
+            path = jsonl
+        else:
+            raise FileNotFoundError(
+                f"{path} is a directory and does not contain conversation.jsonl"
+            )
     msgs = parse_trajectory(path)
     fmt = detect_format(msgs)
 

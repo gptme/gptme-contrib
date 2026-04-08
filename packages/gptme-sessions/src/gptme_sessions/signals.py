@@ -1416,7 +1416,19 @@ def extract_from_path(jsonl_path: Path) -> dict:
     Auto-detects format: gptme, Claude Code, Codex, or Copilot.
     Token usage is extracted when available (CC has full counts, Codex has
     rate-limit percentages only, Copilot has model info only).
+
+    Accepts either a JSONL file path or a gptme session directory
+    (containing ``conversation.jsonl``).
     """
+    # gptme sessions are directories; resolve to the JSONL file inside
+    if jsonl_path.is_dir():
+        candidate = jsonl_path / "conversation.jsonl"
+        if candidate.exists():
+            jsonl_path = candidate
+        else:
+            raise FileNotFoundError(
+                f"{jsonl_path} is a directory and does not contain conversation.jsonl"
+            )
     msgs = parse_trajectory(jsonl_path)
     fmt = detect_format(msgs)
     if fmt == "claude_code":
