@@ -8,6 +8,10 @@ match:
   - "use python3 instead of python"
   - "python vs python3"
   - "which python to use"
+  - "python3 not found"
+  - "python executable"
+  - "python not installed"
+  - "use python3"
 status: active
 ---
 

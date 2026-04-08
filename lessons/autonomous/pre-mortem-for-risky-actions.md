@@ -1,11 +1,19 @@
 ---
 match:
   keywords:
+  - pre-mortem for risky actions
   - "about to delete or remove files"
   - "force push or destructive git operation"
   - "modifying production infrastructure"
   - "risk assessment before action"
   - "what could go wrong with this change"
+  - "destructive operation"
+  - "irreversible change"
+  - "force push"
+  - "rm -rf"
+  - "DROP TABLE"
+  - "production change"
+  - "risky operation"
 status: active
 ---
 

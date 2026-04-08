@@ -12,6 +12,13 @@ match:
   - darwinian trap avoidance
   - autonomous session planning
   - strategic work selection
+  - "strategic focus"
+  - "productivity trap"
+  - "darwinian trap"
+  - "busy work"
+  - "productivity theater"
+  - "low-ROI work"
+  - "idea backlog"
 status: active
 ---
 

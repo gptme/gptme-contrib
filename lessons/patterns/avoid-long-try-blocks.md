@@ -6,6 +6,12 @@ match:
   - split error handling into focused blocks
   - multiple operations in one try block
   - generic error messages
+  - "bare except"
+  - "broad exception"
+  - "except Exception"
+  - "try/except"
+  - "split the try block"
+  - "large try block"
 status: active
 ---
 
