@@ -69,8 +69,9 @@ class MarkdownCodeblockValidator:
                 if fence_match:
                     lang_tag = fence_match.group(1)
 
-                    # Empty language tag is a violation
-                    if not lang_tag:
+                    # Empty language tag on opening fence is a violation
+                    # (closing fences naturally have no tag — only odd count = opening)
+                    if not lang_tag and fence_count % 2 == 1:
                         self.violations.append(
                             (filepath, line_num, "No language tag specified")
                         )
