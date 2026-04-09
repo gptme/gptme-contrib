@@ -275,3 +275,95 @@ def test_build_pretool_match_text_empty_input(hook):
     """Empty tool input returns empty string."""
     text = hook.build_pretool_match_text("Bash", {})
     assert text == ""
+
+
+# --- holdout filtering ---
+
+
+def test_parse_holdout_empty(hook):
+    """Empty env produces empty set."""
+    assert hook.parse_holdout_lessons_env("") == set()
+    assert hook.parse_holdout_lessons_env(None) == set()
+
+
+def test_parse_holdout_single(hook):
+    result = hook.parse_holdout_lessons_env("browser-verification")
+    assert result == {"browser-verification"}
+
+
+def test_parse_holdout_multiple(hook):
+    result = hook.parse_holdout_lessons_env("foo,bar, baz ")
+    assert result == {"foo", "bar", "baz"}
+
+
+def test_parse_holdout_normalizes_backslash(hook):
+    result = hook.parse_holdout_lessons_env("lessons\\tools\\foo.md")
+    assert "lessons/tools/foo.md" in result
+
+
+def test_is_held_out_by_stem(hook):
+    lesson = {"path": "/workspace/lessons/tools/browser-verification.md"}
+    assert hook.is_held_out_lesson(lesson, {"browser-verification"})
+
+
+def test_is_held_out_by_filename(hook):
+    lesson = {"path": "/workspace/lessons/tools/browser-verification.md"}
+    assert hook.is_held_out_lesson(lesson, {"browser-verification.md"})
+
+
+def test_is_held_out_by_partial_path(hook):
+    lesson = {"path": "/workspace/lessons/tools/browser-verification.md"}
+    assert hook.is_held_out_lesson(lesson, {"tools/browser-verification.md"})
+
+
+def test_is_held_out_by_id(hook):
+    lesson = {"path": "/workspace/lessons/foo.md", "id": "my-custom-id"}
+    assert hook.is_held_out_lesson(lesson, {"my-custom-id"})
+
+
+def test_is_held_out_skill_uses_parent_dir(hook):
+    lesson = {"path": "/workspace/skills/my-skill/SKILL.md"}
+    assert hook.is_held_out_lesson(lesson, {"my-skill"})
+
+
+def test_not_held_out_when_no_match(hook):
+    lesson = {"path": "/workspace/lessons/tools/browser-verification.md"}
+    assert not hook.is_held_out_lesson(lesson, {"unrelated-lesson"})
+
+
+def test_not_held_out_empty_set(hook):
+    lesson = {"path": "/workspace/lessons/tools/browser-verification.md"}
+    assert not hook.is_held_out_lesson(lesson, set())
+
+
+def test_filter_held_out_lessons(hook):
+    lessons = [
+        {"path": "/workspace/lessons/tools/browser-verification.md", "title": "BV"},
+        {"path": "/workspace/lessons/tools/git-workflow.md", "title": "GW"},
+        {"path": "/workspace/lessons/social/twitter.md", "title": "TW"},
+    ]
+    holdout = {"browser-verification", "twitter.md"}
+    result = hook.filter_held_out_lessons(lessons, holdout)
+    assert len(result) == 1
+    assert result[0]["title"] == "GW"
+
+
+def test_filter_held_out_empty_passthrough(hook):
+    lessons = [{"path": "/a.md", "title": "A"}]
+    assert hook.filter_held_out_lessons(lessons, set()) == lessons
+
+
+def test_scan_lessons_includes_id(hook, tmp_path):
+    """scan_lessons extracts id field from frontmatter."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "with_id.md").write_text(
+        '---\nid: custom-lesson-id\nmatch:\n  keywords:\n    - "test"\nstatus: active\n---\n# With ID\n\nContent.\n'
+    )
+    (lessons_dir / "no_id.md").write_text(
+        '---\nmatch:\n  keywords:\n    - "other"\nstatus: active\n---\n# No ID\n\nContent.\n'
+    )
+    results = hook.scan_lessons([lessons_dir])
+    by_title = {r["title"]: r for r in results}
+    assert by_title["With ID"]["id"] == "custom-lesson-id"
+    assert by_title["No ID"]["id"] is None
