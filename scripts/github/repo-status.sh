@@ -17,9 +17,9 @@ check_repo() {
     local repo=$1
     local label=${2:-$repo}
 
-    # Fetch last 2 runs so we can show previous result if latest is in-progress
+    # Fetch last 5 runs so we can skip disabled-workflow runs and still have fallback
     local run_json
-    run_json=$(gh run list --repo "$repo" --limit 2 --json conclusion,status,url 2>/dev/null || echo "error")
+    run_json=$(gh run list --repo "$repo" --limit 5 --json conclusion,status,url,name 2>/dev/null || echo "error")
 
     if [ "$run_json" = "error" ]; then
         echo -e "${YELLOW}-${NC} $label: No Actions"
@@ -29,6 +29,13 @@ check_repo() {
     if [ "$run_json" = "[]" ]; then
         echo -e "${YELLOW}-${NC} $label: No runs"
         return
+    fi
+
+    # Filter out runs from manually disabled workflows (e.g. stale fork workflows)
+    local disabled_json
+    disabled_json=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || echo "[]")
+    if [ "$disabled_json" != "[]" ]; then
+        run_json=$(echo "$run_json" | jq --argjson disabled "$disabled_json" '[.[] | select(.name as $n | $disabled | index($n) | not)]')
     fi
 
     local conclusion status in_progress=""
