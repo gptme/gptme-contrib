@@ -280,8 +280,9 @@ def test_build_pretool_match_text_empty_input(hook):
 # --- holdout filtering ---
 
 
-def test_parse_holdout_empty(hook):
+def test_parse_holdout_empty(hook, monkeypatch):
     """Empty env produces empty set."""
+    monkeypatch.delenv("HOLDOUT_LESSONS", raising=False)
     assert hook.parse_holdout_lessons_env("") == set()
     assert hook.parse_holdout_lessons_env(None) == set()
 

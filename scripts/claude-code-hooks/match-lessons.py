@@ -600,7 +600,7 @@ def is_held_out_lesson(lesson: dict, holdout_lessons: set[str]) -> bool:
         path_str,
         path.name.lower(),
         # For SKILL.md files, use parent dir name as identifier; otherwise file stem
-        (path.parent.name if path.name == "SKILL.md" else path.stem).lower(),
+        (path.parent.name if path.name.lower() == "skill.md" else path.stem).lower(),
     }
 
     lesson_id = lesson.get("id")
