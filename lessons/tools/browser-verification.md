@@ -1,15 +1,14 @@
 ---
 match:
   keywords:
-  - "verify web changes in browser"
-  - "check browser console errors"
-  - "deployment verification"
   - "commit web changes without testing"
   - "push without browser check"
   - "claiming fixed without testing"
-  - "check in browser"
   - "forgot to test in browser"
   - "web change deployed without verification"
+  - "without opening the browser"
+  - "declared fixed without checking browser"
+  - "fix working without verifying in browser"
 status: active
 ---
 
