@@ -726,8 +726,13 @@ for repo in $all_repos; do
     running=$((running + 1))
     if [ "$running" -ge "$MAX_PARALLEL" ]; then
         # wait -n (bash 4.3+) waits for any single child; fall back to wait-all
-        wait -n 2>/dev/null || wait
-        running=0
+        if wait -n 2>/dev/null; then
+            running=$((running - 1))
+        else
+            # wait -n not available (bash <4.3): wait for all, reset counter
+            wait
+            running=0
+        fi
     fi
 done
 wait
