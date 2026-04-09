@@ -293,6 +293,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
             patterns = [p for p in raw_patterns if isinstance(p, str) and p.strip()]
 
             skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
+            lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
 
             # Need at least some way to match
             if not keywords and not patterns and not skill_name:
@@ -306,6 +307,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                 {
                     "path": str(f),
                     "title": title,
+                    "id": lesson_id,
                     "keywords": keywords,
                     "patterns": patterns,
                     "skill_name": skill_name,
@@ -562,6 +564,70 @@ def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> lis
 
     results.sort(key=lambda x: -x["score"])
     return results[:max_results]
+
+
+# --- Holdout filtering (A/B testing) ---
+
+
+def parse_holdout_lessons_env(value: str | None = None) -> set[str]:
+    """Parse comma-separated lesson identifiers from HOLDOUT_LESSONS env var.
+
+    Supports multiple identifier formats: file stem, filename, full/partial path,
+    lesson ID (from frontmatter ``id`` field), or parent directory name (for SKILL.md).
+
+    Example::
+
+        HOLDOUT_LESSONS="browser-verification,strategic/scope-discipline.md"
+    """
+    raw = os.environ.get("HOLDOUT_LESSONS", "") if value is None else value
+    if not raw:
+        return set()
+    return {
+        token.strip().lower().replace("\\", "/")
+        for token in raw.split(",")
+        if token.strip()
+    }
+
+
+def is_held_out_lesson(lesson: dict, holdout_lessons: set[str]) -> bool:
+    """Return True if the lesson matches a configured holdout identifier."""
+    if not holdout_lessons:
+        return False
+
+    path = Path(str(lesson["path"]))
+    path_str = str(path).lower().replace("\\", "/")
+    identifiers = {
+        path_str,
+        path.name.lower(),
+        # For SKILL.md files, use parent dir name as identifier; otherwise file stem
+        (path.parent.name if path.name.lower() == "skill.md" else path.stem).lower(),
+    }
+
+    lesson_id = lesson.get("id")
+    if isinstance(lesson_id, str) and lesson_id.strip():
+        identifiers.add(lesson_id.strip().lower())
+
+    for token in holdout_lessons:
+        if token in identifiers:
+            return True
+        # Path suffix matching for partial paths like "strategic/foo.md"
+        if "/" in token or token.endswith(".md"):
+            normalized = token.lstrip("./")
+            if path_str == normalized or path_str.endswith(f"/{normalized}"):
+                return True
+
+    return False
+
+
+def filter_held_out_lessons(
+    lessons: list[dict], holdout_lessons: set[str]
+) -> list[dict]:
+    """Remove lessons selected for holdout from injection output."""
+    if not holdout_lessons:
+        return lessons
+    return [
+        lesson for lesson in lessons if not is_held_out_lesson(lesson, holdout_lessons)
+    ]
 
 
 # --- Session state for cross-invocation dedup ---
@@ -926,13 +992,14 @@ def main():
     workspace = get_workspace()
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
+    holdout_lessons = parse_holdout_lessons_env()
 
     if not lessons:
         emit_empty(event_type)
         sys.exit(0)
 
-    matches = score_lessons(lessons, match_text, max_results=max_results)
-    if not matches:
+    raw_matches = score_lessons(lessons, match_text, max_results=max_results)
+    if not raw_matches:
         emit_empty(event_type)
         sys.exit(0)
 
@@ -940,10 +1007,16 @@ def main():
     already_injected = get_already_injected(session_id, transcript_path)
 
     # --- Prediction: inject co-occurring lessons proactively ---
-    matched_paths = [m["path"] for m in matches if m["path"] not in already_injected]
+    matched_paths = [
+        m["path"] for m in raw_matches if m["path"] not in already_injected
+    ]
     predicted = get_predicted_lessons(
         matched_paths, already_injected, lessons, MAX_PREDICTED_LESSONS
     )
+
+    # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
+    matches = filter_held_out_lessons(raw_matches, holdout_lessons)
+    predicted = filter_held_out_lessons(predicted, holdout_lessons)
 
     context = format_lessons(matches, already_injected, predicted)
 
