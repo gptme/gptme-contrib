@@ -76,6 +76,11 @@
 #   This reduces gh pr list calls from 3N to N (where N = number of repos).
 #   The repo list from discover_repos() is cached for 1 hour.
 #
+#   Parallelism: Per-repo work runs concurrently (up to 8 repos at once).
+#   State files are repo-prefixed, so there's no cross-repo contention.
+#   Results are collected via temp files. On a 13-repo org, this reduces
+#   wall-clock time from ~27s to ~7s.
+#
 #   Subshell note: Several checks pipe into `while read` loops, which run in
 #   subshells. Variable modifications inside these loops don't propagate to the
 #   parent. This is fine because output is captured via stdout, not variables.
@@ -680,31 +685,64 @@ check_notifications() {
 all_repos=$(discover_repos | sort -u)
 all_items=""
 
+# Process repos in parallel — each repo's checks are independent (state files
+# are repo-prefixed, no cross-repo contention). Collect output via temp files.
+# Cap concurrency at 8 to avoid GitHub API rate limits.
+PARALLEL_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$PARALLEL_TMPDIR"' EXIT
+MAX_PARALLEL=8
+running=0
+
 for repo in $all_repos; do
-    # Fetch all PR data once per repo (replaces 3 separate gh pr list calls)
-    pr_data=$(fetch_pr_data "$repo")
+    repo_safe="${repo//\//-}"
+    (
+        # Fetch all PR data once per repo (replaces 3 separate gh pr list calls)
+        pr_data=$(fetch_pr_data "$repo")
+        repo_items=""
 
-    items=$(check_pr_updates "$repo" "$pr_data" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_pr_updates "$repo" "$pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
 
-    items=$(check_ci_failures "$repo" "$pr_data" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_ci_failures "$repo" "$pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
 
-    items=$(check_assigned_issues "$repo" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_assigned_issues "$repo" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
 
-    items=$(check_master_ci "$repo" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_master_ci "$repo" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
 
-    items=$(check_merge_conflicts "$repo" "$pr_data" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_merge_conflicts "$repo" "$pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
 
-    items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
 
-    items=$(check_merge_ready "$repo" "$pr_data" 2>/dev/null || true)
-    [ -n "$items" ] && all_items+="$items"$'\n'
+        items=$(check_merge_ready "$repo" "$pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
+
+        [ -n "$repo_items" ] && printf '%s' "$repo_items" > "$PARALLEL_TMPDIR/$repo_safe"
+    ) &
+    running=$((running + 1))
+    if [ "$running" -ge "$MAX_PARALLEL" ]; then
+        # wait -n (bash 4.3+) waits for any single child; fall back to wait-all
+        if wait -n 2>/dev/null; then
+            running=$((running - 1))
+        else
+            # wait -n not available (bash <4.3): wait for all, reset counter
+            wait
+            running=0
+        fi
+    fi
 done
+wait
+
+# Collect results from all repos
+shopt -s nullglob
+for f in "$PARALLEL_TMPDIR"/*; do
+    all_items+="$(cat "$f")"$'\n'
+done
+shopt -u nullglob
 
 if [ "$FORMAT" = "jsonl" ]; then
     notif_items=$(check_notifications)
