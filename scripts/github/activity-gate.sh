@@ -738,9 +738,11 @@ done
 wait
 
 # Collect results from all repos
+shopt -s nullglob
 for f in "$PARALLEL_TMPDIR"/*; do
-    [ -f "$f" ] && all_items+="$(cat "$f")"$'\n'
+    all_items+="$(cat "$f")"$'\n'
 done
+shopt -u nullglob
 
 if [ "$FORMAT" = "jsonl" ]; then
     notif_items=$(check_notifications)
