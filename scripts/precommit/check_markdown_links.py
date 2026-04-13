@@ -38,9 +38,14 @@ def get_repo_root() -> Path:
     return cwd
 
 
+def strip_code_blocks(content: str) -> str:
+    """Remove fenced code blocks to avoid checking example links inside them."""
+    return re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+
+
 def extract_links(content: str) -> list[tuple[str, str]]:
-    """Extract all markdown links from content."""
-    return LINK_PATTERN.findall(content)
+    """Extract all markdown links from content, skipping code blocks."""
+    return LINK_PATTERN.findall(strip_code_blocks(content))
 
 
 def resolve_link(link: str, file_path: Path, repo_root: Path) -> Path | None:
