@@ -17,7 +17,7 @@ match:
 When an agent has a brain repo (git workspace), persist knowledge there — not in runtime-local memory systems like Claude Code's `~/.claude/projects/*/memory/`.
 
 ## Context
-Claude Code has a local auto-memory system (`MEMORY.md` + memory files) that persists across conversations on the same machine+project. Agents like Alice and Bob have their own git-based brain repos with `knowledge/`, `journal/`, and task systems. These serve different purposes.
+Claude Code has a local auto-memory system (`MEMORY.md` + memory files) that persists across conversations on the same machine+project. Agents like Alice and Bob have their own git-based brain repos with `knowledge/`, `journal/`, and task systems. The local memory is strictly inferior — it's not versioned, not portable across machines, and invisible to other runtimes.
 
 ## Detection
 Observable signals you're about to make this mistake:
@@ -39,19 +39,17 @@ This only exists on one machine, in one runtime. If Alice runs via gptme on alic
 ```
 This is versioned in git, available on all machines, included in all runtimes.
 
-**When to use local memory**: User preferences, feedback on Claude Code behavior, interaction style notes — things specific to the Claude Code runtime on this machine. These are the exception.
+**Everything goes in the brain repo** — domain knowledge, user preferences, interaction style, feedback. There's no good reason for any of it to be local-only. Even "runtime-specific" preferences (like "user wants terse responses") are valuable across runtimes.
 
-**When to use brain repo**: Everything about the project, domain knowledge, data inventories, architecture decisions, process documentation. This is the default.
-
-**Best of both worlds — symlink approach**:
+**Symlink approach** (recommended — no trade-off):
 ```bash
-# Move Claude memory into brain repo
+# Move Claude memory into brain repo, symlink back
 mkdir -p knowledge/claude-memory
 cp ~/.claude/projects/-Users-.../memory/* knowledge/claude-memory/
 rm -rf ~/.claude/projects/-Users-.../memory
 ln -s /path/to/brain/knowledge/claude-memory ~/.claude/projects/-Users-.../memory
 ```
-This way Claude Code's auto-retrieval (MEMORY.md index + description-based relevance matching) still works, but the files live in git. You get Claude's retrieval mechanism AND git durability/portability.
+Claude Code's auto-retrieval (MEMORY.md index + description-based relevance matching) still works, but the files live in git. You get Claude's retrieval mechanism AND git durability/portability.
 
 ## Outcome
 Following this pattern ensures:
