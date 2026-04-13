@@ -43,6 +43,16 @@ This is versioned in git, available on all machines, included in all runtimes.
 
 **When to use brain repo**: Everything about the project, domain knowledge, data inventories, architecture decisions, process documentation. This is the default.
 
+**Best of both worlds — symlink approach**:
+```bash
+# Move Claude memory into brain repo
+mkdir -p knowledge/claude-memory
+cp ~/.claude/projects/-Users-.../memory/* knowledge/claude-memory/
+rm -rf ~/.claude/projects/-Users-.../memory
+ln -s /path/to/brain/knowledge/claude-memory ~/.claude/projects/-Users-.../memory
+```
+This way Claude Code's auto-retrieval (MEMORY.md index + description-based relevance matching) still works, but the files live in git. You get Claude's retrieval mechanism AND git durability/portability.
+
 ## Outcome
 Following this pattern ensures:
 - Knowledge persists across all runtimes (gptme, Claude Code, Codex)
