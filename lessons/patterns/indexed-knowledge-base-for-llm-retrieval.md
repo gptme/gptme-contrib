@@ -2,11 +2,9 @@
 match:
   keywords:
     - knowledge base
-    - memory index
     - curated index
     - knowledge retrieval
-    - MEMORY.md
-    - auto-memory
+    - indexed knowledge
 status: active
 ---
 
@@ -90,6 +88,9 @@ The runtime's retrieval still works (reads through symlink), but files live in g
 - Retrieval is transparent — you can read the index and understand what's available
 - Git versioning means knowledge is durable and auditable
 - Pattern is runtime-agnostic — works with Claude Code, gptme, Codex, or custom tooling
+
+## Related
+- [Prefer Brain Repo Over Local Machine Memory](../workflow/prefer-brain-over-local-memory.md) — companion lesson: *where* to put knowledge (brain repo, not local memory). This lesson covers *how* to structure it.
 
 ## Origin
 2026-04-13: Discovered while integrating Claude Code's auto-memory with Alice's git-based brain repo. Claude's memory system is exactly this pattern (MEMORY.md index + detail files with description-based retrieval). Generalized for any LLM knowledge base.
