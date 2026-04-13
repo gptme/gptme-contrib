@@ -45,10 +45,15 @@ Observable signals that this rule applies:
 
 ### Defense-in-depth: hardlink backup
 ```bash
-# Hardlink trajectories to a safe backup path (zero extra disk)
-cp -al ~/.claude/projects/<project-dir>/*.jsonl ~/data/trajectories/claude-code/
+# Hardlink trajectory files (zero extra disk while originals exist)
+cp -al ~/.claude/projects/*/*.jsonl ~/data/trajectories/claude-code/
+
+# Hardlink session data dirs (tool-results, hook outputs)
+for d in ~/.claude/projects/*/[0-9a-f][0-9a-f][0-9a-f]*; do
+    [ -d "$d" ] && cp -al "$d" ~/data/trajectories/claude-code/
+done
 ```
-Hardlinks use zero extra disk while originals exist. If originals are ever deleted (by a bug, model suggestion, or future refactor), the backup survives as the sole copy. Run this periodically (e.g. in your cleanup/maintenance timer).
+If originals are ever deleted (by a bug, model suggestion, or future refactor), the hardlinked backups survive as the sole copy. Run this periodically (e.g. in your cleanup/maintenance timer).
 
 ### Claude Code settings.json
 Claude Code's default `cleanupPeriodDays` is low (days/weeks). Set it high to prevent the harness itself from deleting trajectories:
