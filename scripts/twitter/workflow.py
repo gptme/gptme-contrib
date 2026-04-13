@@ -1033,6 +1033,52 @@ def _git_commit_posted(path: Path) -> None:
         )
 
 
+def _check_tweet_urls(draft: "TweetDraft") -> list[str]:
+    """Check URLs in tweet text and thread for 404s and private repo links.
+
+    Returns a list of warning strings (empty if all URLs are OK).
+    """
+    import re
+    import urllib.error
+    import urllib.request
+
+    warnings = []
+    # Private repos that would 404 for unauthenticated users
+    private_repos = ["github.com/ErikBjare/bob", "github.com/ErikBjare/alice"]
+
+    # Collect all text to check
+    texts = [draft.text] + (draft.thread if draft.thread else [])
+
+    # Extract URLs
+    url_pattern = re.compile(r"https?://[^\s>\"']+")
+    for text in texts:
+        for url in url_pattern.findall(text):
+            url = url.rstrip(".,;:!?)")
+
+            # Check for private repo links
+            for private_repo in private_repos:
+                if private_repo in url:
+                    warnings.append(
+                        f"Link to private repo (will 404 for readers): {url}"
+                    )
+                    break
+            else:
+                # Check HTTP status
+                try:
+                    req = urllib.request.Request(url, method="HEAD")
+                    req.add_header("User-Agent", "Mozilla/5.0 (URL checker)")
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        status = resp.status
+                        if status >= 400:
+                            warnings.append(f"URL returns {status}: {url}")
+                except urllib.error.HTTPError as e:
+                    warnings.append(f"URL returns {e.code}: {url}")
+                except Exception:
+                    pass  # Network errors are non-fatal
+
+    return warnings
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
@@ -1080,6 +1126,15 @@ def post(dry_run: bool, yes: bool, draft_id: str | None = None) -> None:
                 )
 
         console.print(f"[white]{draft.text}")
+
+        # Check for broken URLs and private repo links before posting
+        url_warnings = _check_tweet_urls(draft)
+        if url_warnings:
+            for warning in url_warnings:
+                console.print(f"[red]⚠ URL WARNING: {warning}[/red]")
+            console.print(
+                "[yellow]Proceed with caution — fix the URL issues before posting if possible.[/yellow]"
+            )
 
         # Three possible actions:
         # 1. --dry-run: Just show what would happen
