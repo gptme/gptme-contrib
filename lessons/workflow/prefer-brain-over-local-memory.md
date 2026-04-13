@@ -1,14 +1,12 @@
 ---
 match:
   keywords:
-    - memory
-    - remember
-    - save
-    - persist
-    - knowledge
-    - brain
-    - MEMORY.md
     - auto-memory
+    - MEMORY.md
+    - brain repo
+    - claude memory
+    - local memory
+status: active
 ---
 
 # Prefer Brain Repo Over Local Machine Memory
