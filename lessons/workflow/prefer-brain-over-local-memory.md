@@ -15,7 +15,7 @@ status: active
 When an agent has a brain repo (git workspace), persist knowledge there — not in runtime-local memory systems like Claude Code's `~/.claude/projects/*/memory/`.
 
 ## Context
-Claude Code has a local auto-memory system (`MEMORY.md` + memory files) that persists across conversations on the same machine+project. Agents like Alice and Bob have their own git-based brain repos with `knowledge/`, `journal/`, and task systems. The local memory is strictly inferior — it's not versioned, not portable across machines, and invisible to other runtimes.
+Claude Code has a local auto-memory system (`MEMORY.md` + memory files) that persists across conversations on the same machine+project. It has useful retrieval features: an auto-loaded index, description-based relevance matching, and structured frontmatter. But it's not versioned, not portable across machines, and invisible to other runtimes. Agents with git-based brain repos (`knowledge/`, `journal/`, task systems) should use those instead — and the symlink approach below preserves Claude's retrieval while adding git durability.
 
 ## Detection
 Observable signals you're about to make this mistake:
