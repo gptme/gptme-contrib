@@ -22,6 +22,14 @@ from pathlib import Path
 # Link pattern for markdown
 LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
+# Fenced code blocks (``` or ~~~, with optional language tag)
+FENCED_BLOCK_PATTERN = re.compile(
+    r"^(`{3,}|~{3,}).*?\n.*?^\1\s*$", re.MULTILINE | re.DOTALL
+)
+
+# Inline code spans (`...`)
+INLINE_CODE_PATTERN = re.compile(r"`[^`]+`")
+
 # Protocols to skip (URLs)
 SKIP_PROTOCOLS = ("http://", "https://", "ftp://", "mailto:", "#")
 
@@ -38,9 +46,19 @@ def get_repo_root() -> Path:
     return cwd
 
 
+def strip_code(content: str) -> str:
+    """Remove fenced code blocks and inline code spans from content.
+
+    Links inside code are examples, not real references — they should
+    not be checked for existence."""
+    content = FENCED_BLOCK_PATTERN.sub("", content)
+    content = INLINE_CODE_PATTERN.sub("", content)
+    return content
+
+
 def extract_links(content: str) -> list[tuple[str, str]]:
-    """Extract all markdown links from content."""
-    return LINK_PATTERN.findall(content)
+    """Extract all markdown links from content, ignoring code blocks."""
+    return LINK_PATTERN.findall(strip_code(content))
 
 
 def resolve_link(link: str, file_path: Path, repo_root: Path) -> Path | None:
