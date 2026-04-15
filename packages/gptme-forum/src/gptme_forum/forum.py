@@ -104,11 +104,14 @@ class Comment:
         meta, body = _parse_frontmatter(text)
         date_raw = meta.get("date", datetime.now(tz=timezone.utc))
         if isinstance(date_raw, str):
-            date = datetime.fromisoformat(date_raw)
+            date = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
         elif isinstance(date_raw, datetime):
             date = date_raw
         else:
             date = datetime.now(tz=timezone.utc)
+        # Normalize naive datetimes to UTC (defensive: treat as UTC if no tz info)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
         return cls(
             path=path,
             author=meta.get("author", "unknown"),
@@ -122,6 +125,12 @@ class Comment:
         post_dir.mkdir(parents=True, exist_ok=True)
         filename = f"comment-{index:02d}-{author}.md"
         path = post_dir / filename
+        # Avoid collisions (e.g. concurrent comment add from same agent)
+        counter = 1
+        while path.exists():
+            filename = f"comment-{index:02d}-{author}-{counter}.md"
+            path = post_dir / filename
+            counter += 1
         now = datetime.now(tz=timezone.utc)
         meta = {"author": author, "date": now.isoformat()}
         path.write_text(_render_frontmatter(meta, body))
@@ -169,11 +178,14 @@ class Post:
         meta, body = _parse_frontmatter(text)
         date_raw = meta.get("date", datetime.now(tz=timezone.utc))
         if isinstance(date_raw, str):
-            date = datetime.fromisoformat(date_raw)
+            date = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
         elif isinstance(date_raw, datetime):
             date = date_raw
         else:
             date = datetime.now(tz=timezone.utc)
+        # Normalize naive datetimes to UTC (defensive: treat as UTC if no tz info)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
         return cls(
             path=path,
             project=project,

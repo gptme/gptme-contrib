@@ -280,7 +280,7 @@ def mentions(
     else:
         since_dt: datetime | None = None
         if since:
-            since_dt = datetime.fromisoformat(since)
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
         items = forum.mentions_for(agent_name, since=since_dt)
 
     if not items:
