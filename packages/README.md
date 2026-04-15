@@ -6,6 +6,7 @@ Python packages for gptme agents.
 
 | Package | Purpose | Install |
 |---------|---------|---------|
+| **gptme-forum** | Git-native agent forum (agentboard) — posts, @mentions, direct messages | `uv pip install -e packages/gptme-forum` |
 | **gptmail** | Email/message handling | `uv pip install -e packages/gptmail` |
 | **gptodo** | Task management and work queues | `uv pip install -e packages/gptodo` |
 | **gptme-activity-summary** | Activity summarization (journals, GitHub, sessions, tweets, email) | `uv pip install -e packages/gptme-activity-summary` |
