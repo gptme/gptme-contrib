@@ -242,25 +242,45 @@ def load_config() -> Dict[Any, Any]:
 
 def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     """Create prompt for tweet evaluation"""
-    # Include thread context if available
+    # Our handle — default matches twitter.py's TWITTER_EXPECTED_USERNAME default
+    # so the identity-context injection works out-of-the-box in production.
+    twitter_handle = os.environ.get("TWITTER_HANDLE", "TimeToBuildBob")
+    handle_lower = twitter_handle.lower()
+
+    # Include thread context if available. Annotate our own prior messages so
+    # the LLM doesn't read the thread as "two other parties" and conclude the
+    # conversation is already resolved.
     thread_context = ""
+    in_thread = False
     if tweet.get("thread_context"):
         thread_context = "\nConversation Thread:\n"
         for i, t in enumerate(tweet["thread_context"]):
-            thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
+            author = t["author"]
+            is_us = author.lower() == handle_lower
+            if is_us:
+                in_thread = True
+            marker = " (US — our prior message)" if is_us else ""
+            thread_context += f"Tweet {i + 1} - @{author}{marker}: {t['text']}\n"
 
-    # Detect if tweet is a direct mention of our handle
-    twitter_handle = os.environ.get("TWITTER_HANDLE")
+    # Direct mention detection: handle appears in the tweet body itself.
     tweet_text = tweet.get("text", "")
-    is_direct_mention = bool(
-        twitter_handle and f"@{twitter_handle}".lower() in tweet_text.lower()
-    )
-    mention_note = (
-        f"\nIMPORTANT: This tweet directly mentions @{twitter_handle} — that IS our account."
-        f" This tweet is addressed TO us. Evaluate it as relevant to us personally."
-        if is_direct_mention
-        else ""
-    )
+    is_direct_mention = f"@{handle_lower}" in tweet_text.lower()
+
+    # Build identity context. Fire for direct mentions OR when we're in the
+    # thread — both cases need explicit identity to prevent confusion.
+    mention_note = ""
+    if is_direct_mention or in_thread:
+        mention_note = (
+            f"\nIMPORTANT: @{twitter_handle} IS our account — we are @{twitter_handle}."
+        )
+        if is_direct_mention:
+            mention_note += " This tweet is addressed TO us. Evaluate it as relevant to us personally."
+        if in_thread:
+            mention_note += (
+                f" Any prior @{twitter_handle} messages in the thread are OUR own replies;"
+                " their presence does NOT mean the conversation is resolved."
+                " Evaluate whether the most recent message from another party needs our response."
+            )
 
     return f"""Evaluate this tweet for response suitability.
 
@@ -368,7 +388,7 @@ def get_system_prompt() -> Message:
 
     # Create Twitter-specific system prompt
     agent_name = os.environ.get("AGENT_NAME", "Agent")
-    twitter_handle = os.environ.get("TWITTER_HANDLE", "agent")
+    twitter_handle = os.environ.get("TWITTER_HANDLE", "TimeToBuildBob")
     twitter_prompt = f"""You are {agent_name} (@{twitter_handle}), an AI agent who evaluates and responds to tweets.
 Your task is to evaluate tweets and generate appropriate responses while:
 1. Maintaining your established personality (direct, opinionated, occasionally witty)
