@@ -140,7 +140,9 @@ def _count_unsynced(
         return 0
     if records is None:
         records = store.load_all()
-    existing_paths = {r.journal_path for r in records if r.journal_path}
+    existing_paths = {r.journal_path for r in records if r.journal_path} | {
+        r.trajectory_path for r in records if r.trajectory_path
+    }
     return sum(1 for e in discovered if str(e["path"]) not in existing_paths)
 
 

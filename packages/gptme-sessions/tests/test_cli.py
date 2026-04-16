@@ -295,6 +295,35 @@ class TestStatsCommand:
         assert "no records" in out.lower()
         assert "hint" not in out.lower()
 
+    def test_stats_no_matches_no_hint_when_synced_via_trajectory_path(self, tmp_path: Path):
+        """stats shows no hint when discovered sessions are already synced via trajectory_path.
+
+        This is the primary sync workflow: sync writes trajectory_path (not journal_path)
+        on imported records, so _count_unsynced must check both fields.
+        """
+        from unittest.mock import patch
+
+        store = SessionStore(sessions_dir=tmp_path)
+        fake_paths = ["/fake/logs/session1.jsonl", "/fake/logs/session2.jsonl"]
+        for path in fake_paths:
+            r = SessionRecord(
+                harness="claude-code",
+                model="sonnet",
+                run_type="autonomous",
+                category="code",
+                outcome="productive",
+                duration_seconds=600,
+                trajectory_path=path,
+            )
+            store.append(r)
+
+        fake_discovered = [{"harness": "claude-code", "path": Path(p)} for p in fake_paths]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        assert rc == 0
+        assert "no records" in out.lower()
+        assert "hint" not in out.lower(), f"False-positive hint shown:\n{out}"
+
     def test_stats_shows_model_breakdown(self, tmp_path: Path):
         """stats --json includes per-model breakdown."""
         _seed_store(tmp_path)
