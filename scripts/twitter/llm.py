@@ -250,12 +250,14 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
             thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
     # Detect if tweet is a direct mention of our handle
-    twitter_handle = os.environ.get("TWITTER_HANDLE", "agent")
+    twitter_handle = os.environ.get("TWITTER_HANDLE")
     tweet_text = tweet.get("text", "")
-    is_direct_mention = f"@{twitter_handle}" in tweet_text
+    is_direct_mention = bool(
+        twitter_handle and f"@{twitter_handle}".lower() in tweet_text.lower()
+    )
     mention_note = (
         f"\nIMPORTANT: This tweet directly mentions @{twitter_handle} — that IS our account."
-        f" This tweet is addressed TO us. Evaluate it as a message requiring our response."
+        f" This tweet is addressed TO us. Evaluate it as relevant to us personally."
         if is_direct_mention
         else ""
     )
