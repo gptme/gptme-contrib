@@ -814,7 +814,9 @@ def create_list(
 ) -> None:
     """Create a new Twitter list and optionally add initial members.
 
-    Example: ./twitter.py create-list --name "AI Interesting" --add garrytan karpathy NousResearch
+    Requires lists.write OAuth scope (re-authorize with --force-reauth if needed).
+
+    Example: ./twitter.py create-list --name "AI Interesting" --add garrytan --add karpathy --add NousResearch
     """
     client = load_twitter_client(require_auth=True)
 
@@ -850,7 +852,9 @@ def create_list(
                             console.print(f"  [red]User @{username_clean} not found")
                     except tweepy.TweepyException as e:
                         console.print(f"  [red]Error adding @{username_clean}: {e}")
-            console.print(f"\n[dim]Fetch list tweets with: --list-id {list_id}")
+            console.print(
+                f"\n[dim]Fetch list tweets with: timeline --list-id {list_id}"
+            )
         else:
             console.print("[red]Failed to create list")
 
