@@ -281,7 +281,7 @@ class TestStatsCommand:
         assert "no records" in out.lower()
         assert "hint" in out.lower()
         assert "2 session(s) discovered but not synced" in out
-        assert "sync --signals" in out
+        assert "sync" in out
 
     def test_stats_no_matches_no_hint_when_all_synced(self, tmp_path: Path):
         """stats with filter that matches nothing shows no hint when all sessions are synced."""
@@ -323,6 +323,20 @@ class TestStatsCommand:
         assert rc == 0
         assert "no records" in out.lower()
         assert "hint" not in out.lower(), f"False-positive hint shown:\n{out}"
+
+    def test_stats_with_results_shows_unsynced_hint(self, tmp_path: Path):
+        """stats with matching results still shows hint when unsynced sessions exist."""
+        from unittest.mock import patch
+
+        _seed_store(tmp_path)
+        fake_discovered = [
+            {"harness": "claude-code", "path": Path("/fake/new-session.jsonl")},
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats"], tmp_path)
+        assert rc == 0
+        assert "hint" in out.lower()
+        assert "1 session(s) discovered but not synced" in out
 
     def test_stats_shows_model_breakdown(self, tmp_path: Path):
         """stats --json includes per-model breakdown."""
@@ -671,6 +685,8 @@ class TestStatsDefaults:
 
     def test_stats_old_records_no_misleading_fallback(self, tmp_path: Path):
         """stats on store with only old records shows a helpful message, not 'run sync'."""
+        from unittest.mock import patch
+
         store = SessionStore(sessions_dir=tmp_path)
         # Insert a record with a timestamp far in the past (outside the implicit 30d window)
         old_record = SessionRecord(
@@ -679,7 +695,8 @@ class TestStatsDefaults:
             timestamp="2020-01-01T00:00:00+00:00",
         )
         store.append(old_record)
-        rc, out = _invoke(["stats"], tmp_path)
+        with patch("gptme_sessions.cli._discover_all", return_value=[]):
+            rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         # Should NOT tell the user to run sync (misleading — data is already synced)
         assert "sync" not in out.lower()

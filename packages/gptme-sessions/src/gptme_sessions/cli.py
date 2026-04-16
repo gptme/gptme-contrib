@@ -451,11 +451,11 @@ def stats(
             click.echo("No records match your filters.")
             # Check if there are discoverable sessions that haven't been synced yet
             hint_window = since_days if since_days else 30
-            unsynced = _count_unsynced(store, since_days=hint_window)
+            unsynced = _count_unsynced(store, records=records, since_days=hint_window)
             if unsynced > 0:
                 click.echo(
                     f"Hint: {unsynced} session(s) discovered but not synced. "
-                    "Run 'gptme-sessions sync --signals' to import."
+                    "Run 'gptme-sessions sync' to import."
                 )
         elif store.load_all():
             # Records exist but all fall outside the implicit 30-day window
