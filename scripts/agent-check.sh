@@ -32,6 +32,14 @@ fi
 
 STATS_PERIOD="${STATS_PERIOD:-1d}"
 
+# Git's approxidate parser does not understand compact "1d" shorthands.
+# Translate "Xd" → "X days ago" so --since filters correctly scope commits.
+if [[ "$STATS_PERIOD" =~ ^([0-9]+)d$ ]]; then
+    GIT_SINCE="${BASH_REMATCH[1]} days ago"
+else
+    GIT_SINCE="$STATS_PERIOD"
+fi
+
 for entry in $HOSTS; do
     # Parse "name=ssh_target" or just "name"
     if [[ "$entry" == *=* ]]; then
@@ -62,7 +70,8 @@ for entry in $HOSTS; do
     echo ""
 
     # Recent git activity
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$ssh_target" "cd ~/$workspace 2>/dev/null && echo 'Recent commits:' && git log --oneline --since '$STATS_PERIOD' 2>/dev/null | head -5 || echo '  (no git repo)'" 2>/dev/null || echo "  (ssh failed)"
+    # Use GIT_SINCE (git approxidate format) rather than STATS_PERIOD (e.g. "1d" is not understood by git)
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$ssh_target" "cd ~/$workspace 2>/dev/null && echo 'Recent commits:' && git log --oneline --since '${GIT_SINCE}' 2>/dev/null | head -5 || echo '  (no git repo)'" 2>/dev/null || echo "  (ssh failed)"
 
     echo ""
 done
