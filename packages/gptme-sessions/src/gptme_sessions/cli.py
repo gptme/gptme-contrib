@@ -449,14 +449,6 @@ def stats(
         has_filters = any([model, run_type, category, harness, outcome, project, since])
         if has_filters:
             click.echo("No records match your filters.")
-            # Check if there are discoverable sessions that haven't been synced yet
-            hint_window = since_days if since_days else 30
-            unsynced = _count_unsynced(store, records=records, since_days=hint_window)
-            if unsynced > 0:
-                click.echo(
-                    f"Hint: {unsynced} session(s) discovered but not synced. "
-                    "Run 'gptme-sessions sync' to import."
-                )
         elif store.load_all():
             # Records exist but all fall outside the implicit 30-day window
             click.echo(
@@ -468,6 +460,16 @@ def stats(
         if not since:
             click.echo(f"Last {since_days} days (use --since all for all-time):\n")
         format_stats(s)
+    if not as_json:
+        # Check for unsynced sessions regardless of whether stats matched anything —
+        # hint is useful even when results exist (import may add more context).
+        hint_window = since_days if since_days else 30
+        unsynced = _count_unsynced(store, since_days=hint_window)
+        if unsynced > 0:
+            click.echo(
+                f"\nHint: {unsynced} session(s) discovered but not synced. "
+                "Run 'gptme-sessions sync' to import."
+            )
 
 
 # -- runs --------------------------------------------------------------------
