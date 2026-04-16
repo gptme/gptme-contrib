@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -62,8 +63,22 @@ def _load_llm_module() -> types.ModuleType:
 
 
 @pytest.fixture(scope="module")
-def llm_module() -> types.ModuleType:
-    return _load_llm_module()
+def llm_module() -> Generator[types.ModuleType, None, None]:
+    # Track which keys we added so we can remove them after the module-scope fixture
+    _STUB_KEYS = (
+        "gptme",
+        "gptme.llm",
+        "gptme.llm.models",
+        "gptme.dirs",
+        "gptme.message",
+        "gptme.prompts",
+    )
+    pre_existing = {k for k in _STUB_KEYS if k in sys.modules}
+    module = _load_llm_module()
+    yield module
+    for key in _STUB_KEYS:
+        if key not in pre_existing:
+            sys.modules.pop(key, None)
 
 
 @pytest.fixture
@@ -174,12 +189,12 @@ def test_unset_handle_skips_detection(
     assert "IS our account" not in prompt
 
 
-def test_handle_as_substring_does_not_false_match(
+def test_substring_handle_triggers_known_false_positive(
     llm_module: types.ModuleType,
     eval_config: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@TimeToBuildBobby should not match @TimeToBuildBob.
+    """@TimeToBuildBobby triggers the note for @TimeToBuildBob — documented false-positive.
 
     The implementation uses `f'@{handle}'` as the needle, which means a
     longer handle with the short one as a prefix would match. This is a
