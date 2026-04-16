@@ -837,10 +837,15 @@ def create_list(
                     try:
                         user = client.get_user(username=username_clean)
                         if user.data:
-                            client.add_list_member(
+                            resp = client.add_list_member(
                                 list_id, user.data.id, user_auth=_get_user_auth(client)
                             )
-                            console.print(f"  [green]+ @{username_clean}")
+                            if resp.data and resp.data.get("is_member"):
+                                console.print(f"  [green]+ @{username_clean}")
+                            else:
+                                console.print(
+                                    f"  [red]Failed to add @{username_clean} (is_member=False)"
+                                )
                         else:
                             console.print(f"  [red]User @{username_clean} not found")
                     except tweepy.TweepyException as e:
@@ -877,11 +882,17 @@ def list_add(list_id: str, usernames: tuple[str, ...]) -> None:
                 results["errors"].append(username_clean)
                 continue
 
-            client.add_list_member(
+            resp = client.add_list_member(
                 list_id, user.data.id, user_auth=_get_user_auth(client)
             )
-            console.print(f"  [green]+ @{username_clean}")
-            results["added"].append(username_clean)
+            if resp.data and resp.data.get("is_member"):
+                console.print(f"  [green]+ @{username_clean}")
+                results["added"].append(username_clean)
+            else:
+                console.print(
+                    f"  [red]Failed to add @{username_clean} (is_member=False)"
+                )
+                results["errors"].append(username_clean)
 
         except tweepy.TweepyException as e:
             console.print(f"  [red]Error adding @{username_clean}: {e}")
