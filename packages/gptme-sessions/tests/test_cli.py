@@ -258,12 +258,106 @@ class TestStatsCommand:
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
 
+    def test_stats_empty_store_no_duplicate_hint(self, tmp_path: Path):
+        """stats on empty store with discovered sessions shows sync hint exactly once.
+
+        _show_discovery_fallback already prints a sync recommendation; the new
+        _count_unsynced hint must be suppressed in this code path to avoid
+        printing two nearly identical sync suggestions.
+        """
+        from unittest.mock import patch
+
+        SessionStore(sessions_dir=tmp_path)
+        fake_discovered = [
+            {"harness": "claude-code", "path": Path("/fake/session1.jsonl")},
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats"], tmp_path)
+        assert rc == 0
+        # Exactly one sync recommendation — not two
+        assert (
+            out.count("gptme-sessions sync") == 1
+        ), f"Expected exactly one sync recommendation, got:\n{out}"
+
     def test_stats_no_matches_with_filter(self, tmp_path: Path):
         """stats with filter that matches nothing shows appropriate message."""
         _seed_store(tmp_path)
         rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
         assert rc == 0
         assert "no records" in out.lower()
+
+    def test_stats_no_matches_shows_unsynced_hint(self, tmp_path: Path):
+        """stats with filter that matches nothing shows hint when unsynced sessions exist."""
+        from unittest.mock import patch
+
+        _seed_store(tmp_path)
+        # Mock _discover_all to return fake unsynced sessions
+        fake_discovered = [
+            {"harness": "claude-code", "path": Path("/fake/session1.jsonl")},
+            {"harness": "gptme", "path": Path("/fake/session2.jsonl")},
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        assert rc == 0
+        assert "no records" in out.lower()
+        assert "hint" in out.lower()
+        assert "2 session(s) discovered but not synced" in out
+        assert "sync" in out
+
+    def test_stats_no_matches_no_hint_when_all_synced(self, tmp_path: Path):
+        """stats with filter that matches nothing shows no hint when all sessions are synced."""
+        from unittest.mock import patch
+
+        _seed_store(tmp_path)
+        # Mock _discover_all to return empty (nothing to sync)
+        with patch("gptme_sessions.cli._discover_all", return_value=[]):
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        assert rc == 0
+        assert "no records" in out.lower()
+        assert "hint" not in out.lower()
+
+    def test_stats_no_matches_no_hint_when_synced_via_trajectory_path(self, tmp_path: Path):
+        """stats shows no hint when discovered sessions are already synced via trajectory_path.
+
+        This is the primary sync workflow: sync writes trajectory_path (not journal_path)
+        on imported records, so _count_unsynced must check both fields.
+        """
+        from unittest.mock import patch
+
+        store = SessionStore(sessions_dir=tmp_path)
+        fake_paths = ["/fake/logs/session1.jsonl", "/fake/logs/session2.jsonl"]
+        for path in fake_paths:
+            r = SessionRecord(
+                harness="claude-code",
+                model="sonnet",
+                run_type="autonomous",
+                category="code",
+                outcome="productive",
+                duration_seconds=600,
+                trajectory_path=path,
+            )
+            store.append(r)
+
+        fake_discovered = [{"harness": "claude-code", "path": Path(p)} for p in fake_paths]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        assert rc == 0
+        assert "no records" in out.lower()
+        assert "hint" not in out.lower(), f"False-positive hint shown:\n{out}"
+
+    def test_stats_with_results_shows_unsynced_hint(self, tmp_path: Path):
+        """stats with matching results still shows hint when unsynced sessions exist."""
+        from unittest.mock import patch
+
+        _seed_store(tmp_path)
+        fake_discovered = [
+            {"harness": "claude-code", "path": Path("/fake/new-session.jsonl")},
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats"], tmp_path)
+        assert rc == 0
+        assert "hint" in out.lower()
+        assert "1 session(s) discovered but not synced" in out
 
     def test_stats_shows_model_breakdown(self, tmp_path: Path):
         """stats --json includes per-model breakdown."""
@@ -612,6 +706,8 @@ class TestStatsDefaults:
 
     def test_stats_old_records_no_misleading_fallback(self, tmp_path: Path):
         """stats on store with only old records shows a helpful message, not 'run sync'."""
+        from unittest.mock import patch
+
         store = SessionStore(sessions_dir=tmp_path)
         # Insert a record with a timestamp far in the past (outside the implicit 30d window)
         old_record = SessionRecord(
@@ -620,7 +716,8 @@ class TestStatsDefaults:
             timestamp="2020-01-01T00:00:00+00:00",
         )
         store.append(old_record)
-        rc, out = _invoke(["stats"], tmp_path)
+        with patch("gptme_sessions.cli._discover_all", return_value=[]):
+            rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         # Should NOT tell the user to run sync (misleading — data is already synced)
         assert "sync" not in out.lower()
