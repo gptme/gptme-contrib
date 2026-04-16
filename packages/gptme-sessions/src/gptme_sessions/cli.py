@@ -199,7 +199,7 @@ def _parse_since(since: str | None) -> int | None:
 )
 @click.pass_context
 def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
-    """Session tracking and analytics for gptme agents."""
+    """Session tracking and analytics for agents. Supports trajectories from gptme, Claude Code, Codex, and Copilot."""
     ctx.ensure_object(dict)
     ctx.obj["sessions_dir"] = sessions_dir
     if ctx.invoked_subcommand is None:
