@@ -801,6 +801,113 @@ def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
 
 
 @cli.command()
+@click.option("--name", required=True, help="Name of the list to create")
+@click.option("--description", default=None, help="Description of the list")
+@click.option(
+    "--private/--public", default=None, help="Make the list private (default: public)"
+)
+@click.option(
+    "--add", "usernames", multiple=True, help="Username(s) to add to the list"
+)
+def create_list(
+    name: str, description: str | None, private: bool | None, usernames: tuple[str, ...]
+) -> None:
+    """Create a new Twitter list and optionally add initial members.
+
+    Requires lists.write OAuth scope (re-authorize with --force-reauth if needed).
+
+    Example: ./twitter.py create-list --name "AI Interesting" --add garrytan --add karpathy --add NousResearch
+    """
+    client = load_twitter_client(require_auth=True)
+
+    try:
+        response = client.create_list(
+            name=name,
+            description=description,
+            private=private,
+            user_auth=_get_user_auth(client),
+        )
+        if response.data:
+            list_id = response.data.get("id")
+            list_name = response.data.get("name")
+            console.print(f"[green]Created list '{list_name}' (id={list_id})")
+
+            if usernames:
+                console.print(f"[yellow]Adding {len(usernames)} member(s)...")
+                for username in usernames:
+                    username_clean = username.lstrip("@")
+                    try:
+                        user = client.get_user(username=username_clean)
+                        if user.data:
+                            resp = client.add_list_member(
+                                list_id, user.data.id, user_auth=_get_user_auth(client)
+                            )
+                            if resp.data and resp.data.get("is_member"):
+                                console.print(f"  [green]+ @{username_clean}")
+                            else:
+                                console.print(
+                                    f"  [red]Failed to add @{username_clean} (is_member=False)"
+                                )
+                        else:
+                            console.print(f"  [red]User @{username_clean} not found")
+                    except tweepy.TweepyException as e:
+                        console.print(f"  [red]Error adding @{username_clean}: {e}")
+            console.print(
+                f"\n[dim]Fetch list tweets with: timeline --list-id {list_id}"
+            )
+        else:
+            console.print("[red]Failed to create list")
+
+    except tweepy.TweepyException as e:
+        console.print(f"[red]Error creating list: {e}")
+
+
+@cli.command()
+@click.argument("list_id")
+@click.option(
+    "--user", "usernames", multiple=True, required=True, help="Username(s) to add"
+)
+def list_add(list_id: str, usernames: tuple[str, ...]) -> None:
+    """Add one or more members to an existing list.
+
+    Example: ./twitter.py list-add 123456789 --user garrytan --user karpathy
+    """
+    client = load_twitter_client(require_auth=True)
+
+    console.print(f"[yellow]Adding {len(usernames)} member(s) to list {list_id}...")
+    results: dict[str, list[str]] = {"added": [], "errors": []}
+
+    for username in usernames:
+        username_clean = username.lstrip("@")
+        try:
+            user = client.get_user(username=username_clean)
+            if not user.data:
+                console.print(f"  [red]User @{username_clean} not found")
+                results["errors"].append(username_clean)
+                continue
+
+            resp = client.add_list_member(
+                list_id, user.data.id, user_auth=_get_user_auth(client)
+            )
+            if resp.data and resp.data.get("is_member"):
+                console.print(f"  [green]+ @{username_clean}")
+                results["added"].append(username_clean)
+            else:
+                console.print(
+                    f"  [red]Failed to add @{username_clean} (is_member=False)"
+                )
+                results["errors"].append(username_clean)
+
+        except tweepy.TweepyException as e:
+            console.print(f"  [red]Error adding @{username_clean}: {e}")
+            results["errors"].append(username_clean)
+
+    console.print(
+        f"\n[bold]Summary:[/bold] added={len(results['added'])}, errors={len(results['errors'])}"
+    )
+
+
+@cli.command()
 @click.argument("username")
 @click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
 @click.option(
