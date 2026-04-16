@@ -9,7 +9,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from gptme_sessions.discovery import decode_cc_project_path, discover_cc_sessions
+from gptme_sessions.discovery import (
+    CC_MIN_SESSION_SIZE,
+    decode_cc_project_path,
+    discover_cc_sessions,
+)
 from gptme_sessions.signals import extract_usage_cc, parse_trajectory
 
 from .session_data import SessionInfo, SessionStats, _aggregate_session
@@ -75,15 +79,20 @@ def fetch_cc_session_stats_range(
     start,
     end,
     cc_dir: Path | None = None,
+    min_size: int = CC_MIN_SESSION_SIZE,
 ) -> SessionStats:
     """Fetch aggregated CC session stats for a date range.
 
     Uses gptme-sessions for directory discovery and token extraction.
     Handles CC-specific metadata (workspace, interactive, timestamps) locally.
+
+    *min_size* is passed to :func:`~gptme_sessions.discovery.discover_cc_sessions`
+    to skip stub session files.  Pass ``min_size=0`` in tests to bypass the
+    size filter when working with small synthetic JSONL files.
     """
     stats = SessionStats(start_date=start, end_date=end)
 
-    for jsonl_file in discover_cc_sessions(start, end, cc_dir):
+    for jsonl_file in discover_cc_sessions(start, end, cc_dir, min_size=min_size):
         msgs = parse_trajectory(jsonl_file)
 
         # Token usage via gptme-sessions
