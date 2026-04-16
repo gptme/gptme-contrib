@@ -169,24 +169,104 @@ def test_case_insensitive_handle_match(
     assert "IS our account" in prompt
 
 
-def test_unset_handle_skips_detection(
+def test_unset_handle_uses_default_and_unrelated_mention_skipped(
     llm_module: types.ModuleType,
     eval_config: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When TWITTER_HANDLE is unset, detection must be skipped entirely.
+    """When TWITTER_HANDLE is unset, the module default 'TimeToBuildBob' is used.
 
-    Regression guard for review feedback: the original code used a fallback
-    default 'agent', which would cause false non-matches on tweets mentioning
-    @agent. The fix removed that default — with no env var, no note is added.
+    A tweet mentioning an unrelated handle (@agent) still gets no identity note
+    because the default handle is 'TimeToBuildBob', not 'agent'. This guards
+    against false positives when the env var isn't explicitly configured
+    (the common production case — see ErikBjare/bob#602 follow-up).
     """
     monkeypatch.delenv("TWITTER_HANDLE", raising=False)
-    # Tweet that would have matched the old default handle 'agent'
+    # Tweet mentioning an unrelated handle
     tweet = _base_tweet("@agent can you help with this?")
 
     prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
 
     assert "IS our account" not in prompt
+
+
+def test_unset_handle_default_fires_on_timetobuildbob_mention(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With TWITTER_HANDLE unset, the default 'TimeToBuildBob' still triggers detection.
+
+    Regression guard for ErikBjare/bob#602 follow-up: production was missing
+    TWITTER_HANDLE env var, so the fix from #663 never fired. The default
+    ensures identity injection works out-of-the-box even without env config.
+    """
+    monkeypatch.delenv("TWITTER_HANDLE", raising=False)
+    tweet = _base_tweet("@TimeToBuildBob is your timeline monitoring working?")
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "IS our account" in prompt
+    assert "@TimeToBuildBob" in prompt
+
+
+def test_our_handle_in_thread_context_triggers_identity_note(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When our handle appears as a thread author, inject identity context.
+
+    Regression guard for ErikBjare/bob#602: the LLM saw a thread where
+    @TimeToBuildBob had already replied and concluded the conversation was
+    "a resolved technical issue between two other parties" — completely
+    missing that @TimeToBuildBob IS us. The eval prompt must mark our prior
+    messages and explain that their presence doesn't mean the thread is done.
+    """
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "text": "Doesn't seem to be working?",
+        "author": "ErikBjare",
+        "context": {},
+        "thread_context": [
+            {"author": "TimeToBuildBob", "text": "Here's my original tweet"},
+            {"author": "ErikBjare", "text": "404 link"},
+            {"author": "TimeToBuildBob", "text": "Corrected URL"},
+        ],
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    # Identity note fires because we're in the thread (even though the current
+    # tweet text doesn't contain @TimeToBuildBob)
+    assert "IS our account" in prompt
+    # Our prior messages are explicitly marked
+    assert "(US — our prior message)" in prompt
+    # Explain that prior replies don't mean the conversation is resolved
+    assert "does NOT mean the conversation is resolved" in prompt
+
+
+def test_thread_context_without_us_does_not_trigger(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread without our handle among authors should not trigger identity note."""
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "text": "Interesting thread",
+        "author": "SomeUser",
+        "context": {},
+        "thread_context": [
+            {"author": "OtherUserA", "text": "Original"},
+            {"author": "OtherUserB", "text": "Reply"},
+        ],
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "IS our account" not in prompt
+    assert "(US — our prior message)" not in prompt
 
 
 def test_substring_handle_triggers_known_false_positive(
