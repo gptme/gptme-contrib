@@ -443,6 +443,7 @@ def stats(
         project=project,
     )
     s = store.stats(records)
+    showed_fallback = False
     if as_json:
         click.echo(json.dumps(s, indent=2))
     elif s.get("total", 0) == 0:
@@ -456,13 +457,15 @@ def stats(
             )
         else:
             _show_discovery_fallback(since_days=30)
+            showed_fallback = True
     else:
         if not since:
             click.echo(f"Last {since_days} days (use --since all for all-time):\n")
         format_stats(s)
-    if not as_json:
+    if not as_json and not showed_fallback:
         # Check for unsynced sessions regardless of whether stats matched anything —
         # hint is useful even when results exist (import may add more context).
+        # Skip when _show_discovery_fallback already printed a sync recommendation.
         hint_window = since_days if since_days else 30
         unsynced = _count_unsynced(store, since_days=hint_window)
         if unsynced > 0:

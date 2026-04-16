@@ -258,6 +258,27 @@ class TestStatsCommand:
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
 
+    def test_stats_empty_store_no_duplicate_hint(self, tmp_path: Path):
+        """stats on empty store with discovered sessions shows sync hint exactly once.
+
+        _show_discovery_fallback already prints a sync recommendation; the new
+        _count_unsynced hint must be suppressed in this code path to avoid
+        printing two nearly identical sync suggestions.
+        """
+        from unittest.mock import patch
+
+        SessionStore(sessions_dir=tmp_path)
+        fake_discovered = [
+            {"harness": "claude-code", "path": Path("/fake/session1.jsonl")},
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats"], tmp_path)
+        assert rc == 0
+        # Exactly one sync recommendation — not two
+        assert (
+            out.count("gptme-sessions sync") == 1
+        ), f"Expected exactly one sync recommendation, got:\n{out}"
+
     def test_stats_no_matches_with_filter(self, tmp_path: Path):
         """stats with filter that matches nothing shows appropriate message."""
         _seed_store(tmp_path)
