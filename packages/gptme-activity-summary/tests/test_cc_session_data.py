@@ -101,7 +101,9 @@ def test_empty_session_filtered(tmp_path):
     _make_session_jsonl(tmp_path, "-home-bob-bob", "empty-sess", empty_msgs)
     _make_session_jsonl(tmp_path, "-home-bob-bob", "real-sess", real_msgs)
 
-    stats = fetch_cc_session_stats_range(date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path)
+    stats = fetch_cc_session_stats_range(
+        date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path, min_size=0
+    )
     assert stats.session_count == 1  # only the real session
     assert stats.total_input_tokens == 100
 
@@ -129,14 +131,18 @@ def test_fetch_cc_session_stats_range(tmp_path):
     _make_session_jsonl(tmp_path, "-home-bob-bob", "sess-b", messages_16)
 
     # Query just Feb 17
-    stats = fetch_cc_session_stats_range(date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path)
+    stats = fetch_cc_session_stats_range(
+        date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path, min_size=0
+    )
     assert stats.session_count == 1
     assert stats.total_input_tokens == 1000
     assert stats.total_output_tokens == 500
     assert "claude-opus-4-6" in stats.models_used
 
     # Query full range
-    stats_all = fetch_cc_session_stats_range(date(2026, 2, 16), date(2026, 2, 17), cc_dir=tmp_path)
+    stats_all = fetch_cc_session_stats_range(
+        date(2026, 2, 16), date(2026, 2, 17), cc_dir=tmp_path, min_size=0
+    )
     assert stats_all.session_count == 2
     assert stats_all.total_input_tokens == 1200
     assert "claude-opus-4-6" in stats_all.models_used
@@ -172,7 +178,9 @@ def test_multiple_projects(tmp_path):
     _make_session_jsonl(tmp_path, "-home-bob-bob", "sess-1", messages_a)
     _make_session_jsonl(tmp_path, "-home-bob-other", "sess-2", messages_b)
 
-    stats = fetch_cc_session_stats_range(date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path)
+    stats = fetch_cc_session_stats_range(
+        date(2026, 2, 17), date(2026, 2, 17), cc_dir=tmp_path, min_size=0
+    )
     assert stats.session_count == 2
     assert stats.total_input_tokens == 300
     assert stats.total_output_tokens == 150
