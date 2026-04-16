@@ -265,6 +265,36 @@ class TestStatsCommand:
         assert rc == 0
         assert "no records" in out.lower()
 
+    def test_stats_no_matches_shows_unsynced_hint(self, tmp_path: Path):
+        """stats with filter that matches nothing shows hint when unsynced sessions exist."""
+        from unittest.mock import patch
+
+        _seed_store(tmp_path)
+        # Mock _discover_all to return fake unsynced sessions
+        fake_discovered = [
+            {"harness": "claude-code", "path": Path("/fake/session1.jsonl")},
+            {"harness": "gptme", "path": Path("/fake/session2.jsonl")},
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=fake_discovered):
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        assert rc == 0
+        assert "no records" in out.lower()
+        assert "hint" in out.lower()
+        assert "2 session(s) discovered but not synced" in out
+        assert "sync --signals" in out
+
+    def test_stats_no_matches_no_hint_when_all_synced(self, tmp_path: Path):
+        """stats with filter that matches nothing shows no hint when all sessions are synced."""
+        from unittest.mock import patch
+
+        _seed_store(tmp_path)
+        # Mock _discover_all to return empty (nothing to sync)
+        with patch("gptme_sessions.cli._discover_all", return_value=[]):
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        assert rc == 0
+        assert "no records" in out.lower()
+        assert "hint" not in out.lower()
+
     def test_stats_shows_model_breakdown(self, tmp_path: Path):
         """stats --json includes per-model breakdown."""
         _seed_store(tmp_path)
