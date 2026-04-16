@@ -1,7 +1,8 @@
-"""gptme-sessions — session tracking and analytics for gptme agents.
+"""gptme-sessions — session tracking and analytics for agents.
 
+Supports trajectories from gptme, Claude Code, Codex, and Copilot.
 Provides append-only JSONL-based session records with query, stats,
-and analytics capabilities. Designed for any gptme agent to track
+and analytics capabilities. Designed for any agent to track
 operational metadata across sessions.
 
 Usage:
