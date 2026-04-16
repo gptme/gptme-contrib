@@ -188,6 +188,9 @@ def discover_gptme_sessions(
     Scans ``~/.local/share/gptme/logs/`` (or ``GPTME_LOGS_DIR``) for
     directories whose name starts with an ISO date in ``[start, end]``.
 
+    Eval sessions (``gptme-evals-*``) are excluded — these are automated
+    benchmark runs that should not count as real agent work sessions.
+
     Returns sorted list of session directory paths.
     """
     if logs_dir is None:
@@ -201,6 +204,11 @@ def discover_gptme_sessions(
         for entry in sorted(logs_dir.iterdir()):
             if not entry.is_dir():
                 continue
+            # Skip eval benchmark sessions — they are not real work sessions
+            # and inflate NOOP counts when synced into session records.
+            name_after_date = entry.name[11:]  # strip YYYY-MM-DD- prefix
+            if name_after_date.startswith("gptme-evals-"):
+                continue
             if _session_in_range(entry.name, start, end):
                 sessions.append(entry)
     except PermissionError:
@@ -208,16 +216,28 @@ def discover_gptme_sessions(
     return sessions
 
 
+# Minimum file size for CC sessions to filter out stub sessions.
+# CC creates ~2.8KB metadata-only stubs for sessions that never got an
+# assistant response (e.g. cancelled before first reply, permission prompts
+# that were declined).  These contain only permission-mode, system prompts,
+# and user messages — no actual work.  Counting them inflates NOOP rates.
+CC_MIN_SESSION_SIZE = 4096  # bytes
+
+
 def discover_cc_sessions(
     start: date,
     end: date,
     cc_dir: Path | None = None,
+    min_size: int = CC_MIN_SESSION_SIZE,
 ) -> list[Path]:
     """Find Claude Code session JSONL files within a date range.
 
     Scans ``~/.claude/projects/`` (or ``CLAUDE_HOME/projects/``) for
     session ``.jsonl`` files. Uses quick first-line timestamp extraction
     for fast date filtering.
+
+    Files smaller than *min_size* bytes are skipped — these are typically
+    stub sessions that never received an assistant response.
 
     Returns sorted list of session JSONL file paths.
     """
@@ -233,6 +253,9 @@ def discover_cc_sessions(
             if not project_dir.is_dir():
                 continue
             for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+                # Skip stub sessions (metadata-only, no assistant response)
+                if min_size > 0 and jsonl_file.stat().st_size < min_size:
+                    continue
                 session_date = _quick_date_from_jsonl(jsonl_file)
                 if session_date is None:
                     continue

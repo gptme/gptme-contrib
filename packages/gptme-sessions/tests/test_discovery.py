@@ -220,6 +220,21 @@ def test_discover_gptme_sessions_nonexistent(tmp_path: Path) -> None:
     assert result == []
 
 
+def test_discover_gptme_sessions_excludes_evals(tmp_path: Path) -> None:
+    """Eval benchmark sessions (gptme-evals-*) are excluded from discovery."""
+    # Real session
+    (tmp_path / "2026-03-05-dancing-blue-fish").mkdir()
+    # Eval sessions — should be excluded
+    (tmp_path / "2026-03-05-gptme-evals-anthropic--claude-sonnet-4-6-tool-abc123").mkdir()
+    (
+        tmp_path / "2026-03-05-gptme-evals-openrouter--anthropic--claude-haiku-4-5-tool-def456"
+    ).mkdir()
+
+    result = discover_gptme_sessions(date(2026, 3, 5), date(2026, 3, 5), logs_dir=tmp_path)
+    assert len(result) == 1
+    assert result[0].name == "2026-03-05-dancing-blue-fish"
+
+
 # --- discover_cc_sessions ---
 
 
@@ -242,7 +257,7 @@ def test_discover_cc_sessions(tmp_path: Path) -> None:
     _make_cc_session(project, "session3", "2026-03-05T14:00:00Z")
     _make_cc_session(project, "session4", "2026-03-06T09:00:00Z")
 
-    result = discover_cc_sessions(date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path)
+    result = discover_cc_sessions(date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path, min_size=0)
     assert len(result) == 2
     names = [p.stem for p in result]
     assert "session2" in names
@@ -260,7 +275,7 @@ def test_discover_cc_sessions_multi_project(tmp_path: Path) -> None:
     _make_cc_session(proj_b, "s2", "2026-03-05T11:00:00Z")
     _make_cc_session(proj_b, "s3", "2026-03-04T11:00:00Z")  # out of range
 
-    result = discover_cc_sessions(date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path)
+    result = discover_cc_sessions(date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path, min_size=0)
     assert len(result) == 2
 
 
@@ -269,6 +284,47 @@ def test_discover_cc_sessions_nonexistent(tmp_path: Path) -> None:
         date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path / "nonexistent"
     )
     assert result == []
+
+
+def test_discover_cc_sessions_filters_stubs(tmp_path: Path) -> None:
+    """Stub sessions (<4KB) are excluded by default; real sessions are kept."""
+    from gptme_sessions.discovery import CC_MIN_SESSION_SIZE
+
+    project = tmp_path / "-home-bob-bob"
+    project.mkdir()
+
+    # Create a stub session (small file, <4KB) — should be filtered
+    stub = _make_cc_session(project, "stub-session", "2026-03-05T10:00:00Z")
+    assert stub.stat().st_size < CC_MIN_SESSION_SIZE  # sanity check
+
+    # Create a real session (padded above threshold)
+    real = project / "real-session.jsonl"
+    line = json.dumps(
+        {"type": "user", "timestamp": "2026-03-05T12:00:00Z", "message": {"content": "hi"}}
+    )
+    # Pad with enough assistant lines to exceed 4KB
+    padding_line = json.dumps(
+        {
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": [{"type": "text", "text": "x" * 200}],
+            }
+        }
+    )
+    real.write_text((line + "\n") + (padding_line + "\n") * 20)
+    assert real.stat().st_size >= CC_MIN_SESSION_SIZE  # sanity check
+
+    # Default min_size: stub excluded, real included
+    result = discover_cc_sessions(date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path)
+    assert len(result) == 1
+    assert result[0].stem == "real-session"
+
+    # With min_size=0: both included
+    result_all = discover_cc_sessions(
+        date(2026, 3, 5), date(2026, 3, 5), cc_dir=tmp_path, min_size=0
+    )
+    assert len(result_all) == 2
 
 
 # --- discover_codex_sessions ---
