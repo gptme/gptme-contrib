@@ -174,7 +174,10 @@ def _show_discovery_fallback(since_days: int = 30) -> None:
 
 
 def _parse_since(since: str | None) -> int | None:
-    """Parse a --since value like '7d', '30', or 'all' into days (None = no filter)."""
+    """Parse a --since value like '7d', '1h', '30', or 'all' into days (None = no filter).
+
+    Hours are converted to days (minimum 1 day for store queries).
+    """
     if not since:
         return None
     if since.lower() == "all":
@@ -182,10 +185,14 @@ def _parse_since(since: str | None) -> int | None:
     try:
         if since.endswith("d"):
             return int(since[:-1])
+        if since.endswith("h"):
+            import math
+
+            return max(1, math.ceil(int(since[:-1]) / 24))
         return int(since)
     except ValueError:
         raise click.BadParameter(
-            f"invalid value {since!r} (expected e.g. 7d, 30d, or 'all')",
+            f"invalid value {since!r} (expected e.g. 1h, 7d, 30d, or 'all')",
             param_hint="'--since'",
         )
 
