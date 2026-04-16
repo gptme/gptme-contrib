@@ -135,7 +135,7 @@ APPROVED_DIR = TWEETS_DIR / "approved"
 POSTED_DIR = TWEETS_DIR / "posted"
 REJECTED_DIR = TWEETS_DIR / "rejected"
 CACHE_DIR = TWEETS_DIR / "cache"
-MAX_POSTS_PER_CYCLE = 5  # Rate limit to prevent mass posting in auto mode
+MAX_POSTS_PER_CYCLE = 2  # Rate limit to prevent mass posting in auto mode
 
 # Ensure directories exist
 for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR, CACHE_DIR]:
@@ -1037,8 +1037,20 @@ def _git_commit_posted(path: Path) -> None:
 @click.option("--dry-run", is_flag=True, help="Don't actually post tweets")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--draft-id", help="Post a specific draft by ID or path")
-def post(dry_run: bool, yes: bool, draft_id: str | None = None) -> None:
+@click.option(
+    "--max-posts",
+    default=None,
+    type=int,
+    help=f"Max tweets to post in one run (default: {MAX_POSTS_PER_CYCLE} when --yes is used, unlimited otherwise)",
+)
+def post(
+    dry_run: bool, yes: bool, draft_id: str | None = None, max_posts: int | None = None
+) -> None:
     """Post approved tweets"""
+    # Apply rate limit: default to MAX_POSTS_PER_CYCLE when running non-interactively (--yes)
+    if max_posts is None and yes and not draft_id:
+        max_posts = MAX_POSTS_PER_CYCLE
+
     # If a specific draft ID is provided, find only that draft
     if draft_id:
         draft_path = find_draft(draft_id, "approved")
@@ -1054,7 +1066,14 @@ def post(dry_run: bool, yes: bool, draft_id: str | None = None) -> None:
 
     client = load_twitter_client(require_auth=True)
 
+    posts_this_run = 0
     for path in drafts:
+        if max_posts is not None and posts_this_run >= max_posts:
+            console.print(
+                f"[yellow]Post rate limit reached ({max_posts}/run), remaining drafts will be posted next time"
+            )
+            break
+
         draft = TweetDraft.load(path)
 
         # Skip if scheduled for later
@@ -1108,6 +1127,7 @@ def post(dry_run: bool, yes: bool, draft_id: str | None = None) -> None:
                     _post_tweet_with_thread(client, draft, tweet_id)
 
                     move_draft(path, "posted")
+                    posts_this_run += 1
                 else:
                     console.print("[red]Error: No response data from tweet creation")
             except Exception as e:
