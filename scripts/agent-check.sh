@@ -50,18 +50,19 @@ for entry in $HOSTS; do
     workspace="$host"
 
     # Claude usage (optional — only if script exists)
-    ssh "$ssh_target" "cd ~/$workspace 2>/dev/null && test -f ./scripts/check-claude-usage.sh && ./scripts/check-claude-usage.sh 2>/dev/null || test -f ./gptme-contrib/scripts/check-claude-usage.sh && ./gptme-contrib/scripts/check-claude-usage.sh 2>/dev/null || echo '  (no claude usage script found)'" 2>/dev/null || echo "  (ssh failed)"
+    # Use if/elif to avoid double-execution if the first script is found but exits non-zero
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$ssh_target" "cd ~/$workspace 2>/dev/null; if test -f ./scripts/check-claude-usage.sh; then ./scripts/check-claude-usage.sh 2>/dev/null; elif test -f ./gptme-contrib/scripts/check-claude-usage.sh; then ./gptme-contrib/scripts/check-claude-usage.sh 2>/dev/null; else echo '  (no claude usage script found)'; fi" 2>/dev/null || echo "  (ssh failed)"
 
     echo ""
 
     # Session stats via gptme-sessions
     # First try sync to pick up any new sessions, then show stats
-    ssh "$ssh_target" "cd ~/$workspace 2>/dev/null && \$HOME/.local/bin/uv tool run gptme-sessions sync --since $STATS_PERIOD --signals 2>/dev/null | tail -1; \$HOME/.local/bin/uv tool run gptme-sessions stats --since $STATS_PERIOD 2>/dev/null || echo '  (gptme-sessions not available)'" 2>/dev/null || echo "  (ssh failed)"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$ssh_target" "cd ~/$workspace 2>/dev/null && \$HOME/.local/bin/uv tool run gptme-sessions sync --since '$STATS_PERIOD' --signals 2>/dev/null | tail -1; \$HOME/.local/bin/uv tool run gptme-sessions stats --since '$STATS_PERIOD' 2>/dev/null || echo '  (gptme-sessions not available)'" 2>/dev/null || echo "  (ssh failed)"
 
     echo ""
 
     # Recent git activity
-    ssh "$ssh_target" "cd ~/$workspace 2>/dev/null && echo 'Recent commits:' && git log --oneline --since '$STATS_PERIOD' 2>/dev/null | head -5 || echo '  (no git repo)'" 2>/dev/null || echo "  (ssh failed)"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$ssh_target" "cd ~/$workspace 2>/dev/null && echo 'Recent commits:' && git log --oneline --since '$STATS_PERIOD' 2>/dev/null | head -5 || echo '  (no git repo)'" 2>/dev/null || echo "  (ssh failed)"
 
     echo ""
 done
