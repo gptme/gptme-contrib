@@ -249,12 +249,23 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
         for i, t in enumerate(tweet["thread_context"]):
             thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
+    # Detect if tweet is a direct mention of our handle
+    twitter_handle = os.environ.get("TWITTER_HANDLE", "agent")
+    tweet_text = tweet.get("text", "")
+    is_direct_mention = f"@{twitter_handle}" in tweet_text
+    mention_note = (
+        f"\nIMPORTANT: This tweet directly mentions @{twitter_handle} — that IS our account."
+        f" This tweet is addressed TO us. Evaluate it as a message requiring our response."
+        if is_direct_mention
+        else ""
+    )
+
     return f"""Evaluate this tweet for response suitability.
 
-Tweet: "{tweet["text"]}"
+Tweet: "{tweet_text}"
 Author: @{tweet["author"]}
 Context: {json.dumps(tweet.get("context", {}), indent=2)}
-{thread_context}
+{thread_context}{mention_note}
 
 Evaluation criteria:
 1. Relevance to our topics: {", ".join(config["evaluation"]["topics"])}
