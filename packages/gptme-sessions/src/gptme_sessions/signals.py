@@ -19,6 +19,7 @@ import glob as _glob
 import json
 import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -72,6 +73,20 @@ _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 # Must be command-gated (not just output-gated) because _PR_MERGE_RE patterns
 # can appear in test files, file-read results, and other non-merge contexts.
 _GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
+
+# Regex to extract `--repo OWNER/REPO` from a `gh` command string.
+# Used to learn the target repo for `gh pr merge`/`gh pr view` so we can
+# resolve the server-side merge-commit SHA after a squash merge.
+_GH_REPO_FLAG_RE = re.compile(r"--repo[=\s]+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+
+# Regex to extract the PR number from a `gh pr merge <N>` style command.
+# Lets us attach `pr create` repo context to a later `pr merge` for the same PR
+# when only one side carries `--repo`.
+_GH_PR_MERGE_NUM_RE = re.compile(r"\bgh\s+pr\s+merge\s+(?:--?\S+\s+)*(\d+)")
+
+# Regex to extract owner/repo from a PR URL produced by `gh pr create`.
+# Example: "https://github.com/owner/repo/pull/42" -> ("owner/repo", "42")
+_PR_CREATE_URL_REPO_RE = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 
 # Fine-grained gh interaction regexes — split gh_interactions into signal types.
 # These are detected on the command input side (same as _GH_INTERACTION_RE).
@@ -173,6 +188,58 @@ def _extract_path_from_args(args_str: str) -> str | None:
     """Extract the 'path' field from a tool call's JSON args string."""
     m = re.search(r'"path"\s*:\s*"([^"]+)"', args_str)
     return m.group(1) if m else None
+
+
+def _resolve_merge_shas(pr_merges: list[str], pr_context: dict[int, str]) -> list[str]:
+    """For each 'PR #N' in pr_merges, look up merge commit SHA via gh CLI.
+
+    When a session runs ``gh pr merge --squash``, GitHub creates a new merge
+    commit *server-side*; the session trajectory never observes that SHA. This
+    helper calls ``gh pr view <N> --repo <owner/repo> --json mergeCommit`` after
+    the fact so the SHA can be added to deliverables and thus be reverse-indexed
+    for revert-attribution.
+
+    Returns a list of merge-commit SHAs (full 40-char hex). Silently skips:
+    - PR numbers with no known repo context (no --repo flag, no captured URL)
+    - gh CLI failures (missing binary, network, auth, non-zero exit)
+    - Timeouts
+    - Malformed SHA output (not 40 hex chars)
+    """
+    shas: list[str] = []
+    for pr_merge in pr_merges:
+        m = re.match(r"PR #(\d+)", pr_merge)
+        if not m:
+            continue
+        pr_num = int(m.group(1))
+        repo = pr_context.get(pr_num)
+        if not repo:
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(pr_num),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "mergeCommit",
+                    "-q",
+                    ".mergeCommit.oid",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if result.returncode != 0:
+            continue
+        sha = result.stdout.strip()
+        if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
+            shas.append(sha)
+    return shas
 
 
 def extract_signals(msgs: list[dict]) -> dict:
@@ -442,6 +509,17 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     _ci_failure_found: bool = False  # True when a --log-failed check returned non-empty output
     _pr_merge_pending: set[str] = set()  # tool_use_ids awaiting pr merge result
     _all_direct_commit_hashes: set[str] = set()  # session-wide dedup for git commits
+    # Map PR number → "owner/repo" for post-session gh pr view lookups.
+    # Populated from (a) gh pr create URL output and (b) `--repo` flags on gh pr merge
+    # commands. Used by _resolve_merge_shas to fetch server-side merge-commit SHAs
+    # for squash-merged PRs (which the session never observes directly).
+    pr_context: dict[int, str] = {}
+    # Stash the repo flag extracted from a `gh pr merge` command at dispatch time,
+    # so it can be attributed to the actual PR number when the result is parsed.
+    _pr_merge_repo_by_tool_id: dict[str, str] = {}
+    # PR number extracted from `gh pr merge <N>` command (may be absent if the
+    # command used `gh pr merge` without an explicit number). Keyed by tool_use_id.
+    _pr_merge_num_by_tool_id: dict[str, int] = {}
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -537,6 +615,15 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     if _GH_PR_MERGE_CMD_RE.search(cmd):
                         if tool_id:
                             _pr_merge_pending.add(tool_id)
+                            # Stash repo flag and PR number so the result parser
+                            # can build pr_context (PR# -> owner/repo) for the
+                            # later gh pr view mergeCommit lookup.
+                            repo_m = _GH_REPO_FLAG_RE.search(cmd)
+                            if repo_m:
+                                _pr_merge_repo_by_tool_id[tool_id] = repo_m.group(1)
+                            num_m = _GH_PR_MERGE_NUM_RE.search(cmd)
+                            if num_m:
+                                _pr_merge_num_by_tool_id[tool_id] = int(num_m.group(1))
 
                     # Parse Bash commands for journal writes via cat heredoc redirects.
                     # Many CC sessions write journals via heredoc (cat > path << EOF)
@@ -686,17 +773,39 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # strings. Only credit a merge when the command was `gh pr merge`.
                     if tool_use_id in _pr_merge_pending:
                         _pr_merge_pending.discard(tool_use_id)
+                        repo_for_merge = _pr_merge_repo_by_tool_id.pop(tool_use_id, None)
+                        stashed_num = _pr_merge_num_by_tool_id.pop(tool_use_id, None)
                         for merge_match in _PR_MERGE_RE.finditer(result_str):
                             pr_num = merge_match.group(1)
                             pr_merges.append(f"PR #{pr_num}")
+                            # Prefer repo extracted from the command itself;
+                            # do NOT overwrite context captured earlier from
+                            # the gh pr create URL output.
+                            if repo_for_merge and int(pr_num) not in pr_context:
+                                pr_context[int(pr_num)] = repo_for_merge
+                        # If the command specified a PR number explicitly but the
+                        # output didn't match (rare — silent success format change),
+                        # still record the repo so future sessions can pick it up.
+                        if (
+                            stashed_num is not None
+                            and repo_for_merge
+                            and stashed_num not in pr_context
+                        ):
+                            pr_context[stashed_num] = repo_for_merge
 
                     # gh pr create detection: successful output contains a PR URL.
                     # Only check when this tool_use_id was flagged as a pr create command.
                     if tool_use_id in _pr_create_pending:
                         _pr_create_pending.discard(tool_use_id)
-                        url_match = _PR_CREATE_URL_RE.search(result_str)
-                        if url_match:
-                            prs_submitted.append(f"PR #{url_match.group(1)}")
+                        # Extract PR number AND owner/repo from the URL; the
+                        # owner/repo mapping is used later to look up the server-
+                        # side merge-commit SHA after `gh pr merge`.
+                        repo_match = _PR_CREATE_URL_REPO_RE.search(result_str)
+                        if repo_match:
+                            owner_repo = repo_match.group(1)
+                            pr_num_str = repo_match.group(2)
+                            prs_submitted.append(f"PR #{pr_num_str}")
+                            pr_context[int(pr_num_str)] = owner_repo
 
                     # gh issue close confirmation: count only when result is not an error.
                     # is_error=True is already handled above (continue), so reaching here
@@ -735,7 +844,24 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # Session-level signal (not per-cycle) since most sessions address one CI issue.
     ci_fixed = _ci_failure_found and bool(git_commits)
 
-    # pr_merges entries in deliverables: "merge PR #N" format for readability
+    # Resolve server-side merge-commit SHAs for squash-merged PRs. When a session
+    # runs `gh pr merge --squash`, GitHub creates the merge commit *server-side*
+    # and the session never observes that SHA — so it would be missing from
+    # deliverables and not reverse-indexed for revert attribution. Look it up
+    # via `gh pr view <N> --json mergeCommit` for every detected merge where we
+    # have repo context. Graceful on failure (no gh, network down, auth missing).
+    merge_shas = _resolve_merge_shas(pr_merges, pr_context)
+    for sha in merge_shas:
+        # Label commit message so grep / human-readable audits can tell these
+        # apart from locally-observed commits. The SHA is the load-bearing bit —
+        # that's what the harm-signal reverse index keys on.
+        commit_entry = f"merge-commit ({sha})"
+        if commit_entry not in git_commits:
+            git_commits.append(commit_entry)
+
+    # pr_merges entries in deliverables: "merge PR #N" format for readability.
+    # git_commits now includes any resolved merge SHAs from the loop above, so
+    # they flow into deliverables here without extra bookkeeping.
     deliverables = list(
         dict.fromkeys(git_commits + [f"merge {m}" for m in pr_merges] + file_writes)
     )
