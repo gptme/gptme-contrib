@@ -7,6 +7,7 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
@@ -174,6 +175,11 @@ class SessionRecord:
     llm_judge_reason: str | None = None  # 1-sentence explanation
     llm_judge_model: str | None = None  # model used for judging (e.g. claude-haiku-4-5)
 
+    # Preserve fields written by older schema versions so load→mutate→rewrite
+    # round-trips don't silently drop data (e.g. ``inferred_category``,
+    # ``failure_reason``, ``recommended_confidence``, ``notes``).
+    _legacy_fields: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = str(uuid.uuid4())[:8]
@@ -200,12 +206,23 @@ class SessionRecord:
         return normalize_model(self.model)
 
     def to_dict(self) -> dict:
-        """Serialize to JSON-compatible dict."""
-        return asdict(self)
+        """Serialize to JSON-compatible dict.
+
+        Legacy/unknown fields captured in ``_legacy_fields`` during
+        ``from_dict`` are re-emitted alongside dataclass fields so that
+        load→rewrite cycles preserve them.
+        """
+        d = asdict(self)
+        legacy = d.pop("_legacy_fields", {}) or {}
+        for k, v in legacy.items():
+            # Known fields always win — we only add legacy keys that aren't
+            # already present as first-class fields.
+            d.setdefault(k, v)
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> SessionRecord:
-        """Deserialize from dict, ignoring unknown fields.
+        """Deserialize from dict, preserving unknown fields for round-trip.
 
         Backward compat: old records stored the trajectory path (JSONL file or
         session directory) in ``journal_path`` before ``trajectory_path`` was
@@ -217,9 +234,14 @@ class SessionRecord:
         trajectory path stored by the old ``sync`` command and should be
         migrated — whether it's a ``.jsonl`` file or a bare session directory
         (the latter occurring for gptme sessions that lack ``conversation.jsonl``).
+
+        Any field not defined on the dataclass (e.g. legacy columns from older
+        schema versions) is captured into ``_legacy_fields`` so that subsequent
+        ``to_dict`` / ``rewrite`` calls preserve it.
         """
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known_fields}
+        legacy = {k: v for k, v in data.items() if k not in known_fields and not k.startswith("_")}
         # Migrate legacy records: journal_path that is not a .md file is
         # actually a trajectory path (JSONL or session directory) set by the
         # old sync command before trajectory_path was introduced.
@@ -229,6 +251,8 @@ class SessionRecord:
             and not filtered["journal_path"].endswith(".md")
         ):
             filtered["trajectory_path"] = filtered.pop("journal_path")
+        if legacy:
+            filtered["_legacy_fields"] = legacy
         return cls(**filtered)
 
     def to_json(self) -> str:

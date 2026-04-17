@@ -58,11 +58,49 @@ def test_session_record_serialization():
     assert r2.deliverables == ["abc123"]
 
 
-def test_session_record_from_dict_ignores_unknown():
-    """from_dict drops fields not in the dataclass."""
-    d = {"model": "sonnet", "unknown_field": "should_be_ignored"}
+def test_session_record_from_dict_preserves_unknown_fields():
+    """from_dict captures unknown fields into ``_legacy_fields`` so they
+    survive a subsequent ``to_dict``/rewrite.
+
+    Regression for silent data loss: older schemas wrote fields like
+    ``inferred_category``, ``failure_reason``, and ``recommended_confidence``
+    directly into the JSONL. Round-tripping such records through
+    ``load_all → mutate → rewrite`` previously dropped them.
+    """
+    d = {
+        "session_id": "abc",
+        "model": "sonnet",
+        "inferred_category": "infrastructure",
+        "failure_reason": "timeout",
+        "recommended_confidence": 0.42,
+    }
     r = SessionRecord.from_dict(d)
     assert r.model == "sonnet"
+    # Legacy fields survive round-trip via to_dict.
+    out = r.to_dict()
+    assert out["inferred_category"] == "infrastructure"
+    assert out["failure_reason"] == "timeout"
+    assert out["recommended_confidence"] == 0.42
+    # And via JSON round-trip.
+    reloaded = SessionRecord.from_dict(json.loads(r.to_json()))
+    reloaded_out = reloaded.to_dict()
+    assert reloaded_out["inferred_category"] == "infrastructure"
+    assert reloaded_out["failure_reason"] == "timeout"
+
+
+def test_session_record_to_dict_legacy_never_overrides_known_fields():
+    """A known-field value must win over an identically-keyed legacy entry.
+
+    ``_legacy_fields`` is only intended to cover fields *not* present on the
+    current dataclass — a forged/duplicate key in the legacy dict must not
+    shadow the authoritative dataclass value.
+    """
+    r = SessionRecord(session_id="x", model="sonnet", category="research")
+    # Simulate a legacy dict that (incorrectly) contains a known-field key.
+    r._legacy_fields = {"category": "DO_NOT_USE_ME", "inferred_category": "ok"}
+    out = r.to_dict()
+    assert out["category"] == "research"
+    assert out["inferred_category"] == "ok"
 
 
 def test_session_record_to_json():
@@ -227,6 +265,45 @@ def test_session_store_rewrite(tmp_path: Path):
     reloaded = store.load_all()
     assert len(reloaded) == 2
     assert reloaded[0].category == "code"
+
+
+def test_store_rewrite_preserves_legacy_fields(tmp_path: Path):
+    """rewrite() must not silently drop legacy fields written by older
+    schema versions (e.g. ``inferred_category``, ``failure_reason``).
+
+    This is the end-to-end regression for the silent data-loss path that
+    existed in ``sync --signals`` and ``sync --fix-timestamps``: both
+    mutate records in memory and then ``rewrite()`` them, which
+    previously stripped any field not defined on ``SessionRecord``.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    # Hand-write a record containing legacy fields (simulating an older
+    # store written before the fields were removed from the dataclass).
+    legacy_line = json.dumps(
+        {
+            "session_id": "legacy1",
+            "timestamp": "2026-04-15T10:00:00+00:00",
+            "model": "opus",
+            "outcome": "noop",
+            "inferred_category": "infrastructure",
+            "failure_reason": "timeout",
+            "recommended_confidence": 0.73,
+        }
+    )
+    store.path.write_text(legacy_line + "\n")
+
+    # Load, mutate something unrelated, rewrite.
+    records = store.load_all()
+    assert len(records) == 1
+    records[0].outcome = "productive"  # any mutation
+    store.rewrite(records)
+
+    # Legacy fields must survive the round-trip.
+    raw = json.loads(store.path.read_text().splitlines()[0])
+    assert raw["outcome"] == "productive"
+    assert raw["inferred_category"] == "infrastructure"
+    assert raw["failure_reason"] == "timeout"
+    assert raw["recommended_confidence"] == 0.73
 
 
 def test_store_rewrite_preserves_appended_records(tmp_path: Path):
