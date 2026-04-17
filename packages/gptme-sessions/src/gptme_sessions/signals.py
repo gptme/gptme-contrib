@@ -82,7 +82,10 @@ _GH_REPO_FLAG_RE = re.compile(r"--repo[=\s]+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
 # Regex to extract the PR number from a `gh pr merge <N>` style command.
 # Lets us attach `pr create` repo context to a later `pr merge` for the same PR
 # when only one side carries `--repo`.
-_GH_PR_MERGE_NUM_RE = re.compile(r"\bgh\s+pr\s+merge\s+(?:--?\S+\s+)*(\d+)")
+# The inner group accepts a flag plus an optional space-separated value whose
+# first character is neither `-` (next flag) nor a digit (the PR number), so
+# patterns like `gh pr merge --repo owner/repo 99 --squash` parse correctly.
+_GH_PR_MERGE_NUM_RE = re.compile(r"\bgh\s+pr\s+merge\s+(?:--?\S+(?:\s+[^-\d]\S*)?\s+)*(\d+)")
 
 # Regex to extract owner/repo from a PR URL produced by `gh pr create`.
 # Example: "https://github.com/owner/repo/pull/42" -> ("owner/repo", "42")

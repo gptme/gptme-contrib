@@ -19,6 +19,7 @@ import subprocess
 from unittest.mock import patch
 
 from gptme_sessions.signals import (
+    _GH_PR_MERGE_NUM_RE,
     _resolve_merge_shas,
     extract_signals_cc,
 )
@@ -40,6 +41,28 @@ def _make_mock_run(stdout: str = "", returncode: int = 0):
         )
 
     return _run
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _GH_PR_MERGE_NUM_RE: captures PR number across flag orderings
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_gh_pr_merge_num_re_captures_across_flag_orderings():
+    """Regression for the --repo-before-N ordering flagged by greptile on #677."""
+    cases = [
+        ("gh pr merge 99 --squash", "99"),
+        ("gh pr merge --squash 99", "99"),
+        ("gh pr merge --repo owner/repo 99 --squash", "99"),
+        ("gh pr merge --repo=owner/repo 99 --squash", "99"),
+        ("gh pr merge --squash --repo owner/repo 99", "99"),
+        ("gh pr merge --auto --squash 123", "123"),
+        ("gh pr merge -R owner/repo 45", "45"),
+    ]
+    for cmd, expected in cases:
+        m = _GH_PR_MERGE_NUM_RE.search(cmd)
+        assert m is not None, f"regex did not match: {cmd!r}"
+        assert m.group(1) == expected, f"{cmd!r} → {m.group(1)}, expected {expected}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
