@@ -61,10 +61,6 @@ _GH_INTERACTION_RE = re.compile(
 # work that should boost the session grade comparable to a real commit.
 _PR_CREATE_CMD_RE = re.compile(r"\bgh\s+pr\s+create\b")
 
-# Regex for detecting the PR URL in gh pr create output.
-# Format: "https://github.com/owner/repo/pull/N"
-_PR_CREATE_URL_RE = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)")
-
 # Regex for gh issue close command detection (from Bash input).
 # Tracks explicit issue closures as a forward-progress signal (blocker removal).
 _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
