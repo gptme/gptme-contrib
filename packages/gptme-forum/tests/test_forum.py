@@ -1,5 +1,6 @@
 """Tests for gptme-forum core library."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gptme_forum.forum import Comment, Forum, Post, find_mentions
@@ -137,3 +138,67 @@ def test_forum_list_projects(tmp_path: Path):
     Post.create(forum.project_dir("beta"), "beta", "alice", "T2", "body")
     projs = forum.list_projects()
     assert projs == ["alpha", "beta"]
+
+
+def test_forum_digest_all_time(tmp_path: Path):
+    forum = Forum(tmp_path / "forum")
+    forum.ensure_exists()
+    p1 = Post.create(forum.project_dir("gptme"), "gptme", "alice", "Post 1", "hey @bob")
+    Post.create(forum.project_dir("gptme"), "gptme", "gordon", "Post 2", "nothing")
+    Comment.create(p1.comment_dir, "bob", "Thanks @alice!", index=1)
+
+    data = forum.digest(agent="bob")
+    assert len(data["new_posts"]) == 2
+    assert len(data["new_comments"]) == 1
+    # bob is mentioned in post 1 body
+    assert len(data["mentions"]) == 1
+    item, kind = data["mentions"][0]
+    assert kind == "post"
+    assert isinstance(item, Post)
+
+
+def test_forum_digest_with_since(tmp_path: Path):
+    from datetime import timedelta
+
+    forum = Forum(tmp_path / "forum")
+    forum.ensure_exists()
+    Post.create(forum.project_dir("gptme"), "gptme", "alice", "Old Post", "hey @bob")
+
+    # 'since' set to now — no new posts
+    since = datetime.now(tz=timezone.utc)
+    data = forum.digest(agent="bob", since=since)
+    assert data["new_posts"] == []
+    assert data["new_comments"] == []
+    assert data["mentions"] == []
+
+    # 'since' set to an hour ago — old post is visible
+    data2 = forum.digest(agent="bob", since=since - timedelta(hours=1))
+    assert len(data2["new_posts"]) == 1
+
+
+def test_forum_unread_digest_state_tracking(tmp_path: Path):
+    forum = Forum(tmp_path / "forum")
+    forum.ensure_exists()
+    state_file = tmp_path / "digest-state.txt"
+
+    Post.create(forum.project_dir("gptme"), "gptme", "alice", "Post 1", "hey @bob")
+
+    # First call: sees 1 post
+    data = forum.unread_digest(agent="bob", state_file=state_file)
+    assert len(data["new_posts"]) == 1
+    assert state_file.exists()
+
+    # Second call: state advanced — no new posts
+    data2 = forum.unread_digest(agent="bob", state_file=state_file)
+    assert data2["new_posts"] == []
+
+
+def test_forum_digest_no_agent(tmp_path: Path):
+    forum = Forum(tmp_path / "forum")
+    forum.ensure_exists()
+    Post.create(forum.project_dir("gptme"), "gptme", "alice", "Post 1", "hey @bob")
+
+    # Without agent — posts and comments listed, no mention filtering
+    data = forum.digest()
+    assert len(data["new_posts"]) == 1
+    assert data["mentions"] == []
