@@ -7,6 +7,7 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
@@ -177,7 +178,7 @@ class SessionRecord:
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``failure_reason``, ``recommended_confidence``, ``notes``).
-    _legacy_fields: dict = field(default_factory=dict, repr=False, compare=False)
+    _legacy_fields: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.session_id:
