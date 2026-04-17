@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,8 +60,6 @@ def load_grading_weights() -> dict[str, float]:
         except Exception as e:
             logger.warning("Failed to load grading weights from %s: %s", path, e)
     # Try environment variable for agent workspace
-    import os
-
     agent_path = os.environ.get("AGENT_PATH") or os.environ.get("GPTME_AGENT_PATH")
     if agent_path:
         alt = Path(agent_path) / "state" / "grading-weights.json"
@@ -345,17 +344,10 @@ def post_session(
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
-        # Phase 3: recompute trajectory_grade as weighted combine when multiple
-        # grade dimensions are populated (e.g. alignment from a prior judge run).
-        if len(record.grades) > 1:
-            weights = load_grading_weights()
-            combined = record.apply_weighted_grade(weights)
-            if combined is not None:
-                logger.info(
-                    "Post-session: weighted trajectory_grade=%.3f from dims=%s",
-                    combined,
-                    list(record.grades.keys()),
-                )
+        # NOTE: Weighted multi-dim combine (productivity × alignment × harm)
+        # is handled by compute-harm-signal.py after harm grades are computed.
+        # At post_session time only productivity is available, so there is
+        # nothing to combine yet.
     if journal_path is not None:
         try:
             existing_session_ids = [
