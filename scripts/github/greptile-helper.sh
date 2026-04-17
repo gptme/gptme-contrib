@@ -112,7 +112,7 @@ _greptile_review_info() {
               else {
                 "has_review": true,
                 "reviewed_at": .updated_at,
-                "score": (.body | capture("Score[*:]*\\s*(?<n>[0-9])/5") | .n | tonumber? // null)
+                "score": (.body | [capture("Score[*:]*\\s*(?<n>[0-9])/5")] | if length == 0 then null else .[0].n | tonumber end)
               }
               end' > "$_REVIEW_CACHE_FILE" 2>/dev/null || echo '{"has_review": false, "score": null, "reviewed_at": null}' > "$_REVIEW_CACHE_FILE"
     cat "$_REVIEW_CACHE_FILE"
