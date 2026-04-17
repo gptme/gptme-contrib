@@ -21,6 +21,7 @@ What this function does **not** do (kept in caller scripts):
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,46 @@ from .signals import extract_from_path
 from .store import SessionStore
 
 logger = logging.getLogger(__name__)
+
+#: Default path for grading weights config (Phase 3 multivariate grading).
+_GRADING_WEIGHTS_PATH = (
+    Path(__file__).resolve().parent.parent.parent.parent.parent.parent
+    / "state"
+    / "grading-weights.json"
+)
+
+#: Fallback weights when config file is not found.
+_DEFAULT_WEIGHTS: dict[str, float] = {
+    "productivity": 0.40,
+    "alignment": 0.35,
+    "harm": 0.25,
+}
+
+
+def load_grading_weights() -> dict[str, float]:
+    """Load grading weights from state/grading-weights.json, with fallback."""
+    # Try to find grading-weights.json by walking up from this file
+    path = _GRADING_WEIGHTS_PATH
+    if path.exists():
+        try:
+            data: dict[str, float] = json.loads(path.read_text())
+            return data
+        except Exception as e:
+            logger.warning("Failed to load grading weights from %s: %s", path, e)
+    # Try environment variable for agent workspace
+    import os
+
+    agent_path = os.environ.get("AGENT_PATH") or os.environ.get("GPTME_AGENT_PATH")
+    if agent_path:
+        alt = Path(agent_path) / "state" / "grading-weights.json"
+        if alt.exists():
+            try:
+                alt_data: dict[str, float] = json.loads(alt.read_text())
+                return alt_data
+            except Exception as e:
+                logger.warning("Failed to load grading weights from %s: %s", alt, e)
+    return _DEFAULT_WEIGHTS
+
 
 #: Valid values for the ``context_tier`` parameter.  Exported so ``cli.py``
 #: can use a single source of truth for ``click.Choice``.
@@ -304,6 +345,17 @@ def post_session(
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
+        # Phase 3: recompute trajectory_grade as weighted combine when multiple
+        # grade dimensions are populated (e.g. alignment from a prior judge run).
+        if len(record.grades) > 1:
+            weights = load_grading_weights()
+            combined = record.apply_weighted_grade(weights)
+            if combined is not None:
+                logger.info(
+                    "Post-session: weighted trajectory_grade=%.3f from dims=%s",
+                    combined,
+                    list(record.grades.keys()),
+                )
     if journal_path is not None:
         try:
             existing_session_ids = [

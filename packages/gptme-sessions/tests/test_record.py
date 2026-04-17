@@ -194,6 +194,73 @@ def test_sync_grade_fields_backfills_missing_multivariate_fields():
     assert r.sync_grade_fields() is False
 
 
+# -- compute_trajectory_grade and apply_weighted_grade -----------------------
+
+
+def test_compute_trajectory_grade_basic():
+    """Weighted average uses only dims present in both grades and weights."""
+    from gptme_sessions.record import compute_trajectory_grade
+
+    grades = {"productivity": 0.8, "alignment": 0.6}
+    weights = {"productivity": 0.4, "alignment": 0.35, "harm": 0.25}
+    # harm missing from grades — only productivity + alignment contribute
+    expected = (0.8 * 0.4 + 0.6 * 0.35) / (0.4 + 0.35)
+    assert abs(compute_trajectory_grade(grades, weights) - expected) < 1e-9
+
+
+def test_compute_trajectory_grade_all_dims():
+    """All three dims present — full weighted average."""
+    from gptme_sessions.record import compute_trajectory_grade
+
+    grades = {"productivity": 0.8, "alignment": 0.7, "harm": 1.0}
+    weights = {"productivity": 0.4, "alignment": 0.35, "harm": 0.25}
+    expected = (0.8 * 0.4 + 0.7 * 0.35 + 1.0 * 0.25) / 1.0
+    assert abs(compute_trajectory_grade(grades, weights) - expected) < 1e-9
+
+
+def test_compute_trajectory_grade_no_overlap():
+    """No overlapping dims → returns None."""
+    from gptme_sessions.record import compute_trajectory_grade
+
+    grades = {"novelty": 0.9}
+    weights = {"productivity": 0.5, "harm": 0.5}
+    assert compute_trajectory_grade(grades, weights) is None
+
+
+def test_compute_trajectory_grade_empty_grades():
+    """Empty grades dict → returns None."""
+    from gptme_sessions.record import compute_trajectory_grade
+
+    assert compute_trajectory_grade({}, {"productivity": 1.0}) is None
+
+
+def test_apply_weighted_grade_updates_trajectory_grade():
+    """apply_weighted_grade() updates trajectory_grade and returns the value."""
+    r = SessionRecord(session_id="weighted-test")
+    r.set_productivity_grade(0.8)
+    r.grades["alignment"] = 0.6
+    weights = {"productivity": 0.4, "alignment": 0.35, "harm": 0.25}
+
+    result = r.apply_weighted_grade(weights)
+
+    expected = (0.8 * 0.4 + 0.6 * 0.35) / (0.4 + 0.35)
+    assert result is not None
+    assert abs(result - expected) < 1e-9
+    assert abs(r.trajectory_grade - expected) < 1e-9
+
+
+def test_apply_weighted_grade_no_grades_returns_none():
+    """apply_weighted_grade() with no matching dims returns None without mutating."""
+    r = SessionRecord(session_id="no-weights")
+    r.grades["novelty"] = 0.9
+    weights = {"productivity": 1.0}
+
+    result = r.apply_weighted_grade(weights)
+
+    assert result is None
+    assert r.trajectory_grade is None
+
+
 # -- normalize_model: dot variants and regex fallback ------------------------
 
 

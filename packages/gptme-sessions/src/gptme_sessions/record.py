@@ -122,6 +122,31 @@ def normalize_run_type(raw: str | None) -> str | None:
     return raw
 
 
+def compute_trajectory_grade(
+    grades: dict[str, float],
+    weights: dict[str, float],
+) -> float | None:
+    """Compute a weighted-average trajectory grade from a grades vector.
+
+    Only dimensions present in *both* ``grades`` and ``weights`` contribute.
+    Missing dimensions are excluded from the denominator so their absence
+    doesn't artificially depress the score.
+
+    Returns ``None`` when there are no overlapping dimensions (can't grade).
+
+    Example::
+
+        >>> compute_trajectory_grade({"productivity": 0.8, "alignment": 0.7},
+        ...                          {"productivity": 0.4, "alignment": 0.35, "harm": 0.25})
+        0.7538461538461538
+    """
+    numerator = sum(grades[k] * weights[k] for k in grades if k in weights)
+    denominator = sum(weights[k] for k in grades if k in weights)
+    if denominator == 0.0:
+        return None
+    return numerator / denominator
+
+
 @dataclass
 class SessionRecord:
     """Canonical per-session metadata record.
@@ -210,8 +235,8 @@ class SessionRecord:
 
     def set_productivity_grade(self, score: float) -> None:
         """Store the productivity dimension alongside the legacy scalar field."""
-        self.trajectory_grade = score
         self.grades["productivity"] = score
+        self.trajectory_grade = score
 
     def set_alignment_grade(
         self,
@@ -252,6 +277,19 @@ class SessionRecord:
             self.grade_reasons["alignment"] = self.llm_judge_reason
             changed = True
         return changed
+
+    def apply_weighted_grade(self, weights: dict[str, float]) -> float | None:
+        """Recompute trajectory_grade as a weighted average of populated grade dims.
+
+        Only dims present in both ``self.grades`` and ``weights`` contribute.
+        Missing dims are excluded from the denominator (no penalty for absent signals).
+        Updates ``self.trajectory_grade`` in place and returns the new value.
+        Returns ``None`` when no overlapping dims are found.
+        """
+        result = compute_trajectory_grade(self.grades, weights)
+        if result is not None:
+            self.trajectory_grade = result
+        return result
 
     @property
     def model_normalized(self) -> str | None:
