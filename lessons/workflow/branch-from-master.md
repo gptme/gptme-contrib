@@ -59,7 +59,21 @@ Following this pattern:
 - No rebasing required
 - Matches PR description exactly
 
+## Warning: follow-on push trap
+Branching from `origin/master` sets the new branch's upstream to `origin/master`.
+Under `push.default=upstream`, `git push -u origin BRANCH` then resolves to
+`BRANCH:master` — your feature commit lands on master with no PR.
+
+**Always push feature branches with an explicit refspec:**
+```bash
+git push -u origin my-feature:my-feature
+```
+
+See [Worktree Push Trap](./worktree-push-trap.md) for the full writeup and
+recovery options.
+
 ## Related
+- [Worktree Push Trap](./worktree-push-trap.md) - The follow-on trap this pattern creates
 - [Git Worktree Workflow](./git-worktree-workflow.md) - Worktree management
 - [Git Workflow](./git-workflow.md) - General git practices
 - [When to Rebase PRs](./when-to-rebase-prs.md) - Rebase guidance
