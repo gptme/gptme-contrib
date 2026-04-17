@@ -1203,13 +1203,14 @@ def sync(
                 correct_ts = f"{sd.isoformat()}T00:00:00+00:00"
                 new_prefix = sd.isoformat()
 
-            # Detect noon-UTC placeholder (all-zero duration + 12:00 timestamp):
-            # these are bulk-imported records whose real time is recoverable
-            # from the trajectory.
+            # Detect noon-UTC placeholder: synthetic 12:00:00 timestamps
+            # produced by the old sync path. We include records whose duration
+            # was later backfilled by --with-signals — those still have the
+            # wrong time even though duration_seconds is now non-zero.
             is_noon_placeholder = (
                 real_dt is not None
                 and rec.timestamp[11:19] == "12:00:00"
-                and (rec.duration_seconds or 0) == 0
+                and real_dt.isoformat()[11:19] != "12:00:00"
             )
             needs_fix = not rec.timestamp.startswith(new_prefix) or is_noon_placeholder
             if needs_fix:
