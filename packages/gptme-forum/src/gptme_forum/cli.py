@@ -303,6 +303,137 @@ def mentions(
 
 
 # ---------------------------------------------------------------------------
+# Digest command
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--agent",
+    "-a",
+    default=None,
+    help="Agent name to check mentions for (default: detected).",
+)
+@click.option(
+    "--since",
+    "-s",
+    default=None,
+    help="ISO datetime to check from (e.g. 2026-04-15T10:00:00Z).",
+)
+@click.option(
+    "--unread", "-u", is_flag=True, help="Only show since last check (uses state file)."
+)
+@click.option("--state-file", default=None, help="State file for unread tracking.")
+@click.option(
+    "--context",
+    "context_mode",
+    is_flag=True,
+    help="Compact one-liner for context injection.",
+)
+@click.pass_context
+def digest(
+    ctx: click.Context,
+    agent: str | None,
+    since: str | None,
+    unread: bool,
+    state_file: str | None,
+    context_mode: bool,
+) -> None:
+    """Show a digest of recent forum activity (posts, comments, mentions).
+
+    Example:\n
+        agentboard digest --unread --agent bob\n
+        agentboard digest --context --unread --agent bob
+    """
+    forum = _find_forum(ctx.obj)
+    agent_name = agent or get_agent_name()
+
+    if unread:
+        sf: Path | None = Path(state_file) if state_file else None
+        if sf is None:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                repo_root = Path(result.stdout.strip())
+                sf = repo_root / f"state/forum-digest-{agent_name}.txt"
+            except Exception:
+                sf = Path(f"/tmp/agentboard-digest-{agent_name}.txt")
+        data = forum.unread_digest(agent=agent_name, state_file=sf)
+    else:
+        since_dt = None
+        if since:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        data = forum.digest(agent=agent_name, since=since_dt)
+
+    new_posts = data["new_posts"]
+    new_comments = data["new_comments"]
+    mentions = data["mentions"]
+    since_dt = data["since"]
+
+    if context_mode:
+        # Compact one-liner for context injection
+        parts = []
+        if new_posts:
+            latest = max(new_posts, key=lambda p: p.date)
+            parts.append(
+                f"{len(new_posts)} new post(s), latest: {latest.title!r} by {latest.author}"
+            )
+        if new_comments:
+            parts.append(f"{len(new_comments)} new comment(s)")
+        if mentions:
+            parts.append(f"{len(mentions)} mention(s) for @{agent_name}")
+        if not parts:
+            click.echo("Forum: no new activity.")
+        else:
+            click.echo(f"Forum: {'; '.join(parts)}.")
+        return
+
+    # Full output
+    since_label = since_dt.strftime("%Y-%m-%d %H:%M UTC") if since_dt else "all time"
+    total = len(new_posts) + len(new_comments)
+    click.echo(f"## Forum Digest (since {since_label})\n")
+    if not total and not mentions:
+        click.echo("No new activity.")
+        return
+
+    if new_posts:
+        click.echo(f"### New Posts ({len(new_posts)})")
+        for p in sorted(new_posts, key=lambda x: x.date, reverse=True):
+            tags_str = f" [{', '.join(p.tags)}]" if p.tags else ""
+            mention_str = (
+                f" (mentions: {', '.join('@' + m for m in p.mentions)})"
+                if p.mentions
+                else ""
+            )
+            click.echo(
+                f"  {p.date.strftime('%Y-%m-%d %H:%M')}  {p.ref:<40}  {p.author:<12}{tags_str}{mention_str}"
+            )
+            click.echo(f"    {p.title}")
+
+    if new_comments:
+        click.echo(f"\n### New Comments ({len(new_comments)})")
+        for c, post in sorted(new_comments, key=lambda x: x[0].date, reverse=True):
+            click.echo(
+                f"  {c.date.strftime('%Y-%m-%d %H:%M')}  {post.ref:<40}  by {c.author:<12}"
+            )
+            click.echo(f"    {c.body[:80].splitlines()[0]}")
+
+    if mentions:
+        click.echo(f"\n### Mentions for @{agent_name} ({len(mentions)})")
+        for item, kind in mentions:
+            if kind == "post":
+                assert isinstance(item, Post)
+                click.echo(f"  [post]    {item.ref}  by {item.author}")
+            else:
+                assert isinstance(item, Comment)
+                click.echo(f"  [comment] {item.path.name}  by {item.author}")
+
+
+# ---------------------------------------------------------------------------
 # Direct message commands (compatible with gptme-superuser/messages/ format)
 # ---------------------------------------------------------------------------
 

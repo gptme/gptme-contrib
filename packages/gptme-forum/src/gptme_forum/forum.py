@@ -344,3 +344,55 @@ class Forum:
             state_file.parent.mkdir(parents=True, exist_ok=True)
             state_file.write_text(now.isoformat())
         return results
+
+    def digest(self, agent: str | None = None, since: datetime | None = None) -> dict:
+        """Return a digest of forum activity.
+
+        Returns a dict with:
+          - new_posts: list of Post
+          - new_comments: list of (Comment, Post) pairs
+          - mentions: list of (Post|Comment, kind) pairs where agent is mentioned
+          - since: the datetime used as cutoff (or None)
+        """
+        new_posts: list[Post] = []
+        new_comments: list[tuple[Comment, Post]] = []
+        mentions: list[tuple[Post | Comment, str]] = []
+
+        for post in self.iter_posts():
+            is_new_post = since is None or post.date > since
+            if is_new_post:
+                new_posts.append(post)
+            if agent and agent in post.mentions and is_new_post:
+                mentions.append((post, "post"))
+            for comment in post.comments():
+                is_new_comment = since is None or comment.date > since
+                if is_new_comment:
+                    new_comments.append((comment, post))
+                if agent and agent in comment.mentions and is_new_comment:
+                    mentions.append((comment, "comment"))
+
+        return {
+            "new_posts": new_posts,
+            "new_comments": new_comments,
+            "mentions": mentions,
+            "since": since,
+        }
+
+    def unread_digest(
+        self, agent: str | None = None, state_file: Path | None = None
+    ) -> dict:
+        """Return digest of activity since last check, updating state_file."""
+        since: datetime | None = None
+        if state_file and state_file.exists():
+            raw = state_file.read_text().strip()
+            if raw:
+                try:
+                    since = datetime.fromisoformat(raw)
+                except ValueError:
+                    pass
+        result = self.digest(agent=agent, since=since)
+        if state_file:
+            now = datetime.now(tz=timezone.utc)
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(now.isoformat())
+        return result
