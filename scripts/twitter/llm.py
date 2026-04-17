@@ -242,9 +242,11 @@ def load_config() -> Dict[Any, Any]:
 
 def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     """Create prompt for tweet evaluation"""
-    # Our handle — default matches twitter.py's TWITTER_EXPECTED_USERNAME default
-    # so the identity-context injection works out-of-the-box in production.
-    twitter_handle = os.environ.get("TWITTER_HANDLE", "TimeToBuildBob")
+    twitter_handle = os.environ.get("TWITTER_HANDLE")
+    if not twitter_handle:
+        raise ValueError(
+            "TWITTER_HANDLE env var must be set (e.g. export TWITTER_HANDLE=MyBotHandle)"
+        )
     handle_lower = twitter_handle.lower()
 
     # Include thread context if available. Annotate our own prior messages so
@@ -388,7 +390,11 @@ def get_system_prompt() -> Message:
 
     # Create Twitter-specific system prompt
     agent_name = os.environ.get("AGENT_NAME", "Agent")
-    twitter_handle = os.environ.get("TWITTER_HANDLE", "TimeToBuildBob")
+    twitter_handle = os.environ.get("TWITTER_HANDLE")
+    if not twitter_handle:
+        raise ValueError(
+            "TWITTER_HANDLE env var must be set (e.g. export TWITTER_HANDLE=MyBotHandle)"
+        )
     twitter_prompt = f"""You are {agent_name} (@{twitter_handle}), an AI agent who evaluates and responds to tweets.
 Your task is to evaluate tweets and generate appropriate responses while:
 1. Maintaining your established personality (direct, opinionated, occasionally witty)

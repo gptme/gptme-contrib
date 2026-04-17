@@ -169,45 +169,23 @@ def test_case_insensitive_handle_match(
     assert "IS our account" in prompt
 
 
-def test_unset_handle_uses_default_and_unrelated_mention_skipped(
+def test_unset_handle_raises_value_error(
     llm_module: types.ModuleType,
     eval_config: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When TWITTER_HANDLE is unset, the module default 'TimeToBuildBob' is used.
+    """TWITTER_HANDLE must be explicitly set — no silent default.
 
-    A tweet mentioning an unrelated handle (@agent) still gets no identity note
-    because the default handle is 'TimeToBuildBob', not 'agent'. This guards
-    against false positives when the env var isn't explicitly configured
-    (the common production case — see ErikBjare/bob#602 follow-up).
+    ErikBjare/bob#602: defaulting to 'TimeToBuildBob' makes the script
+    unusable for other agents without an obvious error. Fail loudly instead.
     """
     monkeypatch.delenv("TWITTER_HANDLE", raising=False)
-    # Tweet mentioning an unrelated handle
     tweet = _base_tweet("@agent can you help with this?")
 
-    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+    import pytest as _pytest
 
-    assert "IS our account" not in prompt
-
-
-def test_unset_handle_default_fires_on_timetobuildbob_mention(
-    llm_module: types.ModuleType,
-    eval_config: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With TWITTER_HANDLE unset, the default 'TimeToBuildBob' still triggers detection.
-
-    Regression guard for ErikBjare/bob#602 follow-up: production was missing
-    TWITTER_HANDLE env var, so the fix from #663 never fired. The default
-    ensures identity injection works out-of-the-box even without env config.
-    """
-    monkeypatch.delenv("TWITTER_HANDLE", raising=False)
-    tweet = _base_tweet("@TimeToBuildBob is your timeline monitoring working?")
-
-    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
-
-    assert "IS our account" in prompt
-    assert "@TimeToBuildBob" in prompt
+    with _pytest.raises(ValueError, match="TWITTER_HANDLE"):
+        llm_module.create_tweet_eval_prompt(tweet, eval_config)
 
 
 def test_our_handle_in_thread_context_triggers_identity_note(
@@ -300,7 +278,7 @@ def test_prompt_contains_tweet_text_and_author(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sanity check: the prompt should echo back the tweet text and author."""
-    monkeypatch.delenv("TWITTER_HANDLE", raising=False)
+    monkeypatch.setenv("TWITTER_HANDLE", "TestBot")
     tweet = _base_tweet("a very specific string 17d2g")
     tweet["author"] = "UniqueAuthor17d2g"
 
