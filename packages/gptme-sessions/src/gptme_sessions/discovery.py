@@ -66,8 +66,8 @@ def _session_in_range(session_name: str, start: date, end: date) -> bool:
         return False
 
 
-def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
-    """Extract session date from the first timestamped line of a JSONL file.
+def _quick_datetime_from_jsonl(jsonl_path: Path) -> datetime | None:
+    """Extract session start datetime from the first timestamped line of a JSONL file.
 
     Reads only until the first valid timestamp is found (fast).
     """
@@ -86,13 +86,21 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
                 ts_str = entry.get("timestamp")
                 if ts_str:
                     try:
-                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        return ts.date()
+                        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                     except (ValueError, TypeError):
                         continue
     except (OSError, UnicodeDecodeError) as e:
         logger.debug("Failed to read %s: %s", jsonl_path, e)
     return None
+
+
+def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
+    """Extract session date from the first timestamped line of a JSONL file.
+
+    Reads only until the first valid timestamp is found (fast).
+    """
+    dt = _quick_datetime_from_jsonl(jsonl_path)
+    return dt.date() if dt else None
 
 
 def decode_cc_project_path(encoded: str) -> str:
@@ -340,6 +348,36 @@ def session_date_from_path(harness: str, path: Path) -> date | None:
     else:
         # claude-code, copilot: date is embedded in the JSONL file
         return _quick_date_from_jsonl(path)
+
+
+def session_datetime_from_path(harness: str, path: Path) -> datetime | None:
+    """Extract session start datetime from a discovered session path.
+
+    For **claude-code** and **copilot**, reads the first event timestamp from
+    the JSONL file, yielding a real datetime (not a placeholder).
+    For **gptme** and **codex**, the path structure only encodes a date, so this
+    returns ``None`` unless the session's JSONL can be located and read.
+
+    Callers that need a real start time (e.g. to avoid noon-UTC placeholder
+    timestamps when syncing into the store) should prefer this function over
+    ``session_date_from_path``.
+
+    Returns ``None`` if the datetime cannot be determined.
+    """
+    if harness == "gptme":
+        # path is either the session dir or a .jsonl inside it; try conversation.jsonl
+        jsonl = path if path.suffix == ".jsonl" else path / "conversation.jsonl"
+        if jsonl.is_file():
+            return _quick_datetime_from_jsonl(jsonl)
+        return None
+    elif harness == "codex":
+        # path is at …/YYYY/MM/DD/file.jsonl — read first timestamp if available
+        if path.is_file():
+            return _quick_datetime_from_jsonl(path)
+        return None
+    else:
+        # claude-code, copilot: start time is embedded in the JSONL file
+        return _quick_datetime_from_jsonl(path)
 
 
 def extract_session_name(harness: str, path: Path) -> str | None:

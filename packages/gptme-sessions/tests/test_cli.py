@@ -658,6 +658,56 @@ class TestSyncTimestamp:
             # The timestamp should start with the session date, not today
             assert gptme_records[0].timestamp.startswith("2026-03-10")
 
+    def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
+        """sync should record the real start time, not a noon-UTC placeholder.
+
+        Regression test: previously, every synced Claude Code session landed at
+        YYYY-MM-DDT12:00:00 because sync only had a date, not a datetime.  This
+        collapsed 100+ sessions into a single hour and produced bogus noop
+        spikes in downstream analytics (bandit, inference-review).
+        """
+        # CLAUDE_HOME points at a directory containing a `projects/` subdir
+        claude_home = tmp_path / "cc"
+        proj = claude_home / "projects" / "-home-user-proj"
+        proj.mkdir(parents=True)
+        traj = proj / "abc12345-aaaa-bbbb-cccc-ddddeeeeffff.jsonl"
+        # File must exceed CC_MIN_SESSION_SIZE (4096 bytes) so it isn't filtered
+        # out as a stub session by discover_cc_sessions.
+        lines = [
+            json.dumps({"type": "system", "timestamp": "2026-04-15T22:42:48Z"}),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-04-15T22:43:00Z",
+                    "message": {"role": "assistant", "content": "x" * 5000},
+                }
+            ),
+        ]
+        traj.write_text("\n".join(lines) + "\n")
+
+        store_dir = tmp_path / "store"
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "--sessions-dir",
+                str(store_dir),
+                "sync",
+                "--harness",
+                "claude-code",
+                "--since",
+                "all",
+            ],
+            env={"CLAUDE_HOME": str(claude_home)},
+        )
+        assert result.exit_code == 0
+
+        store = SessionStore(sessions_dir=store_dir)
+        cc_records = [r for r in store.load_all() if r.harness == "claude-code"]
+        assert len(cc_records) == 1
+        # Must preserve the real hour/minute/second — not the noon placeholder
+        assert cc_records[0].timestamp.startswith("2026-04-15T22:42:48")
+
 
 class TestSyncFixTimestamps:
     def test_fix_timestamps_corrects_records(self, tmp_path: Path):
@@ -682,6 +732,83 @@ class TestSyncFixTimestamps:
         # Verify the timestamp was corrected
         records = store.load_all()
         assert records[0].timestamp.startswith("2026-03-10")
+
+    def test_fix_timestamps_restores_real_time_from_trajectory(self, tmp_path: Path):
+        """--fix-timestamps restores the real start time (not noon placeholder).
+
+        Regression test for the noon-UTC placeholder bug: when sync imports a
+        trajectory without extracting its first-event timestamp, every record
+        lands at YYYY-MM-DDT12:00:00 with duration_seconds=0, collapsing the
+        hourly distribution.  --fix-timestamps must detect these placeholders
+        and recover the real start time from the trajectory file.
+        """
+        # Create a real Claude Code trajectory with a non-noon start time
+        traj_dir = tmp_path / "projects" / "-home-user-proj"
+        traj_dir.mkdir(parents=True)
+        traj = traj_dir / "abc12345-0000-0000-0000-000000000000.jsonl"
+        traj.write_text(json.dumps({"type": "system", "timestamp": "2026-04-15T22:42:48Z"}) + "\n")
+
+        # Seed a placeholder record pointing at that trajectory
+        store = SessionStore(sessions_dir=tmp_path / "store")
+        store.append(
+            SessionRecord(
+                harness="claude-code",
+                timestamp="2026-04-15T12:00:00+00:00",  # noon placeholder
+                duration_seconds=0,
+                trajectory_path=str(traj),
+            )
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--sessions-dir", str(tmp_path / "store"), "sync", "--fix-timestamps"],
+        )
+        assert result.exit_code == 0
+        assert "Fixed 1 timestamp" in result.output
+
+        rec = store.load_all()[0]
+        assert rec.timestamp.startswith("2026-04-15T22:42:48")
+
+    def test_fix_timestamps_restores_noon_placeholder_with_backfilled_duration(
+        self, tmp_path: Path
+    ):
+        """--fix-timestamps also repairs noon-placeholders whose duration was backfilled.
+
+        Regression for Greptile P1 on PR #668: records synced before the fix had
+        duration_seconds=0 and noon timestamps. Later sync --with-signals runs
+        populated duration_seconds to a non-zero value. The original detector
+        required duration_seconds == 0, so these already-backfilled records were
+        silently skipped. Detection should key on the synthetic noon timestamp
+        itself, not on duration_seconds.
+        """
+        traj_dir = tmp_path / "projects" / "-home-user-proj"
+        traj_dir.mkdir(parents=True)
+        traj = traj_dir / "def67890-0000-0000-0000-000000000000.jsonl"
+        traj.write_text(json.dumps({"type": "system", "timestamp": "2026-04-15T09:15:22Z"}) + "\n")
+
+        store = SessionStore(sessions_dir=tmp_path / "store")
+        store.append(
+            SessionRecord(
+                harness="claude-code",
+                timestamp="2026-04-15T12:00:00+00:00",  # noon placeholder
+                duration_seconds=1847,  # backfilled by --with-signals
+                trajectory_path=str(traj),
+            )
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--sessions-dir", str(tmp_path / "store"), "sync", "--fix-timestamps"],
+        )
+        assert result.exit_code == 0
+        assert "Fixed 1 timestamp" in result.output
+
+        rec = store.load_all()[0]
+        assert rec.timestamp.startswith("2026-04-15T09:15:22")
+        # Duration preserved — we only fix the timestamp, not the duration.
+        assert rec.duration_seconds == 1847
 
 
 # -- stats defaults ----------------------------------------------------------

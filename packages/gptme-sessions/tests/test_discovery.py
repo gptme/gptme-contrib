@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from gptme_sessions.discovery import (
     _quick_date_from_jsonl,
+    _quick_datetime_from_jsonl,
     _session_in_range,
     decode_cc_project_path,
     discover_cc_sessions,
@@ -20,6 +21,7 @@ from gptme_sessions.discovery import (
     extract_project,
     extract_session_name,
     parse_gptme_config,
+    session_datetime_from_path,
 )
 
 
@@ -94,6 +96,42 @@ def test_quick_date_from_jsonl_non_dict_lines(tmp_path: Path) -> None:
         + "\n"
     )
     assert _quick_date_from_jsonl(jsonl) == date(2026, 3, 5)
+
+
+# --- _quick_datetime_from_jsonl ---
+
+
+def test_quick_datetime_from_jsonl_returns_full_datetime(tmp_path: Path) -> None:
+    """Real start time is preserved — not collapsed to a date."""
+    jsonl = tmp_path / "session.jsonl"
+    jsonl.write_text(json.dumps({"type": "user", "timestamp": "2026-03-05T22:42:48Z"}) + "\n")
+    assert _quick_datetime_from_jsonl(jsonl) == datetime(
+        2026, 3, 5, 22, 42, 48, tzinfo=timezone.utc
+    )
+
+
+def test_quick_datetime_from_jsonl_missing(tmp_path: Path) -> None:
+    jsonl = tmp_path / "empty.jsonl"
+    jsonl.write_text("")
+    assert _quick_datetime_from_jsonl(jsonl) is None
+
+
+# --- session_datetime_from_path ---
+
+
+def test_session_datetime_from_path_claude_code(tmp_path: Path) -> None:
+    """Avoids the noon-UTC placeholder bug by returning the trajectory's real start time."""
+    jsonl = tmp_path / "abc12345-ffff.jsonl"
+    jsonl.write_text(json.dumps({"type": "system", "timestamp": "2026-04-15T22:42:48.123Z"}) + "\n")
+    dt = session_datetime_from_path("claude-code", jsonl)
+    assert dt is not None
+    assert dt.date() == date(2026, 4, 15)
+    assert (dt.hour, dt.minute, dt.second) == (22, 42, 48)
+
+
+def test_session_datetime_from_path_missing_file_returns_none(tmp_path: Path) -> None:
+    jsonl = tmp_path / "does-not-exist.jsonl"
+    assert session_datetime_from_path("claude-code", jsonl) is None
 
 
 # --- parse_gptme_config ---

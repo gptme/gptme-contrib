@@ -29,6 +29,7 @@ from .discovery import (
     extract_session_name,
     parse_gptme_config,
     session_date_from_path,
+    session_datetime_from_path,
 )
 from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
 from .record import SessionRecord, normalize_run_type
@@ -1188,16 +1189,35 @@ def sync(
             if not rec.trajectory_path:
                 continue
             h = rec.harness or "unknown"
-            sd = session_date_from_path(h, Path(rec.trajectory_path))
-            if sd is None:
-                continue
-            correct_ts = f"{sd.isoformat()}T00:00:00+00:00"
-            # Only fix if the existing timestamp doesn't match the session date
-            if not rec.timestamp.startswith(sd.isoformat()):
+            traj = Path(rec.trajectory_path)
+            # Prefer the real start time from the trajectory; fall back to
+            # session_date at midnight when the trajectory can't be read.
+            real_dt = session_datetime_from_path(h, traj) if traj.is_file() else None
+            if real_dt:
+                correct_ts = real_dt.isoformat()
+                new_prefix = real_dt.date().isoformat()
+            else:
+                sd = session_date_from_path(h, traj)
+                if sd is None:
+                    continue
+                correct_ts = f"{sd.isoformat()}T00:00:00+00:00"
+                new_prefix = sd.isoformat()
+
+            # Detect noon-UTC placeholder: synthetic 12:00:00 timestamps
+            # produced by the old sync path. We include records whose duration
+            # was later backfilled by --with-signals — those still have the
+            # wrong time even though duration_seconds is now non-zero.
+            is_noon_placeholder = (
+                real_dt is not None
+                and rec.timestamp[11:19] == "12:00:00"
+                and real_dt.isoformat()[11:19] != "12:00:00"
+            )
+            needs_fix = not rec.timestamp.startswith(new_prefix) or is_noon_placeholder
+            if needs_fix:
                 if dry_run:
                     click.echo(
                         f"  would fix: {rec.session_id}  "
-                        f"{rec.timestamp[:10]} → {sd.isoformat()}"
+                        f"{rec.timestamp[:19]} → {correct_ts[:19]}"
                     )
                 else:
                     rec.timestamp = correct_ts
@@ -1299,15 +1319,24 @@ def sync(
                     updated += 1
             continue
 
-        # Build the record with correct timestamp from session_date (not now()).
-        # Without this, all bulk-synced records get today's timestamp and
-        # skew daily stats (e.g. 7102 records appearing as "today").
+        # Build the record with correct timestamp from the trajectory's first
+        # event (not now()).  Without this, all bulk-synced records either get
+        # today's timestamp (skewing daily stats) or a noon-UTC placeholder
+        # (which collapses many sessions to a single hour and breaks hourly
+        # analytics).  Read the real first-event datetime when possible;
+        # fall back to noon-UTC on the session_date only if the trajectory
+        # has no readable timestamp.
+        session_dt: datetime | None = (
+            session_datetime_from_path(entry["harness"], traj_path) if traj_path.is_file() else None
+        )
         session_date: date | None = entry.get("session_date")
         record_kwargs: dict = {
             "harness": entry["harness"],
             "trajectory_path": path_str,  # used for deduplication on re-sync
         }
-        if session_date:
+        if session_dt:
+            record_kwargs["timestamp"] = session_dt.isoformat()
+        elif session_date:
             record_kwargs["timestamp"] = datetime(
                 session_date.year,
                 session_date.month,
