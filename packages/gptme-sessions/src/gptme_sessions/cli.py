@@ -1420,6 +1420,48 @@ def sync(
         click.echo(", ".join(parts))
 
 
+@cli.command("repair-grades")
+@click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
+@click.pass_context
+def repair_grades(ctx: click.Context, dry_run: bool) -> None:
+    """Backfill multivariate grade fields from legacy scalar fields."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    if not records:
+        click.echo("No records in store.")
+        return
+
+    repaired = 0
+    productivity_added = 0
+    alignment_added = 0
+    reasons_added = 0
+
+    for rec in records:
+        had_productivity = "productivity" in rec.grades
+        had_alignment = "alignment" in rec.grades
+        had_alignment_reason = "alignment" in rec.grade_reasons
+
+        if rec.sync_grade_fields():
+            repaired += 1
+            if not had_productivity and "productivity" in rec.grades:
+                productivity_added += 1
+            if not had_alignment and "alignment" in rec.grades:
+                alignment_added += 1
+            if not had_alignment_reason and "alignment" in rec.grade_reasons:
+                reasons_added += 1
+
+    if repaired and not dry_run:
+        store.rewrite(records)
+
+    verb = "Would repair" if dry_run else "Repaired"
+    click.echo(
+        f"{verb} {repaired} record(s): "
+        f"productivity={productivity_added}, "
+        f"alignment={alignment_added}, "
+        f"alignment_reasons={reasons_added}."
+    )
+
+
 # -- post-session ------------------------------------------------------------
 
 
@@ -1668,7 +1710,7 @@ def judge(
     if update_store:
         store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
         records = store.load_all()
-        score_map = {r["session_id"]: r for r in results if r["llm_judge_score"] is not None}
+        score_map = {r["session_id"]: r for r in results if r.get("llm_judge_score") is not None}
         updated = 0
         for rec in records:
             if rec.session_id in score_map:
@@ -1694,7 +1736,7 @@ def judge(
         click.echo(json.dumps(results, indent=2))
     else:
         # Summary stats
-        scored = [r for r in results if r["llm_judge_score"] is not None]
+        scored = [r for r in results if r.get("llm_judge_score") is not None]
         if scored:
             scores = [r["llm_judge_score"] for r in scored]
             click.echo(

@@ -898,3 +898,47 @@ class TestProjectFilter:
         data = json.loads(out)
         assert len(data) == 1
         assert data[0]["project"] == "/Users/erb/myproject"
+
+
+class TestRepairGradesCommand:
+    def test_repair_grades_backfills_legacy_fields(self, tmp_path: Path):
+        """repair-grades persists multivariate grade fields for legacy records."""
+        store = SessionStore(sessions_dir=tmp_path)
+        legacy = SessionRecord(
+            session_id="legacy-sync",
+            harness="claude-code",
+            model="opus",
+            trajectory_grade=0.64,
+            llm_judge_score=0.82,
+            llm_judge_reason="Strong execution on the active task.",
+        )
+        store.append(legacy)
+
+        rc, out = _invoke(["repair-grades"], tmp_path)
+
+        assert rc == 0
+        assert "Repaired 1 record(s)" in out
+
+        repaired = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert repaired.grades == {"productivity": 0.64, "alignment": 0.82}
+        assert repaired.grade_reasons == {"alignment": "Strong execution on the active task."}
+
+    def test_repair_grades_dry_run_does_not_rewrite_store(self, tmp_path: Path):
+        """repair-grades --dry-run reports changes without persisting them."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="legacy-dry-run",
+                harness="claude-code",
+                model="opus",
+                trajectory_grade=0.58,
+            )
+        )
+
+        rc, out = _invoke(["repair-grades", "--dry-run"], tmp_path)
+
+        assert rc == 0
+        assert "Would repair 1 record(s)" in out
+
+        persisted = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert persisted.grades == {}

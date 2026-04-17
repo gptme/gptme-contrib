@@ -176,6 +176,24 @@ def test_grade_helpers_sync_multivariate_and_legacy_fields():
     assert r.grade_reasons == {"alignment": "Strong work on the active priority."}
 
 
+def test_sync_grade_fields_backfills_missing_multivariate_fields():
+    """Legacy scalar fields can backfill missing multivariate grade entries."""
+    r = SessionRecord(
+        session_id="legacy-grade-sync",
+        trajectory_grade=0.66,
+        llm_judge_score=0.81,
+        llm_judge_reason="Useful progress on the active task.",
+        llm_judge_model="claude-haiku-4-5",
+    )
+
+    changed = r.sync_grade_fields()
+
+    assert changed is True
+    assert r.grades == {"productivity": 0.66, "alignment": 0.81}
+    assert r.grade_reasons == {"alignment": "Useful progress on the active task."}
+    assert r.sync_grade_fields() is False
+
+
 # -- normalize_model: dot variants and regex fallback ------------------------
 
 

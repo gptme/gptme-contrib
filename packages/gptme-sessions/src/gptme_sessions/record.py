@@ -223,11 +223,35 @@ class SessionRecord:
         """Store the alignment dimension alongside legacy judge fields."""
         self.llm_judge_score = score
         self.grades["alignment"] = score
+        self.llm_judge_reason = reason
         if reason is not None:
-            self.llm_judge_reason = reason
             self.grade_reasons["alignment"] = reason
+        else:
+            self.grade_reasons.pop("alignment", None)
         if model is not None:
             self.llm_judge_model = model
+
+    def sync_grade_fields(self) -> bool:
+        """Backfill multivariate grade fields from legacy scalar fields.
+
+        Returns ``True`` when any missing ``grades``/``grade_reasons`` entry
+        was added, otherwise ``False``.
+        """
+        changed = False
+        if self.trajectory_grade is not None and "productivity" not in self.grades:
+            self.grades["productivity"] = self.trajectory_grade
+            changed = True
+        if self.llm_judge_score is not None and "alignment" not in self.grades:
+            self.grades["alignment"] = self.llm_judge_score
+            changed = True
+        if (
+            self.llm_judge_reason is not None
+            and "alignment" in self.grades
+            and "alignment" not in self.grade_reasons
+        ):
+            self.grade_reasons["alignment"] = self.llm_judge_reason
+            changed = True
+        return changed
 
     @property
     def model_normalized(self) -> str | None:
