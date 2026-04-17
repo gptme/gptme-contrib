@@ -167,6 +167,10 @@ class SessionRecord:
     trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
     journal_path: str | None = None  # path to human-written journal entry
 
+    # Per-dimension grades for the multivariate grading rollout.
+    grades: dict[str, float] = field(default_factory=dict)
+    grade_reasons: dict[str, str] = field(default_factory=dict)
+
     # Trajectory-based grade (from signal extraction, 0.0-1.0)
     trajectory_grade: float | None = None
 
@@ -196,9 +200,58 @@ class SessionRecord:
         # Guard against JSON null for integer field
         if self.duration_seconds is None:
             self.duration_seconds = 0
+        if self.grades is None:
+            self.grades = {}
+        if self.grade_reasons is None:
+            self.grade_reasons = {}
         # Model stored as-is (raw) — use model_normalized for display
         # Normalize run_type — reject numeric values (session numbers) and clean prefixes
         self.run_type = normalize_run_type(self.run_type)
+
+    def set_productivity_grade(self, score: float) -> None:
+        """Store the productivity dimension alongside the legacy scalar field."""
+        self.trajectory_grade = score
+        self.grades["productivity"] = score
+
+    def set_alignment_grade(
+        self,
+        score: float,
+        *,
+        reason: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Store the alignment dimension alongside legacy judge fields."""
+        self.llm_judge_score = score
+        self.grades["alignment"] = score
+        self.llm_judge_reason = reason
+        if reason is not None:
+            self.grade_reasons["alignment"] = reason
+        else:
+            self.grade_reasons.pop("alignment", None)
+        if model is not None:
+            self.llm_judge_model = model
+
+    def sync_grade_fields(self) -> bool:
+        """Backfill multivariate grade fields from legacy scalar fields.
+
+        Returns ``True`` when any missing ``grades``/``grade_reasons`` entry
+        was added, otherwise ``False``.
+        """
+        changed = False
+        if self.trajectory_grade is not None and "productivity" not in self.grades:
+            self.grades["productivity"] = self.trajectory_grade
+            changed = True
+        if self.llm_judge_score is not None and "alignment" not in self.grades:
+            self.grades["alignment"] = self.llm_judge_score
+            changed = True
+        if (
+            self.llm_judge_reason is not None
+            and "alignment" in self.grades
+            and "alignment" not in self.grade_reasons
+        ):
+            self.grade_reasons["alignment"] = self.llm_judge_reason
+            changed = True
+        return changed
 
     @property
     def model_normalized(self) -> str | None:

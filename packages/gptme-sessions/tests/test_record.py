@@ -9,6 +9,8 @@ def test_context_tier_default():
     """context_tier defaults to None."""
     r = SessionRecord()
     assert r.context_tier is None
+    assert r.grades == {}
+    assert r.grade_reasons == {}
 
 
 def test_context_tier_roundtrip():
@@ -153,6 +155,43 @@ def test_project_session_name_none_roundtrip():
     r2 = SessionRecord.from_dict(d)
     assert r2.project is None
     assert r2.session_name is None
+
+
+def test_grade_helpers_sync_multivariate_and_legacy_fields():
+    """Helper methods keep new grade dicts aligned with legacy scalar fields."""
+    r = SessionRecord(session_id="grades1")
+
+    r.set_productivity_grade(0.72)
+    r.set_alignment_grade(
+        0.84,
+        reason="Strong work on the active priority.",
+        model="claude-haiku-4-5",
+    )
+
+    assert r.trajectory_grade == 0.72
+    assert r.llm_judge_score == 0.84
+    assert r.llm_judge_reason == "Strong work on the active priority."
+    assert r.llm_judge_model == "claude-haiku-4-5"
+    assert r.grades == {"productivity": 0.72, "alignment": 0.84}
+    assert r.grade_reasons == {"alignment": "Strong work on the active priority."}
+
+
+def test_sync_grade_fields_backfills_missing_multivariate_fields():
+    """Legacy scalar fields can backfill missing multivariate grade entries."""
+    r = SessionRecord(
+        session_id="legacy-grade-sync",
+        trajectory_grade=0.66,
+        llm_judge_score=0.81,
+        llm_judge_reason="Useful progress on the active task.",
+        llm_judge_model="claude-haiku-4-5",
+    )
+
+    changed = r.sync_grade_fields()
+
+    assert changed is True
+    assert r.grades == {"productivity": 0.66, "alignment": 0.81}
+    assert r.grade_reasons == {"alignment": "Useful progress on the active task."}
+    assert r.sync_grade_fields() is False
 
 
 # -- normalize_model: dot variants and regex fallback ------------------------

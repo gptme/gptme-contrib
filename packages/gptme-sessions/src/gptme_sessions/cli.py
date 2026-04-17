@@ -46,6 +46,26 @@ logger = logging.getLogger(__name__)
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
 
 
+def _judge_fields(
+    score: float | None,
+    reason: str | None,
+    model: str | None,
+) -> dict[str, object]:
+    """Return legacy and multivariate-alignment fields for CLI results."""
+    if score is None:
+        return {}
+
+    fields: dict[str, object] = {
+        "llm_judge_score": score,
+        "llm_judge_reason": reason,
+        "llm_judge_model": model,
+        "grades": {"alignment": score},
+    }
+    if reason is not None:
+        fields["grade_reasons"] = {"alignment": reason}
+    return fields
+
+
 def _discover_all(
     since_days: int = 30,
     harness_filter: str | None = None,
@@ -1400,6 +1420,48 @@ def sync(
         click.echo(", ".join(parts))
 
 
+@cli.command("repair-grades")
+@click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
+@click.pass_context
+def repair_grades(ctx: click.Context, dry_run: bool) -> None:
+    """Backfill multivariate grade fields from legacy scalar fields."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    if not records:
+        click.echo("No records in store.")
+        return
+
+    repaired = 0
+    productivity_added = 0
+    alignment_added = 0
+    reasons_added = 0
+
+    for rec in records:
+        had_productivity = "productivity" in rec.grades
+        had_alignment = "alignment" in rec.grades
+        had_alignment_reason = "alignment" in rec.grade_reasons
+
+        if rec.sync_grade_fields():
+            repaired += 1
+            if not had_productivity and "productivity" in rec.grades:
+                productivity_added += 1
+            if not had_alignment and "alignment" in rec.grades:
+                alignment_added += 1
+            if not had_alignment_reason and "alignment" in rec.grade_reasons:
+                reasons_added += 1
+
+    if repaired and not dry_run:
+        store.rewrite(records)
+
+    verb = "Would repair" if dry_run else "Repaired"
+    click.echo(
+        f"{verb} {repaired} record(s): "
+        f"productivity={productivity_added}, "
+        f"alignment={alignment_added}, "
+        f"alignment_reasons={reasons_added}."
+    )
+
+
 # -- post-session ------------------------------------------------------------
 
 
@@ -1628,9 +1690,7 @@ def judge(
             score = verdict["score"] if verdict else None
             reason = verdict["reason"] if verdict else None
 
-            result_row["llm_judge_score"] = score
-            result_row["llm_judge_reason"] = reason
-            result_row["llm_judge_model"] = verdict["model"] if verdict else None
+            result_row.update(_judge_fields(score, reason, verdict["model"] if verdict else None))
             results.append(result_row)
 
             if not as_json and score is not None:
@@ -1650,14 +1710,16 @@ def judge(
     if update_store:
         store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
         records = store.load_all()
-        score_map = {r["session_id"]: r for r in results if r["llm_judge_score"] is not None}
+        score_map = {r["session_id"]: r for r in results if r.get("llm_judge_score") is not None}
         updated = 0
         for rec in records:
             if rec.session_id in score_map:
                 s = score_map[rec.session_id]
-                rec.llm_judge_score = s["llm_judge_score"]
-                rec.llm_judge_reason = s["llm_judge_reason"]
-                rec.llm_judge_model = s["llm_judge_model"]
+                rec.set_alignment_grade(
+                    s["llm_judge_score"],
+                    reason=s.get("llm_judge_reason"),
+                    model=s.get("llm_judge_model"),
+                )
                 updated += 1
         if updated:
             store.rewrite(records)
@@ -1674,7 +1736,7 @@ def judge(
         click.echo(json.dumps(results, indent=2))
     else:
         # Summary stats
-        scored = [r for r in results if r["llm_judge_score"] is not None]
+        scored = [r for r in results if r.get("llm_judge_score") is not None]
         if scored:
             scores = [r["llm_judge_score"] for r in scored]
             click.echo(
@@ -1802,9 +1864,13 @@ def classify(
                 "journal_path": str(entry),
             }
             if judge_result:
-                row["llm_judge_score"] = judge_result["score"]
-                row["llm_judge_reason"] = judge_result["reason"]
-                row["llm_judge_model"] = judge_result["model"]
+                row.update(
+                    _judge_fields(
+                        judge_result["score"],
+                        judge_result["reason"],
+                        judge_result["model"],
+                    )
+                )
 
             results.append(row)
 
@@ -1830,9 +1896,11 @@ def classify(
                 r = cat_map[rec.session_id]
                 rec.category = r["category"]
                 if r.get("llm_judge_score") is not None:
-                    rec.llm_judge_score = r["llm_judge_score"]
-                    rec.llm_judge_reason = r["llm_judge_reason"]
-                    rec.llm_judge_model = r["llm_judge_model"]
+                    rec.set_alignment_grade(
+                        r["llm_judge_score"],
+                        reason=r.get("llm_judge_reason"),
+                        model=r.get("llm_judge_model"),
+                    )
                 updated += 1
         if updated:
             store.rewrite(records)
