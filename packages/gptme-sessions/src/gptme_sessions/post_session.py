@@ -301,10 +301,9 @@ def post_session(
         record_kwargs["session_id"] = session_id
     if token_count is not None:
         record_kwargs["token_count"] = token_count
-    if grade is not None:
-        record_kwargs["trajectory_grade"] = grade
-
     record = SessionRecord(**record_kwargs)
+    if grade is not None:
+        record.set_productivity_grade(grade)
     if journal_path is not None:
         try:
             existing_session_ids = [

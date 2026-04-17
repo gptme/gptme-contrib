@@ -288,3 +288,104 @@ class TestJudgeCLI:
             assert "2026-03-07" in result.output or "abc123" in result.output
         finally:
             bad_entry.chmod(0o644)  # restore so tmp_path cleanup works
+
+    def test_judge_update_store_writes_alignment_grade(self, tmp_path: "Path") -> None:
+        """judge --update-store keeps legacy judge fields and grades.alignment in sync."""
+        from click.testing import CliRunner
+        from gptme_sessions.cli import cli
+        from gptme_sessions.store import SessionStore
+
+        journal_dir = tmp_path / "journal" / "2026-03-07"
+        journal_dir.mkdir(parents=True)
+        (journal_dir / "autonomous-session-abc123.md").write_text(
+            "## Session\nDid real work.\n",
+            encoding="utf-8",
+        )
+
+        sessions_dir = tmp_path / "sessions"
+        store = SessionStore(sessions_dir=sessions_dir)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        runner = CliRunner()
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "score": 0.81,
+                "reason": "Meaningful progress on the active task.",
+                "model": "claude-haiku-4-5",
+            },
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "--sessions-dir",
+                    str(sessions_dir),
+                    "judge",
+                    "--journal-dir",
+                    str(tmp_path / "journal"),
+                    "--update-store",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        record = SessionStore(sessions_dir=sessions_dir).load_all()[0]
+        assert record.llm_judge_score == 0.81
+        assert record.llm_judge_reason == "Meaningful progress on the active task."
+        assert record.llm_judge_model == "claude-haiku-4-5"
+        assert record.grades == {"alignment": 0.81}
+        assert record.grade_reasons == {"alignment": "Meaningful progress on the active task."}
+
+    def test_classify_update_store_writes_alignment_grade(self, tmp_path: "Path") -> None:
+        """classify --judge --update-store mirrors judge output into grades.alignment."""
+        from click.testing import CliRunner
+        from gptme_sessions.classification import ClassificationResult
+        from gptme_sessions.cli import cli
+        from gptme_sessions.store import SessionStore
+
+        journal_dir = tmp_path / "journal" / "2026-03-07"
+        journal_dir.mkdir(parents=True)
+        (journal_dir / "autonomous-session-def456.md").write_text(
+            "## Session\nFixed a real bug.\n",
+            encoding="utf-8",
+        )
+
+        sessions_dir = tmp_path / "sessions"
+        store = SessionStore(sessions_dir=sessions_dir)
+        store.append(SessionRecord(session_id="def456", outcome="productive"))
+
+        runner = CliRunner()
+        with patch(
+            "gptme_sessions.classification.judge_and_classify",
+            return_value=(
+                ClassificationResult(
+                    category="code",
+                    confidence=0.93,
+                    productive=True,
+                    classifier="llm",
+                ),
+                {
+                    "score": 0.77,
+                    "reason": "Good progress on core implementation.",
+                    "model": "claude-haiku-4-5",
+                },
+            ),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "--sessions-dir",
+                    str(sessions_dir),
+                    "classify",
+                    "--journal-dir",
+                    str(tmp_path / "journal"),
+                    "--judge",
+                    "--update-store",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        record = SessionStore(sessions_dir=sessions_dir).load_all()[0]
+        assert record.category == "code"
+        assert record.llm_judge_score == 0.77
+        assert record.grades == {"alignment": 0.77}
+        assert record.grade_reasons == {"alignment": "Good progress on core implementation."}

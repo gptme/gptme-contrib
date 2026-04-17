@@ -180,3 +180,31 @@ def test_post_session_model_fallback_from_signals(tmp_path: Path):
             trajectory_path=fake_traj,
         )
     assert result.record.model == "claude-sonnet-4-6"
+
+
+def test_post_session_populates_productivity_grade(tmp_path: Path):
+    """post_session mirrors the scalar trajectory grade into grades.productivity."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": ["feat: ship thing (abc1234)"],
+        "grade": 0.68,
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+        )
+
+    assert result.record.trajectory_grade == 0.68
+    assert result.record.grades == {"productivity": 0.68}
+
+    records = store.load_all()
+    assert records[0].grades == {"productivity": 0.68}
