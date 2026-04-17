@@ -141,22 +141,19 @@ while true; do
         echo "[$counter/$max_runs] Starting autonomous run at $(date '+%Y-%m-%d %H:%M:%S %Z')..."
     fi
 
-    systemctl --user start "$SERVICE_NAME"
-    exit_code=$?
-
-    if [ $exit_code -ne 0 ]; then
-        echo "❌ ERROR: Autonomous run $counter failed with exit code $exit_code"
-        echo "Aborting loop."
-        exit $exit_code
+    # Don't abort on a single run failure (e.g. transient lock contention,
+    # pre-start gate rejection). Log and continue so the loop stays resilient
+    # and systemd doesn't have to bounce the wrapper for every hiccup.
+    if systemctl --user start "$SERVICE_NAME"; then
+        # Wait for the service to complete
+        echo "[$counter] Waiting for service to complete..."
+        while systemctl --user is-active --quiet "$SERVICE_NAME"; do
+            sleep 5
+        done
+        echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    else
+        echo "⚠️  Run $counter failed to start — continuing loop after cooldown"
     fi
-
-    # Wait for the service to complete
-    echo "[$counter] Waiting for service to complete..."
-    while systemctl --user is-active --quiet "$SERVICE_NAME"; do
-        sleep 5
-    done
-
-    echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
     echo ""
 
     # Cooldown between runs
