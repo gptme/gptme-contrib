@@ -132,6 +132,14 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
         {"message": {"role": "assistant", "model": "claude-opus-4-6", ...}, ...}
 
     Scans up to 50 lines to find an assistant message with a model field.
+
+    .. note::
+        This only reads the trajectory file. Claude Code sessions invoked
+        with ``claude -p --stream-json --session-id X`` (batch / autonomous
+        usage) write a stub trajectory with no assistant messages — the
+        actual model lives in the stream log. Use
+        :func:`resolve_cc_session_model` when you have a session id and
+        want to cover both pipelines.
     """
     try:
         with open(jsonl_path, encoding="utf-8") as f:
@@ -154,6 +162,99 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
                         return str(model)
     except (OSError, UnicodeDecodeError) as e:
         logger.debug("Failed to read %s for model extraction: %s", jsonl_path, e)
+    return None
+
+
+def _model_from_cc_stream_log(log_path: Path) -> str | None:
+    """Extract model from a ``claude -p --stream-json`` log's init line.
+
+    Autonomous runs invoke ``claude -p --stream-json`` and tee the stream
+    to ``/tmp/cc-session-{hash}.log``. The first line is a
+    ``type=system, subtype=init`` JSON event with ``model`` at the top
+    level — that's the authoritative model for the entire run.
+
+    Returns ``None`` on any parse / IO failure.
+    """
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(obj, dict):
+                    return None
+                model = obj.get("model")
+                if isinstance(model, str) and model:
+                    return model
+                return None
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug("Failed to read %s for model extraction: %s", log_path, e)
+    return None
+
+
+def resolve_cc_session_model(
+    session_id: str,
+    project_dir: Path | None = None,
+    tmp_dir: Path | None = None,
+) -> str | None:
+    """Resolve the model actually used by a Claude Code session.
+
+    Claude Code has two session pipelines with different storage layouts:
+
+    1. **Batch / autonomous** (``claude -p --stream-json --session-id X``)
+       writes only a stub trajectory at ``{project_dir}/{id}.jsonl``
+       (``aiTitle`` / ``sessionId`` metadata, no assistant messages). The
+       actual stream is teed to ``/tmp/cc-session-{hash}.log``, and a
+       pointer file at ``/tmp/cc-session-log-ref-{id}.txt`` contains the
+       log path. The first line of the log is a ``type=system,
+       subtype=init`` event with ``model`` at the top level.
+
+    2. **Interactive** CC sessions write a full trajectory to
+       ``{project_dir}/{id}.jsonl`` with ``message.model`` on each
+       assistant line.
+
+    Preference order: stream log first (covers the batch / autonomous
+    pipeline, which is the dominant usage for bandit updates), falling
+    back to the trajectory (interactive).
+
+    Returns ``None`` when neither source attributes — callers should
+    refuse to guess rather than silently pick another session's model
+    (see the post-mortem in ErikBjare/bob#615 for the contamination
+    vector this guarantees against).
+
+    :param session_id: the ``CC_SESSION_ID`` / ``--session-id`` uuid.
+    :param project_dir: Claude Code project directory (``~/.claude/projects/<slug>``).
+        If ``None``, only the stream log is consulted.
+    :param tmp_dir: directory containing the ``cc-session-log-ref-*.txt``
+        pointer files. Defaults to ``/tmp``.
+    """
+    if not session_id:
+        return None
+
+    if tmp_dir is None:
+        tmp_dir = Path("/tmp")
+
+    ref = tmp_dir / f"cc-session-log-ref-{session_id}.txt"
+    if ref.is_file():
+        try:
+            log_path = Path(ref.read_text(encoding="utf-8").strip())
+        except (OSError, UnicodeDecodeError) as e:
+            logger.debug("Failed to read pointer %s: %s", ref, e)
+            log_path = None
+        if log_path and log_path.is_file():
+            model = _model_from_cc_stream_log(log_path)
+            if model:
+                return model
+
+    if project_dir is not None:
+        trajectory = project_dir / f"{session_id}.jsonl"
+        if trajectory.is_file():
+            return extract_cc_model(trajectory)
+
     return None
 
 
