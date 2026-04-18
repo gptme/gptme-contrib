@@ -68,6 +68,7 @@ Lessons use YAML frontmatter + Markdown:
 match:
   keywords: ["keyword1", "keyword2"]
 status: active
+target_grade: harm  # optional: trajectory_grade | productivity | alignment | harm
 ---
 
 # Lesson Title
@@ -116,6 +117,7 @@ make typecheck
 
 The validator checks:
 - Valid YAML frontmatter
+- Optional `target_grade` is a known dimension (`trajectory_grade`, `productivity`, `alignment`, `harm`)
 - Required sections present
 - Proper Markdown formatting
 - Keyword specificity

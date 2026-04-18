@@ -28,6 +28,9 @@ import yaml
 # Configuration
 TARGET_LENGTH = 100  # lines (soft target for primary lessons)
 COMPANION_DIR = Path("knowledge/lessons")
+VALID_TARGET_GRADE_FIELDS = frozenset(
+    {"trajectory_grade", "productivity", "alignment", "harm"}
+)
 
 
 class LessonValidator:
@@ -150,6 +153,7 @@ class LessonValidator:
 
         Frontmatter philosophy — only stable, write-once metadata belongs here:
         - ``match`` / ``status``: Core lesson routing and lifecycle fields.
+        - ``target_grade``: Optional per-dim LOO target (single dim or list of dims).
         - ``version``: Optional integer or semver string tracking lesson revision history.
           Increment when making significant keyword or content changes so effectiveness
           data can be correlated to a specific lesson variant.
@@ -181,6 +185,7 @@ class LessonValidator:
             allowed_fields = {
                 "match",
                 "status",
+                "target_grade",
                 "version",
                 "automated_by",
                 "automated_date",
@@ -198,6 +203,8 @@ class LessonValidator:
             # Validate version field if present
             if "version" in frontmatter:
                 self._check_version_field(frontmatter["version"])
+            if "target_grade" in frontmatter:
+                self._check_target_grade_field(frontmatter["target_grade"])
 
         except (ValueError, yaml.YAMLError) as e:
             self.errors.append(f"Invalid YAML frontmatter: {e}")
@@ -228,6 +235,47 @@ class LessonValidator:
         else:
             self.errors.append(
                 f"version must be an integer or a string, got {type(value).__name__}"
+            )
+
+    def _check_target_grade_field(self, value: object) -> None:
+        """Validate the optional ``target_grade`` frontmatter field."""
+        targets: list[str] = []
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                self.errors.append("target_grade string must not be empty")
+                return
+            targets = [normalized]
+        elif isinstance(value, list):
+            if not value:
+                self.errors.append("target_grade list must not be empty")
+                return
+            for item in value:
+                if not isinstance(item, str):
+                    self.errors.append(
+                        "target_grade list items must all be non-empty strings"
+                    )
+                    return
+                normalized = item.strip()
+                if not normalized:
+                    self.errors.append(
+                        "target_grade list items must all be non-empty strings"
+                    )
+                    return
+                targets.append(normalized)
+        else:
+            self.errors.append(
+                "target_grade must be a string or a list of non-empty strings"
+            )
+            return
+
+        unknown = sorted(set(targets) - VALID_TARGET_GRADE_FIELDS)
+        if unknown:
+            allowed = ", ".join(sorted(VALID_TARGET_GRADE_FIELDS))
+            unknown_list = ", ".join(unknown)
+            self.errors.append(
+                f"target_grade contains unknown dimensions: {unknown_list} "
+                f"(allowed: {allowed})"
             )
 
     def _validate_two_file_format(self):
