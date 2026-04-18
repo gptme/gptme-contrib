@@ -21,6 +21,7 @@ from gptme_sessions.discovery import (
     extract_project,
     extract_session_name,
     parse_gptme_config,
+    resolve_cc_session_model,
     session_datetime_from_path,
 )
 
@@ -209,6 +210,187 @@ def test_extract_cc_model_non_dict_lines(tmp_path: Path) -> None:
         + "\n"
     )
     assert extract_cc_model(jsonl_file) == "claude-opus-4-6"
+
+
+# --- resolve_cc_session_model ---
+
+
+def _write_stream_log(
+    tmp_dir: Path,
+    session_id: str,
+    log_path: Path,
+    first_line: dict | str,
+) -> None:
+    """Write a stream log and its pointer file for test setup."""
+    if isinstance(first_line, dict):
+        log_path.write_text(json.dumps(first_line) + "\n", encoding="utf-8")
+    else:
+        log_path.write_text(first_line, encoding="utf-8")
+    (tmp_dir / f"cc-session-log-ref-{session_id}.txt").write_text(
+        str(log_path) + "\n", encoding="utf-8"
+    )
+
+
+def test_resolve_cc_session_model_from_stream_log(tmp_path: Path) -> None:
+    """Resolve uses the stream log when the pointer file exists — covers
+    `claude -p --stream-json` autonomous sessions whose trajectory is a stub."""
+    sid = "abcd-1234"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    log_path = tmp_dir / "cc-session-deadbeef.log"
+    _write_stream_log(
+        tmp_dir,
+        sid,
+        log_path,
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": sid,
+            "model": "claude-sonnet-4-6",
+        },
+    )
+    assert resolve_cc_session_model(sid, tmp_dir=tmp_dir) == "claude-sonnet-4-6"
+
+
+def test_resolve_cc_session_model_stream_log_preferred_over_stub(tmp_path: Path) -> None:
+    """When both a stub trajectory (no assistant messages) and a stream log
+    exist, the stream log wins — the stub can't attribute."""
+    sid = "stub-and-log"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    log_path = tmp_dir / "cc-session-xyz.log"
+    _write_stream_log(
+        tmp_dir, sid, log_path, {"type": "system", "subtype": "init", "model": "claude-opus-4-6"}
+    )
+    # Stub trajectory — aiTitle only, no assistant message
+    (project_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"aiTitle": "some title", "sessionId": sid, "type": "summary"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        resolve_cc_session_model(sid, project_dir=project_dir, tmp_dir=tmp_dir) == "claude-opus-4-6"
+    )
+
+
+def test_resolve_cc_session_model_falls_back_to_trajectory(tmp_path: Path) -> None:
+    """When no pointer/log exists (interactive session), fall back to the
+    trajectory file in the project dir."""
+    sid = "interactive-7890"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    (project_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"message": {"role": "user", "content": "hi"}})
+        + "\n"
+        + json.dumps({"message": {"role": "assistant", "model": "claude-opus-4-7", "content": []}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        resolve_cc_session_model(sid, project_dir=project_dir, tmp_dir=tmp_dir) == "claude-opus-4-7"
+    )
+
+
+def test_resolve_cc_session_model_returns_none_when_nothing_resolves(tmp_path: Path) -> None:
+    """Neither a stream log nor a trajectory attributes — refuse to guess.
+    Guards the ErikBjare/bob#615 bandit-contamination invariant."""
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    assert resolve_cc_session_model("ghost-id", project_dir=project_dir, tmp_dir=tmp_dir) is None
+
+
+def test_resolve_cc_session_model_empty_session_id(tmp_path: Path) -> None:
+    """Empty session id short-circuits to None without touching the filesystem."""
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    assert resolve_cc_session_model("", tmp_dir=tmp_dir) is None
+
+
+def test_resolve_cc_session_model_dangling_pointer_falls_back(tmp_path: Path) -> None:
+    """Pointer file exists but references a non-existent log — fall back to
+    the trajectory rather than returning None."""
+    sid = "dangling-pointer"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    (tmp_dir / f"cc-session-log-ref-{sid}.txt").write_text(
+        "/tmp/does-not-exist.log\n", encoding="utf-8"
+    )
+    (project_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"message": {"role": "assistant", "model": "claude-haiku-4-5", "content": []}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        resolve_cc_session_model(sid, project_dir=project_dir, tmp_dir=tmp_dir)
+        == "claude-haiku-4-5"
+    )
+
+
+def test_resolve_cc_session_model_stream_log_no_model_field(tmp_path: Path) -> None:
+    """Stream log's first line lacks a top-level model — fall back cleanly.
+    Covers the case where the log format drifts."""
+    sid = "no-model"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    log_path = tmp_dir / "cc-session-nomodel.log"
+    _write_stream_log(tmp_dir, sid, log_path, {"type": "system", "subtype": "init"})
+    (project_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"message": {"role": "assistant", "model": "claude-sonnet-4-6", "content": []}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        resolve_cc_session_model(sid, project_dir=project_dir, tmp_dir=tmp_dir)
+        == "claude-sonnet-4-6"
+    )
+
+
+def test_resolve_cc_session_model_stream_log_garbage_first_line(tmp_path: Path) -> None:
+    """Stream log's first line is invalid JSON — return None from the log
+    probe and let the trajectory fallback kick in."""
+    sid = "garbage"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    log_path = tmp_dir / "cc-session-garbage.log"
+    _write_stream_log(tmp_dir, sid, log_path, "not-json-at-all\n")
+    (project_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"message": {"role": "assistant", "model": "claude-opus-4-6", "content": []}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        resolve_cc_session_model(sid, project_dir=project_dir, tmp_dir=tmp_dir) == "claude-opus-4-6"
+    )
+
+
+def test_resolve_cc_session_model_without_project_dir(tmp_path: Path) -> None:
+    """When project_dir is None, only the stream log is consulted. A
+    missing pointer returns None instead of trying to read a trajectory."""
+    sid = "no-project-dir"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    assert resolve_cc_session_model(sid, project_dir=None, tmp_dir=tmp_dir) is None
 
 
 # --- discover_gptme_sessions ---
