@@ -42,6 +42,7 @@ get_service_name() {
 
 # Defaults
 counter=0
+failed_starts=0
 max_runs=-1  # -1 means infinite
 COOLDOWN=10  # seconds between runs
 SERVICE_NAME=""
@@ -130,7 +131,11 @@ while true; do
 
     # Check if we've reached the limit
     if [ "$max_runs" -ne -1 ] && [ "$counter" -gt "$max_runs" ]; then
-        echo "✅ Completed all $max_runs runs successfully"
+        if [ "$failed_starts" -gt 0 ]; then
+            echo "⚠️  Completed $max_runs runs ($failed_starts failed to start)"
+        else
+            echo "✅ Completed all $max_runs runs successfully"
+        fi
         exit 0
     fi
 
@@ -152,6 +157,7 @@ while true; do
         done
         echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
     else
+        failed_starts=$((failed_starts + 1))
         echo "⚠️  Run $counter failed to start — continuing loop after cooldown"
     fi
     echo ""
