@@ -191,3 +191,49 @@ def test_version_bool_rejected():
         validator.validate()
         version_errors = [e for e in validator.errors if "version" in e]
         assert version_errors, "version: true (bool) should produce an error"
+
+
+def test_target_grade_single_dim_accepted():
+    """target_grade as a single known dimension should be accepted."""
+    content = _VALID_LESSON.format(extra="target_grade: harm")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+        target_warnings = [w for w in validator.warnings if "target_grade" in w]
+        assert (
+            not target_warnings
+        ), f"Unexpected target_grade warnings: {target_warnings}"
+
+
+def test_target_grade_list_accepted():
+    """target_grade as a list of known dimensions should be accepted."""
+    content = _VALID_LESSON.format(extra='target_grade: ["harm", "alignment"]')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+
+
+def test_target_grade_unknown_dim_rejected():
+    """Unknown target_grade dimensions should produce an error."""
+    content = _VALID_LESSON.format(extra="target_grade: craftsmanship")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        target_errors = [e for e in validator.errors if "target_grade" in e]
+        assert target_errors, "Unknown target_grade dims should produce an error"
+
+
+def test_target_grade_non_string_list_item_rejected():
+    """List values must all be non-empty strings."""
+    content = _VALID_LESSON.format(extra='target_grade: ["harm", 3]')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        target_errors = [e for e in validator.errors if "target_grade" in e]
+        assert target_errors, "Non-string target_grade entries should produce an error"
