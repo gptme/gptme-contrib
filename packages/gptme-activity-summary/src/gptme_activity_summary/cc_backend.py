@@ -39,20 +39,25 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
     import os
 
     env = os.environ.copy()
-    # Allow nesting: unset all CC env vars and use --no-session-persistence.
-    # Root cause: without --no-session-persistence, the subprocess tries to
-    # connect to the parent CC session's persistence layer, which causes it
-    # to silently return empty output (exit 0, no stdout). Clearing env vars
-    # alone is insufficient — the session persistence system is the actual
-    # nesting detection mechanism.
+    # Allow nesting: unset all CC env vars. Historically we also passed
+    # --no-session-persistence unconditionally, but for non-nested callers that
+    # prevents CC from writing a full trajectory to ~/.claude/projects/. Only
+    # pass the flag when actually nested (CLAUDECODE set in parent env) as a
+    # belt-and-suspenders safeguard against the empty-output bug
+    # (gptme/gptme-contrib#585). See: ErikBjare/bob#681.
+    nested = bool(env.get("CLAUDECODE"))
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     env.pop("CC_SESSION_ID", None)
     env.pop("CC_MODEL", None)
 
+    cmd = ["claude", "-p", "-"]
+    if nested:
+        cmd.append("--no-session-persistence")
+
     for attempt in range(1, max_retries + 1):
         result = subprocess.run(
-            ["claude", "-p", "-", "--no-session-persistence"],
+            cmd,
             input=prompt,
             capture_output=True,
             text=True,

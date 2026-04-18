@@ -202,15 +202,46 @@ def test_call_claude_code_unsets_all_cc_env_vars(mock_run):
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_uses_no_session_persistence(mock_run, mock_sleep):
-    """Verify --no-session-persistence flag prevents silent empty output when nested."""
+def test_call_claude_code_no_session_persistence_when_nested(mock_run, mock_sleep):
+    """--no-session-persistence is passed only when CLAUDECODE is set (nested)."""
+    import os
+
     mock_run.return_value = _make_completed_process(stdout="test output")
-    call_claude_code("test prompt")
-    cmd = mock_run.call_args[0][0]
-    assert "--no-session-persistence" in cmd, (
-        "Must pass --no-session-persistence to prevent CC session persistence "
-        "from hijacking output when running as a subprocess of another CC session"
-    )
+
+    # Nested case: CLAUDECODE set → flag present as belt-and-suspenders safeguard
+    os.environ["CLAUDECODE"] = "1"
+    try:
+        call_claude_code("test prompt")
+        cmd = mock_run.call_args[0][0]
+        assert "--no-session-persistence" in cmd, (
+            "Must pass --no-session-persistence when nested (CLAUDECODE set) "
+            "to prevent empty-output bug (gptme/gptme-contrib#585)"
+        )
+    finally:
+        os.environ.pop("CLAUDECODE", None)
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_no_flag_when_not_nested(mock_run, mock_sleep):
+    """--no-session-persistence is dropped for non-nested calls so CC writes a full trajectory."""
+    import os
+
+    mock_run.return_value = _make_completed_process(stdout="test output")
+
+    # Ensure CLAUDECODE is not set
+    prev = os.environ.pop("CLAUDECODE", None)
+    try:
+        call_claude_code("test prompt")
+        cmd = mock_run.call_args[0][0]
+        assert "--no-session-persistence" not in cmd, (
+            "Non-nested calls should NOT pass --no-session-persistence; "
+            "dropping the flag lets CC write a full trajectory to ~/.claude/projects/. "
+            "See ErikBjare/bob#681."
+        )
+    finally:
+        if prev is not None:
+            os.environ["CLAUDECODE"] = prev
 
 
 # --- Tests for _cc_failed flag propagation ---

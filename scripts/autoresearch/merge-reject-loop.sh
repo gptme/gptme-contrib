@@ -469,12 +469,19 @@ run_agent_with_fallback() {
                 gptme_cmd+=("${prompt}")
                 ;;
             claude-code|cc)
-                # Claude Code headless mode. Disable persistence for nested runs
-                # and clear inherited session env to prevent silent empty output.
-                # See: gptme/gptme-contrib#585 for the root cause.
+                # Claude Code headless mode. Clear inherited session env to prevent
+                # silent empty output from nested runs. Only pass
+                # --no-session-persistence when actually nested (CLAUDECODE set)
+                # so non-nested invocations write full trajectories to
+                # ~/.claude/projects/ instead of stubs.
+                # See: gptme/gptme-contrib#585 (original bug), ErikBjare/bob#681.
+                local _persist_flag=()
+                if [[ -n "${CLAUDECODE:-}" ]]; then
+                    _persist_flag=(--no-session-persistence)
+                fi
                 gptme_cmd=(
                     env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CC_SESSION_ID -u CC_MODEL
-                    claude -p --no-session-persistence "${prompt}"
+                    claude -p "${_persist_flag[@]}" "${prompt}"
                     --cwd "${GPTME_DIR}"
                 )
                 if [[ -n "${candidate}" ]]; then
@@ -596,8 +603,13 @@ NEXT_FOCUS: <one concrete specific action the next iteration should take, differ
             gptme --non-interactive -m "${diag_model}" "${diag_prompt}" > "${diagnosis_log}" 2>&1
             ;;
         claude-code|cc)
+            # See nested-run notes above for the --no-session-persistence rationale.
+            local _diag_persist_flag=()
+            if [[ -n "${CLAUDECODE:-}" ]]; then
+                _diag_persist_flag=(--no-session-persistence)
+            fi
             env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CC_SESSION_ID -u CC_MODEL \
-                claude -p --no-session-persistence "${diag_prompt}" --model "${diag_model}" > "${diagnosis_log}" 2>&1
+                claude -p "${_diag_persist_flag[@]}" "${diag_prompt}" --model "${diag_model}" > "${diagnosis_log}" 2>&1
             ;;
     esac
     set -e
