@@ -25,7 +25,11 @@ from .openai_client import (
     _load_project_instructions,
 )
 from .tool_bridge import GptmeToolBridge
-from .twilio_integration import build_connect_stream_twiml, build_stream_url
+from .twilio_integration import (
+    _get_config_env,
+    build_connect_stream_twiml,
+    build_stream_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +76,32 @@ class VoiceServer:
         Configure your Twilio phone number's Voice webhook to POST to this endpoint.
         Twilio will then open a Media Stream WebSocket to /twilio.
         """
-        host = request.headers.get("host", f"{self.host}:{self.port}")
-        ws_url = build_stream_url(host)
+        # Validate Twilio webhook signature when auth token is configured.
+        # Skip in dev environments where TWILIO_AUTH_TOKEN is absent.
+        auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
+        if auth_token:
+            from twilio.request_validator import RequestValidator
+
+            signature = request.headers.get("X-Twilio-Signature", "")
+            host = request.headers.get("host", f"{self.host}:{self.port}")
+            validation_url = f"https://{host}/incoming"
+            form_params = dict(await request.form())
+            if not RequestValidator(auth_token).validate(
+                validation_url, form_params, signature
+            ):
+                logger.warning("Rejected request with invalid Twilio signature")
+                return PlainTextResponse("Forbidden", status_code=403)
+
+        # Prefer the configured public URL; fall back to Host header.
+        public_base_url = _get_config_env(
+            "GPTME_VOICE_PUBLIC_BASE_URL"
+        ) or _get_config_env("TWILIO_PUBLIC_BASE_URL")
+        if public_base_url:
+            ws_url = build_stream_url(public_base_url)
+        else:
+            host = request.headers.get("host", f"{self.host}:{self.port}")
+            ws_url = build_stream_url(host)
+
         twiml = build_connect_stream_twiml(ws_url)
         return PlainTextResponse(twiml, media_type="text/xml")
 

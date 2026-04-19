@@ -3,6 +3,7 @@ Twilio helpers for gptme-voice.
 """
 
 from dataclasses import dataclass
+from html import escape as _html_escape
 from urllib.parse import urlsplit, urlunsplit
 
 from gptme.config import get_config
@@ -88,10 +89,11 @@ def build_stream_url(
 
 def build_connect_stream_twiml(stream_url: str) -> str:
     """Build the TwiML needed to attach a call to a Media Stream."""
+    safe_url = _html_escape(stream_url, quote=True)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{stream_url}" />
+        <Stream url="{safe_url}" />
     </Connect>
 </Response>"""
 
