@@ -25,6 +25,7 @@ from .openai_client import (
     _load_project_instructions,
 )
 from .tool_bridge import GptmeToolBridge
+from .twilio_integration import build_connect_stream_twiml, build_stream_url
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +73,8 @@ class VoiceServer:
         Twilio will then open a Media Stream WebSocket to /twilio.
         """
         host = request.headers.get("host", f"{self.host}:{self.port}")
-        ws_url = f"wss://{host}/twilio"
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Connect>
-        <Stream url="{ws_url}" />
-    </Connect>
-</Response>"""
+        ws_url = build_stream_url(host)
+        twiml = build_connect_stream_twiml(ws_url)
         return PlainTextResponse(twiml, media_type="text/xml")
 
     async def handle_twilio_websocket(self, websocket):

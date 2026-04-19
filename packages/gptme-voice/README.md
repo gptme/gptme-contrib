@@ -62,6 +62,25 @@ Speak into your microphone. The agent responds with its configured personality a
    `https://<your-ngrok-url>/incoming` (HTTP POST)
 3. Call the Twilio number — Twilio connects the call to the voice server.
 
+### Place outbound phone calls via Twilio
+
+Set these values in your environment or gptme config:
+
+```bash
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_PHONE_NUMBER=...
+GPTME_VOICE_PUBLIC_BASE_URL=https://<your-ngrok-url>
+```
+
+Then place a call:
+
+```bash
+gptme-voice-call +46701234567
+```
+
+Use `--dry-run` to print the generated TwiML without dialing.
+
 ### API key
 
 The OpenAI API key is loaded from gptme config (`~/.config/gptme/config.toml` or `config.local.toml`). No need to set `OPENAI_API_KEY` as an env var if it's already configured in gptme.
