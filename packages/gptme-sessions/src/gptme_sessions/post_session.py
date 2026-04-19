@@ -233,7 +233,7 @@ def post_session(
             signals = result
             grade = result.get("grade")
             traj_productive = result.get("productive")
-            usage = result.get("usage") or {}
+            usage = result.get("usage")
             if usage:
                 _in = usage.get("input_tokens")
                 _out = usage.get("output_tokens")
@@ -243,9 +243,10 @@ def post_session(
                 output_tokens = int(_out) if _out is not None else None
                 cache_creation_tokens = int(_cc) if _cc is not None else None
                 cache_read_tokens = int(_cr) if _cr is not None else None
-            total = usage.get("total_tokens", 0)
-            if total:
-                token_count = int(total)
+            if isinstance(usage, dict) and "total_tokens" in usage:
+                total = usage.get("total_tokens")
+                if total is not None:
+                    token_count = int(total)
         except Exception as e:
             # Signal extraction is non-fatal; proceed without signals
             logger.warning("Signal extraction from %s failed: %s", trajectory_path, e)
