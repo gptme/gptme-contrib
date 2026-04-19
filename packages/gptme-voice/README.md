@@ -1,6 +1,6 @@
 # gptme-voice
 
-Voice interface for gptme agents using OpenAI Realtime API.
+Voice interface for gptme agents using OpenAI or xAI Grok Realtime APIs.
 
 ## Features
 
@@ -30,6 +30,9 @@ poetry install -E local
 ```bash
 # Auto-detects agent repo and loads personality
 gptme-voice-server
+
+# Use xAI Grok
+gptme-voice-server --provider grok
 
 # With debug logging
 gptme-voice-server --debug
@@ -81,14 +84,21 @@ gptme-voice-call +46701234567
 
 Use `--dry-run` to print the generated TwiML without dialing.
 
-### API key
+### API keys
 
-The OpenAI API key is loaded from gptme config (`~/.config/gptme/config.toml` or `config.local.toml`). No need to set `OPENAI_API_KEY` as an env var if it's already configured in gptme.
+Keys are loaded from gptme config (`~/.config/gptme/config.toml` or
+`config.local.toml`):
+
+- `OPENAI_API_KEY` for the default `openai` provider
+- `XAI_API_KEY` for `--provider grok`
+
+No need to export them as shell env vars if they're already configured in gptme.
 
 ## Architecture
 
 - **openai_client.py** - WebSocket client for OpenAI Realtime API with VAD, audio streaming, and event handling
-- **server.py** - Starlette WebSocket server bridging clients to OpenAI
+- **xai_client.py** - xAI Grok Voice Agent adapter (OpenAI-compatible WebSocket protocol)
+- **server.py** - Starlette WebSocket server bridging clients to OpenAI or xAI
 - **tool_bridge.py** - Async subagent dispatcher (runs `gptme --non-interactive` in background, injects results)
 - **audio.py** - Audio format conversion (PCM ↔ μ-law for Twilio)
 - **client.py** - Local client with mic/speaker I/O and feedback loop prevention
