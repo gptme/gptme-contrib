@@ -190,6 +190,24 @@ check_clean_worktree_for_hooks() {
     fi
 }
 
+resolve_pre_commit_hook() {
+    local hooks_dir hook_path
+
+    # core.hooksPath takes precedence over the default .git/hooks directory
+    hooks_dir="$(git config core.hooksPath 2>/dev/null)"
+    if [ -z "$hooks_dir" ]; then
+        hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null)" || return 1
+    fi
+    hook_path="$hooks_dir/pre-commit"
+
+    if [ -x "$hook_path" ]; then
+        printf '%s\n' "$hook_path"
+        return 0
+    fi
+
+    return 1
+}
+
 LOCK_TIMEOUT=60
 exec 9>"$LOCKFILE"
 if ! flock --timeout "$LOCK_TIMEOUT" 9; then
@@ -199,9 +217,32 @@ fi
 
 check_index_corruption
 
+MANUAL_PRECOMMIT_RAN=0
 if [ "$NO_VERIFY" -ne 1 ]; then
     check_clean_worktree_for_hooks
-    env GIT_SAFE_COMMIT_LOCK_HELD=1 GIT_SAFE_COMMIT_EXPECT_CLEAN=1 git commit "${FORWARD_ARGS[@]}"
+    PRE_COMMIT_HOOK=""
+    if PRE_COMMIT_HOOK="$(resolve_pre_commit_hook)"; then
+        # Run the tracked hook directly under the wrapper lock, then hand off to
+        # git commit --no-verify. This avoids the hook-time missing-object bug
+        # while preserving the same pre-commit behavior and auto-staging logic.
+        env \
+            GIT_SAFE_COMMIT_LOCK_HELD=1 \
+            GIT_SAFE_COMMIT_EXPECT_CLEAN=1 \
+            GIT_SAFE_COMMIT_MANUAL_PRECOMMIT=1 \
+            "$PRE_COMMIT_HOOK"
+        PRE_COMMIT_EXIT=$?
+        if [ "$PRE_COMMIT_EXIT" -ne 0 ]; then
+            exit "$PRE_COMMIT_EXIT"
+        fi
+        MANUAL_PRECOMMIT_RAN=1
+    fi
+fi
+
+if [ "$NO_VERIFY" -ne 1 ] && [ "$MANUAL_PRECOMMIT_RAN" -eq 1 ]; then
+    # pre-commit already ran directly under the lock; pass a suppression marker so
+    # hooks that understand it (e.g. pre-commit-auto-stage) skip the git-dispatch
+    # redispatch, while commit-msg still runs normally (unlike --no-verify).
+    env GIT_SAFE_COMMIT_LOCK_HELD=1 GIT_SAFE_COMMIT_SUPPRESS_PRECOMMIT=1 git commit "${FORWARD_ARGS[@]}"
 else
     env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit "${FORWARD_ARGS[@]}"
 fi

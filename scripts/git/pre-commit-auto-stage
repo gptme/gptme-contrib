@@ -11,6 +11,13 @@
 
 set -euo pipefail
 
+# Self-suppress when git-safe-commit already ran us directly under the lock.
+# pre-commit ran once; this git-dispatch call is a no-op to allow commit-msg
+# and other post-pre-commit hooks to run without a double-dispatch of pre-commit.
+if [ "${GIT_SAFE_COMMIT_SUPPRESS_PRECOMMIT:-0}" = "1" ]; then
+  exit 0
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
