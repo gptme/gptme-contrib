@@ -288,3 +288,39 @@ def test_post_session_partial_usage_fields_stored_as_none(tmp_path: Path):
     assert records[0].output_tokens is None
     assert records[0].cache_creation_tokens is None
     assert records[0].cache_read_tokens is None
+
+
+def test_post_session_preserves_zero_token_usage(tmp_path: Path):
+    """Zero-token trajectories are stored as token_count=0, not dropped as missing."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": False,
+        "deliverables": [],
+        "usage": {
+            "model": "claude-sonnet-4-6",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+            exit_code=1,
+        )
+
+    assert result.token_count == 0
+    assert result.record.token_count == 0
+
+    records = store.load_all()
+    assert records[0].token_count == 0
