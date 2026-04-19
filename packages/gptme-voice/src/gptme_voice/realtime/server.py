@@ -8,6 +8,7 @@ voice conversations with gptme tool access.
 import base64
 import json
 import logging
+from pathlib import Path
 
 import click
 import uvicorn
@@ -49,8 +50,6 @@ def _build_caller_instructions(
 
     caller_name: str | None = None
     if workspace:
-        from pathlib import Path
-
         people_dir = Path(workspace) / "people"
         if people_dir.is_dir():
             for md_file in people_dir.glob("*.md"):
@@ -170,11 +169,17 @@ class VoiceServer:
         allowlist_raw = _get_config_env("TWILIO_CALLER_ALLOWLIST")
         if allowlist_raw:
             allowlist = {n.strip() for n in allowlist_raw.split(",") if n.strip()}
+            if not auth_token:
+                logger.warning(
+                    "TWILIO_CALLER_ALLOWLIST is set but TWILIO_AUTH_TOKEN is absent — "
+                    "the From field is unauthenticated and can be spoofed; "
+                    "set TWILIO_AUTH_TOKEN to enforce the allowlist securely."
+                )
             if from_number not in allowlist:
                 logger.warning(
-                    "Rejected call from unlisted number: %s (allowlist: %s)",
+                    "Rejected call from unlisted number: %s (%d number(s) in allowlist)",
                     from_number,
-                    allowlist,
+                    len(allowlist),
                 )
                 return PlainTextResponse("Forbidden", status_code=403)
 

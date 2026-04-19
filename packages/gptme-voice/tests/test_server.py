@@ -37,11 +37,11 @@ def test_build_caller_instructions_known_number_from_people_dir() -> None:
         people_dir = Path(tmpdir) / "people"
         people_dir.mkdir()
         (people_dir / "erik-bjareholt.md").write_text(
-            "# Erik Bjäreholt\n\nPhone: +46765784797\n"
+            "# Erik Bjäreholt\n\nPhone: +46700000001\n"
         )
-        result = _build_caller_instructions("You are Bob.", "+46765784797", tmpdir)
+        result = _build_caller_instructions("You are Bob.", "+46700000001", tmpdir)
     assert "Erik Bjäreholt" in result
-    assert "+46765784797" in result
+    assert "+46700000001" in result
     assert "You are Bob." in result
 
 
