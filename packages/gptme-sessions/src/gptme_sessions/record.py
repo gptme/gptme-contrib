@@ -186,6 +186,10 @@ class SessionRecord:
     exit_code: int | None = None  # process exit code (124 = timeout)
     duration_seconds: int = 0
     token_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
 
     # Artifacts
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
