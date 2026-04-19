@@ -99,6 +99,10 @@ class PostSessionResult:
     grade: float | None = None
     signals: dict[str, Any] | None = None
     token_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
 
 
 def post_session(
@@ -212,6 +216,10 @@ def post_session(
     grade: float | None = None
     signals: dict[str, Any] | None = None
     token_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
     traj_productive: bool | None = None
 
     # --- Extract signals from trajectory ---
@@ -222,6 +230,11 @@ def post_session(
             grade = result.get("grade")
             traj_productive = result.get("productive")
             usage = result.get("usage") or {}
+            if usage:
+                input_tokens = int(usage.get("input_tokens", 0))
+                output_tokens = int(usage.get("output_tokens", 0))
+                cache_creation_tokens = int(usage.get("cache_creation_tokens", 0))
+                cache_read_tokens = int(usage.get("cache_read_tokens", 0))
             total = usage.get("total_tokens", 0)
             if total:
                 token_count = int(total)
@@ -341,6 +354,14 @@ def post_session(
         record_kwargs["session_id"] = session_id
     if token_count is not None:
         record_kwargs["token_count"] = token_count
+    if input_tokens is not None:
+        record_kwargs["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        record_kwargs["output_tokens"] = output_tokens
+    if cache_creation_tokens is not None:
+        record_kwargs["cache_creation_tokens"] = cache_creation_tokens
+    if cache_read_tokens is not None:
+        record_kwargs["cache_read_tokens"] = cache_read_tokens
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
@@ -377,4 +398,8 @@ def post_session(
         grade=grade,
         signals=signals,
         token_count=token_count,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
     )

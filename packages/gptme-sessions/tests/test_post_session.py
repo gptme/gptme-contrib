@@ -208,3 +208,44 @@ def test_post_session_populates_productivity_grade(tmp_path: Path):
 
     records = store.load_all()
     assert records[0].grades == {"productivity": 0.68}
+
+
+def test_post_session_persists_usage_fields(tmp_path: Path):
+    """Trajectory usage totals should be written into the canonical session record."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [],
+        "usage": {
+            "model": "claude-sonnet-4-6",
+            "input_tokens": 120,
+            "output_tokens": 45,
+            "cache_creation_tokens": 30,
+            "cache_read_tokens": 600,
+            "total_tokens": 795,
+        },
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="unknown",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+        )
+
+    assert result.token_count == 795
+    assert result.record.input_tokens == 120
+    assert result.record.output_tokens == 45
+    assert result.record.cache_creation_tokens == 30
+    assert result.record.cache_read_tokens == 600
+
+    records = store.load_all()
+    assert records[0].input_tokens == 120
+    assert records[0].output_tokens == 45
+    assert records[0].cache_creation_tokens == 30
+    assert records[0].cache_read_tokens == 600
