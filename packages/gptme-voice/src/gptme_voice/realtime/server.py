@@ -30,13 +30,21 @@ from .twilio_integration import (
     build_connect_stream_twiml,
     build_stream_url,
 )
+from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
 logger = logging.getLogger(__name__)
 
 
+_PROVIDER_OPENAI = "openai"
+_PROVIDER_GROK = "grok"
+_VALID_PROVIDERS = (_PROVIDER_OPENAI, _PROVIDER_GROK)
+
+
 class VoiceServer:
     """
-    WebSocket server that bridges Twilio Media Streams to OpenAI Realtime API.
+    WebSocket server that bridges Twilio Media Streams to a Realtime API.
+
+    Supports OpenAI (default) and xAI Grok as providers.
     """
 
     def __init__(
@@ -45,10 +53,17 @@ class VoiceServer:
         port: int = 8080,
         openai_api_key: str | None = None,
         workspace: str | None = None,
+        provider: str = _PROVIDER_OPENAI,
+        model: str | None = None,
     ):
         self.host = host
         self.port = port
-        self.openai_api_key = openai_api_key or _get_openai_api_key()
+        self.provider = provider
+        self.model = model
+        if provider == _PROVIDER_GROK:
+            self._api_key = _get_xai_api_key()
+        else:
+            self._api_key = openai_api_key or _get_openai_api_key()
         self.workspace = workspace or _detect_agent_repo()
         self._instructions = _load_project_instructions(self.workspace)
 
@@ -118,7 +133,7 @@ class VoiceServer:
         await websocket.accept()
 
         call_sid: str | None = None
-        openai_client: OpenAIRealtimeClient | None = None
+        realtime_client: OpenAIRealtimeClient | None = None
         audio_converter = AudioConverter()
 
         try:
@@ -135,11 +150,15 @@ class VoiceServer:
                     call_sid = data.get("start", {}).get("call_sid")
                     stream_sid = data.get("start", {}).get("stream_sid")
 
-                    # Create OpenAI client, then tool bridge with inject callback
-                    openai_client = OpenAIRealtimeClient(
-                        api_key=self.openai_api_key,
-                        session_config=SessionConfig(instructions=self._instructions),
-                        on_audio=lambda audio: self._send_to_twilio(  # type: ignore[arg-type]
+                    if self.model:
+                        session_cfg = SessionConfig(
+                            instructions=self._instructions, model=self.model
+                        )
+                    else:
+                        session_cfg = SessionConfig(instructions=self._instructions)
+                    realtime_client = self._make_client(
+                        session_cfg,
+                        on_audio=lambda audio: self._send_to_twilio(
                             websocket,
                             stream_sid,
                             audio_converter.openai_to_twilio(audio),
@@ -147,29 +166,29 @@ class VoiceServer:
                     )
                     tool_bridge = GptmeToolBridge(
                         workspace=self.workspace,
-                        on_result=openai_client.inject_message,
+                        on_result=realtime_client.inject_message,
                     )
-                    openai_client.on_function_call = tool_bridge.handle_function_call
+                    realtime_client.on_function_call = tool_bridge.handle_function_call
 
-                    await openai_client.connect()
-                    self._connections[call_sid] = (websocket, openai_client)  # type: ignore[index]
+                    await realtime_client.connect()
+                    self._connections[call_sid] = (websocket, realtime_client)
 
                 elif event == "media":
                     # Audio chunk from Twilio
-                    if openai_client:
+                    if realtime_client:
                         # Extract μ-law audio
                         media = data.get("media", {})
                         mulaw_b64 = media.get("payload", "")
                         if mulaw_b64:
-                            # Convert to PCM and send to OpenAI
+                            # Convert to PCM and send to realtime API
                             mulaw_data = base64.b64decode(mulaw_b64)
                             pcm_data = audio_converter.twilio_to_openai(mulaw_data)
-                            await openai_client.send_audio(pcm_data)
+                            await realtime_client.send_audio(pcm_data)
 
                 elif event == "stop":
                     # Call ended
-                    if openai_client:
-                        await openai_client.disconnect()
+                    if realtime_client:
+                        await realtime_client.disconnect()
                     if call_sid and call_sid in self._connections:
                         del self._connections[call_sid]
                     break
@@ -177,8 +196,8 @@ class VoiceServer:
         except Exception as e:
             logger.exception("Error handling Twilio connection: %s", e)
         finally:
-            if openai_client:
-                await openai_client.disconnect()
+            if realtime_client:
+                await realtime_client.disconnect()
             if call_sid and call_sid in self._connections:
                 del self._connections[call_sid]
 
@@ -193,6 +212,24 @@ class VoiceServer:
         }
         await websocket.send_text(json.dumps(message))
 
+    def _make_client(
+        self,
+        session_config: SessionConfig,
+        **kwargs,
+    ) -> OpenAIRealtimeClient:
+        """Instantiate the realtime client for the configured provider."""
+        if self.provider == _PROVIDER_GROK:
+            return XAIRealtimeClient(
+                api_key=self._api_key,
+                session_config=session_config,
+                **kwargs,
+            )
+        return OpenAIRealtimeClient(
+            api_key=self._api_key,
+            session_config=session_config,
+            **kwargs,
+        )
+
     async def handle_local_websocket(self, websocket):
         """
         Handle WebSocket connection for local testing.
@@ -202,23 +239,27 @@ class VoiceServer:
         """
         await websocket.accept()
 
-        openai_client: OpenAIRealtimeClient | None = None
+        realtime_client: OpenAIRealtimeClient | None = None
 
         try:
-            # Create OpenAI client first, then tool bridge with inject callback
-            openai_client = OpenAIRealtimeClient(
-                api_key=self.openai_api_key,
-                session_config=SessionConfig(instructions=self._instructions),
-                on_audio=lambda audio: self._send_local_audio(websocket, audio),  # type: ignore[arg-type]
+            if self.model:
+                session_cfg = SessionConfig(
+                    instructions=self._instructions, model=self.model
+                )
+            else:
+                session_cfg = SessionConfig(instructions=self._instructions)
+            realtime_client = self._make_client(
+                session_cfg,
+                on_audio=lambda audio: self._send_local_audio(websocket, audio),
                 on_audio_end=lambda: self._send_local_audio_end(websocket),
             )
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
-                on_result=openai_client.inject_message,
+                on_result=realtime_client.inject_message,
             )
-            openai_client.on_function_call = tool_bridge.handle_function_call
+            realtime_client.on_function_call = tool_bridge.handle_function_call
 
-            await openai_client.connect()
+            await realtime_client.connect()
 
             async for message in websocket.iter_text():
                 data = json.loads(message)
@@ -228,16 +269,16 @@ class VoiceServer:
                     audio_b64 = data.get("audio", "")
                     if audio_b64:
                         audio_data = base64.b64decode(audio_b64)
-                        await openai_client.send_audio(audio_data)
+                        await realtime_client.send_audio(audio_data)
 
                 elif data.get("type") == "commit":
-                    await openai_client.commit_audio()
+                    await realtime_client.commit_audio()
 
         except Exception as e:
             logger.exception("Error handling local connection: %s", e)
         finally:
-            if openai_client:
-                await openai_client.disconnect()
+            if realtime_client:
+                await realtime_client.disconnect()
 
     async def _send_local_audio(self, websocket, audio_data: bytes):
         """Send audio to local client."""
@@ -259,8 +300,27 @@ class VoiceServer:
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", default=8080, type=int, help="Port to bind to")
 @click.option("--workspace", default=None, help="Working directory for gptme commands")
+@click.option(
+    "--provider",
+    default=_PROVIDER_OPENAI,
+    type=click.Choice(_VALID_PROVIDERS),
+    show_default=True,
+    help="Realtime API provider.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Override the realtime model (e.g. gpt-4o-realtime-preview-2024-12-17 or grok-2-realtime).",
+)
 @click.option("--debug", is_flag=True, help="Enable debug logging")
-def main(host: str, port: int, workspace: str | None, debug: bool):
+def main(
+    host: str,
+    port: int,
+    workspace: str | None,
+    provider: str,
+    model: str | None,
+    debug: bool,
+):
     """Voice Interface Server for gptme."""
     logging.basicConfig(
         level=logging.DEBUG if debug else logging.INFO,
@@ -274,9 +334,11 @@ def main(host: str, port: int, workspace: str | None, debug: bool):
         host=host,
         port=port,
         workspace=workspace,
+        provider=provider,
+        model=model,
     )
 
-    logger.info(f"Starting voice server on {host}:{port}")
+    logger.info(f"Starting voice server on {host}:{port} (provider={provider})")
     logger.info(f"Local test endpoint: ws://{host}:{port}/local")
 
     server.run()

@@ -177,14 +177,25 @@ class OpenAIRealtimeClient:
         self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
 
-    async def connect(self) -> None:
-        """Connect to OpenAI Realtime API."""
-        headers = {
+    def _get_ws_url(self) -> str:
+        """WebSocket URL for this provider (override in subclasses)."""
+        return f"{self.WS_URL}?model={self.session_config.model}"
+
+    def _get_ws_headers(self) -> dict[str, str]:
+        """Auth headers for this provider (override in subclasses)."""
+        return {
             "Authorization": f"Bearer {self.api_key}",
             "OpenAI-Beta": "realtime=v1",
         }
 
-        url = f"{self.WS_URL}?model={self.session_config.model}"
+    def _get_transcription_config(self) -> dict | None:
+        """Transcription config for session.update (override to None to omit)."""
+        return {"model": "whisper-1"}
+
+    async def connect(self) -> None:
+        """Connect to OpenAI Realtime API."""
+        url = self._get_ws_url()
+        headers = self._get_ws_headers()
         self._ws = await websockets.connect(url, additional_headers=headers)
 
         instructions = self.session_config.instructions or _DEFAULT_INSTRUCTIONS
@@ -193,59 +204,57 @@ class OpenAIRealtimeClient:
         )
 
         # Configure session
-        await self._send_event(
-            "session.update",
-            {
-                "session": {
-                    "modalities": ["text", "audio"],
-                    "instructions": instructions,
-                    "voice": self.session_config.voice,
-                    "input_audio_format": self.session_config.input_format,
-                    "output_audio_format": self.session_config.output_format,
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": {
-                        "type": self.session_config.turn_detection,
-                        "threshold": self.session_config.vad_threshold,
-                        "silence_duration_ms": self.session_config.vad_silence_duration_ms,
-                        "prefix_padding_ms": self.session_config.vad_prefix_padding_ms,
-                    },
-                    "tools": [
-                        {
-                            "type": "function",
-                            "name": "subagent",
-                            "description": (
-                                "Dispatch a task to a gptme subagent running in the workspace. "
-                                "The subagent has full access to tools: shell, file read/write, "
-                                "python, and can reason about multi-step tasks. "
-                                "Use this for anything that requires interacting with the codebase, "
-                                "reading files, checking task status, running commands, searching code, etc. "
-                                "Describe what you want done in natural language."
-                            ),
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "task": {
-                                        "type": "string",
-                                        "description": "Natural language description of the task for the subagent",
-                                    },
-                                    "mode": {
-                                        "type": "string",
-                                        "enum": ["smart", "fast"],
-                                        "description": (
-                                            "Model quality tradeoff. 'smart' (default) uses the full model "
-                                            "for complex tasks like code analysis, multi-step reasoning, or "
-                                            "writing code. 'fast' uses a smaller model for quick lookups like "
-                                            "reading a file, checking git status, or simple searches."
-                                        ),
-                                    },
-                                },
-                                "required": ["task"],
-                            },
-                        }
-                    ],
-                }
+        session_params: dict = {
+            "modalities": ["text", "audio"],
+            "instructions": instructions,
+            "voice": self.session_config.voice,
+            "input_audio_format": self.session_config.input_format,
+            "output_audio_format": self.session_config.output_format,
+            "turn_detection": {
+                "type": self.session_config.turn_detection,
+                "threshold": self.session_config.vad_threshold,
+                "silence_duration_ms": self.session_config.vad_silence_duration_ms,
+                "prefix_padding_ms": self.session_config.vad_prefix_padding_ms,
             },
-        )
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "subagent",
+                    "description": (
+                        "Dispatch a task to a gptme subagent running in the workspace. "
+                        "The subagent has full access to tools: shell, file read/write, "
+                        "python, and can reason about multi-step tasks. "
+                        "Use this for anything that requires interacting with the codebase, "
+                        "reading files, checking task status, running commands, searching code, etc. "
+                        "Describe what you want done in natural language."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "Natural language description of the task for the subagent",
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["smart", "fast"],
+                                "description": (
+                                    "Model quality tradeoff. 'smart' (default) uses the full model "
+                                    "for complex tasks like code analysis, multi-step reasoning, or "
+                                    "writing code. 'fast' uses a smaller model for quick lookups like "
+                                    "reading a file, checking git status, or simple searches."
+                                ),
+                            },
+                        },
+                        "required": ["task"],
+                    },
+                }
+            ],
+        }
+        transcription = self._get_transcription_config()
+        if transcription is not None:
+            session_params["input_audio_transcription"] = transcription
+        await self._send_event("session.update", {"session": session_params})
 
         # Start receiving messages
         self._receive_task = asyncio.create_task(self._receive_loop())
