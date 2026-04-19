@@ -93,6 +93,7 @@ reap_stale_sessions() {
     stale_cutoff=$((now - 600))  # 10 minutes ago
     while IFS='|' read -r sess created; do
         [ -z "$sess" ] && continue
+        [ -z "$created" ] && continue
         if [ "$created" -lt "$stale_cutoff" ]; then
             tmux kill-session -t "$sess" 2>/dev/null || true
         fi
