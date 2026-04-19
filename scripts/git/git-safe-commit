@@ -193,7 +193,11 @@ check_clean_worktree_for_hooks() {
 resolve_pre_commit_hook() {
     local hooks_dir hook_path
 
-    hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null)" || return 1
+    # core.hooksPath takes precedence over the default .git/hooks directory
+    hooks_dir="$(git config core.hooksPath 2>/dev/null)"
+    if [ -z "$hooks_dir" ]; then
+        hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null)" || return 1
+    fi
     hook_path="$hooks_dir/pre-commit"
 
     if [ -x "$hook_path" ]; then
@@ -235,7 +239,10 @@ if [ "$NO_VERIFY" -ne 1 ]; then
 fi
 
 if [ "$NO_VERIFY" -ne 1 ] && [ "$MANUAL_PRECOMMIT_RAN" -eq 1 ]; then
-    env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit --no-verify "${FORWARD_ARGS[@]}"
+    # pre-commit already ran directly under the lock; pass a suppression marker so
+    # hooks that understand it (e.g. pre-commit-auto-stage) skip the git-dispatch
+    # redispatch, while commit-msg still runs normally (unlike --no-verify).
+    env GIT_SAFE_COMMIT_LOCK_HELD=1 GIT_SAFE_COMMIT_SUPPRESS_PRECOMMIT=1 git commit "${FORWARD_ARGS[@]}"
 else
     env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit "${FORWARD_ARGS[@]}"
 fi

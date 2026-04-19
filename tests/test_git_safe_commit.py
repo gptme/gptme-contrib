@@ -800,8 +800,8 @@ def test_safe_commit_allows_normal_small_repo_commit(git_repo: Path):
     assert result.returncode == 0, result.stderr
 
 
-def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: Path):
-    """Wrapper should run pre-commit itself, then commit without redispatching it."""
+def test_safe_commit_runs_pre_commit_manually_before_suppressed_commit(git_repo: Path):
+    """Wrapper runs pre-commit directly, then uses suppress marker so commit-msg still fires."""
     hooks_dir = git_repo / ".git" / "hooks"
     hooks_dir.mkdir(exist_ok=True)
     subprocess.run(
@@ -818,6 +818,10 @@ def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: 
             f"""\
             #!/bin/sh
             count_file="{pre_commit_count}"
+            # Self-suppress on git-dispatch redispatch (same as pre-commit-auto-stage)
+            if [ "${{GIT_SAFE_COMMIT_SUPPRESS_PRECOMMIT:-0}}" = "1" ]; then
+                exit 0
+            fi
             count=0
             if [ -f "$count_file" ]; then
                 count="$(cat "$count_file")"
@@ -839,11 +843,22 @@ def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: 
         textwrap.dedent(
             """\
             #!/bin/sh
-            printf '\nManual-Hook: yes\n' >> "$1"
+            printf '\nPrepare-Hook: yes\n' >> "$1"
             """
         )
     )
     prepare_commit_msg_hook.chmod(0o755)
+
+    commit_msg_hook = hooks_dir / "commit-msg"
+    commit_msg_hook.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            printf '\nCommit-Msg: yes\n' >> "$1"
+            """
+        )
+    )
+    commit_msg_hook.chmod(0o755)
 
     test_file = git_repo / "test.txt"
     test_file.write_text("hello\n")
@@ -859,6 +874,7 @@ def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: 
     )
 
     assert result.returncode == 0, result.stderr
+    # pre-commit ran exactly once (via bridge; git-dispatch was suppressed)
     assert pre_commit_count.read_text() == "1"
 
     commit_message = subprocess.run(
@@ -869,4 +885,6 @@ def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: 
         text=True,
     )
     assert "test: manual pre-commit bridge" in commit_message.stdout
-    assert "Manual-Hook: yes" in commit_message.stdout
+    assert "Prepare-Hook: yes" in commit_message.stdout
+    # commit-msg must still fire (regression guard for the --no-verify bypass)
+    assert "Commit-Msg: yes" in commit_message.stdout
