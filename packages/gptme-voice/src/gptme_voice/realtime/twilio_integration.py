@@ -98,6 +98,14 @@ def build_connect_stream_twiml(stream_url: str) -> str:
 </Response>"""
 
 
+def build_reject_call_twiml() -> str:
+    """Build the TwiML used to reject an incoming call."""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Reject />
+</Response>"""
+
+
 def resolve_outbound_call_settings(
     *, from_number: str | None = None, public_base_url: str | None = None
 ) -> OutboundCallSettings:

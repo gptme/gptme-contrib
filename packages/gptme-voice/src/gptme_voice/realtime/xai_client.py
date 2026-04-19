@@ -15,7 +15,7 @@ from gptme.config import get_config
 from .openai_client import OpenAIRealtimeClient, SessionConfig
 
 _OPENAI_DEFAULT_VOICE = "echo"
-_DEFAULT_XAI_VOICE = "eve"
+_DEFAULT_XAI_VOICE = "rex"
 
 
 def _get_xai_api_key() -> str | None:

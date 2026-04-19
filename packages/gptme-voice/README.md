@@ -65,6 +65,17 @@ Speak into your microphone. The agent responds with its configured personality a
    `https://<your-ngrok-url>/incoming` (HTTP POST)
 3. Call the Twilio number — Twilio connects the call to the voice server.
 
+Optional hardening:
+
+```bash
+TWILIO_ALLOWED_CALLERS=+46765784797,+15551234567
+```
+
+When set, only those caller numbers can get past `/incoming`. The server also
+injects the caller number and Twilio caller name into the realtime instructions
+for that specific call, so the agent can acknowledge who is calling without
+guessing.
+
 ### Place outbound phone calls via Twilio
 
 Set these values in your environment or gptme config:
