@@ -177,14 +177,21 @@ class OpenAIRealtimeClient:
         self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
 
-    async def connect(self) -> None:
-        """Connect to OpenAI Realtime API."""
-        headers = {
+    def _get_ws_url(self) -> str:
+        """WebSocket URL for this provider (override in subclasses)."""
+        return f"{self.WS_URL}?model={self.session_config.model}"
+
+    def _get_ws_headers(self) -> dict[str, str]:
+        """Auth headers for this provider (override in subclasses)."""
+        return {
             "Authorization": f"Bearer {self.api_key}",
             "OpenAI-Beta": "realtime=v1",
         }
 
-        url = f"{self.WS_URL}?model={self.session_config.model}"
+    async def connect(self) -> None:
+        """Connect to OpenAI Realtime API."""
+        url = self._get_ws_url()
+        headers = self._get_ws_headers()
         self._ws = await websockets.connect(url, additional_headers=headers)
 
         instructions = self.session_config.instructions or _DEFAULT_INSTRUCTIONS
