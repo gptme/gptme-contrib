@@ -23,8 +23,19 @@ def test_build_stream_url_accepts_bare_host_with_path():
 def test_build_connect_stream_twiml_embeds_stream_url():
     twiml = build_connect_stream_twiml("wss://voice.example/twilio")
 
-    assert '<Stream url="wss://voice.example/twilio" />' in twiml
+    assert 'url="wss://voice.example/twilio"' in twiml
     assert twiml.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+
+
+def test_build_connect_stream_twiml_with_custom_params():
+    twiml = build_connect_stream_twiml(
+        "wss://voice.example/twilio",
+        custom_params={"from_number": "+46700000001", "name": "Erik"},
+    )
+
+    assert 'name="from_number" value="+46700000001"' in twiml
+    assert 'name="name" value="Erik"' in twiml
+    assert "<Parameter" in twiml
 
 
 def test_build_connect_stream_twiml_escapes_url():
@@ -112,4 +123,4 @@ def test_call_cli_dry_run_prints_twiml(monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert '<Stream url="wss://voice.example/twilio" />' in result.output
+    assert 'url="wss://voice.example/twilio"' in result.output

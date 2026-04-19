@@ -8,6 +8,7 @@ voice conversations with gptme tool access.
 import base64
 import json
 import logging
+from pathlib import Path
 
 import click
 import uvicorn
@@ -33,6 +34,55 @@ from .twilio_integration import (
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
 logger = logging.getLogger(__name__)
+
+
+def _build_caller_instructions(
+    base_instructions: str, from_number: str, workspace: str | None
+) -> str:
+    """Prepend caller-identity context to session instructions.
+
+    Looks up the caller's phone number in the workspace people/ directory to
+    find a name.  Falls back to the raw phone number so the agent at least
+    knows who is calling instead of being blind.
+    """
+    if not from_number:
+        return base_instructions
+
+    caller_name: str | None = None
+    if workspace:
+        people_dir = Path(workspace) / "people"
+        if people_dir.is_dir():
+            for md_file in people_dir.glob("*.md"):
+                try:
+                    text = md_file.read_text()
+                    if from_number in text:
+                        # Use the stem as a hint; the file header is the canonical name
+                        first_h1 = next(
+                            (
+                                line.lstrip("# ").strip()
+                                for line in text.splitlines()
+                                if line.startswith("# ")
+                            ),
+                            None,
+                        )
+                        caller_name = first_h1 or md_file.stem.replace("-", " ").title()
+                        break
+                except Exception:
+                    pass
+
+    if caller_name:
+        caller_ctx = (
+            f"The current caller's phone number is {from_number} "
+            f"({caller_name}). "
+            f"You know this person — refer to them by name."
+        )
+    else:
+        caller_ctx = (
+            f"The current caller's phone number is {from_number}. "
+            f"You do not recognise this number; treat the caller as an unknown guest."
+        )
+
+    return f"{caller_ctx}\n\n{base_instructions}"
 
 
 _PROVIDER_OPENAI = "openai"
@@ -96,6 +146,9 @@ class VoiceServer:
         Configure your Twilio phone number's Voice webhook to POST to this endpoint.
         Twilio will then open a Media Stream WebSocket to /twilio.
         """
+        form_params = dict(await request.form())
+        from_number = form_params.get("From", "")
+
         # Validate Twilio webhook signature when auth token is configured.
         # Skip in dev environments where TWILIO_AUTH_TOKEN is absent.
         auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
@@ -105,11 +158,29 @@ class VoiceServer:
             signature = request.headers.get("X-Twilio-Signature", "")
             host = request.headers.get("host", f"{self.host}:{self.port}")
             validation_url = f"https://{host}/incoming"
-            form_params = dict(await request.form())
             if not RequestValidator(auth_token).validate(
                 validation_url, form_params, signature
             ):
                 logger.warning("Rejected request with invalid Twilio signature")
+                return PlainTextResponse("Forbidden", status_code=403)
+
+        # Allowlist: only accept calls from known numbers.
+        # Set TWILIO_CALLER_ALLOWLIST to a comma-separated list of E.164 numbers.
+        allowlist_raw = _get_config_env("TWILIO_CALLER_ALLOWLIST")
+        if allowlist_raw:
+            allowlist = {n.strip() for n in allowlist_raw.split(",") if n.strip()}
+            if not auth_token:
+                logger.warning(
+                    "TWILIO_CALLER_ALLOWLIST is set but TWILIO_AUTH_TOKEN is absent — "
+                    "the From field is unauthenticated and can be spoofed; "
+                    "set TWILIO_AUTH_TOKEN to enforce the allowlist securely."
+                )
+            if from_number not in allowlist:
+                logger.warning(
+                    "Rejected call from unlisted number: %s (%d number(s) in allowlist)",
+                    from_number,
+                    len(allowlist),
+                )
                 return PlainTextResponse("Forbidden", status_code=403)
 
         # Prefer the configured public URL; fall back to Host header.
@@ -122,7 +193,11 @@ class VoiceServer:
             host = request.headers.get("host", f"{self.host}:{self.port}")
             ws_url = build_stream_url(host)
 
-        twiml = build_connect_stream_twiml(ws_url)
+        # Forward caller number to WebSocket handler via TwiML custom parameters.
+        custom_params: dict[str, str] = {}
+        if from_number:
+            custom_params["from_number"] = from_number
+        twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
     async def handle_twilio_websocket(self, websocket):
@@ -161,12 +236,19 @@ class VoiceServer:
                     if not call_sid:
                         call_sid = stream_sid
 
+                    # Inject caller context into instructions (phone + name lookup)
+                    custom_params = start.get("customParameters", {})
+                    from_number = custom_params.get("from_number", "")
+                    instructions = _build_caller_instructions(
+                        self._instructions, from_number, self.workspace
+                    )
+
                     if self.model:
                         session_cfg = SessionConfig(
-                            instructions=self._instructions, model=self.model
+                            instructions=instructions, model=self.model
                         )
                     else:
-                        session_cfg = SessionConfig(instructions=self._instructions)
+                        session_cfg = SessionConfig(instructions=instructions)
                     realtime_client = self._make_client(
                         session_cfg,
                         on_audio=lambda audio: self._send_to_twilio(
