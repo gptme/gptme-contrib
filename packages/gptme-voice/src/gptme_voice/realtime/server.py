@@ -1,7 +1,7 @@
 """
 WebSocket server for Twilio Media Streams.
 
-Bridges Twilio phone calls to OpenAI Realtime API for real-time
+Bridges Twilio phone calls to a realtime API for real-time
 voice conversations with gptme tool access.
 """
 
@@ -72,7 +72,7 @@ class VoiceServer:
         self.workspace = workspace or _detect_agent_repo()
         self._instructions = _load_project_instructions(self.workspace)
 
-        # Active connections: call_sid -> (twilio_ws, openai_client)
+        # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
 
         # Create Starlette app
@@ -321,7 +321,10 @@ class VoiceServer:
 @click.option(
     "--model",
     default=None,
-    help="Override the realtime model (e.g. gpt-4o-realtime-preview-2024-12-17 or grok-2-realtime).",
+    help=(
+        "Override the realtime model. Useful for OpenAI; for xAI Grok, omit this "
+        "unless you need a specific model alias from the xAI console."
+    ),
 )
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def main(
