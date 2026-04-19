@@ -798,3 +798,75 @@ def test_safe_commit_allows_normal_small_repo_commit(git_repo: Path):
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: Path):
+    """Wrapper should run pre-commit itself, then commit without redispatching it."""
+    hooks_dir = git_repo / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks_dir)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    pre_commit_count = git_repo / ".git" / "manual-pre-commit.count"
+    pre_commit_hook = hooks_dir / "pre-commit"
+    pre_commit_hook.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            count_file="{pre_commit_count}"
+            count=0
+            if [ -f "$count_file" ]; then
+                count="$(cat "$count_file")"
+            fi
+            count=$((count + 1))
+            printf '%s' "$count" > "$count_file"
+            if [ "${{GIT_SAFE_COMMIT_MANUAL_PRECOMMIT:-0}}" != "1" ]; then
+                echo "expected manual pre-commit marker" >&2
+                exit 91
+            fi
+            exit 0
+            """
+        )
+    )
+    pre_commit_hook.chmod(0o755)
+
+    prepare_commit_msg_hook = hooks_dir / "prepare-commit-msg"
+    prepare_commit_msg_hook.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            printf '\nManual-Hook: yes\n' >> "$1"
+            """
+        )
+    )
+    prepare_commit_msg_hook.chmod(0o755)
+
+    test_file = git_repo / "test.txt"
+    test_file.write_text("hello\n")
+    subprocess.run(
+        ["git", "add", "test.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "test.txt", "-m", "test: manual pre-commit bridge"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert pre_commit_count.read_text() == "1"
+
+    commit_message = subprocess.run(
+        ["git", "log", "-1", "--format=%B"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "test: manual pre-commit bridge" in commit_message.stdout
+    assert "Manual-Hook: yes" in commit_message.stdout
