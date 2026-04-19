@@ -30,10 +30,10 @@ def test_build_connect_stream_twiml_embeds_stream_url():
 def test_build_connect_stream_twiml_with_custom_params():
     twiml = build_connect_stream_twiml(
         "wss://voice.example/twilio",
-        custom_params={"from_number": "+46765784797", "name": "Erik"},
+        custom_params={"from_number": "+46700000001", "name": "Erik"},
     )
 
-    assert 'name="from_number" value="+46765784797"' in twiml
+    assert 'name="from_number" value="+46700000001"' in twiml
     assert 'name="name" value="Erik"' in twiml
     assert "<Parameter" in twiml
 
