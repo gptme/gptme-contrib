@@ -337,7 +337,8 @@ def test_safe_commit_serialization(git_repo: Path):
 
     # At least one should succeed; the other might succeed or fail
     # depending on timing, but neither should produce a corrupted commit
-    assert proc_a.returncode == 0 or proc_b.returncode == 0
+    assert proc_a.returncode == 0, f"Session A failed: {err_a.decode()}"
+    assert proc_b.returncode == 0, f"Session B failed: {err_b.decode()}"
 
     # Verify we have the right number of commits (init + 1 or 2)
     log = subprocess.run(

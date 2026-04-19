@@ -20,6 +20,7 @@ NC='\033[0m' # No Color
 # --- Mass-deletion guard (runs unconditionally, ~1ms) ---
 # This MUST run before the prek/pre-commit availability check below,
 # because when prek is missing, the hook exits 0 and all guards are skipped.
+# The guard script is optional — only present in repos that ship it (e.g. ErikBjare/bob).
 # See: ErikBjare/bob#536 (catastrophic deletion incident)
 _REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -n "$_REPO_ROOT" ] && [ -f "$_REPO_ROOT/scripts/git/guard-mass-delete.sh" ]; then
@@ -90,7 +91,11 @@ echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
 
 # Capture the staged set before formatters run so auto-staging cannot pick up
 # files another session changed in the meantime.
-mapfile -t ORIGINALLY_STAGED_FILES < <(git diff --cached --name-only --diff-filter=ACM)
+ORIGINALLY_STAGED_FILES=()
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  ORIGINALLY_STAGED_FILES+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACM)
 
 run_precommit() {
   if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then

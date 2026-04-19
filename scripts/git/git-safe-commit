@@ -66,10 +66,17 @@ for arg in "$@"; do
         --)
             PARSE_AFTER_DASHDASH=1
             ;;
-        -m|--message|-F|--file|-c|--reedit-message|-C|--reuse-message|--fixup|--squash|--author|--date|--trailer|--pathspec-from-file)
+        -m|--message|-F|--file|-c|--reedit-message|-C|--reuse-message|--fixup|--squash|--author|--date|--trailer)
             SKIP_NEXT_ARG=1
             ;;
-        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*|--pathspec-from-file=*)
+        --pathspec-from-file)
+            SKIP_NEXT_ARG=1
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            ;;
+        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*)
+            ;;
+        --pathspec-from-file=*)
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
             ;;
         -*)
             ;;
