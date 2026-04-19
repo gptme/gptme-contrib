@@ -58,3 +58,7 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
     def _get_ws_headers(self) -> dict[str, str]:
         """xAI auth — bearer token only, no OpenAI-Beta header."""
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    def _get_transcription_config(self) -> dict | None:
+        """xAI does not support whisper-1; omit transcription config."""
+        return None
