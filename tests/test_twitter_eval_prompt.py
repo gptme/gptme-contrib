@@ -188,6 +188,28 @@ def test_unset_handle_raises_value_error(
         llm_module.create_tweet_eval_prompt(tweet, eval_config)
 
 
+def test_openrouter_key_resolution_prefers_twitter_specific_key(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY_SOCIAL", "social-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY_TWITTER", "twitter-key")
+
+    assert llm_module._resolve_openrouter_api_key() == "twitter-key"
+
+
+def test_openrouter_key_resolution_falls_back_to_social_key(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_TWITTER", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY_SOCIAL", "social-key")
+
+    assert llm_module._resolve_openrouter_api_key() == "social-key"
+
+
 def test_our_handle_in_thread_context_triggers_identity_note(
     llm_module: types.ModuleType,
     eval_config: dict[str, Any],
