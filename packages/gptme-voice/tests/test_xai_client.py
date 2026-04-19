@@ -5,5 +5,5 @@ from gptme_voice.realtime.xai_client import XAIRealtimeClient
 def test_xai_client_uses_xai_defaults() -> None:
     client = XAIRealtimeClient(api_key="test-key", session_config=SessionConfig())
 
-    assert client.session_config.voice == "eve"
+    assert client.session_config.voice == "rex"  # male voice for Bob persona
     assert client._get_ws_url() == "wss://api.x.ai/v1/realtime"

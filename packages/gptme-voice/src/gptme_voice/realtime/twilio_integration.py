@@ -87,13 +87,28 @@ def build_stream_url(
     return urlunsplit((scheme, parsed.netloc, path, "", ""))
 
 
-def build_connect_stream_twiml(stream_url: str) -> str:
-    """Build the TwiML needed to attach a call to a Media Stream."""
+def build_connect_stream_twiml(
+    stream_url: str, custom_params: dict[str, str] | None = None
+) -> str:
+    """Build the TwiML needed to attach a call to a Media Stream.
+
+    custom_params are forwarded to the WebSocket handler via Twilio's
+    <Parameter> elements, arriving in the "start.customParameters" payload.
+    """
     safe_url = _html_escape(stream_url, quote=True)
+    param_lines = ""
+    if custom_params:
+        for key, value in custom_params.items():
+            safe_key = _html_escape(key, quote=True)
+            safe_value = _html_escape(value, quote=True)
+            param_lines += (
+                f'\n            <Parameter name="{safe_key}" value="{safe_value}" />'
+            )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{safe_url}" />
+        <Stream url="{safe_url}">{param_lines}
+        </Stream>
     </Connect>
 </Response>"""
 

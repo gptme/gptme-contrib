@@ -15,7 +15,8 @@ from gptme.config import get_config
 from .openai_client import OpenAIRealtimeClient, SessionConfig
 
 _OPENAI_DEFAULT_VOICE = "echo"
-_DEFAULT_XAI_VOICE = "eve"
+# "rex" = male, confident, clear — matches the Bob persona better than "eve" (female)
+_DEFAULT_XAI_VOICE = "rex"
 
 
 def _get_xai_api_key() -> str | None:
