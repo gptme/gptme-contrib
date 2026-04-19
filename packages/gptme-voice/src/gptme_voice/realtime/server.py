@@ -54,6 +54,7 @@ class VoiceServer:
         self.app = Starlette(
             routes=[
                 Route("/", self.health_check, methods=["GET"]),
+                Route("/incoming", self.handle_incoming_call, methods=["POST"]),
                 WebSocketRoute("/twilio", self.handle_twilio_websocket),
                 WebSocketRoute("/local", self.handle_local_websocket),
             ]
@@ -62,6 +63,23 @@ class VoiceServer:
     async def health_check(self, request: Request) -> PlainTextResponse:
         """Health check endpoint."""
         return PlainTextResponse("OK")
+
+    async def handle_incoming_call(self, request: Request) -> PlainTextResponse:
+        """
+        Handle incoming Twilio call — return TwiML to connect to Media Stream.
+
+        Configure your Twilio phone number's Voice webhook to POST to this endpoint.
+        Twilio will then open a Media Stream WebSocket to /twilio.
+        """
+        host = request.headers.get("host", f"{self.host}:{self.port}")
+        ws_url = f"wss://{host}/twilio"
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{ws_url}" />
+    </Connect>
+</Response>"""
+        return PlainTextResponse(twiml, media_type="text/xml")
 
     async def handle_twilio_websocket(self, websocket):
         """
