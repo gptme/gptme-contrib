@@ -27,6 +27,15 @@ def test_build_connect_stream_twiml_embeds_stream_url():
     assert twiml.startswith('<?xml version="1.0" encoding="UTF-8"?>')
 
 
+def test_build_connect_stream_twiml_escapes_url():
+    twiml = build_connect_stream_twiml(
+        'wss://voice.example/twilio?token="abc"&mode=fast'
+    )
+
+    assert "&quot;abc&quot;" in twiml
+    assert "&amp;mode=fast" in twiml
+
+
 def test_resolve_outbound_call_settings_uses_config_fallbacks(monkeypatch):
     values = {
         "TWILIO_ACCOUNT_SID": "AC123",
