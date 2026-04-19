@@ -40,6 +40,11 @@ _PROVIDER_GROK = "grok"
 _VALID_PROVIDERS = (_PROVIDER_OPENAI, _PROVIDER_GROK)
 
 
+def _get_twilio_field(payload: dict, camel_name: str, snake_name: str) -> str | None:
+    """Read Twilio fields, preferring the documented camelCase form."""
+    return payload.get(camel_name) or payload.get(snake_name)
+
+
 class VoiceServer:
     """
     WebSocket server that bridges Twilio Media Streams to a Realtime API.
@@ -147,8 +152,14 @@ class VoiceServer:
 
                 elif event == "start":
                     # Call started
-                    call_sid = data.get("start", {}).get("call_sid")
-                    stream_sid = data.get("start", {}).get("stream_sid")
+                    start = data.get("start", {})
+                    stream_sid = _get_twilio_field(start, "streamSid", "stream_sid")
+                    call_sid = _get_twilio_field(start, "callSid", "call_sid")
+                    if not stream_sid:
+                        logger.warning("Twilio start event missing streamSid: %s", data)
+                        continue
+                    if not call_sid:
+                        call_sid = stream_sid
 
                     if self.model:
                         session_cfg = SessionConfig(
@@ -207,7 +218,7 @@ class VoiceServer:
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         message = {
             "event": "media",
-            "stream_sid": stream_sid,
+            "streamSid": stream_sid,
             "media": {"payload": audio_b64},
         }
         await websocket.send_text(json.dumps(message))

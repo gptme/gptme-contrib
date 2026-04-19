@@ -3,18 +3,19 @@ xAI (Grok) Realtime API WebSocket client.
 
 Drop-in replacement for OpenAIRealtimeClient using xAI's voice agent API.
 The protocol is largely OpenAI-compatible; the differences are the endpoint
-URL, authentication header, and default model name.
+URL, authentication header, and xAI-specific defaults.
 
 See: https://docs.x.ai/developers/model-capabilities/audio/voice-agent
 """
+
+import dataclasses
 
 from gptme.config import get_config
 
 from .openai_client import OpenAIRealtimeClient, SessionConfig
 
-# Default OpenAI model sentinel — detected so we can swap in the Grok default
-_OPENAI_DEFAULT_MODEL = "gpt-4o-realtime-preview-2024-12-17"
-_DEFAULT_XAI_MODEL = "grok-2-realtime"
+_OPENAI_DEFAULT_VOICE = "echo"
+_DEFAULT_XAI_VOICE = "eve"
 
 
 def _get_xai_api_key() -> str | None:
@@ -30,7 +31,7 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
     - Connects to api.x.ai instead of api.openai.com
     - Uses XAI_API_KEY for authentication
     - No OpenAI-Beta header
-    - Defaults to the Grok realtime model
+    - Defaults to an xAI-supported voice
     """
 
     WS_URL = "wss://api.x.ai/v1/realtime"
@@ -48,10 +49,8 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
             )
 
         cfg = session_config or SessionConfig()
-        if cfg.model == _OPENAI_DEFAULT_MODEL:
-            import dataclasses
-
-            cfg = dataclasses.replace(cfg, model=_DEFAULT_XAI_MODEL)
+        if cfg.voice == _OPENAI_DEFAULT_VOICE:
+            cfg = dataclasses.replace(cfg, voice=_DEFAULT_XAI_VOICE)
 
         super().__init__(api_key=resolved_key, session_config=cfg, **kwargs)
 
