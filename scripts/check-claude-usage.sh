@@ -84,6 +84,23 @@ fi
 SESSION_NAME="claude-usage-check-$$"
 TIMEOUT=25
 
+# Reap stale sessions from prior runs (SIGKILLed, systemd-terminated, etc.).
+# Any claude-usage-check-* session older than 10 minutes is stale (the script
+# runs with TIMEOUT=25 and usually completes in under a minute).
+reap_stale_sessions() {
+    local now stale_cutoff
+    now=$(date +%s)
+    stale_cutoff=$((now - 600))  # 10 minutes ago
+    while IFS='|' read -r sess created; do
+        [ -z "$sess" ] && continue
+        if [ "$created" -lt "$stale_cutoff" ]; then
+            tmux kill-session -t "$sess" 2>/dev/null || true
+        fi
+    done < <(tmux list-sessions -F '#{session_name}|#{session_created}' 2>/dev/null \
+        | grep '^claude-usage-check-' || true)
+}
+reap_stale_sessions
+
 cleanup() {
     # Try graceful exit first
     tmux send-keys -t "$SESSION_NAME" Escape 2>/dev/null || true
