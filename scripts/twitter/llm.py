@@ -451,6 +451,19 @@ def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> 
         return response_type.default()
 
 
+def _resolve_openrouter_api_key() -> str:
+    """Prefer Twitter/social-specific OpenRouter keys over the shared default."""
+    for env_var in (
+        "OPENROUTER_API_KEY_TWITTER",
+        "OPENROUTER_API_KEY_SOCIAL",
+        "OPENROUTER_API_KEY",
+    ):
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+    return ""
+
+
 def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     """Call LLM with explicit max_tokens to control OpenRouter budget reservation.
 
@@ -466,7 +479,7 @@ def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     """
     import openai
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    api_key = _resolve_openrouter_api_key()
     if not api_key:
         # Not using OpenRouter — fall back to gptme's reply (no budget issue)
         return reply(messages, model_name, stream=False)
