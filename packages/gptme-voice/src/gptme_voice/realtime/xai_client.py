@@ -55,6 +55,10 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
 
         super().__init__(api_key=resolved_key, session_config=cfg, **kwargs)
 
+    def _get_ws_url(self) -> str:
+        """xAI uses the base URL only — no ?model= parameter."""
+        return self.WS_URL
+
     def _get_ws_headers(self) -> dict[str, str]:
         """xAI auth — bearer token only, no OpenAI-Beta header."""
         return {"Authorization": f"Bearer {self.api_key}"}
