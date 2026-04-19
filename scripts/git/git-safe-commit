@@ -239,10 +239,10 @@ if [ "$NO_VERIFY" -ne 1 ]; then
 fi
 
 if [ "$NO_VERIFY" -ne 1 ] && [ "$MANUAL_PRECOMMIT_RAN" -eq 1 ]; then
-    # pre-commit already ran directly under the lock; pass a suppression marker so
-    # hooks that understand it (e.g. pre-commit-auto-stage) skip the git-dispatch
-    # redispatch, while commit-msg still runs normally (unlike --no-verify).
-    env GIT_SAFE_COMMIT_LOCK_HELD=1 GIT_SAFE_COMMIT_SUPPRESS_PRECOMMIT=1 git commit "${FORWARD_ARGS[@]}"
+    # pre-commit already ran directly under the lock; use --no-verify so git
+    # does not redispatch the pre-commit hook. prepare-commit-msg still runs
+    # (--no-verify only skips pre-commit and commit-msg, not prepare-commit-msg).
+    env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit --no-verify "${FORWARD_ARGS[@]}"
 else
     env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit "${FORWARD_ARGS[@]}"
 fi
