@@ -86,13 +86,17 @@ class PostSessionResult:
     """Return value from :func:`post_session`.
 
     Attributes:
-        record:      The :class:`SessionRecord` that was appended to the store.
-        grade:       Graded reward (0.0–1.0) extracted from the trajectory, or
-                     ``None`` if no trajectory was available.
-        signals:     Raw signal dict from :func:`~gptme_sessions.signals.extract_from_path`,
-                     or ``None`` if no trajectory was available.
-        token_count: Total token count from the trajectory (CC format only),
-                     or ``None`` if not available.
+        record:                The :class:`SessionRecord` that was appended to the store.
+        grade:                 Graded reward (0.0–1.0) extracted from the trajectory, or
+                               ``None`` if no trajectory was available.
+        signals:               Raw signal dict from :func:`~gptme_sessions.signals.extract_from_path`,
+                               or ``None`` if no trajectory was available.
+        token_count:           Total token count from the trajectory (CC format only),
+                               or ``None`` if not available.
+        input_tokens:          Input tokens from usage breakdown, or ``None`` if not present.
+        output_tokens:         Output tokens from usage breakdown, or ``None`` if not present.
+        cache_creation_tokens: Cache-write tokens, or ``None`` if not present.
+        cache_read_tokens:     Cache-read tokens, or ``None`` if not present.
     """
 
     record: SessionRecord
@@ -231,10 +235,14 @@ def post_session(
             traj_productive = result.get("productive")
             usage = result.get("usage") or {}
             if usage:
-                input_tokens = int(usage.get("input_tokens", 0))
-                output_tokens = int(usage.get("output_tokens", 0))
-                cache_creation_tokens = int(usage.get("cache_creation_tokens", 0))
-                cache_read_tokens = int(usage.get("cache_read_tokens", 0))
+                _in = usage.get("input_tokens")
+                _out = usage.get("output_tokens")
+                _cc = usage.get("cache_creation_tokens")
+                _cr = usage.get("cache_read_tokens")
+                input_tokens = int(_in) if _in is not None else None
+                output_tokens = int(_out) if _out is not None else None
+                cache_creation_tokens = int(_cc) if _cc is not None else None
+                cache_read_tokens = int(_cr) if _cr is not None else None
             total = usage.get("total_tokens", 0)
             if total:
                 token_count = int(total)

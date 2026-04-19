@@ -249,3 +249,42 @@ def test_post_session_persists_usage_fields(tmp_path: Path):
     assert records[0].output_tokens == 45
     assert records[0].cache_creation_tokens == 30
     assert records[0].cache_read_tokens == 600
+
+
+def test_post_session_partial_usage_fields_stored_as_none(tmp_path: Path):
+    """Absent usage sub-fields must be None, not 0, to avoid corrupting analytics."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    # Older trajectory format: only total_tokens present, no breakdown keys
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [],
+        "usage": {
+            "model": "claude-sonnet-4-6",
+            "total_tokens": 500,
+        },
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="unknown",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+        )
+
+    assert result.token_count == 500
+    # Absent breakdown keys must be None, not 0
+    assert result.input_tokens is None
+    assert result.output_tokens is None
+    assert result.cache_creation_tokens is None
+    assert result.cache_read_tokens is None
+
+    records = store.load_all()
+    assert records[0].input_tokens is None
+    assert records[0].output_tokens is None
+    assert records[0].cache_creation_tokens is None
+    assert records[0].cache_read_tokens is None
