@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Pre-commit hook with auto-staging and commit serialization.
+# Prevents concurrent pre-commit runs from overlapping on the same working tree.
+#
+# Installation:
+#   ln -sf $(pwd)/scripts/git/pre-commit-auto-stage .git/hooks/pre-commit
+#
+# Or copy:
+#   cp scripts/git/pre-commit-auto-stage .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# --- Mass-deletion guard (runs unconditionally, ~1ms) ---
+# This MUST run before the prek/pre-commit availability check below,
+# because when prek is missing, the hook exits 0 and all guards are skipped.
+# The guard script is optional — only present in repos that ship it (e.g. ErikBjare/bob).
+# See: ErikBjare/bob#536 (catastrophic deletion incident)
+_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$_REPO_ROOT" ] && [ -f "$_REPO_ROOT/scripts/git/guard-mass-delete.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$_REPO_ROOT/scripts/git/guard-mass-delete.sh"
+  guard_mass_delete_staged
+fi
+
+if [ ! -f ".pre-commit-config.yaml" ]; then
+  exit 0
+fi
+
+if command -v prek >/dev/null 2>&1; then
+  PRECOMMIT_CMD="prek"
+elif command -v pre-commit >/dev/null 2>&1; then
+  PRECOMMIT_CMD="pre-commit"
+else
+  echo -e "${YELLOW}⚠️  Neither prek nor pre-commit found, skipping checks${NC}"
+  exit 0
+fi
+
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)"
+LOCKFILE="$GIT_DIR/commit.lock"
+LOCK_TIMEOUT="${PRECOMMIT_LOCK_TIMEOUT:-60}"
+
+if [ "${GIT_SAFE_COMMIT_LOCK_HELD:-0}" != "1" ]; then
+  exec 9>"$LOCKFILE"
+  if ! flock --timeout "$LOCK_TIMEOUT" 9; then
+    echo -e "${RED}✗ Another commit or pre-commit run is already in progress${NC}" >&2
+    echo -e "${RED}Retry shortly, or use git safe-commit for full commit serialization${NC}" >&2
+    exit 1
+  fi
+fi
+
+if [ "${GIT_SAFE_COMMIT_EXPECT_CLEAN:-0}" = "1" ]; then
+  UNSTAGED_FILES="$(git diff --name-only --ignore-submodules -- 2>/dev/null)" || true
+  UNTRACKED_FILES="$(git ls-files --others --exclude-standard 2>/dev/null)" || true
+  DIRTY_COUNT=0
+
+  if [ -n "$UNSTAGED_FILES" ]; then
+    DIRTY_COUNT=$((DIRTY_COUNT + $(printf '%s\n' "$UNSTAGED_FILES" | grep -c . || true)))
+  fi
+  if [ -n "$UNTRACKED_FILES" ]; then
+    DIRTY_COUNT=$((DIRTY_COUNT + $(printf '%s\n' "$UNTRACKED_FILES" | grep -c . || true)))
+  fi
+
+  if [ "$DIRTY_COUNT" -gt 0 ]; then
+    echo -e "${RED}✗ Refusing to run pre-commit after git-safe-commit detected new dirty paths${NC}" >&2
+    echo -e "${RED}  Another session likely dirtied the worktree after the wrapper checked it.${NC}" >&2
+    echo -e "${RED}  Running prek now would trigger stash/restore on unrelated files (issue #642).${NC}" >&2
+    echo "" >&2
+    echo -e "${YELLOW}Sample dirty paths:${NC}" >&2
+    {
+      printf '%s\n' "$UNSTAGED_FILES"
+      printf '%s\n' "$UNTRACKED_FILES"
+    } | grep -v '^$' | head -10 | sed 's/^/  /' >&2
+    if [ "$DIRTY_COUNT" -gt 10 ]; then
+      echo "  ... and $((DIRTY_COUNT - 10)) more" >&2
+    fi
+    echo "" >&2
+    echo "Clean the worktree and retry, or after manual verification use:" >&2
+    echo "  git-safe-commit ... --no-verify" >&2
+    exit 1
+  fi
+fi
+
+echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
+
+# Capture the staged set before formatters run so auto-staging cannot pick up
+# files another session changed in the meantime.
+ORIGINALLY_STAGED_FILES=()
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  ORIGINALLY_STAGED_FILES+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+run_precommit() {
+  if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then
+    "$PRECOMMIT_CMD" run
+  else
+    "$PRECOMMIT_CMD" run --files "${ORIGINALLY_STAGED_FILES[@]}"
+  fi
+}
+
+set +e
+PRECOMMIT_OUTPUT="$(run_precommit 2>&1)"
+PRECOMMIT_EXIT=$?
+set -e
+
+if [ $PRECOMMIT_EXIT -eq 0 ]; then
+  echo -e "${GREEN}✓ All pre-commit checks passed${NC}"
+  exit 0
+else
+  echo "$PRECOMMIT_OUTPUT"
+  echo -e "${YELLOW}Pre-commit modified files, checking for auto-staging...${NC}"
+
+  # Check if any files were actually modified
+  if git diff --quiet; then
+    echo -e "${RED}✗ Pre-commit failed but no files were modified${NC}"
+    echo -e "${RED}This indicates a real failure, not auto-fixing${NC}"
+    exit 1
+  fi
+
+  while IFS= read -r file; do
+    for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
+      if [ "$file" = "$staged_file" ]; then
+        git add "$file"
+        break
+      fi
+    done
+  done < <(git diff --name-only --diff-filter=M)
+
+  echo -e "${GREEN}✓ Auto-staged formatter fixes for originally staged files${NC}"
+
+  # Re-run pre-commit to verify all checks pass
+  echo -e "${GREEN}Re-running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
+
+  set +e
+  PRECOMMIT_OUTPUT="$(run_precommit 2>&1)"
+  PRECOMMIT_EXIT=$?
+  set -e
+
+  if [ $PRECOMMIT_EXIT -eq 0 ]; then
+    echo -e "${GREEN}✓ All checks passed after auto-staging${NC}"
+    exit 0
+  else
+    echo "$PRECOMMIT_OUTPUT"
+    echo -e "${RED}✗ Pre-commit still failing after auto-staging${NC}"
+    exit 1
+  fi
+fi
