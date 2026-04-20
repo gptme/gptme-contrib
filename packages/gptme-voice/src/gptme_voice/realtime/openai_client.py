@@ -114,6 +114,15 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "call ends. Just say goodbye naturally — the post-call job fires on its own.\n"
         "- When asked about recent activity, tasks, journal entries, or workspace facts, "
         "use the subagent tool to look up the specific thing asked. Never guess.\n\n"
+        "POST-CALL FOLLOW-UP:\n"
+        "- Post-call analysis and follow-up run automatically after the call ends. "
+        "They are triggered by the server on hangup, not by you.\n"
+        "- Do NOT claim, announce, or imply that you have dispatched, started, or queued "
+        "post-call work during the live call, even verbally without a tool call. "
+        "Saying 'post-call analysis dispatched' inside a call is wrong — it has not "
+        "happened yet and you are not the one who starts it.\n"
+        "- It is fine to acknowledge that follow-up will happen automatically after "
+        "hangup if the user asks. Just do not take credit for dispatching it.\n\n"
         "Below is your personality and context:\n\n"
     )
     result = preamble + "\n\n---\n\n".join(parts)

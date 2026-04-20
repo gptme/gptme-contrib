@@ -1,8 +1,13 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
-from gptme_voice.realtime.openai_client import OpenAIRealtimeClient, SessionConfig
+from gptme_voice.realtime.openai_client import (
+    OpenAIRealtimeClient,
+    SessionConfig,
+    _load_project_instructions,
+)
 
 
 class _FakeWebSocket:
@@ -54,3 +59,29 @@ def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
         assert fake_ws.closed is True
 
     asyncio.run(_exercise())
+
+
+def test_load_project_instructions_includes_post_call_follow_up_guard(
+    tmp_path: Path,
+) -> None:
+    """Preamble must tell the live-call model not to claim post-call dispatch itself."""
+    (tmp_path / "gptme.toml").write_text(
+        '[prompt]\nfiles = ["ABOUT.md"]\n',
+    )
+    (tmp_path / "ABOUT.md").write_text("# ABOUT\nYou are Bob.\n")
+
+    instructions = _load_project_instructions(str(tmp_path))
+
+    # The preamble was applied (sanity — otherwise we'd get _DEFAULT_INSTRUCTIONS).
+    assert "real-time voice conversation" in instructions
+
+    # The new POST-CALL FOLLOW-UP section exists.
+    assert "POST-CALL FOLLOW-UP:" in instructions
+
+    # The core behavioral constraint from the 2026-04-20 call is present:
+    # do not verbally claim to have dispatched post-call work during the call.
+    assert "Do NOT claim, announce, or imply that you have dispatched" in instructions
+    assert "post-call analysis dispatched" in instructions
+
+    # Acknowledging automatic post-call follow-up is still allowed.
+    assert "happen automatically after" in instructions
