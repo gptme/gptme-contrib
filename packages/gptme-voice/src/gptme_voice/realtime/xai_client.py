@@ -53,6 +53,18 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
         if cfg.voice == _OPENAI_DEFAULT_VOICE:
             cfg = dataclasses.replace(cfg, voice=_DEFAULT_XAI_VOICE)
 
+        # VAD tuning for Grok interruption (from task #651 / Erik feedback)
+        # Lower threshold = more sensitive to speech, easier to interrupt
+        # Reduce silence duration so Bob stops faster
+        # Prefix padding reduced to minimize lag
+        if cfg.vad_threshold >= 0.65:  # only override default/high values
+            cfg = dataclasses.replace(
+                cfg,
+                vad_threshold=0.55,
+                vad_silence_duration_ms=250,
+                vad_prefix_padding_ms=150,
+            )
+
         super().__init__(api_key=resolved_key, session_config=cfg, **kwargs)
 
     def _get_ws_url(self) -> str:
