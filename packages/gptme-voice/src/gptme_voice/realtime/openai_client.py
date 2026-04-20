@@ -117,11 +117,14 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "- NEVER use the subagent tool to run post-call analysis, summarise the session, "
         "or queue follow-up work. That is handled automatically by the server after the "
         "call ends. Just say goodbye naturally — the post-call job fires on its own.\n"
-        "- NEVER use the subagent tool to cancel or check the status of another subagent. "
-        "You cannot cancel running subagents. If asked to cancel a task in progress, "
-        "say so honestly: 'I can't cancel it — it will complete on its own'.\n"
         "- When asked about recent activity, tasks, journal entries, or workspace facts, "
         "use the subagent tool to look up the specific thing asked. Never guess.\n\n"
+        "SUBAGENT STATUS AND CANCEL:\n"
+        "- If the caller asks what the subagent is doing, call the subagent_status tool "
+        "to list pending tasks — do not use a fresh subagent dispatch for this.\n"
+        "- If the caller asks to cancel the subagent, call the subagent_cancel tool. "
+        "Pass task_id for a specific task, or omit task_id to cancel all pending tasks.\n"
+        "- Do not promise to 'try to stop it' verbally without calling subagent_cancel.\n\n"
         "POST-CALL FOLLOW-UP:\n"
         "- Post-call analysis and follow-up run automatically after the call ends. "
         "They are triggered by the server on hangup, not by you.\n"
@@ -294,6 +297,44 @@ class OpenAIRealtimeClient:
                             },
                         },
                         "required": ["task"],
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "subagent_status",
+                    "description": (
+                        "Check which subagent tasks are still running. Use this when "
+                        "the caller asks what the subagent is doing, or before deciding "
+                        "to cancel. Returns each pending task's id, a short preview of "
+                        "the task, the mode, and elapsed seconds."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "subagent_cancel",
+                    "description": (
+                        "Cancel a running subagent task. Use this when the caller "
+                        "explicitly asks to stop or cancel the subagent, or when the "
+                        "dispatched task no longer matches what the caller wants. "
+                        "Pass task_id to cancel a specific task, or omit task_id to "
+                        "cancel every pending subagent task."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": (
+                                    "Task id to cancel (as returned by subagent or "
+                                    "subagent_status). Omit task_id to cancel every "
+                                    "pending subagent task."
+                                ),
+                            },
+                        },
                     },
                 },
                 {
