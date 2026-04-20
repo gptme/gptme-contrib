@@ -93,6 +93,8 @@ The agent is a general-purpose autonomous AI assistant.
 2. Write high-quality code and documentation
 3. Self-improve through lessons and patterns
 4. Contribute to open-source projects"""
+NO_THINK_PREFILL = "<think></think>\n"
+NO_THINK_PREFILL_MODELS = frozenset({"lmstudio/qwen/qwen3.6-35b-a3b"})
 
 
 def _compute_judge_version() -> str:
@@ -264,24 +266,57 @@ def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
     }
 
 
+def _strip_json_wrappers(text: str) -> str:
+    """Normalize common LLM wrappers around a JSON payload."""
+    cleaned = text.strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+
+    if "```" in cleaned:
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(1).strip()
+
+    if cleaned.startswith("json"):
+        cleaned = cleaned[4:].strip()
+
+    return cleaned
+
+
 def _parse_judge_payload(text: str, model: str) -> dict | None:
     """Parse a judge JSON response, tolerating markdown code fences."""
     if not text:
         return None
-    payload = text.strip()
-    if "```" in payload:
-        m = re.search(r"```(?:json)?\s*(.*?)\s*```", payload, re.DOTALL)
-        if m:
-            payload = m.group(1).strip()
+    payload = _strip_json_wrappers(text)
     try:
         verdict = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        logger.warning("LLM judge returned non-JSON response: %s", exc)
-        return None
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", payload)
+        if not match:
+            logger.warning("LLM judge returned non-JSON response")
+            return None
+        verdict = json.loads(match.group(0))
     score = float(verdict.get("score", 0.5))
     reason = str(verdict.get("reason", ""))
     score = max(0.0, min(1.0, score))
     return {"score": score, "reason": reason, "model": model}
+
+
+def _prepare_messages_for_model(messages: list[Any], model: str) -> list[Any]:
+    """Apply known model-specific message tweaks before a gptme judge call."""
+    prepared = list(messages)
+    if model not in NO_THINK_PREFILL_MODELS:
+        return prepared
+    if (
+        prepared
+        and getattr(prepared[-1], "role", None) == "assistant"
+        and getattr(prepared[-1], "content", None) == NO_THINK_PREFILL
+    ):
+        return prepared
+
+    from gptme.message import Message
+
+    prepared.append(Message("assistant", NO_THINK_PREFILL))
+    return prepared
 
 
 def _judge_via_anthropic_direct(
@@ -341,10 +376,13 @@ def _judge_via_gptme(prompt: str, *, model: str) -> dict | None:
                 tool_format="markdown",
             )
             response = reply(
-                [
-                    Message("system", JUDGE_SYSTEM),
-                    Message("user", prompt),
-                ],
+                _prepare_messages_for_model(
+                    [
+                        Message("system", JUDGE_SYSTEM),
+                        Message("user", prompt),
+                    ],
+                    model,
+                ),
                 model,
                 stream=False,
             )

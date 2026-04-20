@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gptme.message import Message
 
 from gptme_sessions.judge import (
     DEFAULT_GOALS,
@@ -16,7 +17,10 @@ from gptme_sessions.judge import (
     JUDGE_VERSION,
     JUDGE_PROMPT_TEMPLATE,
     JUDGE_SYSTEM,
+    NO_THINK_PREFILL,
     _judge_openrouter_env,
+    _parse_judge_payload,
+    _prepare_messages_for_model,
     _resolve_openrouter_api_key,
     _is_anthropic_direct_model,
     _strip_anthropic_prefix,
@@ -140,6 +144,42 @@ class TestJudgeSession:
         """Default goals should work for any agent, not just Bob."""
         assert "Bob" not in DEFAULT_GOALS
         assert "agent" in DEFAULT_GOALS.lower()
+
+    def test_parse_judge_payload_handles_think_tags_and_fences(self) -> None:
+        parsed = _parse_judge_payload(
+            """
+<think>internal</think>
+```json
+{"score": 1.4, "reason": "Shipped a real fix"}
+```
+""",
+            "openai-subscription/gpt-5.4",
+        )
+
+        assert parsed == {
+            "score": 1.0,
+            "reason": "Shipped a real fix",
+            "model": "openai-subscription/gpt-5.4",
+        }
+
+    def test_prepare_messages_for_qwen_adds_no_think_prefill(self) -> None:
+        prepared = _prepare_messages_for_model(
+            [Message("system", "judge"), Message("user", "score this")],
+            "lmstudio/qwen/qwen3.6-35b-a3b",
+        )
+
+        assert [msg.role for msg in prepared] == ["system", "user", "assistant"]
+        assert prepared[-1].content == NO_THINK_PREFILL
+
+    def test_prepare_messages_for_other_models_is_noop(self) -> None:
+        messages = [Message("system", "judge"), Message("user", "score this")]
+
+        prepared = _prepare_messages_for_model(
+            messages,
+            "openai-subscription/gpt-5.4",
+        )
+
+        assert prepared == messages
 
 
 class TestJudgeFromSignals:
