@@ -177,7 +177,7 @@ def test_schedule_post_call_runs_configured_command_hook() -> None:
                 transcript=[TranscriptTurn(role="user", text="Follow up")],
                 metadata={},
             )
-            record_path = server._save_recent_call(record)
+            record_path = server._save_call_record(record)
             observed: dict[str, str] = {}
 
             async def _fake_run_post_call(caller_id: str, path: Path) -> None:
@@ -196,6 +196,36 @@ def test_schedule_post_call_runs_configured_command_hook() -> None:
             }
 
     asyncio.run(_exercise())
+
+
+def test_load_recent_call_falls_back_to_legacy_flat_path() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        record = RecentCallRecord(
+            caller_id="+46700000009",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="Legacy state")],
+            metadata={},
+        )
+        legacy_path = server._legacy_recent_call_path(record.caller_id)
+        legacy_path.write_text(
+            json.dumps(
+                {
+                    "caller_id": record.caller_id,
+                    "source": record.source,
+                    "ended_at": record.ended_at,
+                    "transcript": [dict(role="user", text="Legacy state")],
+                    "metadata": {},
+                }
+            )
+        )
+
+        loaded = server._load_recent_call(record.caller_id)
+
+        assert loaded is not None
+        assert loaded.transcript[0].text == "Legacy state"
 
 
 def test_consume_recent_call_deletes_state_file() -> None:
@@ -221,6 +251,65 @@ def test_consume_recent_call_deletes_state_file() -> None:
             server._consume_recent_call("+46700000002")
 
         assert not state_path.exists()
+
+
+def test_consume_recent_call_keeps_archived_record() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        record = RecentCallRecord(
+            caller_id="+46700000005",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="Archive me")],
+            metadata={"call_sid": "CAarchived"},
+        )
+        archived_path = server._save_call_record(record)
+        server._save_recent_call(record)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+            server._consume_recent_call(record.caller_id)
+
+        assert archived_path.exists()
+        payload = json.loads(archived_path.read_text())
+        assert payload["transcript"][0]["text"] == "Archive me"
+
+
+def test_save_call_record_uses_unique_archive_path_per_call() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+
+        first = RecentCallRecord(
+            caller_id="+46700000006",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="First call")],
+            metadata={"call_sid": "CAfirst"},
+        )
+        second = RecentCallRecord(
+            caller_id="+46700000006",
+            source="twilio",
+            ended_at=1_001.0,
+            transcript=[TranscriptTurn(role="user", text="Second call")],
+            metadata={"call_sid": "CAsecond"},
+        )
+
+        first_path = server._save_call_record(first)
+        second_path = server._save_call_record(second)
+
+        assert first_path != second_path
+        assert first_path.exists()
+        assert second_path.exists()
+        assert (
+            json.loads(first_path.read_text())["transcript"][0]["text"] == "First call"
+        )
+        assert (
+            json.loads(second_path.read_text())["transcript"][0]["text"]
+            == "Second call"
+        )
 
 
 def test_schedule_post_call_runner_finally_does_not_evict_newer_task() -> None:
