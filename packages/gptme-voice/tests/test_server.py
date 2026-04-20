@@ -101,10 +101,11 @@ def test_build_resume_instructions_includes_prior_transcript() -> None:
 
 
 def test_truncate_resume_transcript_keeps_line_boundaries() -> None:
+    # Lines must exceed max_chars so truncation is actually triggered
     transcript_text = "\n".join(
         [
-            f"User: {'a' * 1200}",
-            f"Assistant: {'b' * 1200}",
+            f"User: {'a' * 1500}",
+            f"Assistant: {'b' * 1500}",
             "User: tail",
         ]
     )
@@ -112,6 +113,7 @@ def test_truncate_resume_transcript_keeps_line_boundaries() -> None:
     truncated = _truncate_resume_transcript(transcript_text, 2_500)
     formatted_lines = transcript_text.splitlines()
 
+    assert len(transcript_text) > 2_500, "input must exceed budget to test truncation"
     assert truncated.splitlines()[0] in formatted_lines
     assert truncated.endswith("User: tail")
     assert len(truncated) <= 2_500
