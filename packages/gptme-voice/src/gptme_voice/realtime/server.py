@@ -649,6 +649,13 @@ class VoiceServer:
 
         except WebSocketDisconnect:
             pass  # Normal path when _schedule_hangup closes the WebSocket
+        except RuntimeError as exc:
+            # Starlette raises RuntimeError from receive() when the socket is
+            # already closed (e.g. after _schedule_hangup closes server-side).
+            # Treat that as a normal disconnect instead of logging a traceback.
+            if "not connected" not in str(exc).lower():
+                raise
+            logger.debug("Twilio websocket already closed before iter_text: %s", exc)
         except Exception as e:
             logger.exception("Error handling Twilio connection: %s", e)
         finally:
@@ -755,6 +762,13 @@ class VoiceServer:
 
         except WebSocketDisconnect:
             pass  # Normal path when _schedule_hangup closes the WebSocket
+        except RuntimeError as exc:
+            # Starlette raises RuntimeError from receive() when the socket is
+            # already closed (e.g. after _schedule_hangup closes server-side).
+            # Treat that as a normal disconnect instead of logging a traceback.
+            if "not connected" not in str(exc).lower():
+                raise
+            logger.debug("Local websocket already closed before iter_text: %s", exc)
         except Exception as e:
             logger.exception("Error handling local connection: %s", e)
         finally:
