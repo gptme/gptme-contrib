@@ -18,10 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .twilio_integration import _get_config_env
+
 logger = logging.getLogger(__name__)
 
 # Max output to return (avoid overwhelming the realtime API)
 _MAX_OUTPUT_LEN = 2000
+_IGNORABLE_ERROR_LINES = {
+    "Warning: Input is not a terminal (fd=0).",
+}
 
 # Appended to each task so the subagent writes a clean response file
 _RESPONSE_SUFFIX = (
@@ -59,12 +64,47 @@ class GptmeToolBridge:
         workspace: str | None = None,
         on_result: Callable[[str], Awaitable[None]] | None = None,
     ):
-        self.gptme_path = gptme_path
+        self.gptme_path = _get_config_env("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
+        shared_model = _get_config_env("GPTME_VOICE_SUBAGENT_MODEL")
+        self.model_fast = (
+            _get_config_env("GPTME_VOICE_SUBAGENT_MODEL_FAST")
+            or shared_model
+            or self.MODEL_FAST
+        )
+        self.model_smart = (
+            _get_config_env("GPTME_VOICE_SUBAGENT_MODEL_SMART")
+            or shared_model
+            or self.MODEL_SMART
+        )
         self._pending_tasks: dict[str, asyncio.Task] = {}
         self._task_counter = 0
+
+    @staticmethod
+    def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
+        stderr_lines = [
+            line.strip()
+            for line in stderr.splitlines()
+            if line.strip() and line.strip() not in _IGNORABLE_ERROR_LINES
+        ]
+        if stderr_lines:
+            return "\n".join(stderr_lines)
+
+        stdout_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        for needle in ("Error code:", "API error:", "invalid_request_error", "ERROR"):
+            for line in reversed(stdout_lines):
+                if needle.lower() in line.lower():
+                    return line
+        if output:
+            return output
+        if stdout_lines:
+            return stdout_lines[-1]
+        fallback_stderr = stderr.strip()
+        if fallback_stderr:
+            return fallback_stderr
+        return ""
 
     async def _run_subagent(self, task_id: str, task: str, mode: str = "smart") -> None:
         """Run a subagent in the background and inject result when done."""
@@ -92,7 +132,7 @@ class GptmeToolBridge:
             response_file = Path(tf.name)
         augmented_task = task + _RESPONSE_SUFFIX.format(response_file=response_file)
 
-        model = self.MODEL_FAST if mode == "fast" else self.MODEL_SMART
+        model = self.model_fast if mode == "fast" else self.model_smart
         logger.info(f"Dispatching subagent ({mode}): {task}")
         logger.debug(f"Response file: {response_file}")
 
@@ -126,18 +166,27 @@ class GptmeToolBridge:
                     error=f"Subagent timed out after {self.timeout}s",
                 )
 
+            stdout_text = stdout.decode("utf-8", errors="replace").strip()
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+
             # Read the response file if it exists
             if response_file.exists():
                 output = response_file.read_text().strip()
-                logger.info(
-                    f"Subagent response ({len(output)} chars): {output[:200]}..."
-                )
+                if output:
+                    logger.info(
+                        f"Subagent response ({len(output)} chars): {output[:200]}..."
+                    )
+                else:
+                    output = stdout_text
+                    logger.warning(
+                        "Subagent wrote an empty response file, using stdout"
+                    )
             else:
                 # Fall back to stdout if no response file was written
-                output = stdout.decode("utf-8", errors="replace").strip()
+                output = stdout_text
                 logger.warning("Subagent did not write response file, using stdout")
 
-            error = stderr.decode("utf-8", errors="replace").strip()
+            error = self._extract_error_text(stdout_text, stderr_text, output)
 
             # Truncate long output
             if len(output) > _MAX_OUTPUT_LEN:
