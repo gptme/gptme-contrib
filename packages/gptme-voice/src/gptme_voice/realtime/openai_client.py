@@ -231,11 +231,11 @@ class OpenAIRealtimeClient:
                     "name": "subagent",
                     "description": (
                         "Dispatch a task to a gptme subagent running in the workspace. "
-                        "The subagent has full access to tools: shell, file read/write, "
-                        "python, and can reason about multi-step tasks. "
-                        "Use this for anything that requires interacting with the codebase, "
-                        "reading files, checking task status, running commands, searching code, etc. "
-                        "Describe what you want done in natural language."
+                        "Use it only for one small, focused workspace lookup or action: "
+                        "check one task, inspect one file, run one quick command, or verify "
+                        "one recent fact. Do not use it for broad investigations, full "
+                        "reviews, or post-call analysis. Describe one concrete request in "
+                        "natural language."
                     ),
                     "parameters": {
                         "type": "object",
@@ -248,10 +248,10 @@ class OpenAIRealtimeClient:
                                 "type": "string",
                                 "enum": ["smart", "fast"],
                                 "description": (
-                                    "Model quality tradeoff. 'smart' (default) uses the full model "
-                                    "for complex tasks like code analysis, multi-step reasoning, or "
-                                    "writing code. 'fast' uses a smaller model for quick lookups like "
-                                    "reading a file, checking git status, or simple searches."
+                                    "Response urgency. 'fast' uses a smaller model for speed — "
+                                    "prefer this for simple lookups. 'smart' (default) uses a "
+                                    "larger model when accuracy matters. Both are for small, "
+                                    "focused lookups only — never for broad investigations."
                                 ),
                             },
                         },
