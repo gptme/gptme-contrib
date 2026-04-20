@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 
 import pytest
 from gptme_voice.realtime.openai_client import (
+    _MAX_PENDING_AUDIO_CHUNKS,
     OpenAIRealtimeClient,
     SessionConfig,
     _load_project_instructions,
@@ -85,6 +87,95 @@ def test_load_project_instructions_includes_post_call_follow_up_guard(
 
     # Acknowledging automatic post-call follow-up is still allowed.
     assert "happen automatically after" in instructions
+
+
+def test_send_audio_buffers_until_session_created() -> None:
+    """Audio arriving before session.created must be buffered, not forwarded.
+
+    Regression for silent-call-on-startup: Twilio media frames can arrive
+    before the provider confirms the session with ``session.created``. Sending
+    audio before then is a no-op on the provider side — the caller hears
+    silence because Grok has not started listening.
+    """
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+
+            # connect() sends session.update; everything after index 0 is
+            # what send_audio / flush produced.
+            assert fake_ws.sent[0]["type"] == "session.update"
+            baseline = len(fake_ws.sent)
+
+            # Audio before session.created must be buffered, not sent.
+            await client.send_audio(b"\x01\x02\x03")
+            await client.send_audio(b"\x04\x05\x06")
+            assert len(fake_ws.sent) == baseline
+            assert len(client._pending_audio) == 2
+
+            # Simulate provider confirming the session — the flush should
+            # replay buffered chunks in order.
+            await client._handle_event({"type": "session.created"})
+
+            assert client._session_ready is not None
+            assert client._session_ready.is_set()
+            assert client._pending_audio == []
+
+            appends = [
+                e for e in fake_ws.sent if e.get("type") == "input_audio_buffer.append"
+            ]
+            assert len(appends) == 2
+            assert base64.b64decode(appends[0]["audio"]) == b"\x01\x02\x03"
+            assert base64.b64decode(appends[1]["audio"]) == b"\x04\x05\x06"
+
+            # After ready, send_audio goes straight through.
+            await client.send_audio(b"\x07\x08")
+            appends = [
+                e for e in fake_ws.sent if e.get("type") == "input_audio_buffer.append"
+            ]
+            assert len(appends) == 3
+            assert base64.b64decode(appends[2]["audio"]) == b"\x07\x08"
+
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_send_audio_buffer_is_bounded() -> None:
+    """Buffer must be capped so a never-arriving session.created cannot leak memory."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+
+            # Fill the buffer to capacity plus 3 overflow chunks.
+            for i in range(_MAX_PENDING_AUDIO_CHUNKS + 3):
+                await client.send_audio(bytes([i % 256]))
+
+            assert len(client._pending_audio) == _MAX_PENDING_AUDIO_CHUNKS
+            assert client._pending_audio_dropped == 3
+
+            await client.disconnect()
+
+    asyncio.run(_exercise())
 
 
 def test_load_project_instructions_guards_present_without_personality_files(
