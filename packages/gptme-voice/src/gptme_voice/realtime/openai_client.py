@@ -248,10 +248,10 @@ class OpenAIRealtimeClient:
                                 "type": "string",
                                 "enum": ["smart", "fast"],
                                 "description": (
-                                    "Model quality tradeoff. 'smart' (default) uses the full model "
-                                    "for complex tasks like code analysis, multi-step reasoning, or "
-                                    "writing code. 'fast' uses a smaller model for quick lookups like "
-                                    "reading a file, checking git status, or simple searches."
+                                    "Response urgency. 'fast' uses a smaller model for speed — "
+                                    "prefer this for simple lookups. 'smart' (default) uses a "
+                                    "larger model when accuracy matters. Both are for small, "
+                                    "focused lookups only — never for broad investigations."
                                 ),
                             },
                         },
