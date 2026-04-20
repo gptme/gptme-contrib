@@ -15,6 +15,8 @@ from gptme_sessions.judge import (
     DEFAULT_JUDGE_MODEL,
     JUDGE_PROMPT_TEMPLATE,
     JUDGE_SYSTEM,
+    _is_anthropic_direct_model,
+    _strip_anthropic_prefix,
     judge_from_signals,
     judge_session,
 )
@@ -192,6 +194,76 @@ class TestJudgeFromSignals:
             assert call_args[1]["model"] == "custom-model"
 
 
+class TestModelRouting:
+    """Tests for Anthropic-direct vs gptme.llm routing logic."""
+
+    def test_bare_claude_id_is_direct(self) -> None:
+        assert _is_anthropic_direct_model("claude-haiku-4-5-20251001") is True
+        assert _is_anthropic_direct_model("claude-sonnet-4-5") is True
+
+    def test_anthropic_prefix_is_direct(self) -> None:
+        assert _is_anthropic_direct_model("anthropic/claude-sonnet-4.6") is True
+        assert _is_anthropic_direct_model("anthropic/claude-haiku-4-5-20251001") is True
+
+    def test_provider_prefixed_is_not_direct(self) -> None:
+        assert _is_anthropic_direct_model("openrouter/anthropic/claude-sonnet-4.6") is False
+        assert _is_anthropic_direct_model("openai-subscription/gpt-5.4") is False
+        assert _is_anthropic_direct_model("lmstudio/qwen/qwen3.6-35b-a3b") is False
+        assert _is_anthropic_direct_model("openai/gpt-4o") is False
+
+    def test_strip_anthropic_prefix(self) -> None:
+        assert _strip_anthropic_prefix("anthropic/claude-sonnet-4.6") == "claude-sonnet-4.6"
+        assert _strip_anthropic_prefix("claude-haiku-4-5-20251001") == "claude-haiku-4-5-20251001"
+        # Non-anthropic prefixes are left alone
+        assert (
+            _strip_anthropic_prefix("openrouter/anthropic/claude-sonnet-4.6")
+            == "openrouter/anthropic/claude-sonnet-4.6"
+        )
+
+    def test_non_anthropic_model_routes_via_gptme(self) -> None:
+        """Non-Anthropic-direct models call _judge_via_gptme, not _judge_via_anthropic_direct."""
+        with (
+            patch(
+                "gptme_sessions.judge._judge_via_gptme",
+                return_value={"score": 0.6, "reason": "ok", "model": "openrouter/x"},
+            ) as mock_gptme,
+            patch("gptme_sessions.judge._judge_via_anthropic_direct") as mock_direct,
+        ):
+            result = judge_session(
+                "journal text", category="code", model="openrouter/anthropic/claude-sonnet-4.6"
+            )
+        assert result is not None
+        assert result["score"] == 0.6
+        mock_gptme.assert_called_once()
+        mock_direct.assert_not_called()
+
+    def test_anthropic_direct_model_routes_via_anthropic(self) -> None:
+        """Bare Anthropic IDs call _judge_via_anthropic_direct, not _judge_via_gptme."""
+        with (
+            patch(
+                "gptme_sessions.judge._judge_via_anthropic_direct",
+                return_value={"score": 0.7, "reason": "ok", "model": "claude-haiku-4-5-20251001"},
+            ) as mock_direct,
+            patch("gptme_sessions.judge._judge_via_gptme") as mock_gptme,
+        ):
+            result = judge_session("journal text", category="code")
+        assert result is not None
+        assert result["score"] == 0.7
+        mock_direct.assert_called_once()
+        mock_gptme.assert_not_called()
+
+    def test_gptme_path_returns_none_when_gptme_missing(self) -> None:
+        """When gptme is not installed, non-Anthropic models get None cleanly."""
+        with patch.dict(
+            "sys.modules",
+            {"gptme": None, "gptme.init": None, "gptme.llm": None, "gptme.message": None},
+        ):
+            result = judge_session(
+                "journal text", category="code", model="openrouter/anthropic/claude-sonnet-4.6"
+            )
+        assert result is None
+
+
 class TestSessionRecordJudgeFields:
     """Tests for LLM judge fields on SessionRecord."""
 
@@ -250,6 +322,16 @@ class TestJudgeCLI:
         param_names = [p.name for p in signals_cmd.params]
         assert "llm_judge" in param_names
         assert "goals" in param_names
+
+    def test_judge_and_signals_have_model_flag(self) -> None:
+        """Both 'judge' and 'signals' expose a --model flag for judge routing."""
+        from gptme_sessions.cli import cli
+
+        for cmd_name in ("judge", "signals"):
+            params = [p for p in cli.commands[cmd_name].params if p.name == "judge_model"]
+            assert params, f"{cmd_name!r} is missing --model flag"
+            flag = params[0]
+            assert "--model" in flag.opts
 
     @pytest.mark.skipif(
         getattr(os, "getuid", lambda: -1)() == 0,
