@@ -943,10 +943,20 @@ def discover(
 @click.option("--grade", is_flag=True, help="Output grade only (float 0.0-1.0)")
 @click.option("--usage", is_flag=True, help="Output token usage breakdown")
 @click.option(
-    "--llm-judge", is_flag=True, help="Run LLM-as-judge scoring (requires anthropic package)"
+    "--llm-judge",
+    is_flag=True,
+    help="Run LLM-as-judge scoring (requires anthropic or gptme package)",
 )
 @click.option("--goals", default=None, help="Agent goals for LLM judge (default: generic)")
 @click.option("--category", "judge_category", default=None, help="Category hint for LLM judge")
+@click.option(
+    "--model",
+    "judge_model",
+    default=None,
+    help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
+    "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
+    "route via gptme.llm.reply.",
+)
 def signals(
     path: Path,
     as_json: bool,
@@ -955,6 +965,7 @@ def signals(
     llm_judge: bool,
     goals: str | None,
     judge_category: str | None,
+    judge_model: str | None,
 ) -> None:
     """Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)."""
     # Validate mutual exclusivity
@@ -983,6 +994,8 @@ def signals(
         judge_kwargs: dict = {}
         if goals:
             judge_kwargs["goals"] = goals
+        if judge_model:
+            judge_kwargs["model"] = judge_model
         verdict = judge_from_signals(
             result,
             category=judge_category,
@@ -991,7 +1004,10 @@ def signals(
         if verdict:
             result["llm_judge"] = verdict
         else:
-            click.echo("LLM judge: unavailable (missing API key or anthropic package)", err=True)
+            click.echo(
+                "LLM judge: unavailable (missing API key, SDK, or judge returned no result)",
+                err=True,
+            )
 
     if grade:
         click.echo(f"{result['grade']:.4f}")
@@ -1236,8 +1252,7 @@ def sync(
             if needs_fix:
                 if dry_run:
                     click.echo(
-                        f"  would fix: {rec.session_id}  "
-                        f"{rec.timestamp[:19]} → {correct_ts[:19]}"
+                        f"  would fix: {rec.session_id}  {rec.timestamp[:19]} → {correct_ts[:19]}"
                     )
                 else:
                     rec.timestamp = correct_ts
@@ -1589,6 +1604,14 @@ def post_session_cmd(
 @click.option("--last", type=int, default=20, help="Score last N sessions (default: 20)")
 @click.option("--goals", default=None, help="Agent goals for LLM judge (default: generic)")
 @click.option(
+    "--model",
+    "judge_model",
+    default=None,
+    help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
+    "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
+    "route via gptme.llm.reply. Default: claude-haiku-4-5-20251001.",
+)
+@click.option(
     "--update-store",
     is_flag=True,
     help="Write scores back to session-records.jsonl (matching by session_id)",
@@ -1601,6 +1624,7 @@ def judge(
     journal_dir: Path | None,
     last: int,
     goals: str | None,
+    judge_model: str | None,
     update_store: bool,
     as_json: bool,
     dry_run: bool,
@@ -1613,10 +1637,12 @@ def judge(
     With --update-store, writes scores back to session-records.jsonl by matching
     session IDs from journal filenames to stored records.
     """
-    from .judge import DEFAULT_GOALS, judge_session
+    from .judge import DEFAULT_GOALS, DEFAULT_JUDGE_MODEL, judge_session
 
     if dry_run and update_store:
         raise click.UsageError("--dry-run and --update-store are mutually exclusive")
+
+    effective_model = judge_model or DEFAULT_JUDGE_MODEL
 
     if journal_dir is None:
         journal_dir = Path.cwd() / "journal"
@@ -1686,7 +1712,9 @@ def judge(
                     click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
                 continue
 
-            verdict = judge_session(text, category=cat, goals=effective_goals)
+            verdict = judge_session(
+                text, category=cat, goals=effective_goals, model=effective_model
+            )
             score = verdict["score"] if verdict else None
             reason = verdict["reason"] if verdict else None
 
