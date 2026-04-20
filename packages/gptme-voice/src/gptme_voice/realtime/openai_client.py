@@ -7,6 +7,7 @@ voice conversations.
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -220,6 +221,7 @@ class OpenAIRealtimeClient:
         self._session_ready: asyncio.Event | None = None
         self._pending_audio: list[bytes] = []
         self._pending_audio_dropped = 0
+        self._event_notice: asyncio.Event | None = None
 
     def _get_ws_url(self) -> str:
         """WebSocket URL for this provider (override in subclasses)."""
@@ -243,6 +245,7 @@ class OpenAIRealtimeClient:
         self._session_ready = asyncio.Event()
         self._pending_audio = []
         self._pending_audio_dropped = 0
+        self._event_notice = asyncio.Event()
 
         url = self._get_ws_url()
         headers = self._get_ws_headers()
@@ -392,8 +395,36 @@ class OpenAIRealtimeClient:
         )
         await self._send_event("response.create", {})
 
-    async def disconnect(self) -> None:
+    async def disconnect(
+        self,
+        *,
+        drain_timeout_seconds: float = 0.0,
+        idle_timeout_seconds: float = 0.0,
+        commit_audio: bool = False,
+        stop_audio_output: bool = False,
+    ) -> None:
         """Disconnect from OpenAI Realtime API."""
+        if stop_audio_output:
+            # Once the call-side websocket is closing, late provider audio is
+            # more trouble than it's worth. Keep transcript callbacks alive so
+            # we can still persist the final text turns during the drain window.
+            self.on_audio = None
+            self.on_audio_end = None
+
+        if (
+            commit_audio
+            and self._session_ready is not None
+            and self._session_ready.is_set()
+        ):
+            with contextlib.suppress(Exception):
+                await self.commit_audio()
+
+        if drain_timeout_seconds > 0 and idle_timeout_seconds > 0:
+            await self._drain_incoming_events(
+                timeout_seconds=drain_timeout_seconds,
+                idle_timeout_seconds=idle_timeout_seconds,
+            )
+
         if self._receive_task:
             self._receive_task.cancel()
             try:
@@ -404,6 +435,41 @@ class OpenAIRealtimeClient:
         if self._ws:
             await self._ws.close()
             self._ws = None
+
+    async def _drain_incoming_events(
+        self, *, timeout_seconds: float, idle_timeout_seconds: float
+    ) -> None:
+        """Wait briefly for late provider events before disconnecting.
+
+        This is primarily for call teardown: a caller can hang up while the
+        realtime provider is still about to emit the final transcript turn.
+        Keeping the provider socket alive for a short idle-bounded window lets
+        those late text events land without keeping the connection open forever.
+        """
+
+        if timeout_seconds <= 0 or idle_timeout_seconds <= 0:
+            return
+
+        receive_task = self._receive_task
+        event_notice = self._event_notice
+        if receive_task is None or receive_task.done() or event_notice is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while not receive_task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+
+            event_notice.clear()
+            try:
+                await asyncio.wait_for(
+                    event_notice.wait(),
+                    timeout=min(idle_timeout_seconds, remaining),
+                )
+            except asyncio.TimeoutError:
+                return
 
     async def send_audio(self, pcm_data: bytes) -> None:
         """
@@ -493,6 +559,8 @@ class OpenAIRealtimeClient:
 
     async def _handle_event(self, event: dict) -> None:
         """Handle an event from OpenAI Realtime API."""
+        if self._event_notice is not None:
+            self._event_notice.set()
         event_type = event.get("type", "")
 
         # Audio output chunk (handle both old and new event names)

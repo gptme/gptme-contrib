@@ -30,6 +30,29 @@ class _FakeWebSocket:
         self.closed = True
 
 
+class _QueuedWebSocket(_FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self._incoming: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def feed(self, event: dict) -> None:
+        await self._incoming.put(json.dumps(event))
+
+    def __aiter__(self) -> "_QueuedWebSocket":
+        return self
+
+    async def __anext__(self) -> str:
+        message = await self._incoming.get()
+        if message is None:
+            raise StopAsyncIteration
+        return message
+
+    async def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            await self._incoming.put(None)
+
+
 def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
     async def _exercise() -> None:
         fake_ws = _FakeWebSocket()
@@ -196,3 +219,68 @@ def test_load_project_instructions_guards_present_without_personality_files(
     assert "real-time voice conversation" in instructions
     assert "POST-CALL FOLLOW-UP:" in instructions
     assert "Do NOT claim, announce, or imply that you have dispatched" in instructions
+
+
+def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -> None:
+    """Call teardown should preserve late transcript events but suppress late audio.
+
+    Regression for Twilio calls that hang up while the provider is still about to
+    emit the final transcript turn. We want the text for persistence, but we must
+    not try to write late audio to a websocket that is already closing.
+    """
+
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+        user_transcripts: list[str] = []
+        audio_chunks: list[bytes] = []
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                on_user_transcript=user_transcripts.append,
+                on_audio=audio_chunks.append,
+            )
+            await client.connect()
+            await client._handle_event({"type": "session.created"})
+
+            async def _emit_late_events() -> None:
+                await asyncio.sleep(0.01)
+                await fake_ws.feed(
+                    {
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "transcript": "final words",
+                    }
+                )
+                await fake_ws.feed(
+                    {
+                        "type": "response.audio.delta",
+                        "delta": base64.b64encode(b"\x01\x02").decode("utf-8"),
+                    }
+                )
+
+            emit_task = asyncio.create_task(_emit_late_events())
+            await client.disconnect(
+                drain_timeout_seconds=0.2,
+                idle_timeout_seconds=0.05,
+                commit_audio=True,
+                stop_audio_output=True,
+            )
+            await emit_task
+
+        commit_events = [
+            event
+            for event in fake_ws.sent
+            if event.get("type") == "input_audio_buffer.commit"
+        ]
+        assert commit_events, "disconnect should commit pending audio before drain"
+        assert user_transcripts == ["final words"]
+        assert audio_chunks == []
+        assert fake_ws.closed is True
+
+    asyncio.run(_exercise())
