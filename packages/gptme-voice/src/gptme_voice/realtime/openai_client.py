@@ -257,7 +257,29 @@ class OpenAIRealtimeClient:
                         },
                         "required": ["task"],
                     },
-                }
+                },
+                {
+                    "type": "function",
+                    "name": "hangup",
+                    "description": (
+                        "End the current voice call cleanly. Use this only when the caller "
+                        "has clearly said goodbye or explicitly asked to hang up. Do not use "
+                        "this to interrupt ongoing work or avoid a question. "
+                        "Say a brief farewell first; the call will terminate shortly after."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {
+                                "type": "string",
+                                "description": (
+                                    "Short free-form reason for hanging up "
+                                    "(e.g. 'caller said goodbye'). Optional."
+                                ),
+                            },
+                        },
+                    },
+                },
             ],
         }
         transcription = self._get_transcription_config()

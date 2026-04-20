@@ -62,11 +62,13 @@ class GptmeToolBridge:
         timeout: int = 300,
         workspace: str | None = None,
         on_result: Callable[[str], Awaitable[None]] | None = None,
+        on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
+        self.on_hangup = on_hangup
         env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         self.model_fast = env_model or self.MODEL_FAST
         self.model_smart = env_model or self.MODEL_SMART
@@ -233,6 +235,25 @@ class GptmeToolBridge:
                 "status": "dispatched",
                 "task_id": task_id,
                 "message": f"Working on it: {task}",
+            }
+
+        if name == "hangup":
+            reason = arguments.get("reason") or None
+            logger.info("Hangup requested (reason=%s)", reason or "<none>")
+            if self.on_hangup is None:
+                return {
+                    "status": "not_supported",
+                    "message": (
+                        "Hang-up is not wired up on this server; "
+                        "the call will end when the caller hangs up."
+                    ),
+                }
+            # Fire the teardown in the background so the model still gets a
+            # synchronous function-call response and can finish speaking.
+            asyncio.create_task(self.on_hangup(reason))
+            return {
+                "status": "hanging_up",
+                "message": "Ending the call shortly.",
             }
 
         return {"error": f"Unknown function: {name}"}

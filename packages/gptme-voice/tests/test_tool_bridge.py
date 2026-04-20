@@ -203,3 +203,104 @@ def test_execute_reports_timeout() -> None:
         assert "timed out" in result.error.lower()
 
     asyncio.run(_exercise())
+
+
+def test_handle_function_call_hangup_fires_callback_when_wired() -> None:
+    """hangup triggers on_hangup callback with optional reason."""
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {"calls": []}
+
+        async def _on_hangup(reason: str | None) -> None:
+            captured["calls"].append(reason)  # type: ignore[attr-defined]
+
+        bridge = GptmeToolBridge(workspace="/fake/workspace", on_hangup=_on_hangup)
+        result = await bridge.handle_function_call(
+            "hangup", {"reason": "caller said goodbye"}
+        )
+
+        assert result["status"] == "hanging_up"
+        # Give the background task a tick to run
+        await asyncio.sleep(0)
+        assert captured["calls"] == ["caller said goodbye"]
+
+    asyncio.run(_exercise())
+
+
+def test_handle_function_call_hangup_without_reason() -> None:
+    """hangup works when arguments is empty (reason is optional)."""
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {"calls": []}
+
+        async def _on_hangup(reason: str | None) -> None:
+            captured["calls"].append(reason)  # type: ignore[attr-defined]
+
+        bridge = GptmeToolBridge(workspace="/fake/workspace", on_hangup=_on_hangup)
+        result = await bridge.handle_function_call("hangup", {})
+
+        assert result["status"] == "hanging_up"
+        await asyncio.sleep(0)
+        assert captured["calls"] == [None]
+
+    asyncio.run(_exercise())
+
+
+def test_handle_function_call_hangup_returns_not_supported_without_callback() -> None:
+    """hangup returns not_supported when server has no on_hangup wired."""
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")  # no on_hangup
+        result = await bridge.handle_function_call("hangup", {})
+        assert result["status"] == "not_supported"
+        assert "message" in result
+
+    asyncio.run(_exercise())
+
+
+def test_handle_function_call_subagent_still_works_alongside_hangup() -> None:
+    """Adding hangup support does not regress subagent dispatch."""
+
+    async def _exercise() -> None:
+        async def _on_hangup(reason: str | None) -> None:  # pragma: no cover
+            return None
+
+        bridge = GptmeToolBridge(workspace="/fake/workspace", on_hangup=_on_hangup)
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(returncode=0, stdout="ok")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            result = await bridge.handle_function_call(
+                "subagent", {"task": "check something"}
+            )
+
+        assert result["status"] == "dispatched"
+        assert "task_id" in result
+
+    asyncio.run(_exercise())
+
+
+def test_handle_function_call_unknown_name_returns_error() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+        result = await bridge.handle_function_call("not_a_tool", {})
+        assert "error" in result
+
+    asyncio.run(_exercise())
+
+
+def test_hangup_tool_advertised_in_openai_session_config() -> None:
+    """Ensure the hangup tool is present in the OpenAI session tools list
+    so the model can actually discover and call it.
+    """
+    import inspect
+
+    from gptme_voice.realtime import openai_client
+
+    source = inspect.getsource(openai_client.OpenAIRealtimeClient.connect)
+    assert (
+        '"name": "hangup"' in source
+    ), "hangup tool must be declared in OpenAIRealtimeClient.connect() tools list"
+    assert '"name": "subagent"' in source, "subagent tool must also still be declared"

@@ -23,6 +23,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocketDisconnect
 
 from .audio import AudioConverter
 from .openai_client import (
@@ -45,6 +46,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RESUME_WINDOW_SECONDS = 300
 _DEFAULT_STATE_DIR = "/tmp/gptme-voice-call-state"
 _MAX_RESUME_TRANSCRIPT_CHARS = 2500
+
+# Delay before actually closing the WebSocket after the model requests hangup,
+# so the goodbye utterance has time to reach the caller.
+_HANGUP_FAREWELL_DELAY_SECONDS = 5.0
 
 
 @dataclass
@@ -555,9 +560,21 @@ class VoiceServer:
                             transcript, "user", text
                         ),
                     )
+                    hangup_ws = websocket
+                    hangup_call_sid = call_sid
+
+                    async def _twilio_hangup(reason: str | None) -> None:
+                        await self._schedule_hangup(
+                            hangup_ws,
+                            source="twilio",
+                            reason=reason,
+                            call_sid=hangup_call_sid,
+                        )
+
                     tool_bridge = GptmeToolBridge(
                         workspace=self.workspace,
                         on_result=realtime_client.inject_message,
+                        on_hangup=_twilio_hangup,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -580,6 +597,8 @@ class VoiceServer:
                     # Call ended
                     break
 
+        except WebSocketDisconnect:
+            pass  # Normal path when _schedule_hangup closes the WebSocket
         except Exception as e:
             logger.exception("Error handling Twilio connection: %s", e)
         finally:
@@ -652,9 +671,20 @@ class VoiceServer:
                     transcript, "user", text
                 ),
             )
+            local_ws = websocket
+
+            async def _local_hangup(reason: str | None) -> None:
+                await self._schedule_hangup(
+                    local_ws,
+                    source="local",
+                    reason=reason,
+                    call_sid=None,
+                )
+
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
+                on_hangup=_local_hangup,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -673,6 +703,8 @@ class VoiceServer:
                 elif data.get("type") == "commit":
                     await realtime_client.commit_audio()
 
+        except WebSocketDisconnect:
+            pass  # Normal path when _schedule_hangup closes the WebSocket
         except Exception as e:
             logger.exception("Error handling local connection: %s", e)
         finally:
@@ -684,6 +716,38 @@ class VoiceServer:
                 transcript,
                 {"caller_id": caller_id, "provider": self.provider},
             )
+
+    async def _schedule_hangup(
+        self,
+        websocket,
+        *,
+        source: str,
+        reason: str | None,
+        call_sid: str | None,
+    ) -> None:
+        """Close the call-side WebSocket after a short delay.
+
+        Runs from a background task spawned by the tool bridge. The delay lets
+        the model finish its farewell utterance before the socket drops. When
+        the socket closes, the ``handle_*_websocket`` loop exits its
+        ``async for`` and falls through to the ``finally`` block, which runs
+        the normal ``_on_call_end`` teardown (post-call hook, transcript
+        persistence, resume record).
+        """
+        logger.info(
+            "Hangup scheduled: source=%s call_sid=%s reason=%s",
+            source,
+            call_sid,
+            reason or "<none>",
+        )
+        try:
+            await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        try:
+            await websocket.close()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Error closing WebSocket during hangup: %s", exc)
 
     async def _send_local_audio(self, websocket, audio_data: bytes):
         """Send audio to local client."""
