@@ -407,3 +407,64 @@ def test_cancelled_post_call_command_terminates_subprocess() -> None:
                     await asyncio.sleep(0.05)
 
     asyncio.run(_exercise())
+
+
+class _ClosedIterTextWebSocket:
+    """WebSocket stub whose iter_text raises the starlette 'already closed' error.
+
+    Reproduces the condition observed after ``_schedule_hangup`` closes the socket
+    server-side: the next call into ``iter_text`` (which calls ``receive_text``)
+    sees ``application_state != CONNECTED`` and raises ``RuntimeError`` instead of
+    ``WebSocketDisconnect``.
+    """
+
+    def __init__(self, error: RuntimeError) -> None:
+        self._error = error
+        self.accepted = False
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    def iter_text(self):
+        async def _gen():
+            raise self._error
+            yield  # pragma: no cover - generator marker
+
+        return _gen()
+
+    @property
+    def query_params(self) -> dict[str, str]:
+        return {}
+
+
+def test_twilio_handler_swallows_runtimeerror_after_server_close(tmp_path) -> None:
+    """After _schedule_hangup closes the socket, iter_text raises RuntimeError.
+
+    The handler should treat a 'not connected' RuntimeError as a normal
+    disconnect (equivalent to WebSocketDisconnect) instead of logging a
+    traceback. Regression test for the noise observed in production logs:
+    'Error handling Twilio connection: WebSocket is not connected.'
+    """
+    server = VoiceServer()
+    server.state_dir = tmp_path
+    websocket = _ClosedIterTextWebSocket(
+        RuntimeError('WebSocket is not connected. Need to call "accept" first.')
+    )
+
+    # Should not raise — the RuntimeError must be swallowed like WebSocketDisconnect.
+    asyncio.run(server.handle_twilio_websocket(websocket))
+
+    assert websocket.accepted is True
+
+
+def test_twilio_handler_reraises_unrelated_runtimeerror(tmp_path) -> None:
+    """Only the starlette 'not connected' RuntimeError should be swallowed.
+
+    Unrelated RuntimeErrors must still surface so real bugs are not hidden.
+    """
+    server = VoiceServer()
+    server.state_dir = tmp_path
+    websocket = _ClosedIterTextWebSocket(RuntimeError("unexpected failure"))
+
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        asyncio.run(server.handle_twilio_websocket(websocket))
