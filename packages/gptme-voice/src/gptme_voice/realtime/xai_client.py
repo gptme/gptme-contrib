@@ -9,10 +9,13 @@ See: https://docs.x.ai/developers/model-capabilities/audio/voice-agent
 """
 
 import dataclasses
+import logging
 
 from gptme.config import get_config
 
 from .openai_client import OpenAIRealtimeClient, SessionConfig
+
+logger = logging.getLogger(__name__)
 
 _OPENAI_DEFAULT_VOICE = "echo"
 # "rex" = male, confident, clear — matches the Bob persona better than "eve" (female)
@@ -78,3 +81,18 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
     def _get_transcription_config(self) -> dict | None:
         """xAI does not support whisper-1; omit transcription config."""
         return None
+
+    async def _handle_event(self, event: dict) -> None:
+        """xAI does not emit session.created — treat session.updated as the ready signal."""
+        await super()._handle_event(event)
+        # xAI sends session.updated but not session.created. If _session_ready is
+        # still unset after session.updated arrives, mark it ready and flush buffered
+        # audio so Twilio audio doesn't sit in the pre-session buffer forever.
+        if (
+            event.get("type") == "session.updated"
+            and self._session_ready is not None
+            and not self._session_ready.is_set()
+        ):
+            logger.info("xAI session.updated received — marking session ready")
+            self._session_ready.set()
+            await self._flush_pending_audio()
