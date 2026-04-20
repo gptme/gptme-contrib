@@ -84,9 +84,11 @@ class GptmeToolBridge:
         self.workspace = workspace
         self.on_result = on_result
         self.on_hangup = on_hangup
-        env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
-        self.model_fast = env_model or self.MODEL_FAST
-        self.model_smart = env_model or self.MODEL_SMART
+        legacy_env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
+        env_model_fast = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_FAST")
+        env_model_smart = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_SMART")
+        self.model_fast = env_model_fast or legacy_env_model or self.MODEL_FAST
+        self.model_smart = env_model_smart or legacy_env_model or self.MODEL_SMART
         self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
 
@@ -161,14 +163,19 @@ class GptmeToolBridge:
         augmented_task = task + _RESPONSE_SUFFIX.format(response_file=response_file)
 
         model = self.model_fast if mode == "fast" else self.model_smart
-        logger.info(f"Dispatching subagent ({mode}): {task}")
+        logger.info(
+            f"Dispatching subagent ({mode}, model={model or 'default'}): {task}"
+        )
         logger.debug(f"Response file: {response_file}")
 
-        cmd = [self.gptme_path, "--non-interactive"]
-        # Fast mode skips workspace context loading — avoids 20k+ token overhead
-        # that would otherwise add 30-60s latency for simple lookups.
-        if mode != "fast":
-            cmd += ["--context", "files"]
+        cmd = [
+            self.gptme_path,
+            "--non-interactive",
+            "--context",
+            "files",
+        ]
+        # Keep project prompt files but skip context_cmd. This avoids pulling in
+        # scripts/context.sh while still giving the subagent its runtime rules.
         if model:
             cmd += ["--model", model, "--tool-format", "tool"]
         cmd.append(augmented_task)

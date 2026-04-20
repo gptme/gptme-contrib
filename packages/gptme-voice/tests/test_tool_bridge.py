@@ -68,7 +68,7 @@ def test_execute_prefers_meaningful_stdout_error_over_tty_warning() -> None:
     asyncio.run(_exercise())
 
 
-def test_execute_uses_env_override_for_smart_model() -> None:
+def test_execute_uses_legacy_env_override_for_smart_model() -> None:
     async def _exercise() -> None:
         captured: dict[str, object] = {}
 
@@ -79,6 +79,61 @@ def test_execute_uses_env_override_for_smart_model() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("GPTME_VOICE_SUBAGENT_MODEL", "openai-subscription/gpt-5.4")
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            result = await bridge._execute("Inspect recent voice changes", mode="smart")
+
+        assert result.success is True
+        assert tuple(captured["args"])[:7] == (
+            "gptme",
+            "--non-interactive",
+            "--context",
+            "files",
+            "--model",
+            "openai-subscription/gpt-5.4",
+            "--tool-format",
+        )
+        assert tuple(captured["args"])[7] == "tool"
+
+    asyncio.run(_exercise())
+
+
+def test_execute_uses_fast_model_override_without_touching_smart() -> None:
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_FAST", "openai/gpt-5-mini")
+            mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_SMART", "openai-subscription/gpt-5.4")
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            result = await bridge._execute("Inspect recent voice changes", mode="fast")
+
+        assert result.success is True
+        assert "--model" in tuple(captured["args"])
+        model_index = tuple(captured["args"]).index("--model") + 1
+        assert tuple(captured["args"])[model_index] == "openai/gpt-5-mini"
+
+    asyncio.run(_exercise())
+
+
+def test_execute_uses_smart_model_override_without_touching_fast() -> None:
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_FAST", "openai/gpt-5-mini")
+            mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_SMART", "openai-subscription/gpt-5.4")
             mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
@@ -119,8 +174,8 @@ def test_execute_uses_env_override_for_gptme_path() -> None:
     asyncio.run(_exercise())
 
 
-def test_execute_fast_mode_skips_context_loading() -> None:
-    """fast mode must NOT pass --context files — that's the main latency source."""
+def test_execute_fast_mode_keeps_context_files() -> None:
+    """fast mode should skip context_cmd without dropping project prompt files."""
 
     async def _exercise() -> None:
         captured: dict[str, object] = {}
@@ -136,8 +191,8 @@ def test_execute_fast_mode_skips_context_loading() -> None:
             await bridge._execute("quick lookup", mode="fast")
 
         args = tuple(captured["args"])
-        assert "--context" not in args, "fast mode must not load workspace context"
-        assert "files" not in args, "fast mode must not load workspace context"
+        assert "--context" in args
+        assert "files" in args
         assert "--non-interactive" in args
 
     asyncio.run(_exercise())
