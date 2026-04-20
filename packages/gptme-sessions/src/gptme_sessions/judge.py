@@ -150,7 +150,10 @@ def _load_config_env(config_paths: tuple[Path, ...] = CONFIG_PATHS) -> dict[str,
     try:
         import tomllib
     except ImportError:
-        return merged
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return merged
 
     for path in config_paths:
         if not path.exists():
