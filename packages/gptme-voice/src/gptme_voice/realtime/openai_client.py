@@ -103,12 +103,17 @@ def _load_project_instructions(workspace: str | None = None) -> str:
 
     preamble = (
         "You are in a real-time voice conversation. "
-        "Keep responses concise and conversational. "
-        "IMPORTANT: When asked about your recent activity, tasks, journal entries, "
-        "code changes, or anything factual about your workspace — ALWAYS use the "
-        "subagent tool to look it up. Never guess or hallucinate facts about what "
-        "you've been doing. Only speak from the personality context below for "
-        "identity questions (who you are, your values, etc).\n\n"
+        "Keep responses concise and conversational.\n\n"
+        "SUBAGENT TOOL RULES:\n"
+        "- Use the subagent tool ONLY for small, specific lookups: a single task status, "
+        "a recent journal entry, a quick file check. One focused question per call.\n"
+        "- Do NOT dispatch broad investigation tasks (e.g. 'investigate the whole system', "
+        "'run a full review') — these always time out and leave the call hanging.\n"
+        "- NEVER use the subagent tool to run post-call analysis, summarise the session, "
+        "or queue follow-up work. That is handled automatically by the server after the "
+        "call ends. Just say goodbye naturally — the post-call job fires on its own.\n"
+        "- When asked about recent activity, tasks, journal entries, or workspace facts, "
+        "use the subagent tool to look up the specific thing asked. Never guess.\n\n"
         "Below is your personality and context:\n\n"
     )
     result = preamble + "\n\n---\n\n".join(parts)
