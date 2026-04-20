@@ -249,17 +249,18 @@ def test_subagent_status_shows_last_output() -> None:
             )
             task_id = dispatch["task_id"]
 
-            # Allow the stdout reader to consume lines
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            # Allow the stdout reader to consume all lines (needs multiple event loop turns)
+            await output_written.wait()
+            for _ in range(10):
+                await asyncio.sleep(0)
 
             status = await bridge.handle_function_call("subagent_status", {})
             entry = next(
                 (e for e in status["pending"] if e["task_id"] == task_id), None
             )
             assert entry is not None
-            if entry.get("last_output"):
-                assert "Found 3 active tasks" in entry["last_output"]
+            assert entry.get("last_output") is not None
+            assert "Found 3 active tasks" in entry["last_output"]
 
             await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
 
