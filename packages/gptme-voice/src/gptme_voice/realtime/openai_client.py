@@ -39,6 +39,17 @@ _MAX_INSTRUCTIONS_LEN = 4096
 # than enough for any realistic session-handshake delay while still capping
 # memory growth if the provider never confirms the session.
 _MAX_PENDING_AUDIO_CHUNKS = 500
+# Event types that carry transcript text — only these reset the drain idle timer.
+_TRANSCRIPT_EVENT_TYPES = frozenset(
+    {
+        "response.audio_transcript.delta",
+        "response.output_audio_transcript.delta",
+        "response.audio_transcript.done",
+        "response.output_audio_transcript.done",
+        "conversation.item.input_audio_transcription.delta",
+        "conversation.item.input_audio_transcription.completed",
+    }
+)
 
 
 def _detect_agent_repo() -> str | None:
@@ -420,10 +431,13 @@ class OpenAIRealtimeClient:
                 await self.commit_audio()
 
         if drain_timeout_seconds > 0 and idle_timeout_seconds > 0:
-            await self._drain_incoming_events(
-                timeout_seconds=drain_timeout_seconds,
-                idle_timeout_seconds=idle_timeout_seconds,
-            )
+            # CancelledError must not skip the cleanup below (receive_task cancel
+            # + ws.close). Suppress it here; caller's finally block still runs.
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._drain_incoming_events(
+                    timeout_seconds=drain_timeout_seconds,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                )
 
         if self._receive_task:
             self._receive_task.cancel()
@@ -559,9 +573,11 @@ class OpenAIRealtimeClient:
 
     async def _handle_event(self, event: dict) -> None:
         """Handle an event from OpenAI Realtime API."""
-        if self._event_notice is not None:
-            self._event_notice.set()
         event_type = event.get("type", "")
+        # Only transcript-carrying events reset the drain idle timer; VAD and
+        # lifecycle events must not extend the teardown window unnecessarily.
+        if self._event_notice is not None and event_type in _TRANSCRIPT_EVENT_TYPES:
+            self._event_notice.set()
 
         # Audio output chunk (handle both old and new event names)
         if event_type in ("response.audio.delta", "response.output_audio.delta"):
