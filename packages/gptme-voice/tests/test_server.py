@@ -1,6 +1,9 @@
 import asyncio
 import base64
 import json
+import os
+import shlex
+import sys
 import tempfile
 from pathlib import Path
 
@@ -12,6 +15,7 @@ from gptme_voice.realtime.server import (
     _build_caller_instructions,
     _build_resume_instructions,
     _get_twilio_field,
+    _truncate_resume_transcript,
 )
 
 
@@ -94,6 +98,23 @@ def test_build_resume_instructions_includes_prior_transcript() -> None:
     assert "User: Hello Bob" in result
     assert "Assistant: Hi Erik" in result
     assert "You are Bob." in result
+
+
+def test_truncate_resume_transcript_keeps_line_boundaries() -> None:
+    transcript_text = "\n".join(
+        [
+            f"User: {'a' * 1200}",
+            f"Assistant: {'b' * 1200}",
+            "User: tail",
+        ]
+    )
+
+    truncated = _truncate_resume_transcript(transcript_text, 2_500)
+    formatted_lines = transcript_text.splitlines()
+
+    assert truncated.splitlines()[0] in formatted_lines
+    assert truncated.endswith("User: tail")
+    assert len(truncated) <= 2_500
 
 
 def test_recent_call_is_consumed_within_resume_window() -> None:
@@ -237,5 +258,61 @@ def test_schedule_post_call_runner_finally_does_not_evict_newer_task() -> None:
             assert first_task.cancelled()
 
             second_task.cancel()
+
+    asyncio.run(_exercise())
+
+
+def test_cancelled_post_call_command_terminates_subprocess() -> None:
+    def _pid_exists(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            pid_file = Path(tmpdir) / "post-call.pid"
+            record_path = Path(tmpdir) / "recent-call.json"
+            record_path.write_text("{}")
+            script = (
+                "import os, pathlib, time; "
+                "pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); "
+                "time.sleep(60)"
+            )
+            server.post_call_command = (
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+            )
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv("PID_FILE", str(pid_file))
+                task = asyncio.create_task(
+                    server._run_post_call_command("+46700000004", record_path)
+                )
+
+                deadline = asyncio.get_running_loop().time() + 5
+                while not pid_file.exists():
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise RuntimeError("post-call command did not start")
+                    await asyncio.sleep(0.05)
+
+                pid = int(pid_file.read_text())
+                assert _pid_exists(pid)
+
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+                deadline = asyncio.get_running_loop().time() + 5
+                while _pid_exists(pid):
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise AssertionError(
+                            "cancelled post-call command subprocess still running"
+                        )
+                    await asyncio.sleep(0.05)
 
     asyncio.run(_exercise())

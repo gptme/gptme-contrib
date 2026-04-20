@@ -7,6 +7,7 @@ voice conversations with gptme tool access.
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -123,6 +124,31 @@ def _format_transcript(transcript: list[TranscriptTurn]) -> str:
     return "\n".join(f"{turn.role.title()}: {turn.text}" for turn in transcript)
 
 
+def _truncate_resume_transcript(transcript_text: str, max_chars: int) -> str:
+    """Keep the newest transcript lines without starting mid-line."""
+    if len(transcript_text) <= max_chars:
+        return transcript_text
+
+    lines = transcript_text.splitlines()
+    kept_lines: list[str] = []
+    total_chars = 0
+
+    for line in reversed(lines):
+        line_chars = len(line) + (1 if kept_lines else 0)
+        if kept_lines and total_chars + line_chars > max_chars:
+            break
+        if not kept_lines and len(line) > max_chars:
+            return line[-max_chars:]
+
+        kept_lines.append(line)
+        total_chars += line_chars
+
+    if kept_lines:
+        return "\n".join(reversed(kept_lines))
+
+    return transcript_text[-max_chars:]
+
+
 def _build_resume_instructions(
     base_instructions: str,
     recent_call: RecentCallRecord | None,
@@ -133,8 +159,9 @@ def _build_resume_instructions(
         return base_instructions
 
     transcript_text = _format_transcript(recent_call.transcript)
-    if len(transcript_text) > _MAX_RESUME_TRANSCRIPT_CHARS:
-        transcript_text = transcript_text[-_MAX_RESUME_TRANSCRIPT_CHARS:]
+    transcript_text = _truncate_resume_transcript(
+        transcript_text, _MAX_RESUME_TRANSCRIPT_CHARS
+    )
 
     age_seconds = max(int(time.time() - recent_call.ended_at), 0)
     resume_ctx = (
@@ -306,7 +333,20 @@ class VoiceServer:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                logger.info("Cancelling post-call command for %s", caller_id)
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    await process.wait()
+            raise
         if process.returncode != 0:
             logger.error(
                 "Post-call command failed for %s (exit=%s): %s",
