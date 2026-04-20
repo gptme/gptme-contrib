@@ -5,9 +5,15 @@ Bridges Twilio phone calls to a realtime API for real-time
 voice conversations with gptme tool access.
 """
 
+import asyncio
 import base64
+import hashlib
 import json
 import logging
+import os
+import shlex
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import click
@@ -34,6 +40,25 @@ from .twilio_integration import (
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_RESUME_WINDOW_SECONDS = 300
+_DEFAULT_STATE_DIR = "/tmp/gptme-voice-call-state"
+_MAX_RESUME_TRANSCRIPT_CHARS = 2500
+
+
+@dataclass
+class TranscriptTurn:
+    role: str
+    text: str
+
+
+@dataclass
+class RecentCallRecord:
+    caller_id: str
+    source: str
+    ended_at: float
+    transcript: list[TranscriptTurn]
+    metadata: dict[str, str]
 
 
 def _build_caller_instructions(
@@ -85,6 +110,43 @@ def _build_caller_instructions(
     return f"{caller_ctx}\n\n{base_instructions}"
 
 
+def _append_transcript_turn(
+    transcript: list[TranscriptTurn], role: str, text: str
+) -> None:
+    """Append a cleaned turn to the transcript if it contains useful text."""
+    cleaned = text.strip()
+    if cleaned:
+        transcript.append(TranscriptTurn(role=role, text=cleaned))
+
+
+def _format_transcript(transcript: list[TranscriptTurn]) -> str:
+    return "\n".join(f"{turn.role.title()}: {turn.text}" for turn in transcript)
+
+
+def _build_resume_instructions(
+    base_instructions: str,
+    recent_call: RecentCallRecord | None,
+    resume_window_seconds: int,
+) -> str:
+    """Prepend recent-call context when a caller reconnects quickly."""
+    if not recent_call or not recent_call.transcript:
+        return base_instructions
+
+    transcript_text = _format_transcript(recent_call.transcript)
+    if len(transcript_text) > _MAX_RESUME_TRANSCRIPT_CHARS:
+        transcript_text = transcript_text[-_MAX_RESUME_TRANSCRIPT_CHARS:]
+
+    age_seconds = max(int(time.time() - recent_call.ended_at), 0)
+    resume_ctx = (
+        "The current caller reconnected after a brief disconnect. "
+        f"This prior call ended {age_seconds} seconds ago, within the "
+        f"{resume_window_seconds}-second resume window. "
+        "Continue naturally from the previous conversation instead of starting over.\n\n"
+        f"Previous transcript:\n{transcript_text}"
+    )
+    return f"{resume_ctx}\n\n{base_instructions}"
+
+
 _PROVIDER_OPENAI = "openai"
 _PROVIDER_GROK = "grok"
 _VALID_PROVIDERS = (_PROVIDER_OPENAI, _PROVIDER_GROK)
@@ -121,9 +183,23 @@ class VoiceServer:
             self._api_key = openai_api_key or _get_openai_api_key()
         self.workspace = workspace or _detect_agent_repo()
         self._instructions = _load_project_instructions(self.workspace)
+        self.resume_window_seconds = int(
+            _get_config_env("GPTME_VOICE_RESUME_WINDOW_SECONDS")
+            or _DEFAULT_RESUME_WINDOW_SECONDS
+        )
+        self.post_call_delay_seconds = int(
+            _get_config_env("GPTME_VOICE_POST_CALL_DELAY_SECONDS")
+            or self.resume_window_seconds
+        )
+        self.post_call_command = _get_config_env("GPTME_VOICE_POST_CALL_COMMAND")
+        self.state_dir = Path(
+            _get_config_env("GPTME_VOICE_STATE_DIR") or _DEFAULT_STATE_DIR
+        )
+        self.state_dir.mkdir(parents=True, exist_ok=True)
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
+        self._pending_post_calls: dict[str, asyncio.Task[None]] = {}
 
         # Create Starlette app
         self.app = Starlette(
@@ -134,6 +210,156 @@ class VoiceServer:
                 WebSocketRoute("/local", self.handle_local_websocket),
             ]
         )
+
+    def _recent_call_path(self, caller_id: str) -> Path:
+        digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
+        return self.state_dir / f"{digest}.json"
+
+    def _save_recent_call(self, record: RecentCallRecord) -> Path:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self._recent_call_path(record.caller_id)
+        payload = {
+            "caller_id": record.caller_id,
+            "source": record.source,
+            "ended_at": record.ended_at,
+            "transcript": [asdict(turn) for turn in record.transcript],
+            "metadata": record.metadata,
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        return path
+
+    def _load_recent_call(self, caller_id: str) -> RecentCallRecord | None:
+        path = self._recent_call_path(caller_id)
+        if not path.exists():
+            return None
+
+        try:
+            payload = json.loads(path.read_text())
+            transcript = [
+                TranscriptTurn(role=item["role"], text=item["text"])
+                for item in payload.get("transcript", [])
+                if item.get("role") and item.get("text")
+            ]
+            return RecentCallRecord(
+                caller_id=payload["caller_id"],
+                source=payload.get("source", "unknown"),
+                ended_at=float(payload["ended_at"]),
+                transcript=transcript,
+                metadata={
+                    str(key): str(value)
+                    for key, value in payload.get("metadata", {}).items()
+                    if value is not None
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to load recent call state from %s: %s", path, exc)
+            return None
+
+    def _consume_recent_call(self, caller_id: str | None) -> RecentCallRecord | None:
+        if not caller_id:
+            return None
+
+        recent_call = self._load_recent_call(caller_id)
+        if not recent_call:
+            return None
+
+        age_seconds = time.time() - recent_call.ended_at
+        if age_seconds > self.resume_window_seconds:
+            return None
+
+        pending_task = self._pending_post_calls.pop(caller_id, None)
+        if pending_task:
+            pending_task.cancel()
+            logger.info("Cancelled pending post-call follow-up for %s", caller_id)
+
+        logger.info(
+            "Resuming recent %s call for %s (%ds old)",
+            recent_call.source,
+            caller_id,
+            int(age_seconds),
+        )
+        return recent_call
+
+    async def _run_post_call_command(self, caller_id: str, record_path: Path) -> None:
+        if not self.post_call_command:
+            return
+
+        argv = shlex.split(self.post_call_command)
+        if not argv:
+            logger.warning("Ignoring empty GPTME_VOICE_POST_CALL_COMMAND")
+            return
+
+        env = os.environ.copy()
+        env["GPTME_VOICE_POST_CALL_JSON"] = str(record_path)
+        env["GPTME_VOICE_CALLER_ID"] = caller_id
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            str(record_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.error(
+                "Post-call command failed for %s (exit=%s): %s",
+                caller_id,
+                process.returncode,
+                (stderr or b"").decode("utf-8", errors="replace").strip(),
+            )
+            return
+
+        if stdout:
+            logger.info(
+                "Post-call command output for %s: %s",
+                caller_id,
+                stdout.decode("utf-8", errors="replace").strip(),
+            )
+
+    async def _schedule_post_call(self, caller_id: str, record_path: Path) -> None:
+        existing_task = self._pending_post_calls.pop(caller_id, None)
+        if existing_task:
+            existing_task.cancel()
+
+        if not self.post_call_command:
+            return
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(self.post_call_delay_seconds)
+                await self._run_post_call_command(caller_id, record_path)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self._pending_post_calls.pop(caller_id, None)
+
+        self._pending_post_calls[caller_id] = asyncio.create_task(_runner())
+
+    async def _on_call_end(
+        self,
+        caller_id: str | None,
+        source: str,
+        transcript: list[TranscriptTurn],
+        metadata: dict[str, str],
+    ) -> None:
+        if not caller_id:
+            return
+
+        record = RecentCallRecord(
+            caller_id=caller_id,
+            source=source,
+            ended_at=time.time(),
+            transcript=transcript,
+            metadata={k: v for k, v in metadata.items() if v},
+        )
+        record_path = self._save_recent_call(record)
+        await self._schedule_post_call(caller_id, record_path)
+
+    def _get_local_caller_id(self, websocket) -> str:
+        caller_id = websocket.query_params.get("caller_id")
+        if caller_id:
+            return caller_id
+        return "local"
 
     async def health_check(self, request: Request) -> PlainTextResponse:
         """Health check endpoint."""
@@ -213,8 +439,12 @@ class VoiceServer:
         await websocket.accept()
 
         call_sid: str | None = None
+        stream_sid: str | None = None
+        caller_id: str | None = None
         realtime_client: OpenAIRealtimeClient | None = None
         audio_converter = AudioConverter()
+        transcript: list[TranscriptTurn] = []
+        metadata: dict[str, str] = {}
 
         try:
             async for message in websocket.iter_text():
@@ -239,9 +469,21 @@ class VoiceServer:
                     # Inject caller context into instructions (phone + name lookup)
                     custom_params = start.get("customParameters", {})
                     from_number = custom_params.get("from_number", "")
+                    caller_id = from_number or call_sid or stream_sid
                     instructions = _build_caller_instructions(
                         self._instructions, from_number, self.workspace
                     )
+                    instructions = _build_resume_instructions(
+                        instructions,
+                        self._consume_recent_call(caller_id),
+                        self.resume_window_seconds,
+                    )
+                    metadata = {
+                        "from_number": from_number,
+                        "call_sid": call_sid,
+                        "stream_sid": stream_sid,
+                        "provider": self.provider,
+                    }
 
                     if self.model:
                         session_cfg = SessionConfig(
@@ -255,6 +497,12 @@ class VoiceServer:
                             websocket,
                             stream_sid,
                             audio_converter.openai_to_twilio(audio),
+                        ),
+                        on_ai_transcript=lambda text: _append_transcript_turn(
+                            transcript, "assistant", text
+                        ),
+                        on_user_transcript=lambda text: _append_transcript_turn(
+                            transcript, "user", text
                         ),
                     )
                     tool_bridge = GptmeToolBridge(
@@ -280,10 +528,6 @@ class VoiceServer:
 
                 elif event == "stop":
                     # Call ended
-                    if realtime_client:
-                        await realtime_client.disconnect()
-                    if call_sid and call_sid in self._connections:
-                        del self._connections[call_sid]
                     break
 
         except Exception as e:
@@ -293,6 +537,7 @@ class VoiceServer:
                 await realtime_client.disconnect()
             if call_sid and call_sid in self._connections:
                 del self._connections[call_sid]
+            await self._on_call_end(caller_id, "twilio", transcript, metadata)
 
     async def _send_to_twilio(self, websocket, stream_sid: str, audio_data: bytes):
         """Send audio to Twilio Media Stream."""
@@ -332,19 +577,30 @@ class VoiceServer:
         """
         await websocket.accept()
 
+        caller_id = self._get_local_caller_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
+        transcript: list[TranscriptTurn] = []
 
         try:
+            instructions = _build_resume_instructions(
+                self._instructions,
+                self._consume_recent_call(caller_id),
+                self.resume_window_seconds,
+            )
             if self.model:
-                session_cfg = SessionConfig(
-                    instructions=self._instructions, model=self.model
-                )
+                session_cfg = SessionConfig(instructions=instructions, model=self.model)
             else:
-                session_cfg = SessionConfig(instructions=self._instructions)
+                session_cfg = SessionConfig(instructions=instructions)
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
                 on_audio_end=lambda: self._send_local_audio_end(websocket),
+                on_ai_transcript=lambda text: _append_transcript_turn(
+                    transcript, "assistant", text
+                ),
+                on_user_transcript=lambda text: _append_transcript_turn(
+                    transcript, "user", text
+                ),
             )
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
@@ -372,6 +628,12 @@ class VoiceServer:
         finally:
             if realtime_client:
                 await realtime_client.disconnect()
+            await self._on_call_end(
+                caller_id,
+                "local",
+                transcript,
+                {"caller_id": caller_id, "provider": self.provider},
+            )
 
     async def _send_local_audio(self, websocket, audio_data: bytes):
         """Send audio to local client."""

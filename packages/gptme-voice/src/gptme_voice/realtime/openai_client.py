@@ -159,6 +159,8 @@ class OpenAIRealtimeClient:
         on_audio: Callable[[bytes], None] | None = None,
         on_audio_end: Callable[[], None] | None = None,
         on_transcript: Callable[[str], None] | None = None,
+        on_ai_transcript: Callable[[str], None] | None = None,
+        on_user_transcript: Callable[[str], None] | None = None,
         on_function_call: Callable[[str, dict], Any] | None = None,
     ):
         self.api_key = api_key or _get_openai_api_key()
@@ -171,6 +173,8 @@ class OpenAIRealtimeClient:
         self.on_audio = on_audio
         self.on_audio_end = on_audio_end
         self.on_transcript = on_transcript
+        self.on_ai_transcript = on_ai_transcript
+        self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
 
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -366,12 +370,16 @@ class OpenAIRealtimeClient:
             transcript = event.get("transcript", "")
             if transcript:
                 logger.info(f"AI: {transcript}")
+                if self.on_ai_transcript:
+                    await self._call_callback(self.on_ai_transcript, transcript)
 
         # User speech transcript
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript", "")
             if transcript:
                 logger.info(f"User: {transcript}")
+                if self.on_user_transcript:
+                    await self._call_callback(self.on_user_transcript, transcript)
 
         # VAD events
         elif event_type == "input_audio_buffer.speech_started":
