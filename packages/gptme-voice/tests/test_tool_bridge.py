@@ -426,6 +426,38 @@ def test_subagent_cancel_specific_task_injects_cancel_notice() -> None:
     asyncio.run(_exercise())
 
 
+def test_execute_kills_process_on_cancel() -> None:
+    """Cancelling a running _execute call must kill the underlying OS process."""
+
+    async def _exercise() -> None:
+        killed: list[bool] = []
+
+        class _SlowProcess(_FakeProcess):
+            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+                await asyncio.sleep(10)
+                return b"", b""
+
+            def kill(self) -> None:
+                killed.append(True)
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=30)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            task = asyncio.create_task(bridge._execute("long task", mode="fast"))
+            await asyncio.sleep(0)  # let the task start
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert killed, "process.kill() must be called when _execute is cancelled"
+
+    asyncio.run(_exercise())
+
+
 def test_subagent_cancel_all_cancels_every_pending_task() -> None:
     async def _exercise() -> None:
         class _SlowProcess(_FakeProcess):

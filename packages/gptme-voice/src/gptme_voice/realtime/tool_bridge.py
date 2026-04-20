@@ -181,6 +181,9 @@ class GptmeToolBridge:
                     output="",
                     error=f"Subagent timed out after {self.timeout}s",
                 )
+            except asyncio.CancelledError:
+                process.kill()
+                raise
 
             stdout_text = stdout.decode("utf-8", errors="replace").strip()
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
