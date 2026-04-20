@@ -16,7 +16,7 @@ import logging
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -55,6 +55,7 @@ class PendingTask:
     description: str
     mode: str
     started_at: float
+    last_output: str = field(default="")
 
 
 class GptmeToolBridge:
@@ -115,8 +116,14 @@ class GptmeToolBridge:
 
     async def _run_subagent(self, task_id: str, task: str, mode: str = "smart") -> None:
         """Run a subagent in the background and inject result when done."""
+        pending = self._pending_tasks.get(task_id)
+
+        def _on_progress(line: str) -> None:
+            if pending is not None:
+                pending.last_output = line
+
         try:
-            result = await self._execute(task, mode=mode)
+            result = await self._execute(task, mode=mode, on_progress=_on_progress)
         except asyncio.CancelledError:
             logger.info(f"Task {task_id} cancelled")
             if self.on_result:
@@ -140,7 +147,12 @@ class GptmeToolBridge:
         # Clean up
         self._pending_tasks.pop(task_id, None)
 
-    async def _execute(self, task: str, mode: str = "smart") -> ToolResult:
+    async def _execute(
+        self,
+        task: str,
+        mode: str = "smart",
+        on_progress: Callable[[str], None] | None = None,
+    ) -> ToolResult:
         """Execute a gptme subagent and return the result."""
         with tempfile.NamedTemporaryFile(
             prefix="gptme-voice-", suffix=".md", delete=False
@@ -152,12 +164,11 @@ class GptmeToolBridge:
         logger.info(f"Dispatching subagent ({mode}): {task}")
         logger.debug(f"Response file: {response_file}")
 
-        cmd = [
-            self.gptme_path,
-            "--non-interactive",
-            "--context",
-            "files",
-        ]
+        cmd = [self.gptme_path, "--non-interactive"]
+        # Fast mode skips workspace context loading — avoids 20k+ token overhead
+        # that would otherwise add 30-60s latency for simple lookups.
+        if mode != "fast":
+            cmd += ["--context", "files"]
         if model:
             cmd += ["--model", model, "--tool-format", "tool"]
         cmd.append(augmented_task)
@@ -170,9 +181,29 @@ class GptmeToolBridge:
                 cwd=self.workspace,
             )
 
+            stdout_lines: list[str] = []
+            stderr_lines: list[str] = []
+
+            async def _read_stdout() -> None:
+                assert process.stdout is not None
+                async for raw in process.stdout:
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        stdout_lines.append(line)
+                        if on_progress:
+                            on_progress(line)
+
+            async def _read_stderr() -> None:
+                assert process.stderr is not None
+                async for raw in process.stderr:
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        stderr_lines.append(line)
+
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=self.timeout
+                await asyncio.wait_for(
+                    asyncio.gather(_read_stdout(), _read_stderr(), process.wait()),
+                    timeout=self.timeout,
                 )
             except asyncio.TimeoutError:
                 process.kill()
@@ -185,8 +216,8 @@ class GptmeToolBridge:
                 process.kill()
                 raise
 
-            stdout_text = stdout.decode("utf-8", errors="replace").strip()
-            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            stdout_text = "\n".join(stdout_lines).strip()
+            stderr_text = "\n".join(stderr_lines).strip()
 
             # Read the response file if it exists
             if response_file.exists():
@@ -241,12 +272,15 @@ class GptmeToolBridge:
         if len(description) > _MAX_TASK_PREVIEW:
             description = description[:_MAX_TASK_PREVIEW].rstrip() + "..."
         elapsed = max(0.0, time.monotonic() - entry.started_at)
-        return {
+        result: dict = {
             "task_id": task_id,
             "task": description,
             "mode": entry.mode,
             "elapsed_seconds": round(elapsed, 1),
         }
+        if entry.last_output:
+            result["last_output"] = entry.last_output[:200]
+        return result
 
     async def _cancel_task(self, task_id: str, entry: PendingTask) -> dict:
         entry.task.cancel()
