@@ -55,7 +55,13 @@ class PendingTask:
     description: str
     mode: str
     started_at: float
+    model: str | None = None
     last_output: str = field(default="")
+    process_started_at: float | None = None
+    first_output_at: float | None = None
+    last_output_at: float | None = None
+    completed_at: float | None = None
+    returncode: int | None = None
 
 
 class GptmeToolBridge:
@@ -116,16 +122,130 @@ class GptmeToolBridge:
             return fallback_stderr
         return ""
 
+    @staticmethod
+    def _round_seconds(value: float | None) -> float | None:
+        if value is None:
+            return None
+        return round(max(0.0, value), 1)
+
+    def _timing_breakdown(
+        self,
+        entry: PendingTask,
+        now: float | None = None,
+    ) -> dict[str, float]:
+        reference_time = entry.completed_at or now or time.monotonic()
+        result: dict[str, float] = {}
+        dispatch_to_spawn = None
+        if entry.process_started_at is not None:
+            dispatch_to_spawn = self._round_seconds(
+                entry.process_started_at - entry.started_at
+            )
+        if dispatch_to_spawn is not None:
+            result["dispatch_to_spawn_seconds"] = dispatch_to_spawn
+
+        if entry.process_started_at is not None:
+            spawn_elapsed = self._round_seconds(
+                reference_time - entry.process_started_at
+            )
+            if spawn_elapsed is not None:
+                result["spawn_elapsed_seconds"] = spawn_elapsed
+
+        if entry.process_started_at is not None and entry.first_output_at is not None:
+            first_output = self._round_seconds(
+                entry.first_output_at - entry.process_started_at
+            )
+            if first_output is not None:
+                result["spawn_to_first_output_seconds"] = first_output
+
+        if entry.first_output_at is not None:
+            output_elapsed = self._round_seconds(reference_time - entry.first_output_at)
+            if output_elapsed is not None:
+                result["output_elapsed_seconds"] = output_elapsed
+
+        if entry.last_output_at is not None:
+            last_output_age = self._round_seconds(reference_time - entry.last_output_at)
+            if last_output_age is not None:
+                result["last_output_age_seconds"] = last_output_age
+
+        if entry.completed_at is not None:
+            total = self._round_seconds(entry.completed_at - entry.started_at)
+            if total is not None:
+                result["total_seconds"] = total
+
+        return result
+
+    def _pending_stage(self, entry: PendingTask) -> str:
+        if entry.completed_at is not None:
+            return "completed"
+        if entry.process_started_at is None:
+            return "queued"
+        if entry.first_output_at is None:
+            return "starting"
+        return "running"
+
+    def _log_timing_summary(self, task_id: str, entry: PendingTask) -> None:
+        timings = self._timing_breakdown(entry)
+        if not timings:
+            return
+
+        labels = (
+            ("dispatch_to_spawn_seconds", "dispatch->spawn"),
+            ("spawn_to_first_output_seconds", "spawn->first_output"),
+            ("spawn_elapsed_seconds", "spawn->done"),
+            ("output_elapsed_seconds", "first_output->done"),
+            ("last_output_age_seconds", "quiet_tail"),
+            ("total_seconds", "total"),
+        )
+        parts = []
+        for key, label in labels:
+            value = timings.get(key)
+            if value is not None:
+                parts.append(f"{label}={value:.1f}s")
+
+        if entry.returncode is not None:
+            parts.append(f"exit={entry.returncode}")
+
+        logger.info(
+            "Task %s timings (%s, model=%s): %s",
+            task_id,
+            entry.mode,
+            entry.model or "default",
+            ", ".join(parts),
+        )
+
     async def _run_subagent(self, task_id: str, task: str, mode: str = "smart") -> None:
         """Run a subagent in the background and inject result when done."""
         pending = self._pending_tasks.get(task_id)
 
-        def _on_progress(line: str) -> None:
+        def _on_started(started_at: float) -> None:
+            if pending is not None:
+                pending.process_started_at = started_at
+
+        def _on_progress(line: str, emitted_at: float) -> None:
             if pending is not None:
                 pending.last_output = line
+                pending.last_output_at = emitted_at
+                if pending.first_output_at is None:
+                    pending.first_output_at = emitted_at
+
+        def _on_completed(returncode: int, completed_at: float) -> None:
+            if pending is not None:
+                pending.completed_at = completed_at
+                pending.returncode = returncode
+
+        model = self.model_fast if mode == "fast" else self.model_smart
+
+        if pending is not None:
+            pending.model = model
 
         try:
-            result = await self._execute(task, mode=mode, on_progress=_on_progress)
+            result = await self._execute(
+                task,
+                mode=mode,
+                on_started=_on_started,
+                on_progress=_on_progress,
+                on_completed=_on_completed,
+            )
         except asyncio.CancelledError:
             logger.info(f"Task {task_id} cancelled")
             if self.on_result:
@@ -140,6 +260,9 @@ class GptmeToolBridge:
         else:
             response_text = f"Subagent error: {result.error or 'Unknown error'}"
 
+        if pending is not None:
+            self._log_timing_summary(task_id, pending)
+
         logger.info(f"Task {task_id} complete: {response_text[:100]}...")
 
         # Inject result into conversation
@@ -153,7 +276,9 @@ class GptmeToolBridge:
         self,
         task: str,
         mode: str = "smart",
-        on_progress: Callable[[str], None] | None = None,
+        on_started: Callable[[float], None] | None = None,
+        on_progress: Callable[[str, float], None] | None = None,
+        on_completed: Callable[[int, float], None] | None = None,
     ) -> ToolResult:
         """Execute a gptme subagent and return the result."""
         with tempfile.NamedTemporaryFile(
@@ -187,6 +312,8 @@ class GptmeToolBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
             )
+            if on_started:
+                on_started(time.monotonic())
 
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
@@ -198,7 +325,7 @@ class GptmeToolBridge:
                     if line:
                         stdout_lines.append(line)
                         if on_progress:
-                            on_progress(line)
+                            on_progress(line, time.monotonic())
 
             async def _read_stderr() -> None:
                 assert process.stderr is not None
@@ -252,6 +379,9 @@ class GptmeToolBridge:
                     + f"\n... (truncated, {len(output)} total chars)"
                 )
 
+            if on_completed:
+                on_completed(process.returncode, time.monotonic())
+
             if process.returncode != 0:
                 logger.error(
                     f"Subagent failed (exit {process.returncode}): {error or output[:200]}"
@@ -284,7 +414,13 @@ class GptmeToolBridge:
             "task": description,
             "mode": entry.mode,
             "elapsed_seconds": round(elapsed, 1),
+            "stage": self._pending_stage(entry),
         }
+        if entry.model:
+            result["model"] = entry.model
+        timings = self._timing_breakdown(entry)
+        if timings:
+            result["timings"] = timings
         if entry.last_output:
             result["last_output"] = entry.last_output[:200]
         return result
@@ -313,6 +449,7 @@ class GptmeToolBridge:
             mode = arguments.get("mode", "smart")
             if mode not in ("fast", "smart"):
                 mode = "smart"
+            model = self.model_fast if mode == "fast" else self.model_smart
 
             # Assign task ID and dispatch in background
             self._task_counter += 1
@@ -324,6 +461,7 @@ class GptmeToolBridge:
                 description=task,
                 mode=mode,
                 started_at=time.monotonic(),
+                model=model,
             )
 
             return {

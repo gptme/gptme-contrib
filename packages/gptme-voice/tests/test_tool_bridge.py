@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 from gptme_voice.realtime.tool_bridge import GptmeToolBridge
@@ -259,8 +260,13 @@ def test_subagent_status_shows_last_output() -> None:
                 (e for e in status["pending"] if e["task_id"] == task_id), None
             )
             assert entry is not None
+            assert entry["stage"] == "running"
+            assert entry["model"] == bridge.model_fast
             assert entry.get("last_output") is not None
             assert "Found 3 active tasks" in entry["last_output"]
+            assert entry.get("timings") is not None
+            assert entry["timings"]["spawn_to_first_output_seconds"] >= 0
+            assert entry["timings"]["output_elapsed_seconds"] >= 0
 
             await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
 
@@ -522,10 +528,44 @@ def test_subagent_status_lists_pending_dispatch() -> None:
             assert entry["task_id"] == task_id
             assert entry["task"] == "check one thing"
             assert entry["mode"] == "fast"
+            assert entry["stage"] == "starting"
+            assert entry["model"] == bridge.model_fast
             assert entry["elapsed_seconds"] >= 0
+            assert entry.get("timings") is not None
+            assert entry["timings"]["dispatch_to_spawn_seconds"] >= 0
+            assert entry["timings"]["spawn_elapsed_seconds"] >= 0
+            assert "spawn_to_first_output_seconds" not in entry["timings"]
 
             # Clean up the background task
             await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
+
+    asyncio.run(_exercise())
+
+
+def test_completed_subagent_logs_timing_summary(caplog) -> None:
+    async def _exercise() -> None:
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=0,
+                stdout="[INFO] Starting lookup\n[INFO] Done\n",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            with caplog.at_level(logging.INFO):
+                dispatch = await bridge.handle_function_call(
+                    "subagent", {"task": "quick lookup", "mode": "fast"}
+                )
+
+                task_id = dispatch["task_id"]
+                for _ in range(10):
+                    await asyncio.sleep(0)
+
+            assert any(
+                f"Task {task_id} timings" in record.message for record in caplog.records
+            )
 
     asyncio.run(_exercise())
 
