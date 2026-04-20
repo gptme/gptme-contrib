@@ -272,6 +272,13 @@ class VoiceServer:
             pending_task.cancel()
             logger.info("Cancelled pending post-call follow-up for %s", caller_id)
 
+        # Delete the state file so a crash-resume can't re-inject the old transcript
+        path = self._recent_call_path(caller_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Failed to delete recent call state %s: %s", path, exc)
+
         logger.info(
             "Resuming recent %s call for %s (%ds old)",
             recent_call.source,
@@ -325,13 +332,16 @@ class VoiceServer:
             return
 
         async def _runner() -> None:
+            task = asyncio.current_task()
             try:
                 await asyncio.sleep(self.post_call_delay_seconds)
                 await self._run_post_call_command(caller_id, record_path)
             except asyncio.CancelledError:
                 raise
             finally:
-                self._pending_post_calls.pop(caller_id, None)
+                # Only remove our own entry — a newer task may have replaced us
+                if self._pending_post_calls.get(caller_id) is task:
+                    self._pending_post_calls.pop(caller_id)
 
         self._pending_post_calls[caller_id] = asyncio.create_task(_runner())
 
