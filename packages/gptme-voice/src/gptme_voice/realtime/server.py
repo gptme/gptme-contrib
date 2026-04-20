@@ -50,6 +50,8 @@ _MAX_RESUME_TRANSCRIPT_CHARS = 2500
 # Delay before actually closing the WebSocket after the model requests hangup,
 # so the goodbye utterance has time to reach the caller.
 _HANGUP_FAREWELL_DELAY_SECONDS = 5.0
+_CALL_END_DRAIN_TIMEOUT_SECONDS = 1.5
+_CALL_END_IDLE_TIMEOUT_SECONDS = 0.25
 
 
 @dataclass
@@ -660,7 +662,7 @@ class VoiceServer:
             logger.exception("Error handling Twilio connection: %s", e)
         finally:
             if realtime_client:
-                await realtime_client.disconnect()
+                await self._disconnect_realtime_client(realtime_client)
             if call_sid and call_sid in self._connections:
                 del self._connections[call_sid]
             await self._on_call_end(caller_id, "twilio", transcript, metadata)
@@ -773,7 +775,7 @@ class VoiceServer:
             logger.exception("Error handling local connection: %s", e)
         finally:
             if realtime_client:
-                await realtime_client.disconnect()
+                await self._disconnect_realtime_client(realtime_client)
             await self._on_call_end(
                 caller_id,
                 "local",
@@ -812,6 +814,18 @@ class VoiceServer:
             await websocket.close()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Error closing WebSocket during hangup: %s", exc)
+
+    async def _disconnect_realtime_client(
+        self, realtime_client: OpenAIRealtimeClient
+    ) -> None:
+        """Drain late transcript events briefly before closing the provider socket."""
+
+        await realtime_client.disconnect(
+            drain_timeout_seconds=_CALL_END_DRAIN_TIMEOUT_SECONDS,
+            idle_timeout_seconds=_CALL_END_IDLE_TIMEOUT_SECONDS,
+            commit_audio=True,
+            stop_audio_output=True,
+        )
 
     async def _send_local_audio(self, websocket, audio_data: bytes):
         """Send audio to local client."""
