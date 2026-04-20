@@ -111,22 +111,13 @@ def _compute_judge_version() -> str:
 JUDGE_VERSION = _compute_judge_version()
 
 
-def _get_api_key() -> str:
+def _get_api_key(config_paths: tuple[Path, ...] = CONFIG_PATHS) -> str:
     """Resolve Anthropic API key from environment or gptme config."""
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if key:
         return key
-    # Try gptme config as fallback
-    try:
-        import tomllib
-
-        config_path = Path.home() / ".config" / "gptme" / "config.toml"
-        if config_path.exists():
-            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            key = config.get("env", {}).get("ANTHROPIC_API_KEY", "")
-    except Exception:
-        pass
-    return key
+    # Try gptme config as fallback (reads both config.toml and config.local.toml)
+    return _load_config_env(config_paths).get("ANTHROPIC_API_KEY", "")
 
 
 def _normalize_context(context: str) -> str:

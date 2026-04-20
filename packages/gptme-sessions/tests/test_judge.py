@@ -18,6 +18,7 @@ from gptme_sessions.judge import (
     JUDGE_PROMPT_TEMPLATE,
     JUDGE_SYSTEM,
     NO_THINK_PREFILL,
+    _get_api_key,
     _judge_openrouter_env,
     _parse_judge_payload,
     _prepare_messages_for_model,
@@ -334,6 +335,16 @@ class TestModelRouting:
             )
             == "judge-key"
         )
+
+    def test_get_api_key_reads_config_local(self, tmp_path: Path, monkeypatch) -> None:
+        """_get_api_key() falls back to config.local.toml, not just config.toml."""
+        config = tmp_path / "config.toml"
+        config.write_text("[env]\n", encoding="utf-8")
+        config_local = tmp_path / "config.local.toml"
+        config_local.write_text('[env]\nANTHROPIC_API_KEY = "local-key"\n', encoding="utf-8")
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert _get_api_key(config_paths=(config, config_local)) == "local-key"
 
     def test_judge_openrouter_env_promotes_scoped_key(self, monkeypatch) -> None:
         monkeypatch.setattr(
