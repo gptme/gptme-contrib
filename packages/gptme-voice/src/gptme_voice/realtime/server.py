@@ -23,6 +23,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocketDisconnect
 
 from .audio import AudioConverter
 from .openai_client import (
@@ -596,6 +597,8 @@ class VoiceServer:
                     # Call ended
                     break
 
+        except WebSocketDisconnect:
+            pass  # Normal path when _schedule_hangup closes the WebSocket
         except Exception as e:
             logger.exception("Error handling Twilio connection: %s", e)
         finally:
@@ -700,6 +703,8 @@ class VoiceServer:
                 elif data.get("type") == "commit":
                     await realtime_client.commit_audio()
 
+        except WebSocketDisconnect:
+            pass  # Normal path when _schedule_hangup closes the WebSocket
         except Exception as e:
             logger.exception("Error handling local connection: %s", e)
         finally:
