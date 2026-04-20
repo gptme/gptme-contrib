@@ -373,14 +373,13 @@ class OpenAIRealtimeClient:
         being picked up by mic) is handled client-side.
 
         Audio that arrives before the provider has confirmed the session
-        (``session.created``) is buffered and flushed once the session is
-        ready. This prevents silent calls on cold starts / fast reconnects
-        where Twilio's first media frames race ahead of the provider's
-        session handshake.
+        is buffered and flushed once the session is ready. This prevents
+        silent calls on cold starts / fast reconnects where Twilio's first
+        media frames race ahead of the provider's session handshake.
         """
         if self._session_ready is None or not self._session_ready.is_set():
             # Session not confirmed yet — buffer the chunk, bounded so a
-            # never-arriving session.created cannot leak memory.
+            # never-arriving ready signal cannot leak memory.
             if len(self._pending_audio) < _MAX_PENDING_AUDIO_CHUNKS:
                 self._pending_audio.append(pcm_data)
             else:
@@ -388,7 +387,7 @@ class OpenAIRealtimeClient:
                 if self._pending_audio_dropped == 1:
                     logger.warning(
                         "Dropping pre-session audio (buffer full at %d chunks) — "
-                        "session.created may be delayed",
+                        "provider ready signal may be delayed",
                         _MAX_PENDING_AUDIO_CHUNKS,
                     )
             return
@@ -396,14 +395,23 @@ class OpenAIRealtimeClient:
         audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
         await self._send_event("input_audio_buffer.append", {"audio": audio_b64})
 
+    async def _mark_session_ready(self, event_type: str) -> None:
+        """Mark the provider session ready and flush any buffered audio once."""
+        if self._session_ready is None or self._session_ready.is_set():
+            return
+
+        logger.info("%s received — marking session ready", event_type)
+        self._session_ready.set()
+        await self._flush_pending_audio()
+
     async def _flush_pending_audio(self) -> None:
-        """Send any audio that was buffered before ``session.created`` arrived."""
+        """Send any audio that was buffered before the session was ready."""
         if not self._pending_audio:
             return
         chunks = self._pending_audio
         self._pending_audio = []
         logger.info(
-            "Flushing %d buffered audio chunk(s) after session.created",
+            "Flushing %d buffered audio chunk(s) after session ready",
             len(chunks),
         )
         for pcm_data in chunks:
@@ -496,13 +504,10 @@ class OpenAIRealtimeClient:
         # Session events
         elif event_type == "session.created":
             logger.info("Session created")
-            # Provider has confirmed the session — safe to forward audio.
-            # Flush any audio buffered during the handshake race window.
-            if self._session_ready is not None:
-                self._session_ready.set()
-            await self._flush_pending_audio()
+            await self._mark_session_ready(event_type)
         elif event_type == "session.updated":
             logger.info("Session configured")
+            await self._mark_session_ready(event_type)
 
         # Response lifecycle — mute mic while responding
         elif event_type == "response.created":
