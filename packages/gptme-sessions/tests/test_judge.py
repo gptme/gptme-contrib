@@ -9,18 +9,29 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gptme.message import Message
 
 from gptme_sessions.judge import (
     DEFAULT_GOALS,
     DEFAULT_JUDGE_MODEL,
+    JUDGE_VERSION,
     JUDGE_PROMPT_TEMPLATE,
     JUDGE_SYSTEM,
+    NO_THINK_PREFILL,
+    _get_api_key,
+    _judge_openrouter_env,
+    _parse_judge_payload,
+    _prepare_messages_for_model,
+    _resolve_openrouter_api_key,
     _is_anthropic_direct_model,
     _strip_anthropic_prefix,
+    judge_and_writeback,
     judge_from_signals,
     judge_session,
+    normalize_judge_verdict,
 )
 from gptme_sessions.record import SessionRecord
+from gptme_sessions.store import SessionStore
 
 
 class TestJudgeSession:
@@ -134,6 +145,42 @@ class TestJudgeSession:
         """Default goals should work for any agent, not just Bob."""
         assert "Bob" not in DEFAULT_GOALS
         assert "agent" in DEFAULT_GOALS.lower()
+
+    def test_parse_judge_payload_handles_think_tags_and_fences(self) -> None:
+        parsed = _parse_judge_payload(
+            """
+<think>internal</think>
+```json
+{"score": 1.4, "reason": "Shipped a real fix"}
+```
+""",
+            "openai-subscription/gpt-5.4",
+        )
+
+        assert parsed == {
+            "score": 1.0,
+            "reason": "Shipped a real fix",
+            "model": "openai-subscription/gpt-5.4",
+        }
+
+    def test_prepare_messages_for_qwen_adds_no_think_prefill(self) -> None:
+        prepared = _prepare_messages_for_model(
+            [Message("system", "judge"), Message("user", "score this")],
+            "lmstudio/qwen/qwen3.6-35b-a3b",
+        )
+
+        assert [msg.role for msg in prepared] == ["system", "user", "assistant"]
+        assert prepared[-1].content == NO_THINK_PREFILL
+
+    def test_prepare_messages_for_other_models_is_noop(self) -> None:
+        messages = [Message("system", "judge"), Message("user", "score this")]
+
+        prepared = _prepare_messages_for_model(
+            messages,
+            "openai-subscription/gpt-5.4",
+        )
+
+        assert prepared == messages
 
 
 class TestJudgeFromSignals:
@@ -263,6 +310,75 @@ class TestModelRouting:
             )
         assert result is None
 
+    def test_resolve_openrouter_api_key_prefers_scoped_env(self) -> None:
+        env = {
+            "OPENROUTER_API_KEY_JUDGE": "judge-key",
+            "OPENROUTER_API_KEY": "shared-key",
+        }
+
+        assert _resolve_openrouter_api_key("judge", environ=env) == "judge-key"
+
+    def test_resolve_openrouter_api_key_reads_config_local(self, tmp_path: Path) -> None:
+        config = tmp_path / "config.toml"
+        config.write_text('[env]\nOPENROUTER_API_KEY = "shared-key"\n', encoding="utf-8")
+        config_local = tmp_path / "config.local.toml"
+        config_local.write_text(
+            '[env]\nOPENROUTER_API_KEY_JUDGE = "judge-key"\n',
+            encoding="utf-8",
+        )
+
+        assert (
+            _resolve_openrouter_api_key(
+                "judge",
+                environ={},
+                config_paths=(config, config_local),
+            )
+            == "judge-key"
+        )
+
+    def test_get_api_key_reads_config_local(self, tmp_path: Path, monkeypatch) -> None:
+        """_get_api_key() falls back to config.local.toml, not just config.toml."""
+        config = tmp_path / "config.toml"
+        config.write_text("[env]\n", encoding="utf-8")
+        config_local = tmp_path / "config.local.toml"
+        config_local.write_text('[env]\nANTHROPIC_API_KEY = "local-key"\n', encoding="utf-8")
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert _get_api_key(config_paths=(config, config_local)) == "local-key"
+
+    def test_judge_openrouter_env_promotes_scoped_key(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "gptme_sessions.judge._resolve_openrouter_api_key",
+            lambda *args, **kwargs: "judge-key",
+        )
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        seen: list[str | None] = []
+        with _judge_openrouter_env("openrouter/qwen/qwen3-next-80b"):
+            seen.append(os.environ.get("OPENROUTER_API_KEY"))
+
+        assert seen == ["judge-key"]
+        assert "OPENROUTER_API_KEY" not in os.environ
+
+    def test_normalize_judge_verdict_attaches_meta(self) -> None:
+        normalized = normalize_judge_verdict(
+            {
+                "score": 0.74,
+                "reason": "Meaningful progress",
+                "model": "openai-subscription/gpt-5.4",
+            }
+        )
+
+        assert normalized == {
+            "score": 0.74,
+            "reason": "Meaningful progress",
+            "model": "openai-subscription/gpt-5.4",
+            "meta": {
+                "backend": "gptme-fallback",
+                "judge_version": JUDGE_VERSION,
+            },
+        }
+
 
 class TestSessionRecordJudgeFields:
     """Tests for LLM judge fields on SessionRecord."""
@@ -303,6 +419,68 @@ class TestSessionRecordJudgeFields:
         }
         record = SessionRecord.from_dict(old_data)
         assert record.llm_judge_score is None
+
+    def test_writeback_helpers_store_alignment_meta(self, tmp_path: Path) -> None:
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "score": 0.74,
+                "reason": "Real work shipped",
+                "model": "openai-subscription/gpt-5.4",
+            },
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="abc123",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result["status"] == "ok"
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert updated.grades["alignment"] == 0.74
+        assert updated.grade_reasons["alignment"] == "Real work shipped"
+        assert updated.llm_judge_score == 0.74
+        assert updated.llm_judge_reason == "Real work shipped"
+        assert updated.llm_judge_model == "openai-subscription/gpt-5.4"
+        assert updated.to_dict()["llm_judge_meta"] == {
+            "backend": "gptme-fallback",
+            "judge_version": JUDGE_VERSION,
+        }
+
+    def test_judge_and_writeback_reports_missing_record(self, tmp_path: Path) -> None:
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "score": 0.5,
+                "reason": "Did work",
+                "model": "openai-subscription/gpt-5.4",
+            },
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="missing",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result == {
+            "status": "no_record",
+            "score": 0.5,
+            "reason": "Did work",
+            "model": "openai-subscription/gpt-5.4",
+            "meta": {
+                "backend": "gptme-fallback",
+                "judge_version": JUDGE_VERSION,
+            },
+        }
 
 
 class TestJudgeCLI:
