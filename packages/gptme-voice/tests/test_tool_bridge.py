@@ -304,3 +304,183 @@ def test_hangup_tool_advertised_in_openai_session_config() -> None:
         '"name": "hangup"' in source
     ), "hangup tool must be declared in OpenAIRealtimeClient.connect() tools list"
     assert '"name": "subagent"' in source, "subagent tool must also still be declared"
+    assert (
+        '"name": "subagent_status"' in source
+    ), "subagent_status tool must be declared so the model can check pending tasks"
+    assert (
+        '"name": "subagent_cancel"' in source
+    ), "subagent_cancel tool must be declared so the model can cancel pending tasks"
+
+
+def test_subagent_status_empty_when_no_tasks() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+        result = await bridge.handle_function_call("subagent_status", {})
+        assert result["status"] == "ok"
+        assert result["pending_count"] == 0
+        assert result["pending"] == []
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_status_lists_pending_dispatch() -> None:
+    """After dispatching, status should show the task with metadata."""
+
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+                await asyncio.sleep(5)
+                return b"", b""
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "check one thing", "mode": "fast"}
+            )
+            assert dispatch["status"] == "dispatched"
+            task_id = dispatch["task_id"]
+
+            await asyncio.sleep(0)
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["status"] == "ok"
+            assert status["pending_count"] == 1
+            entry = status["pending"][0]
+            assert entry["task_id"] == task_id
+            assert entry["task"] == "check one thing"
+            assert entry["mode"] == "fast"
+            assert entry["elapsed_seconds"] >= 0
+
+            # Clean up the background task
+            await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_cancel_unknown_task_id_returns_not_found() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+        result = await bridge.handle_function_call(
+            "subagent_cancel", {"task_id": "task-999"}
+        )
+        assert result["status"] == "not_found"
+        assert "task-999" in result["message"]
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_cancel_with_no_pending_returns_no_pending() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+        result = await bridge.handle_function_call("subagent_cancel", {})
+        assert result["status"] == "no_pending"
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_cancel_specific_task_injects_cancel_notice() -> None:
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+                await asyncio.sleep(5)
+                return b"", b""
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        injected: list[str] = []
+
+        async def _on_result(text: str) -> None:
+            injected.append(text)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace", timeout=10, on_result=_on_result
+            )
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "do a thing"}
+            )
+            task_id = dispatch["task_id"]
+            await asyncio.sleep(0)
+
+            result = await bridge.handle_function_call(
+                "subagent_cancel", {"task_id": task_id}
+            )
+            assert result["status"] == "cancelled"
+            assert result["task_id"] == task_id
+            assert result["cancelled"] is True
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["pending_count"] == 0
+
+            assert injected, "expected on_result to be called with cancel notice"
+            assert "cancelled" in injected[0].lower()
+
+    asyncio.run(_exercise())
+
+
+def test_execute_kills_process_on_cancel() -> None:
+    """Cancelling a running _execute call must kill the underlying OS process."""
+
+    async def _exercise() -> None:
+        killed: list[bool] = []
+
+        class _SlowProcess(_FakeProcess):
+            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+                await asyncio.sleep(10)
+                return b"", b""
+
+            def kill(self) -> None:
+                killed.append(True)
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=30)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            task = asyncio.create_task(bridge._execute("long task", mode="fast"))
+            await asyncio.sleep(0)  # let the task start
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert killed, "process.kill() must be called when _execute is cancelled"
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_cancel_all_cancels_every_pending_task() -> None:
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+                await asyncio.sleep(5)
+                return b"", b""
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            await bridge.handle_function_call("subagent", {"task": "a"})
+            await bridge.handle_function_call("subagent", {"task": "b"})
+            await asyncio.sleep(0)
+
+            result = await bridge.handle_function_call("subagent_cancel", {})
+            assert result["status"] == "cancelled_all"
+            assert result["cancelled_count"] == 2
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["pending_count"] == 0
+
+    asyncio.run(_exercise())

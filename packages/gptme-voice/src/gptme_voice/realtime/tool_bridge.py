@@ -15,11 +15,15 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+# Max task-description length to echo back when reporting status
+_MAX_TASK_PREVIEW = 120
 
 # Max output to return (avoid overwhelming the realtime API)
 _MAX_OUTPUT_LEN = 2000
@@ -41,6 +45,16 @@ class ToolResult:
     success: bool
     output: str
     error: str | None = None
+
+
+@dataclass
+class PendingTask:
+    """Metadata for an in-flight subagent dispatch."""
+
+    task: asyncio.Task
+    description: str
+    mode: str
+    started_at: float
 
 
 class GptmeToolBridge:
@@ -72,7 +86,7 @@ class GptmeToolBridge:
         env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         self.model_fast = env_model or self.MODEL_FAST
         self.model_smart = env_model or self.MODEL_SMART
-        self._pending_tasks: dict[str, asyncio.Task] = {}
+        self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
 
     @staticmethod
@@ -101,7 +115,16 @@ class GptmeToolBridge:
 
     async def _run_subagent(self, task_id: str, task: str, mode: str = "smart") -> None:
         """Run a subagent in the background and inject result when done."""
-        result = await self._execute(task, mode=mode)
+        try:
+            result = await self._execute(task, mode=mode)
+        except asyncio.CancelledError:
+            logger.info(f"Task {task_id} cancelled")
+            if self.on_result:
+                await self.on_result(
+                    f"Subagent task {task_id} was cancelled before it finished."
+                )
+            self._pending_tasks.pop(task_id, None)
+            raise
 
         if result.success:
             response_text = result.output
@@ -158,6 +181,9 @@ class GptmeToolBridge:
                     output="",
                     error=f"Subagent timed out after {self.timeout}s",
                 )
+            except asyncio.CancelledError:
+                process.kill()
+                raise
 
             stdout_text = stdout.decode("utf-8", errors="replace").strip()
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
@@ -210,6 +236,29 @@ class GptmeToolBridge:
         finally:
             response_file.unlink(missing_ok=True)
 
+    def _describe_pending(self, task_id: str, entry: PendingTask) -> dict:
+        description = entry.description
+        if len(description) > _MAX_TASK_PREVIEW:
+            description = description[:_MAX_TASK_PREVIEW].rstrip() + "..."
+        elapsed = max(0.0, time.monotonic() - entry.started_at)
+        return {
+            "task_id": task_id,
+            "task": description,
+            "mode": entry.mode,
+            "elapsed_seconds": round(elapsed, 1),
+        }
+
+    async def _cancel_task(self, task_id: str, entry: PendingTask) -> dict:
+        entry.task.cancel()
+        try:
+            await entry.task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001 - report anything else back
+            logger.warning(f"Task {task_id} raised during cancel: {e}")
+        self._pending_tasks.pop(task_id, None)
+        return {"task_id": task_id, "cancelled": True}
+
     async def handle_function_call(self, name: str, arguments: dict) -> dict:
         """Handle an OpenAI function call.
 
@@ -229,12 +278,66 @@ class GptmeToolBridge:
             task_id = f"task-{self._task_counter}"
 
             bg_task = asyncio.create_task(self._run_subagent(task_id, task, mode=mode))
-            self._pending_tasks[task_id] = bg_task
+            self._pending_tasks[task_id] = PendingTask(
+                task=bg_task,
+                description=task,
+                mode=mode,
+                started_at=time.monotonic(),
+            )
 
             return {
                 "status": "dispatched",
                 "task_id": task_id,
                 "message": f"Working on it: {task}",
+            }
+
+        if name == "subagent_status":
+            pending = [
+                self._describe_pending(tid, entry)
+                for tid, entry in self._pending_tasks.items()
+                if not entry.task.done()
+            ]
+            return {
+                "status": "ok",
+                "pending_count": len(pending),
+                "pending": pending,
+            }
+
+        if name == "subagent_cancel":
+            task_id_arg: str | None = arguments.get("task_id")
+            if task_id_arg:
+                entry = self._pending_tasks.get(task_id_arg)
+                if entry is None or entry.task.done():
+                    return {
+                        "status": "not_found",
+                        "task_id": task_id_arg,
+                        "message": (
+                            f"No pending subagent task with id {task_id_arg}. "
+                            "Use subagent_status to list pending tasks."
+                        ),
+                    }
+                result = await self._cancel_task(task_id_arg, entry)
+                return {"status": "cancelled", **result}
+
+            # No task_id — cancel all pending
+            targets = [
+                (tid, entry)
+                for tid, entry in list(self._pending_tasks.items())
+                if not entry.task.done()
+            ]
+            if not targets:
+                return {
+                    "status": "no_pending",
+                    "message": "No subagent tasks are currently running.",
+                }
+            cancelled = []
+            for tid, entry in targets:
+                result = await self._cancel_task(tid, entry)
+                cancelled.append(result)
+            return {
+                "status": "cancelled_all",
+                "cancelled_count": len(cancelled),
+                "cancelled": cancelled,
             }
 
         if name == "hangup":
