@@ -4,6 +4,24 @@ import pytest
 from gptme_voice.realtime.tool_bridge import GptmeToolBridge
 
 
+class _FakeStream:
+    """Minimal async-iterable that yields encoded lines then EOF."""
+
+    def __init__(self, data: bytes) -> None:
+        self._lines = data.splitlines(keepends=True)
+        self._index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._index < len(self._lines):
+            line = self._lines[self._index]
+            self._index += 1
+            return line
+        raise StopAsyncIteration
+
+
 class _FakeProcess:
     def __init__(
         self,
@@ -13,12 +31,14 @@ class _FakeProcess:
         stderr: str = "",
     ) -> None:
         self.returncode = returncode
-        self._stdout = stdout.encode("utf-8")
-        self._stderr = stderr.encode("utf-8")
+        data_out = stdout.encode("utf-8")
+        data_err = stderr.encode("utf-8")
+        self.stdout = _FakeStream(data_out)
+        self.stderr = _FakeStream(data_err)
         self.killed = False
 
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, self._stderr
+    async def wait(self) -> int:
+        return self.returncode
 
     def kill(self) -> None:
         self.killed = True
@@ -95,6 +115,98 @@ def test_execute_uses_env_override_for_gptme_path() -> None:
 
         assert result.success is True
         assert tuple(captured["args"])[0] == "/fake/bin/gptme"
+
+    asyncio.run(_exercise())
+
+
+def test_execute_fast_mode_skips_context_loading() -> None:
+    """fast mode must NOT pass --context files — that's the main latency source."""
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            await bridge._execute("quick lookup", mode="fast")
+
+        args = tuple(captured["args"])
+        assert "--context" not in args, "fast mode must not load workspace context"
+        assert "files" not in args, "fast mode must not load workspace context"
+        assert "--non-interactive" in args
+
+    asyncio.run(_exercise())
+
+
+def test_execute_smart_mode_keeps_context_loading() -> None:
+    """smart mode must still pass --context files for full workspace awareness."""
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            await bridge._execute("detailed analysis", mode="smart")
+
+        args = tuple(captured["args"])
+        assert "--context" in args
+        assert "files" in args
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_status_shows_last_output() -> None:
+    """subagent_status should include last_output once the subagent produces output."""
+
+    async def _exercise() -> None:
+        class _SlowProcessWithOutput(_FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.sleep(5)
+                return 0
+
+        output_written = asyncio.Event()
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            proc = _SlowProcessWithOutput(
+                returncode=0,
+                stdout="[INFO] Checking task status\n[INFO] Found 3 active tasks\n",
+            )
+            output_written.set()
+            return proc
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "check active tasks", "mode": "fast"}
+            )
+            task_id = dispatch["task_id"]
+
+            # Allow the stdout reader to consume lines
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            entry = next(
+                (e for e in status["pending"] if e["task_id"] == task_id), None
+            )
+            assert entry is not None
+            if entry.get("last_output"):
+                assert "Found 3 active tasks" in entry["last_output"]
+
+            await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
 
     asyncio.run(_exercise())
 
@@ -187,9 +299,9 @@ def test_execute_reports_timeout() -> None:
         bridge = GptmeToolBridge(timeout=1, workspace="/fake/workspace")
 
         class _HangingProcess(_FakeProcess):
-            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+            async def wait(self) -> int:
                 await asyncio.sleep(10)
-                return b"", b""
+                return -1
 
         async def _fake_create_subprocess_exec(*_args, **_kwargs):
             return _HangingProcess(returncode=-1)
@@ -328,9 +440,9 @@ def test_subagent_status_lists_pending_dispatch() -> None:
 
     async def _exercise() -> None:
         class _SlowProcess(_FakeProcess):
-            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+            async def wait(self) -> int:
                 await asyncio.sleep(5)
-                return b"", b""
+                return 0
 
         async def _fake_create_subprocess_exec(*_args, **_kwargs):
             return _SlowProcess(returncode=0)
@@ -386,9 +498,9 @@ def test_subagent_cancel_with_no_pending_returns_no_pending() -> None:
 def test_subagent_cancel_specific_task_injects_cancel_notice() -> None:
     async def _exercise() -> None:
         class _SlowProcess(_FakeProcess):
-            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+            async def wait(self) -> int:
                 await asyncio.sleep(5)
-                return b"", b""
+                return 0
 
         async def _fake_create_subprocess_exec(*_args, **_kwargs):
             return _SlowProcess(returncode=0)
@@ -433,9 +545,9 @@ def test_execute_kills_process_on_cancel() -> None:
         killed: list[bool] = []
 
         class _SlowProcess(_FakeProcess):
-            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+            async def wait(self) -> int:
                 await asyncio.sleep(10)
-                return b"", b""
+                return 0
 
             def kill(self) -> None:
                 killed.append(True)
@@ -461,9 +573,9 @@ def test_execute_kills_process_on_cancel() -> None:
 def test_subagent_cancel_all_cancels_every_pending_task() -> None:
     async def _exercise() -> None:
         class _SlowProcess(_FakeProcess):
-            async def communicate(self) -> tuple[bytes, bytes]:  # type: ignore[override]
+            async def wait(self) -> int:
                 await asyncio.sleep(5)
-                return b"", b""
+                return 0
 
         async def _fake_create_subprocess_exec(*_args, **_kwargs):
             return _SlowProcess(returncode=0)
