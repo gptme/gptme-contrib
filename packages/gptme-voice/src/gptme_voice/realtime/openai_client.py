@@ -98,9 +98,8 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         if total > _MAX_INSTRUCTIONS_LEN:
             break
 
-    if not parts:
-        return _DEFAULT_INSTRUCTIONS
-
+    # Build guards preamble — always applied regardless of personality files so
+    # behavioral constraints are never silently absent for a live-call session.
     preamble = (
         "You are in a real-time voice conversation. "
         "Keep responses concise and conversational.\n\n"
@@ -123,9 +122,16 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "happened yet and you are not the one who starts it.\n"
         "- It is fine to acknowledge that follow-up will happen automatically after "
         "hangup if the user asks. Just do not take credit for dispatching it.\n\n"
-        "Below is your personality and context:\n\n"
     )
-    result = preamble + "\n\n---\n\n".join(parts)
+
+    if not parts:
+        return preamble  # guards still apply even with no personality files
+
+    result = (
+        preamble
+        + "Below is your personality and context:\n\n"
+        + "\n\n---\n\n".join(parts)
+    )
 
     # Truncate if still too long
     if len(result) > _MAX_INSTRUCTIONS_LEN:

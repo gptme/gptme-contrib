@@ -85,3 +85,23 @@ def test_load_project_instructions_includes_post_call_follow_up_guard(
 
     # Acknowledging automatic post-call follow-up is still allowed.
     assert "happen automatically after" in instructions
+
+
+def test_load_project_instructions_guards_present_without_personality_files(
+    tmp_path: Path,
+) -> None:
+    """Guards must apply even when a workspace has no matching personality files."""
+    # Config exists but references a file that doesn't exist — no parts loaded.
+    (tmp_path / "gptme.toml").write_text(
+        '[prompt]\nfiles = ["MISSING.md"]\n',
+    )
+
+    instructions = _load_project_instructions(str(tmp_path))
+
+    # Should NOT fall back to the bare _DEFAULT_INSTRUCTIONS.
+    assert "You are a helpful assistant" not in instructions
+
+    # Behavioral guards must still be present.
+    assert "real-time voice conversation" in instructions
+    assert "POST-CALL FOLLOW-UP:" in instructions
+    assert "Do NOT claim, announce, or imply that you have dispatched" in instructions
