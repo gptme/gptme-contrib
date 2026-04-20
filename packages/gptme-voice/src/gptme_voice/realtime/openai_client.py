@@ -231,11 +231,11 @@ class OpenAIRealtimeClient:
                     "name": "subagent",
                     "description": (
                         "Dispatch a task to a gptme subagent running in the workspace. "
-                        "The subagent has full access to tools: shell, file read/write, "
-                        "python, and can reason about multi-step tasks. "
-                        "Use this for anything that requires interacting with the codebase, "
-                        "reading files, checking task status, running commands, searching code, etc. "
-                        "Describe what you want done in natural language."
+                        "Use it only for one small, focused workspace lookup or action: "
+                        "check one task, inspect one file, run one quick command, or verify "
+                        "one recent fact. Do not use it for broad investigations, full "
+                        "reviews, or post-call analysis. Describe one concrete request in "
+                        "natural language."
                     ),
                     "parameters": {
                         "type": "object",
