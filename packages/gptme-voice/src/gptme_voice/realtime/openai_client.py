@@ -98,9 +98,8 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         if total > _MAX_INSTRUCTIONS_LEN:
             break
 
-    if not parts:
-        return _DEFAULT_INSTRUCTIONS
-
+    # Build guards preamble — always applied regardless of personality files so
+    # behavioral constraints are never silently absent for a live-call session.
     preamble = (
         "You are in a real-time voice conversation. "
         "Keep responses concise and conversational.\n\n"
@@ -117,9 +116,25 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "say so honestly: 'I can't cancel it — it will complete on its own'.\n"
         "- When asked about recent activity, tasks, journal entries, or workspace facts, "
         "use the subagent tool to look up the specific thing asked. Never guess.\n\n"
-        "Below is your personality and context:\n\n"
+        "POST-CALL FOLLOW-UP:\n"
+        "- Post-call analysis and follow-up run automatically after the call ends. "
+        "They are triggered by the server on hangup, not by you.\n"
+        "- Do NOT claim, announce, or imply that you have dispatched, started, or queued "
+        "post-call work during the live call, even verbally without a tool call. "
+        "Saying 'post-call analysis dispatched' inside a call is wrong — it has not "
+        "happened yet and you are not the one who starts it.\n"
+        "- It is fine to acknowledge that follow-up will happen automatically after "
+        "hangup if the user asks. Just do not take credit for dispatching it.\n\n"
     )
-    result = preamble + "\n\n---\n\n".join(parts)
+
+    if not parts:
+        return preamble  # guards still apply even with no personality files
+
+    result = (
+        preamble
+        + "Below is your personality and context:\n\n"
+        + "\n\n---\n\n".join(parts)
+    )
 
     # Truncate if still too long
     if len(result) > _MAX_INSTRUCTIONS_LEN:
