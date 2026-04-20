@@ -20,15 +20,43 @@ Integration points:
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, TypedDict
+
+from .store import SessionStore
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
+CONFIG_PATHS = (
+    Path.home() / ".config" / "gptme" / "config.toml",
+    Path.home() / ".config" / "gptme" / "config.local.toml",
+)
+CONTEXT_FALLBACKS = {
+    "JUDGE": ("JUDGE", "LLM_JUDGE", "EVAL"),
+    "LLM_JUDGE": ("LLM_JUDGE", "JUDGE", "EVAL"),
+    "EVAL": ("EVAL", "JUDGE", "LLM_JUDGE"),
+}
+
+
+class JudgeMetadata(TypedDict):
+    backend: str
+    judge_version: str
+
+
+class JudgeVerdict(TypedDict, total=False):
+    score: float
+    reason: str
+    model: str
+    meta: JudgeMetadata
+
 
 JUDGE_SYSTEM = """\
 You are evaluating an AI agent's work session for strategic value.
@@ -67,6 +95,20 @@ The agent is a general-purpose autonomous AI assistant.
 4. Contribute to open-source projects"""
 
 
+def _compute_judge_version() -> str:
+    payload = "\n---\n".join(
+        [
+            JUDGE_SYSTEM.strip(),
+            JUDGE_PROMPT_TEMPLATE.strip(),
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"goal-alignment-v1-{digest}"
+
+
+JUDGE_VERSION = _compute_judge_version()
+
+
 def _get_api_key() -> str:
     """Resolve Anthropic API key from environment or gptme config."""
     key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -83,6 +125,92 @@ def _get_api_key() -> str:
     except Exception:
         pass
     return key
+
+
+def _normalize_context(context: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", context.strip().upper()).strip("_")
+
+
+def _candidate_openrouter_env_var_names(context: str) -> list[str]:
+    normalized = _normalize_context(context)
+    names: list[str] = []
+    for candidate in CONTEXT_FALLBACKS.get(normalized, ((normalized,) if normalized else ())):
+        env_var = f"OPENROUTER_API_KEY_{candidate}"
+        if env_var not in names:
+            names.append(env_var)
+    names.append("OPENROUTER_API_KEY")
+    return names
+
+
+def _load_config_env(config_paths: tuple[Path, ...] = CONFIG_PATHS) -> dict[str, str]:
+    """Load merged [env] values from gptme config, with local overrides last."""
+    merged: dict[str, str] = {}
+    try:
+        import tomllib
+    except ImportError:
+        return merged
+
+    for path in config_paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("rb") as fh:
+                data = tomllib.load(fh)
+        except Exception:
+            continue
+        env = data.get("env", {})
+        for key, value in env.items():
+            if isinstance(value, str):
+                merged[key] = value
+    return merged
+
+
+def _resolve_openrouter_api_key(
+    context: str,
+    *,
+    environ: dict[str, str] | None = None,
+    config_paths: tuple[Path, ...] = CONFIG_PATHS,
+) -> str | None:
+    """Resolve a scoped OpenRouter key, falling back to the shared default."""
+    env = os.environ if environ is None else environ
+    candidates = _candidate_openrouter_env_var_names(context)
+
+    for name in candidates:
+        value = env.get(name, "")
+        if value:
+            return value
+
+    config_env = _load_config_env(config_paths)
+    for name in candidates:
+        value = config_env.get(name, "")
+        if value:
+            return value
+
+    return None
+
+
+@contextlib.contextmanager
+def _judge_openrouter_env(model: str) -> Iterator[None]:
+    """Temporarily promote the judge-scoped OpenRouter key for judge calls."""
+    if not model.startswith("openrouter/"):
+        yield
+        return
+    judge_key = _resolve_openrouter_api_key("JUDGE")
+    if not judge_key:
+        yield
+        return
+    backup = os.environ.get("OPENROUTER_API_KEY")
+    if backup == judge_key:
+        yield
+        return
+    os.environ["OPENROUTER_API_KEY"] = judge_key
+    try:
+        yield
+    finally:
+        if backup is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = backup
 
 
 def _is_anthropic_direct_model(model: str) -> bool:
@@ -104,6 +232,36 @@ def _is_anthropic_direct_model(model: str) -> bool:
 
 def _strip_anthropic_prefix(model: str) -> str:
     return model.removeprefix("anthropic/") if model.startswith("anthropic/") else model
+
+
+def _judge_backend(model: str) -> str:
+    if _is_anthropic_direct_model(model):
+        return "anthropic-direct"
+    return "gptme-fallback"
+
+
+def _build_judge_meta(*, model: str) -> JudgeMetadata:
+    return {
+        "backend": _judge_backend(model),
+        "judge_version": JUDGE_VERSION,
+    }
+
+
+def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
+    """Attach stable metadata to a raw judge verdict."""
+    model = str(payload.get("model", ""))
+    raw_meta = payload.get("meta")
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    base_meta = _build_judge_meta(model=model)
+    return {
+        "score": max(0.0, min(1.0, float(payload.get("score", 0.5)))),
+        "reason": str(payload.get("reason", "")),
+        "model": model,
+        "meta": {
+            "backend": str(meta.get("backend", base_meta["backend"])),
+            "judge_version": str(meta.get("judge_version", base_meta["judge_version"])),
+        },
+    }
 
 
 def _parse_judge_payload(text: str, model: str) -> dict | None:
@@ -175,20 +333,21 @@ def _judge_via_gptme(prompt: str, *, model: str) -> dict | None:
         return None
 
     try:
-        init_gptme(
-            model=model,
-            interactive=False,
-            tool_allowlist=[],
-            tool_format="markdown",
-        )
-        response = reply(
-            [
-                Message("system", JUDGE_SYSTEM),
-                Message("user", prompt),
-            ],
-            model,
-            stream=False,
-        )
+        with _judge_openrouter_env(model):
+            init_gptme(
+                model=model,
+                interactive=False,
+                tool_allowlist=[],
+                tool_format="markdown",
+            )
+            response = reply(
+                [
+                    Message("system", JUDGE_SYSTEM),
+                    Message("user", prompt),
+                ],
+                model,
+                stream=False,
+            )
     except Exception as exc:
         logger.warning("LLM judge (gptme) failed: %s", exc)
         return None
@@ -290,3 +449,72 @@ def judge_from_signals(
         journal_text = "\n".join(parts) if parts else "(no signal data)"
 
     return judge_session(journal_text, category=category, **kwargs)
+
+
+def _store_judge_meta(record: Any, meta: JudgeMetadata | None) -> None:
+    """Persist judge metadata via the SessionRecord legacy-field bridge."""
+    if not meta:
+        return
+    normalized = {k: str(v) for k, v in meta.items() if v}
+    if not normalized:
+        return
+    legacy_fields = getattr(record, "_legacy_fields", None)
+    if isinstance(legacy_fields, dict):
+        legacy_fields["llm_judge_meta"] = normalized
+
+
+def write_alignment_grade(
+    *,
+    session_id: str,
+    verdict: JudgeVerdict,
+    sessions_dir: Path,
+) -> bool:
+    """Persist an alignment verdict onto an existing session record."""
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    normalized = normalize_judge_verdict(dict(verdict))
+    for record in records:
+        if record.session_id != session_id:
+            continue
+        record.set_alignment_grade(
+            normalized["score"],
+            reason=normalized["reason"],
+            model=normalized["model"],
+        )
+        _store_judge_meta(record, normalized.get("meta"))
+        store.rewrite(records)
+        return True
+    return False
+
+
+def judge_and_writeback(
+    *,
+    text: str,
+    category: str | None,
+    goals: str,
+    session_id: str,
+    sessions_dir: Path,
+    model: str = DEFAULT_JUDGE_MODEL,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Judge a session and persist the verdict via SessionStore."""
+    verdict = judge_session(
+        text,
+        category=category,
+        goals=goals,
+        model=model,
+        api_key=api_key,
+    )
+    if verdict is None:
+        return {"status": "failed"}
+
+    normalized = normalize_judge_verdict(verdict)
+    updated = write_alignment_grade(
+        session_id=session_id,
+        verdict=normalized,
+        sessions_dir=sessions_dir,
+    )
+    if not updated:
+        return {"status": "no_record", **normalized}
+
+    return {"status": "ok", **normalized}
