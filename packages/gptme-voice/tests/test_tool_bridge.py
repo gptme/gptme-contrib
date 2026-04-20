@@ -26,7 +26,7 @@ class _FakeProcess:
 
 def test_execute_prefers_meaningful_stdout_error_over_tty_warning() -> None:
     async def _exercise() -> None:
-        bridge = GptmeToolBridge(workspace="/home/bob/bob")
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
         stdout = """
 [11:13:00] ERROR    Fatal error occurred
 [11:13:00] ERROR    Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'You have reached your specified API usage limits. You will regain access on 2026-05-01 at 00:00 UTC.'}}
@@ -58,9 +58,9 @@ def test_execute_uses_env_override_for_smart_model() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_SMART", "openai-subscription/gpt-5.4")
+            mp.setenv("GPTME_VOICE_SUBAGENT_MODEL", "openai-subscription/gpt-5.4")
             mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-            bridge = GptmeToolBridge(workspace="/home/bob/bob")
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
         assert result.success is True
@@ -88,12 +88,12 @@ def test_execute_uses_env_override_for_gptme_path() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setenv("GPTME_VOICE_SUBAGENT_PATH", "/home/bob/.local/bin/gptme")
+            mp.setenv("GPTME_VOICE_SUBAGENT_PATH", "/fake/bin/gptme")
             mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-            bridge = GptmeToolBridge(workspace="/home/bob/bob")
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
         assert result.success is True
-        assert tuple(captured["args"])[0] == "/home/bob/.local/bin/gptme"
+        assert tuple(captured["args"])[0] == "/fake/bin/gptme"
 
     asyncio.run(_exercise())

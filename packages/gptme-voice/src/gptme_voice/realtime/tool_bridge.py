@@ -13,12 +13,11 @@ conversation when ready.
 
 import asyncio
 import logging
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
-
-from .twilio_integration import _get_config_env
 
 logger = logging.getLogger(__name__)
 
@@ -64,21 +63,13 @@ class GptmeToolBridge:
         workspace: str | None = None,
         on_result: Callable[[str], Awaitable[None]] | None = None,
     ):
-        self.gptme_path = _get_config_env("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
+        self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
-        shared_model = _get_config_env("GPTME_VOICE_SUBAGENT_MODEL")
-        self.model_fast = (
-            _get_config_env("GPTME_VOICE_SUBAGENT_MODEL_FAST")
-            or shared_model
-            or self.MODEL_FAST
-        )
-        self.model_smart = (
-            _get_config_env("GPTME_VOICE_SUBAGENT_MODEL_SMART")
-            or shared_model
-            or self.MODEL_SMART
-        )
+        env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
+        self.model_fast = env_model or self.MODEL_FAST
+        self.model_smart = env_model or self.MODEL_SMART
         self._pending_tasks: dict[str, asyncio.Task] = {}
         self._task_counter = 0
 
