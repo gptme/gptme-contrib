@@ -245,47 +245,92 @@ class VoiceServer:
 
     def _recent_call_path(self, caller_id: str) -> Path:
         digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
+        return self._recent_state_dir() / f"{digest}.json"
+
+    def _legacy_recent_call_path(self, caller_id: str) -> Path:
+        digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
         return self.state_dir / f"{digest}.json"
 
-    def _save_recent_call(self, record: RecentCallRecord) -> Path:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        path = self._recent_call_path(record.caller_id)
-        payload = {
+    def _recent_state_dir(self) -> Path:
+        return self.state_dir / "recent"
+
+    def _call_archive_dir(self) -> Path:
+        return self.state_dir / "archive"
+
+    def _call_record_path(self, record: RecentCallRecord) -> Path:
+        identifier = (
+            record.metadata.get("call_sid")
+            or record.metadata.get("stream_sid")
+            or hashlib.sha256(
+                f"{record.caller_id}:{record.ended_at}:{record.source}".encode()
+            ).hexdigest()[:16]
+        )
+        safe_identifier = "".join(
+            ch for ch in identifier if ch.isalnum() or ch in {"-", "_"}
+        )
+        if not safe_identifier:
+            safe_identifier = "call"
+        ended_at = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(record.ended_at))
+        milliseconds = int((record.ended_at % 1) * 1000)
+        return (
+            self._call_archive_dir()
+            / f"{ended_at}-{milliseconds:03d}-{record.source}-{safe_identifier}.json"
+        )
+
+    def _record_payload(self, record: RecentCallRecord) -> dict[str, object]:
+        return {
             "caller_id": record.caller_id,
             "source": record.source,
             "ended_at": record.ended_at,
             "transcript": [asdict(turn) for turn in record.transcript],
             "metadata": record.metadata,
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+    def _write_call_record(self, path: Path, record: RecentCallRecord) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self._record_payload(record), indent=2, sort_keys=True)
+        )
         return path
 
-    def _load_recent_call(self, caller_id: str) -> RecentCallRecord | None:
-        path = self._recent_call_path(caller_id)
-        if not path.exists():
-            return None
+    def _save_recent_call(self, record: RecentCallRecord) -> Path:
+        return self._write_call_record(self._recent_call_path(record.caller_id), record)
 
-        try:
-            payload = json.loads(path.read_text())
-            transcript = [
-                TranscriptTurn(role=item["role"], text=item["text"])
-                for item in payload.get("transcript", [])
-                if item.get("role") and item.get("text")
-            ]
-            return RecentCallRecord(
-                caller_id=payload["caller_id"],
-                source=payload.get("source", "unknown"),
-                ended_at=float(payload["ended_at"]),
-                transcript=transcript,
-                metadata={
-                    str(key): str(value)
-                    for key, value in payload.get("metadata", {}).items()
-                    if value is not None
-                },
-            )
-        except Exception as exc:
-            logger.warning("Failed to load recent call state from %s: %s", path, exc)
-            return None
+    def _save_call_record(self, record: RecentCallRecord) -> Path:
+        return self._write_call_record(self._call_record_path(record), record)
+
+    def _load_recent_call(self, caller_id: str) -> RecentCallRecord | None:
+        for path in (
+            self._recent_call_path(caller_id),
+            self._legacy_recent_call_path(caller_id),
+        ):
+            if not path.exists():
+                continue
+
+            try:
+                payload = json.loads(path.read_text())
+                transcript = [
+                    TranscriptTurn(role=item["role"], text=item["text"])
+                    for item in payload.get("transcript", [])
+                    if item.get("role") and item.get("text")
+                ]
+                return RecentCallRecord(
+                    caller_id=payload["caller_id"],
+                    source=payload.get("source", "unknown"),
+                    ended_at=float(payload["ended_at"]),
+                    transcript=transcript,
+                    metadata={
+                        str(key): str(value)
+                        for key, value in payload.get("metadata", {}).items()
+                        if value is not None
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load recent call state from %s: %s", path, exc
+                )
+
+        return None
 
     def _consume_recent_call(self, caller_id: str | None) -> RecentCallRecord | None:
         if not caller_id:
@@ -304,12 +349,16 @@ class VoiceServer:
             pending_task.cancel()
             logger.info("Cancelled pending post-call follow-up for %s", caller_id)
 
-        # Delete the state file so a crash-resume can't re-inject the old transcript
-        path = self._recent_call_path(caller_id)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("Failed to delete recent call state %s: %s", path, exc)
+        # Delete the resume-state file(s) so a crash-resume can't re-inject the old
+        # transcript, but keep archived per-call records for post-call analysis.
+        for path in {
+            self._recent_call_path(caller_id),
+            self._legacy_recent_call_path(caller_id),
+        }:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Failed to delete recent call state %s: %s", path, exc)
 
         logger.info(
             "Resuming recent %s call for %s (%ds old)",
@@ -407,7 +456,8 @@ class VoiceServer:
             transcript=transcript,
             metadata={k: v for k, v in metadata.items() if v},
         )
-        record_path = self._save_recent_call(record)
+        self._save_recent_call(record)
+        record_path = self._save_call_record(record)
         await self._schedule_post_call(caller_id, record_path)
 
     def _get_local_caller_id(self, websocket) -> str:
