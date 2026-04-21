@@ -87,6 +87,23 @@ Skills extend gptme's lesson system by providing executable components alongside
 - `find_duplicate_code()` - Duplicate detection
 - `check_test_coverage()` - Test file analysis
 
+### 4. rewrite-soul
+
+**Purpose**: Tighten or create an agent's `SOUL.md` into a compact runtime persona (voice, taste, stance) without pulling in operational rules, tool lists, or dated initiatives.
+
+**Use cases**:
+- Creating `SOUL.md` for a new agent from broader identity docs
+- Tightening a drifted `SOUL.md` that has grown into a README or tool index
+- Splitting runtime voice out of `ABOUT.md` after it has grown too long
+
+**Features**:
+- 5-step workflow with boundary-file reading, content triage, compression, surgical rewrite, and verification
+- Reusable rewrite prompt that enforces persona-only content
+- Content/ownership table showing what belongs in `SOUL.md` vs `ABOUT.md` / `AGENTS.md` / `GOALS.md`
+- Anti-pattern checklist for the most common ways persona files drift
+
+**Keywords**: `SOUL.md`, `persona`, `agent voice`, `rewrite soul`, `agent identity`
+
 ## Using Skills
 
 ### Loading a Skill
