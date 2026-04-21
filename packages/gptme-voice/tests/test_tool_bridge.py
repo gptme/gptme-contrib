@@ -69,6 +69,56 @@ def test_execute_prefers_meaningful_stdout_error_over_tty_warning() -> None:
     asyncio.run(_exercise())
 
 
+def test_execute_does_not_report_tty_warning_when_stdout_is_empty() -> None:
+    """Regression: subagent that exits 1 with empty stdout and an
+    only-ignorable stderr (e.g. the prompt_toolkit non-TTY warning) used to
+    surface that warning as the user-visible error. The fallback should
+    return an actionable exit-code message instead."""
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=1,
+                stdout="",
+                stderr="Warning: Input is not a terminal (fd=0).\n",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            result = await bridge._execute("Investigate the voice system", mode="smart")
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Input is not a terminal" not in result.error
+        assert "Exit code 1" in result.error
+
+    asyncio.run(_exercise())
+
+
+def test_execute_passes_devnull_stdin_to_subprocess() -> None:
+    """Defensive: the subagent should never inherit the parent's stdin.
+    Explicit DEVNULL prevents prompt_toolkit's non-TTY warning and also
+    guarantees the subagent can't block waiting on parent input."""
+
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            await bridge._execute("Inspect recent voice changes", mode="smart")
+
+        assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+
+    asyncio.run(_exercise())
+
+
 def test_execute_uses_legacy_env_override_for_smart_model() -> None:
     async def _exercise() -> None:
         captured: dict[str, object] = {}
