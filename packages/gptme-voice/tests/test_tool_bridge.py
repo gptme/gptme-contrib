@@ -786,3 +786,85 @@ def test_subagent_cancel_all_cancels_every_pending_task() -> None:
             assert status["pending_count"] == 0
 
     asyncio.run(_exercise())
+
+
+# --- handoff_to_agent tests ---
+
+
+def test_handoff_not_supported_when_callback_is_none() -> None:
+    """Without on_handoff wired, handoff_to_agent returns not_supported."""
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+        result = await bridge.handle_function_call(
+            "handoff_to_agent", {"to_agent": "alice", "reason": "caller asked"}
+        )
+        assert result["status"] == "not_supported"
+        assert "GPTME_VOICE_HANDOFF_DIR" in result["message"]
+
+    asyncio.run(_exercise())
+
+
+def test_handoff_invokes_callback_with_correct_args() -> None:
+    """When on_handoff is wired, the callback receives to_agent, reason, context_summary."""
+
+    async def _exercise() -> None:
+        captured: dict = {}
+
+        async def _fake_handoff(
+            to_agent: str, reason: str, context_summary: str | None
+        ) -> dict:
+            captured["to_agent"] = to_agent
+            captured["reason"] = reason
+            captured["context_summary"] = context_summary
+            return {
+                "status": "handoff_initiated",
+                "handoff_id": "test-id",
+                "to_agent": to_agent,
+                "message": "ok",
+            }
+
+        bridge = GptmeToolBridge(
+            workspace="/fake/workspace",
+            on_handoff=_fake_handoff,
+        )
+        result = await bridge.handle_function_call(
+            "handoff_to_agent",
+            {
+                "to_agent": "alice",
+                "reason": "caller asked for Alice",
+                "context_summary": "discussing gptme issues",
+            },
+        )
+        assert result["status"] == "handoff_initiated"
+        assert result["to_agent"] == "alice"
+        assert captured["to_agent"] == "alice"
+        assert captured["reason"] == "caller asked for Alice"
+        assert captured["context_summary"] == "discussing gptme issues"
+
+    asyncio.run(_exercise())
+
+
+def test_handoff_passes_none_context_summary_when_absent() -> None:
+    """context_summary is optional; when absent the callback gets None."""
+
+    async def _exercise() -> None:
+        captured: dict = {}
+
+        async def _fake_handoff(
+            to_agent: str, reason: str, context_summary: str | None
+        ) -> dict:
+            captured["context_summary"] = context_summary
+            return {
+                "status": "handoff_initiated",
+                "to_agent": to_agent,
+                "message": "ok",
+            }
+
+        bridge = GptmeToolBridge(workspace="/fake/workspace", on_handoff=_fake_handoff)
+        await bridge.handle_function_call(
+            "handoff_to_agent", {"to_agent": "gordon", "reason": "financial question"}
+        )
+        assert captured["context_summary"] is None
+
+    asyncio.run(_exercise())

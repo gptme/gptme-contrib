@@ -84,12 +84,14 @@ class GptmeToolBridge:
         workspace: str | None = None,
         on_result: Callable[[str], Awaitable[None]] | None = None,
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
+        on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
         self.on_hangup = on_hangup
+        self.on_handoff = on_handoff
         legacy_env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         env_model_fast = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_FAST")
         env_model_smart = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_SMART")
@@ -579,5 +581,25 @@ class GptmeToolBridge:
                 "status": "hanging_up",
                 "message": "Ending the call shortly.",
             }
+
+        if name == "handoff_to_agent":
+            to_agent = arguments.get("to_agent", "")
+            reason = arguments.get("reason", "")
+            context_summary = arguments.get("context_summary") or None
+            logger.info(
+                "Handoff requested (to_agent=%s, reason=%s)",
+                to_agent,
+                reason or "<none>",
+            )
+            if self.on_handoff is None:
+                return {
+                    "status": "not_supported",
+                    "message": (
+                        "Handoff is not configured on this server. "
+                        "Set GPTME_VOICE_HANDOFF_DIR to enable cross-agent transfers."
+                    ),
+                }
+            result = await self.on_handoff(to_agent, reason, context_summary)
+            return result
 
         return {"error": f"Unknown function: {name}"}

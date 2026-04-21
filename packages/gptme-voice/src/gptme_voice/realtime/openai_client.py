@@ -10,7 +10,7 @@ import base64
 import contextlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -146,6 +146,15 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "happened yet and you are not the one who starts it.\n"
         "- It is fine to acknowledge that follow-up will happen automatically after "
         "hangup if the user asks. Just do not take credit for dispatching it.\n\n"
+        "HANDOFF TO ANOTHER AGENT:\n"
+        "- Use handoff_to_agent ONLY when the caller explicitly asks to speak with "
+        "Alice, Gordon, or Sven, or when the topic is clearly outside your expertise "
+        "and another specific agent is better suited.\n"
+        "- Always say a brief handoff notice before calling the tool "
+        "(e.g. 'I'll transfer you to Alice now — one moment.').\n"
+        "- The full transcript is forwarded automatically. You don't need to summarise "
+        "the conversation unless there's important context not obvious from the transcript.\n"
+        "- Do not use handoff as a way to avoid answering a question.\n\n"
     )
 
     if not parts:
@@ -182,6 +191,9 @@ class SessionConfig:
     vad_threshold: float = 0.7
     vad_silence_duration_ms: int = 500
     vad_prefix_padding_ms: int = 300
+    available_agents: list[str] = field(
+        default_factory=lambda: ["alice", "gordon", "sven"]
+    )
 
 
 class OpenAIRealtimeClient:
@@ -371,6 +383,48 @@ class OpenAIRealtimeClient:
                                 ),
                             },
                         },
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "handoff_to_agent",
+                    "description": (
+                        "Transfer the caller to another AI agent ("
+                        + ", ".join(
+                            a.capitalize() for a in self.session_config.available_agents
+                        )
+                        + "). "
+                        "Use this when the caller explicitly asks to speak with a different "
+                        "agent, or when the topic is clearly outside your expertise and "
+                        "another agent is better suited. Say a brief handoff notice first "
+                        "(e.g. 'I'll transfer you to Alice now'). The transfer includes the "
+                        "full conversation transcript so the receiving agent has context."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to_agent": {
+                                "type": "string",
+                                "enum": self.session_config.available_agents,
+                                "description": "The agent to transfer the caller to.",
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": (
+                                    "Short reason for the transfer "
+                                    "(e.g. 'caller asked to speak with Alice'). Required."
+                                ),
+                            },
+                            "context_summary": {
+                                "type": "string",
+                                "description": (
+                                    "Optional brief summary of the conversation for the "
+                                    "receiving agent (max 500 chars). Use this to highlight "
+                                    "key context not obvious from the transcript."
+                                ),
+                            },
+                        },
+                        "required": ["to_agent", "reason"],
                     },
                 },
             ],
