@@ -15,6 +15,7 @@ import os
 import shlex
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -257,8 +258,19 @@ class VoiceServer:
     def _recent_state_dir(self) -> Path:
         return self.state_dir / "recent"
 
+    def _handoff_state_dir(self) -> Path:
+        return self.state_dir / "handoffs"
+
     def _call_archive_dir(self) -> Path:
         return self.state_dir / "archive"
+
+    def _handoff_bootstrap_path(self, handoff_id: str) -> Path:
+        safe_handoff_id = "".join(
+            ch for ch in handoff_id if ch.isalnum() or ch in {"-", "_"}
+        )
+        if not safe_handoff_id:
+            safe_handoff_id = "handoff"
+        return self._handoff_state_dir() / f"{safe_handoff_id}.json"
 
     def _call_record_path(self, record: RecentCallRecord) -> Path:
         identifier = (
@@ -342,6 +354,99 @@ class VoiceServer:
                 )
 
         return None
+
+    def _parse_state_timestamp(self, value: object) -> float | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        normalized = value.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    def _consume_handoff_bootstrap(self, handoff_id: str | None) -> str | None:
+        if not handoff_id:
+            return None
+
+        path = self._handoff_bootstrap_path(handoff_id)
+        if not path.exists():
+            logger.warning("Handoff bootstrap %s not found at %s", handoff_id, path)
+            return None
+
+        try:
+            payload = json.loads(path.read_text())
+        except Exception as exc:
+            logger.warning("Failed to load handoff bootstrap %s: %s", path, exc)
+            return None
+
+        if payload.get("protocol_version") != 1:
+            logger.warning(
+                "Ignoring handoff bootstrap %s with unsupported protocol_version=%r",
+                handoff_id,
+                payload.get("protocol_version"),
+            )
+            return None
+        if payload.get("source") != "voice_handoff":
+            logger.warning(
+                "Ignoring handoff bootstrap %s with unexpected source=%r",
+                handoff_id,
+                payload.get("source"),
+            )
+            return None
+
+        accepted_at = self._parse_state_timestamp(payload.get("accepted_at"))
+        if accepted_at is not None:
+            age_seconds = time.time() - accepted_at
+            if age_seconds > self.resume_window_seconds:
+                logger.info(
+                    "Ignoring stale handoff bootstrap %s (%ds old)",
+                    handoff_id,
+                    int(age_seconds),
+                )
+                return None
+
+        resume_context = str(payload.get("resume_context") or "").strip()
+        if not resume_context:
+            logger.warning(
+                "Ignoring handoff bootstrap %s with empty resume_context", handoff_id
+            )
+            return None
+
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning(
+                "Failed to delete consumed handoff bootstrap %s: %s", path, exc
+            )
+
+        logger.info("Consumed handoff bootstrap %s from %s", handoff_id, path)
+        return resume_context
+
+    def _build_session_instructions(
+        self,
+        *,
+        caller_id: str | None,
+        from_number: str = "",
+        handoff_id: str | None = None,
+    ) -> str:
+        instructions = self._instructions
+        if from_number:
+            instructions = _build_caller_instructions(
+                instructions, from_number, self.workspace
+            )
+
+        handoff_resume_context = self._consume_handoff_bootstrap(handoff_id)
+        if handoff_resume_context:
+            return f"{handoff_resume_context}\n\n{instructions}"
+
+        return _build_resume_instructions(
+            instructions,
+            self._consume_recent_call(caller_id),
+            self.resume_window_seconds,
+        )
 
     def _consume_recent_call(self, caller_id: str | None) -> RecentCallRecord | None:
         if not caller_id:
@@ -486,6 +591,12 @@ class VoiceServer:
             return caller_id
         return "local"
 
+    def _get_local_handoff_id(self, websocket) -> str | None:
+        handoff_id = websocket.query_params.get("handoff_id")
+        if handoff_id:
+            return handoff_id
+        return None
+
     async def health_check(self, request: Request) -> PlainTextResponse:
         """Health check endpoint."""
         return PlainTextResponse("OK")
@@ -571,6 +682,7 @@ class VoiceServer:
         audio_converter = AudioConverter()
         transcript: list[TranscriptTurn] = []
         metadata: dict[str, str] = {}
+        handoff_id: str | None = None
 
         try:
             async for message in websocket.iter_text():
@@ -595,14 +707,12 @@ class VoiceServer:
                     # Inject caller context into instructions (phone + name lookup)
                     custom_params = start.get("customParameters", {})
                     from_number = custom_params.get("from_number", "")
+                    handoff_id = custom_params.get("handoff_id") or None
                     caller_id = from_number or call_sid or stream_sid
-                    instructions = _build_caller_instructions(
-                        self._instructions, from_number, self.workspace
-                    )
-                    instructions = _build_resume_instructions(
-                        instructions,
-                        self._consume_recent_call(caller_id),
-                        self.resume_window_seconds,
+                    instructions = self._build_session_instructions(
+                        caller_id=caller_id,
+                        from_number=from_number,
+                        handoff_id=handoff_id,
                     )
                     metadata = {
                         "from_number": from_number,
@@ -610,6 +720,8 @@ class VoiceServer:
                         "stream_sid": stream_sid,
                         "provider": self.provider,
                     }
+                    if handoff_id:
+                        metadata["handoff_id"] = handoff_id
 
                     if self.model:
                         session_cfg = SessionConfig(
@@ -731,15 +843,15 @@ class VoiceServer:
         await websocket.accept()
 
         caller_id = self._get_local_caller_id(websocket)
+        handoff_id = self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
         transcript: list[TranscriptTurn] = []
 
         try:
-            instructions = _build_resume_instructions(
-                self._instructions,
-                self._consume_recent_call(caller_id),
-                self.resume_window_seconds,
+            instructions = self._build_session_instructions(
+                caller_id=caller_id,
+                handoff_id=handoff_id,
             )
             if self.model:
                 session_cfg = SessionConfig(instructions=instructions, model=self.model)
@@ -806,7 +918,11 @@ class VoiceServer:
                 caller_id,
                 "local",
                 transcript,
-                {"caller_id": caller_id, "provider": self.provider},
+                {
+                    "caller_id": caller_id,
+                    "provider": self.provider,
+                    **({"handoff_id": handoff_id} if handoff_id else {}),
+                },
                 tool_bridge=tool_bridge,
             )
 
