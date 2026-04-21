@@ -115,6 +115,20 @@ def test_unknown_agent_rejected_at_build_time():
         )
 
 
+def test_naive_datetime_raises_value_error():
+    """Timezone-naive now must be rejected; otherwise validate() raises TypeError."""
+    naive_now = datetime(2026, 4, 21, 10, 0, 0)  # no tzinfo
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_handoff(
+            from_agent="bob",
+            to_agent="alice",
+            caller_id="test-caller",
+            reason="scheduling_capability",
+            secret=SECRET,
+            now=naive_now,
+        )
+
+
 def test_hmac_without_secret_is_not_verified():
     """Validation without a secret still requires the hmac field but doesn't verify it."""
     payload = _sample_payload()

@@ -202,6 +202,8 @@ def build_handoff(
         raise ValueError("from_agent and to_agent must differ")
 
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware (e.g. datetime.now(timezone.utc))")
     ts = now.isoformat().replace("+00:00", "Z")
     expires = (now + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
     ch = caller_hash(caller_id)
