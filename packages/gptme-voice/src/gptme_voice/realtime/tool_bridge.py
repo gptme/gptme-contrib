@@ -97,6 +97,7 @@ class GptmeToolBridge:
         self.model_smart = env_model_smart or legacy_env_model or self.MODEL_SMART
         self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
+        self._completed_timings: list[dict[str, object]] = []
 
     @staticmethod
     def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
@@ -212,6 +213,44 @@ class GptmeToolBridge:
             entry.model or "default",
             ", ".join(parts),
         )
+
+        self._completed_timings.append(
+            self._build_timing_record(task_id, entry, timings)
+        )
+
+    def _build_timing_record(
+        self,
+        task_id: str,
+        entry: PendingTask,
+        timings: dict[str, float],
+    ) -> dict[str, object]:
+        description = entry.description or ""
+        if len(description) > _MAX_TASK_PREVIEW:
+            description = description[: _MAX_TASK_PREVIEW - 1] + "…"
+        record: dict[str, object] = {
+            "task_id": task_id,
+            "mode": entry.mode,
+            "model": entry.model,
+            "task_preview": description,
+            "returncode": entry.returncode,
+            "timings": dict(timings),
+        }
+        return record
+
+    def get_timings(self) -> list[dict[str, object]]:
+        """Return a copy of timing records for completed subagent runs.
+
+        Each entry is deep-copied one level so callers can mutate without
+        affecting the bridge's internal state.
+        """
+        copies: list[dict[str, object]] = []
+        for record in self._completed_timings:
+            copy = dict(record)
+            inner = record.get("timings")
+            if isinstance(inner, dict):
+                copy["timings"] = dict(inner)
+            copies.append(copy)
+        return copies
 
     async def _run_subagent(self, task_id: str, task: str, mode: str = "smart") -> None:
         """Run a subagent in the background and inject result when done."""
