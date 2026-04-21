@@ -48,6 +48,7 @@ from .classification import (
     judge_and_classify,
     normalize_category,
 )
+from .spans import SpanAggregates, ToolSpan, extract_spans_from_cc_jsonl
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 from .transcript import (
@@ -99,4 +100,7 @@ __all__ = [
     "SessionTranscript",
     "TRANSCRIPT_SCHEMA_VERSION",
     "read_transcript",
+    "SpanAggregates",
+    "ToolSpan",
+    "extract_spans_from_cc_jsonl",
 ]
