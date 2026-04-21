@@ -12,6 +12,7 @@ match:
   - "try/except"
   - "split the try block"
   - "large try block"
+  session_categories: [code]
 status: active
 ---
 
