@@ -1,5 +1,10 @@
 """Tests for SessionRecord dataclass."""
 
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
 import pytest
 
 from gptme_sessions.record import SessionRecord, normalize_model
@@ -310,3 +315,179 @@ def test_normalize_model_aliases(raw: str, expected: str) -> None:
 )
 def test_normalize_model_regex_fallback(raw: str | None, expected: str | None) -> None:
     assert normalize_model(raw) == expected
+
+
+# -- span_aggregates field + populate_span_aggregates helper ------------------
+
+
+def _write_cc_trajectory(tmp_path: Path) -> Path:
+    """Synthetic CC JSONL: one Bash dispatch + successful result."""
+    records = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-04-21T10:00:00+00:00",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tid1",
+                        "name": "Bash",
+                        "input": {"command": "echo hi"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-04-21T10:00:01+00:00",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tid1",
+                        "content": "hi",
+                        "is_error": False,
+                    }
+                ]
+            },
+        },
+    ]
+    p = tmp_path / "session.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return p
+
+
+def _write_gptme_trajectory(tmp_path: Path, session_name: str = "sess-aa") -> Path:
+    """Synthetic gptme conversation.jsonl: one shell dispatch + success result."""
+    sess_dir = tmp_path / session_name
+    sess_dir.mkdir()
+    records = [
+        {
+            "role": "assistant",
+            "timestamp": "2026-04-21T10:00:00",
+            "content": '\n@shell(call-abc-0): {"command": "echo hi"}',
+        },
+        {
+            "role": "system",
+            "timestamp": "2026-04-21T10:00:01",
+            "content": "Ran allowlisted command: `echo hi`\n\n```stdout\nhi\n```",
+            "pinned": False,
+        },
+    ]
+    p = sess_dir / "conversation.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return p
+
+
+def test_span_aggregates_default_is_none():
+    """span_aggregates defaults to None."""
+    r = SessionRecord()
+    assert r.span_aggregates is None
+
+
+def test_span_aggregates_roundtrip():
+    """span_aggregates survives to_dict/from_dict and JSON round-trip."""
+    agg = {
+        "total_spans": 3,
+        "error_spans": 1,
+        "error_rate": 1 / 3,
+        "dominant_tool": "Bash",
+        "avg_duration_ms": 250.0,
+        "max_duration_ms": 500,
+        "tool_counts": {"Bash": 2, "Read": 1},
+        "retry_depth": 1,
+    }
+    r = SessionRecord(session_id="span-rt", span_aggregates=agg)
+    d = r.to_dict()
+    assert d["span_aggregates"] == agg
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.span_aggregates == agg
+
+    parsed = json.loads(r.to_json())
+    assert parsed["span_aggregates"] == agg
+    r3 = SessionRecord.from_dict(parsed)
+    assert r3.span_aggregates == agg
+
+
+def test_span_aggregates_none_roundtrip():
+    """span_aggregates=None round-trips correctly."""
+    r = SessionRecord()
+    d = r.to_dict()
+    assert d["span_aggregates"] is None
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.span_aggregates is None
+
+
+def test_populate_span_aggregates_no_trajectory_path():
+    """Returns False and leaves span_aggregates unchanged when trajectory_path is None."""
+    r = SessionRecord(harness="claude-code")
+    assert r.populate_span_aggregates() is False
+    assert r.span_aggregates is None
+
+
+def test_populate_span_aggregates_missing_file(tmp_path: Path):
+    """Returns False when trajectory file does not exist."""
+    r = SessionRecord(
+        harness="claude-code",
+        trajectory_path=str(tmp_path / "does-not-exist.jsonl"),
+    )
+    assert r.populate_span_aggregates() is False
+    assert r.span_aggregates is None
+
+
+def test_populate_span_aggregates_unknown_harness(tmp_path: Path):
+    """Returns False for harnesses without an extractor."""
+    p = _write_cc_trajectory(tmp_path)
+    r = SessionRecord(harness="copilot-cli", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is False
+    assert r.span_aggregates is None
+
+
+def test_populate_span_aggregates_cc_trajectory(tmp_path: Path):
+    """Populates aggregates from a claude-code trajectory."""
+    p = _write_cc_trajectory(tmp_path)
+    r = SessionRecord(harness="claude-code", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    assert r.span_aggregates is not None
+    assert r.span_aggregates["total_spans"] == 1
+    assert r.span_aggregates["error_spans"] == 0
+    assert r.span_aggregates["error_rate"] == 0.0
+    assert r.span_aggregates["dominant_tool"] == "Bash"
+    assert r.span_aggregates["max_duration_ms"] == 1000
+    assert r.span_aggregates["tool_counts"] == {"Bash": 1}
+    assert r.span_aggregates["retry_depth"] == 0
+
+
+def test_populate_span_aggregates_gptme_trajectory(tmp_path: Path):
+    """Populates aggregates from a gptme conversation.jsonl."""
+    p = _write_gptme_trajectory(tmp_path, session_name="sess-aa")
+    r = SessionRecord(harness="gptme", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    assert r.span_aggregates is not None
+    assert r.span_aggregates["total_spans"] == 1
+    assert r.span_aggregates["dominant_tool"] == "shell"
+    assert r.span_aggregates["error_spans"] == 0
+    assert r.span_aggregates["tool_counts"] == {"shell": 1}
+
+
+def test_populate_span_aggregates_harness_hint_overrides(tmp_path: Path):
+    """harness_hint overrides self.harness for extractor selection."""
+    p = _write_cc_trajectory(tmp_path)
+    # harness is intentionally wrong; hint should still pick CC extractor.
+    r = SessionRecord(harness="gptme", trajectory_path=str(p))
+    assert r.populate_span_aggregates(harness_hint="claude-code") is True
+    assert r.span_aggregates is not None
+    assert r.span_aggregates["total_spans"] == 1
+    assert r.span_aggregates["dominant_tool"] == "Bash"
+
+
+def test_populate_span_aggregates_idempotent_rerun(tmp_path: Path):
+    """Re-running populate replaces previous aggregates (idempotent contract)."""
+    p = _write_cc_trajectory(tmp_path)
+    r = SessionRecord(harness="claude-code", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    first = dict(r.span_aggregates or {})
+    assert r.populate_span_aggregates() is True
+    assert r.span_aggregates == first

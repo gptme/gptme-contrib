@@ -208,6 +208,13 @@ class SessionRecord:
     llm_judge_reason: str | None = None  # 1-sentence explanation
     llm_judge_model: str | None = None  # model used for judging (e.g. claude-haiku-4-5)
 
+    # Per-tool-call span aggregates (Phase 2 of span-level tracing, idea #158).
+    # Dict shape mirrors SpanAggregates fields (total_spans, error_spans,
+    # error_rate, dominant_tool, avg_duration_ms, max_duration_ms,
+    # tool_counts, retry_depth) so downstream consumers can read it without
+    # importing gptme_sessions.spans. ``None`` means not yet populated.
+    span_aggregates: dict[str, Any] | None = None
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``failure_reason``, ``recommended_confidence``, ``notes``).
@@ -294,6 +301,55 @@ class SessionRecord:
         if result is not None:
             self.trajectory_grade = result
         return result
+
+    def populate_span_aggregates(self, harness_hint: str | None = None) -> bool:
+        """Extract tool spans from ``trajectory_path`` and store aggregates.
+
+        Chooses the extractor based on ``harness_hint`` (or ``self.harness``
+        when not given): ``"claude-code"`` → CC JSONL, ``"gptme"`` → gptme
+        JSONL. Stores ``SpanAggregates.from_spans(...)`` serialized as a dict
+        on ``self.span_aggregates`` (including the computed ``error_rate``).
+
+        Returns ``True`` when aggregates were populated, ``False`` when the
+        trajectory path is missing, unreadable, or the harness is unknown.
+        Idempotent: safe to re-run when new trajectory data arrives.
+        """
+        from pathlib import Path
+
+        # Lazy import avoids a top-level cycle and keeps record.py independent
+        # of the spans module for users who never call this helper.
+        from gptme_sessions.spans import (
+            SpanAggregates,
+            extract_spans_from_cc_jsonl,
+            extract_spans_from_gptme_jsonl,
+        )
+
+        if not self.trajectory_path:
+            return False
+        traj = Path(self.trajectory_path)
+        if not traj.exists():
+            return False
+
+        harness = harness_hint or self.harness
+        if harness == "claude-code":
+            spans = extract_spans_from_cc_jsonl(traj, session_id=self.session_id)
+        elif harness == "gptme":
+            spans = extract_spans_from_gptme_jsonl(traj, session_id=self.session_id)
+        else:
+            return False
+
+        agg = SpanAggregates.from_spans(spans)
+        self.span_aggregates = {
+            "total_spans": agg.total_spans,
+            "error_spans": agg.error_spans,
+            "error_rate": agg.error_rate,
+            "dominant_tool": agg.dominant_tool,
+            "avg_duration_ms": agg.avg_duration_ms,
+            "max_duration_ms": agg.max_duration_ms,
+            "tool_counts": agg.tool_counts,
+            "retry_depth": agg.retry_depth,
+        }
+        return True
 
     @property
     def model_normalized(self) -> str | None:
