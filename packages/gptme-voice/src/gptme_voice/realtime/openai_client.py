@@ -183,6 +183,7 @@ class SessionConfig:
     model: str = "gpt-4o-realtime-preview-2024-12-17"
     voice: str = "echo"
     instructions: str = ""
+    initial_response_instructions: str = ""
     input_format: str = "pcm16"
     output_format: str = "pcm16"
     input_sample_rate: int = 24000
@@ -245,6 +246,7 @@ class OpenAIRealtimeClient:
         self._pending_audio: list[bytes] = []
         self._pending_audio_dropped = 0
         self._event_notice: asyncio.Event | None = None
+        self._initial_response_sent = False
 
     def _get_ws_url(self) -> str:
         """WebSocket URL for this provider (override in subclasses)."""
@@ -269,6 +271,7 @@ class OpenAIRealtimeClient:
         self._pending_audio = []
         self._pending_audio_dropped = 0
         self._event_notice = asyncio.Event()
+        self._initial_response_sent = False
 
         url = self._get_ws_url()
         headers = self._get_ws_headers()
@@ -578,6 +581,24 @@ class OpenAIRealtimeClient:
         logger.info("%s received — marking session ready", event_type)
         self._session_ready.set()
         await self._flush_pending_audio()
+        await self._send_initial_response_if_needed()
+
+    async def _send_initial_response_if_needed(self) -> None:
+        """Trigger a one-shot startup response once the provider session is ready."""
+        instructions = self.session_config.initial_response_instructions.strip()
+        if self._initial_response_sent or not instructions:
+            return
+
+        self._initial_response_sent = True
+        logger.info("Sending initial realtime response bootstrap")
+        await self._send_event(
+            "response.create",
+            {
+                "response": {
+                    "instructions": instructions,
+                }
+            },
+        )
 
     async def _flush_pending_audio(self) -> None:
         """Send any audio that was buffered before the session was ready."""

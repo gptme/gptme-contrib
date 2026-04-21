@@ -45,7 +45,10 @@ def test_xai_client_treats_session_updated_as_ready_signal() -> None:
             )
             client = XAIRealtimeClient(
                 api_key="test-key",
-                session_config=SessionConfig(instructions="You are Bob."),
+                session_config=SessionConfig(
+                    instructions="You are Bob.",
+                    initial_response_instructions="Say hello first.",
+                ),
             )
             await client.connect()
 
@@ -63,6 +66,17 @@ def test_xai_client_treats_session_updated_as_ready_signal() -> None:
             ]
             assert len(appends) == 1
             assert base64.b64decode(appends[0]["audio"]) == b"\x01\x02\x03"
+            response_creates = [
+                event
+                for event in fake_ws.sent
+                if event.get("type") == "response.create"
+            ]
+            assert response_creates == [
+                {
+                    "type": "response.create",
+                    "response": {"instructions": "Say hello first."},
+                }
+            ]
 
             await client.disconnect()
             assert fake_ws.closed is True

@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RESUME_WINDOW_SECONDS = 300
 _DEFAULT_STATE_DIR = "/tmp/gptme-voice-call-state"
 _MAX_RESUME_TRANSCRIPT_CHARS = 2500
+_INITIAL_TWILIO_GREETING_INSTRUCTIONS = (
+    "A fresh inbound phone call has just connected. "
+    "Greet the caller briefly in one sentence, use their name if you know it, "
+    "then stop and wait for them to speak."
+)
 
 # Delay before actually closing the WebSocket after the model requests hangup,
 # so the goodbye utterance has time to reach the caller.
@@ -70,6 +75,12 @@ class RecentCallRecord:
     transcript: list[TranscriptTurn]
     metadata: dict[str, str]
     subagent_timings: list[dict[str, object]] = field(default_factory=list)
+
+
+@dataclass
+class SessionBootstrap:
+    instructions: str
+    should_greet_first: bool = False
 
 
 def _build_caller_instructions(
@@ -460,13 +471,13 @@ class VoiceServer:
         logger.info("Consumed handoff bootstrap %s from %s", handoff_id, path)
         return resume_context
 
-    def _build_session_instructions(
+    def _build_session_bootstrap(
         self,
         *,
         caller_id: str | None,
         from_number: str = "",
         handoff_id: str | None = None,
-    ) -> str:
+    ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
             instructions = _build_caller_instructions(
@@ -475,13 +486,39 @@ class VoiceServer:
 
         handoff_resume_context = self._consume_handoff_bootstrap(handoff_id)
         if handoff_resume_context:
-            return f"{handoff_resume_context}\n\n{instructions}"
+            return SessionBootstrap(
+                instructions=f"{handoff_resume_context}\n\n{instructions}",
+                should_greet_first=False,
+            )
 
-        return _build_resume_instructions(
-            instructions,
-            self._consume_recent_call(caller_id),
-            self.resume_window_seconds,
+        recent_call = self._consume_recent_call(caller_id)
+        if recent_call:
+            return SessionBootstrap(
+                instructions=_build_resume_instructions(
+                    instructions,
+                    recent_call,
+                    self.resume_window_seconds,
+                ),
+                should_greet_first=False,
+            )
+
+        return SessionBootstrap(
+            instructions=instructions,
+            should_greet_first=True,
         )
+
+    def _build_session_instructions(
+        self,
+        *,
+        caller_id: str | None,
+        from_number: str = "",
+        handoff_id: str | None = None,
+    ) -> str:
+        return self._build_session_bootstrap(
+            caller_id=caller_id,
+            from_number=from_number,
+            handoff_id=handoff_id,
+        ).instructions
 
     def _consume_recent_call(self, caller_id: str | None) -> RecentCallRecord | None:
         if not caller_id:
@@ -808,10 +845,16 @@ class VoiceServer:
                     from_number = custom_params.get("from_number", "")
                     handoff_id = custom_params.get("handoff_id") or None
                     caller_id = from_number or call_sid or stream_sid
-                    instructions = self._build_session_instructions(
+                    bootstrap = self._build_session_bootstrap(
                         caller_id=caller_id,
                         from_number=from_number,
                         handoff_id=handoff_id,
+                    )
+                    instructions = bootstrap.instructions
+                    initial_response_instructions = (
+                        _INITIAL_TWILIO_GREETING_INSTRUCTIONS
+                        if bootstrap.should_greet_first
+                        else ""
                     )
                     metadata = {
                         "from_number": from_number,
@@ -825,12 +868,14 @@ class VoiceServer:
                     if self.model:
                         session_cfg = SessionConfig(
                             instructions=instructions,
+                            initial_response_instructions=initial_response_instructions,
                             model=self.model,
                             available_agents=self._available_agents,
                         )
                     else:
                         session_cfg = SessionConfig(
                             instructions=instructions,
+                            initial_response_instructions=initial_response_instructions,
                             available_agents=self._available_agents,
                         )
                     realtime_client = self._make_client(

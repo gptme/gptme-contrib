@@ -201,6 +201,45 @@ def test_send_audio_buffer_is_bounded() -> None:
     asyncio.run(_exercise())
 
 
+def test_initial_response_is_sent_once_after_session_ready() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(
+                    initial_response_instructions="Greet the caller briefly.",
+                ),
+            )
+            await client.connect()
+
+            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
+
+            response_creates = [
+                event
+                for event in fake_ws.sent
+                if event.get("type") == "response.create"
+            ]
+            assert response_creates == [
+                {
+                    "type": "response.create",
+                    "response": {"instructions": "Greet the caller briefly."},
+                }
+            ]
+
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
 def test_load_project_instructions_guards_present_without_personality_files(
     tmp_path: Path,
 ) -> None:
