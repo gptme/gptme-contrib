@@ -14,6 +14,7 @@ match:
   - "DROP TABLE"
   - "production change"
   - "risky operation"
+  session_categories: [code, infrastructure, cleanup]
 target_grade: harm
 status: active
 ---

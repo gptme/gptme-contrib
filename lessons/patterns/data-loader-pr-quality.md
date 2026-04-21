@@ -9,6 +9,7 @@ match:
   - loader test
   - timezone assertion
   - unit validation
+  session_categories: [code]
 status: active
 ---
 

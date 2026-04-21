@@ -6,6 +6,7 @@ match:
     - "LINEAR_API_KEY not set"
     - "Linear GraphQL mutation"
     - "create Linear ticket"
+  session_categories: [triage, infrastructure]
 category: tools
 status: active
 ---

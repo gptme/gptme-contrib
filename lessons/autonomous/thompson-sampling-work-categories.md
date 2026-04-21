@@ -12,6 +12,7 @@ match:
   - optimizing session mode bandit
   - category selection explore exploit
   - work category bandit setup
+  session_categories: [monitoring, self-review]
 ---
 
 # Thompson Sampling for Work Category Optimization
