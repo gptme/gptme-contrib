@@ -163,6 +163,79 @@ def test_recent_call_is_ignored_outside_resume_window() -> None:
         assert resumed is None
 
 
+def test_consume_handoff_bootstrap_returns_resume_context_and_deletes_file() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        server._instructions = "You are Alice."
+        bootstrap_path = server._handoff_bootstrap_path("handoff-123")
+        bootstrap_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_path.write_text(
+            json.dumps(
+                {
+                    "protocol_version": 1,
+                    "source": "voice_handoff",
+                    "handoff_id": "handoff-123",
+                    "accepted_at": "1970-01-01T00:18:20Z",
+                    "resume_context": "bob transferred this caller to alice.",
+                }
+            )
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_200.0)
+            instructions = server._build_session_instructions(
+                caller_id="+46700000007",
+                handoff_id="handoff-123",
+            )
+
+        assert "bob transferred this caller to alice." in instructions
+        assert "You are Alice." in instructions
+        assert not bootstrap_path.exists()
+
+
+def test_stale_handoff_bootstrap_falls_back_to_recent_call_resume() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        server._instructions = "You are Alice."
+        record = RecentCallRecord(
+            caller_id="+46700000008",
+            source="twilio",
+            ended_at=1_300.0,
+            transcript=[TranscriptTurn(role="user", text="Resume the old call")],
+            metadata={},
+        )
+        server._save_recent_call(record)
+
+        bootstrap_path = server._handoff_bootstrap_path("handoff-stale")
+        bootstrap_path.parent.mkdir(parents=True, exist_ok=True)
+        bootstrap_path.write_text(
+            json.dumps(
+                {
+                    "protocol_version": 1,
+                    "source": "voice_handoff",
+                    "handoff_id": "handoff-stale",
+                    "accepted_at": "1970-01-01T00:16:40Z",
+                    "resume_context": "stale handoff context",
+                }
+            )
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_600.0)
+            instructions = server._build_session_instructions(
+                caller_id=record.caller_id,
+                handoff_id="handoff-stale",
+            )
+
+        assert "Resume the old call" in instructions
+        assert "stale handoff context" not in instructions
+        assert bootstrap_path.exists()
+
+
 def test_schedule_post_call_runs_configured_command_hook() -> None:
     async def _exercise() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
