@@ -38,12 +38,25 @@ _GPTME_NOISE_PREFIXES = (
     "Shellcheck found potential issues",
 )
 
+# Matches fractional seconds (e.g. ".1", ".123") before a timezone offset or end-of-string.
+# Python 3.10 fromisoformat() only accepts exactly 3 or 6 fractional digits; 3.11+ accepts any.
+_FRAC_RE = re.compile(r"\.(\d+)(?=[+\-Z]|$)")
+
+
+def _normalize_ts(ts_str: str) -> str:
+    """Pad fractional seconds to 6 digits for Python 3.10 fromisoformat() compat."""
+
+    def _pad(m: re.Match) -> str:  # type: ignore[type-arg]
+        return "." + m.group(1).ljust(6, "0")[:6]
+
+    return _FRAC_RE.sub(_pad, ts_str.replace("Z", "+00:00"))
+
 
 def _parse_ts(ts_str: str | None) -> datetime | None:
     if not ts_str:
         return None
     try:
-        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return datetime.fromisoformat(_normalize_ts(ts_str))
     except ValueError:
         return None
 
