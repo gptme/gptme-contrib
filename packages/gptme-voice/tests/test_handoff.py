@@ -22,6 +22,8 @@ from gptme_voice.handoff import (
 )
 
 SECRET = b"bob-alice-handoff-test-secret-v1!"
+SAMPLE_NOW = datetime(2026, 4, 21, 10, 0, 0, tzinfo=timezone.utc)
+SAMPLE_VALIDATION_NOW = SAMPLE_NOW + timedelta(seconds=30)
 
 
 # ---------- compute_hmac / validate ----------
@@ -33,7 +35,7 @@ def _sample_payload(
     secret: bytes = SECRET,
     **overrides,
 ) -> dict:
-    now = now or datetime(2026, 4, 21, 10, 0, 0, tzinfo=timezone.utc)
+    now = now or SAMPLE_NOW
     return build_handoff(
         from_agent="bob",
         to_agent="alice",
@@ -63,7 +65,7 @@ def test_unsupported_protocol_version_rejected():
     payload["protocol_version"] = 2
     # Re-sign so the failure is version-based, not HMAC-based.
     payload["hmac"] = compute_hmac(payload, SECRET)
-    result = validate(payload, secret=SECRET)
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
     assert not result.ok
     assert "protocol_version" in result.reason
 
@@ -71,7 +73,7 @@ def test_unsupported_protocol_version_rejected():
 def test_missing_required_field_rejected():
     payload = _sample_payload()
     del payload["transcript"]
-    result = validate(payload, secret=SECRET)
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
     assert not result.ok
     assert "transcript" in result.reason
 
@@ -88,7 +90,7 @@ def test_expired_payload_rejected():
 def test_tampered_transcript_rejected():
     payload = _sample_payload()
     payload["transcript"].append({"role": "user", "text": "injected"})
-    result = validate(payload, secret=SECRET)
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
     assert not result.ok
     assert "HMAC" in result.reason
 
@@ -133,7 +135,7 @@ def test_hmac_without_secret_is_not_verified():
     """Validation without a secret still requires the hmac field but doesn't verify it."""
     payload = _sample_payload()
     payload["hmac"] = "clearly-not-the-real-signature"
-    result = validate(payload, secret=None)
+    result = validate(payload, secret=None, now=SAMPLE_VALIDATION_NOW)
     assert result.ok, result.reason
 
 
@@ -157,7 +159,7 @@ def test_extra_fields_carried_and_signed():
     # Mutating the extra field should break the HMAC.
     tampered = dict(payload)
     tampered["context_summary"] = "mutated"
-    result = validate(tampered, secret=SECRET)
+    result = validate(tampered, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
     assert not result.ok
     assert "HMAC" in result.reason
 
@@ -208,7 +210,7 @@ def test_handoff_writer_initiate_writes_signed_payload(tmp_path: Path):
     assert published.path.is_file()
     on_disk = json.loads(published.path.read_text())
     assert on_disk == published.payload
-    result = validate(on_disk, secret=SECRET)
+    result = validate(on_disk, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
     assert result.ok, result.reason
     assert on_disk["from_agent"] == "bob"
     assert on_disk["to_agent"] == "alice"
