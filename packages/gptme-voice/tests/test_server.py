@@ -100,6 +100,20 @@ def test_build_resume_instructions_includes_prior_transcript() -> None:
     assert "You are Bob." in result
 
 
+def test_build_session_bootstrap_greets_fresh_calls() -> None:
+    server = VoiceServer()
+    server._instructions = "You are Bob."
+
+    bootstrap = server._build_session_bootstrap(
+        caller_id="+46700000011",
+        from_number="+46700000011",
+    )
+
+    assert bootstrap.should_greet_first is True
+    assert "+46700000011" in bootstrap.instructions
+    assert "You are Bob." in bootstrap.instructions
+
+
 def test_truncate_resume_transcript_keeps_line_boundaries() -> None:
     # Lines must exceed max_chars so truncation is actually triggered
     transcript_text = "\n".join(
@@ -140,6 +154,30 @@ def test_recent_call_is_consumed_within_resume_window() -> None:
         assert resumed is not None
         assert resumed.caller_id == "+46700000001"
         assert resumed.transcript[0].text == "Hello again"
+
+
+def test_build_session_bootstrap_skips_greeting_for_recent_resume() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        server._instructions = "You are Bob."
+        record = RecentCallRecord(
+            caller_id="+46700000012",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="Resume this call")],
+            metadata={"from_number": "+46700000012"},
+        )
+        server._save_recent_call(record)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+            bootstrap = server._build_session_bootstrap(caller_id=record.caller_id)
+
+        assert bootstrap.should_greet_first is False
+        assert "reconnected after a brief disconnect" in bootstrap.instructions
+        assert "Resume this call" in bootstrap.instructions
 
 
 def test_recent_call_is_ignored_outside_resume_window() -> None:
