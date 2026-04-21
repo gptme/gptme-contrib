@@ -8,6 +8,8 @@ match:
     - session data
     - cleanupPeriodDays
     - log cleanup
+target_grade: harm
+status: active
 ---
 
 # Trajectory Persistence
@@ -94,3 +96,14 @@ April 2026: A cleanup script deleted 3,011 trajectory files over 5 days despite 
 All four layers failed in the April 2026 incident: the script deleted despite layer 1, bypassed layer 2, layer 3 didn't exist yet, and layer 4 predated the data. Defense-in-depth means having all layers.
 
 Principle: **Disk is cheap; lost history is irreplaceable.**
+
+## Outcome
+Following this rule prevents:
+- **Irreversible data loss**: Trajectory files cannot be reconstructed once deleted
+- **Lost learning signal**: Session records are the primary input for LOO analysis and bandit feedback
+- **Broken debugging**: Post-hoc analysis becomes impossible without the original trace
+- **Trust violations**: User safety settings (`cleanupPeriodDays: 1000000`) must never be overridden by scripts
+
+## Related
+- [Pre-Mortem for Risky Actions](../autonomous/pre-mortem-for-risky-actions.md) — run before any deletion logic
+- [Autonomous Operation Safety](../autonomous/autonomous-operation-safety.md) — boundaries for autonomous actions
