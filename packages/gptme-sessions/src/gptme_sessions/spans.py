@@ -247,9 +247,12 @@ def extract_spans_from_cc_jsonl(
 
                 dur_ms = -1
                 if dispatch_ts is not None and ts is not None:
-                    delta = (ts - dispatch_ts).total_seconds()
-                    if delta >= 0:
-                        dur_ms = int(delta * 1000)
+                    try:
+                        delta = (ts - dispatch_ts).total_seconds()
+                        if delta >= 0:
+                            dur_ms = int(delta * 1000)
+                    except TypeError:
+                        pass  # mixed tz-aware/naive timestamps – leave dur_ms as sentinel
 
                 exit_code = _exit_code(result_content) if tool_name == "Bash" else None
 

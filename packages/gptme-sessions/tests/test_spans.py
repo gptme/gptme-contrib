@@ -285,6 +285,19 @@ def test_aggregates_unknown_duration_excluded() -> None:
     assert agg.max_duration_ms == 300
 
 
+def test_mixed_timezone_timestamps_no_crash(tmp_path: Path) -> None:
+    """Mixed tz-aware/naive timestamps should produce dur_ms=-1, not TypeError."""
+    records = [
+        _cc_assistant("Bash", "tid1", "cmd", "2026-04-21T10:00:00+00:00"),  # tz-aware
+        _cc_result("tid1", "done", "2026-04-21T10:00:01"),  # tz-naive
+    ]
+    p = _write_jsonl(tmp_path, records)
+    spans = extract_spans_from_cc_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].duration_ms == -1  # sentinel; subtraction failed gracefully
+
+
 def test_output_size_consistent_with_text_extraction(tmp_path: Path) -> None:
     """output_size should be non-zero when the result is a dict without 'text' key."""
     records = [
