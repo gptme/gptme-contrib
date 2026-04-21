@@ -152,10 +152,10 @@ def test_extra_fields_carried_and_signed():
 
 
 def test_caller_hash_is_stable_and_hex():
-    digest = caller_hash("+46765784797")
+    digest = caller_hash("+15550001234")
     assert len(digest) == 16
     assert all(c in "0123456789abcdef" for c in digest)
-    assert caller_hash("+46765784797") == digest  # deterministic
+    assert caller_hash("+15550001234") == digest  # deterministic
 
 
 # ---------- atomic_write / atomic_move ----------
@@ -185,7 +185,7 @@ def test_handoff_writer_initiate_writes_signed_payload(tmp_path: Path):
     writer = HandoffWriter(tmp_path, from_agent="bob", secret=SECRET)
     published = writer.initiate(
         to_agent="alice",
-        caller_id="+46765784797",
+        caller_id="+15550001234",
         reason="scheduling_capability",
         transcript=[
             {"role": "user", "text": "please get alice", "ts": "2026-04-21T10:00:00Z"}
@@ -208,13 +208,13 @@ def test_handoff_writer_sequences_multiple_initiations_for_same_caller(
     now = datetime(2026, 4, 21, 10, 0, 0, tzinfo=timezone.utc)
     first = writer.initiate(
         to_agent="alice",
-        caller_id="+46765784797",
+        caller_id="+15550001234",
         reason="r1",
         now=now,
     )
     second = writer.initiate(
         to_agent="alice",
-        caller_id="+46765784797",
+        caller_id="+15550001234",
         reason="r2",
         # Same instant — forces filenames to disambiguate via sequence, not timestamp.
         now=now,

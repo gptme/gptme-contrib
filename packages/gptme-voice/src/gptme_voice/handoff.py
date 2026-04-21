@@ -204,13 +204,13 @@ def build_handoff(
     now = now or datetime.now(timezone.utc)
     ts = now.isoformat().replace("+00:00", "Z")
     expires = (now + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
-    handoff_id = f"{int(now.timestamp())}-{from_agent}-{to_agent}"
+    ch = caller_hash(caller_id)
+    handoff_id = f"{int(now.timestamp())}-{from_agent}-{to_agent}-{ch}"
 
     payload: dict[str, Any] = {
         "protocol_version": PROTOCOL_VERSION,
         "handoff_id": handoff_id,
-        "caller_hash": caller_hash(caller_id),
-        "caller_id_ref": f"plaintext:{caller_id}",
+        "caller_hash": ch,
         "from_agent": from_agent,
         "to_agent": to_agent,
         "reason": reason,
@@ -265,13 +265,17 @@ def _next_sequence(handoff_dir: Path, caller_digest: str) -> int:
     prefix = f"{caller_digest}-"
     for entry in handoff_dir.iterdir() if handoff_dir.exists() else ():
         name = entry.name.lstrip(".")
-        if not name.startswith(prefix) or not name.endswith(".json"):
+        if not name.startswith(prefix):
+            continue
+        # Accept both committed files ({hash}-{seq}.json) and in-flight atomics
+        # ({hash}-{seq}.json.tmp — written by atomic_write before os.replace).
+        if name.endswith(".json"):
+            seq_str = name[len(prefix) : -len(".json")]
+        elif name.endswith(".json.tmp"):
+            seq_str = name[len(prefix) : -len(".json.tmp")]
+        else:
             continue
         try:
-            seq_str = name[len(prefix) : -len(".json")]
-            # Strip the ".tmp" suffix if this was an in-flight write.
-            if seq_str.endswith(".tmp"):
-                seq_str = seq_str[: -len(".tmp")]
             seq = int(seq_str)
         except ValueError:
             continue
