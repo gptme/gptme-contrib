@@ -433,6 +433,48 @@ def judge_session(
     return _judge_via_gptme(prompt, model=model)
 
 
+def judge_session_with_fallback(
+    journal_text: str,
+    category: str | None = None,
+    *,
+    goals: str = DEFAULT_GOALS,
+    default_model: str = DEFAULT_JUDGE_MODEL,
+    fallback_models: tuple[str, ...] = (),
+    api_key: str | None = None,
+) -> dict | None:
+    """Score a session, trying fallback models if the primary is unavailable.
+
+    Args:
+        journal_text: The session journal/summary text to evaluate.
+        category: Work category (e.g. "code", "triage", "content").
+        goals: Agent goals description (ordered by priority).
+        default_model: Primary judge model. Tried first.
+        fallback_models: Additional models to try in order when the primary fails.
+        api_key: Anthropic API key (Anthropic-direct path only).
+
+    Returns:
+        Dict with keys ``score``, ``reason``, ``model`` or ``None`` if all models fail.
+    """
+    models_to_try = (default_model, *fallback_models)
+    for i, model in enumerate(models_to_try):
+        if i > 0:
+            logger.info(
+                "Judge model %s unavailable; falling back to %s",
+                models_to_try[i - 1],
+                model,
+            )
+        result = judge_session(
+            journal_text,
+            category=category,
+            goals=goals,
+            model=model,
+            api_key=api_key,
+        )
+        if result is not None:
+            return result
+    return None
+
+
 def judge_from_signals(
     signals: dict,
     journal_text: str | None = None,
@@ -527,16 +569,30 @@ def judge_and_writeback(
     session_id: str,
     sessions_dir: Path,
     model: str = DEFAULT_JUDGE_MODEL,
+    fallback_models: tuple[str, ...] = (),
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Judge a session and persist the verdict via SessionStore."""
-    verdict = judge_session(
-        text,
-        category=category,
-        goals=goals,
-        model=model,
-        api_key=api_key,
-    )
+    """Judge a session and persist the verdict via SessionStore.
+
+    If ``fallback_models`` is provided, tries them in order when ``model`` fails.
+    """
+    if fallback_models:
+        verdict = judge_session_with_fallback(
+            text,
+            category=category,
+            goals=goals,
+            default_model=model,
+            fallback_models=fallback_models,
+            api_key=api_key,
+        )
+    else:
+        verdict = judge_session(
+            text,
+            category=category,
+            goals=goals,
+            model=model,
+            api_key=api_key,
+        )
     if verdict is None:
         return {"status": "failed"}
 

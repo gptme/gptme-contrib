@@ -28,6 +28,7 @@ from gptme_sessions.judge import (
     judge_and_writeback,
     judge_from_signals,
     judge_session,
+    judge_session_with_fallback,
     normalize_judge_verdict,
 )
 from gptme_sessions.record import SessionRecord
@@ -181,6 +182,110 @@ class TestJudgeSession:
         )
 
         assert prepared == messages
+
+
+class TestJudgeSessionWithFallback:
+    """Tests for judge_session_with_fallback()."""
+
+    def test_returns_primary_on_success(self, monkeypatch) -> None:
+        """When the primary model succeeds, return its result without trying fallbacks."""
+        calls: list[str] = []
+
+        def _fake_judge_session(text, category=None, *, goals, model, **kw):
+            calls.append(model)
+            return {"score": 0.8, "reason": "Primary worked", "model": model}
+
+        monkeypatch.setattr("gptme_sessions.judge.judge_session", _fake_judge_session)
+
+        result = judge_session_with_fallback(
+            "session text",
+            goals="ship useful work",
+            fallback_models=("fallback/model-a",),
+        )
+
+        assert result is not None
+        assert result["score"] == 0.8
+        assert calls == [DEFAULT_JUDGE_MODEL]
+
+    def test_tries_fallback_after_primary_fails(self, monkeypatch) -> None:
+        """When the primary fails, the first fallback model is used."""
+        calls: list[str] = []
+
+        def _fake_judge_session(text, category=None, *, goals, model, **kw):
+            calls.append(model)
+            if model == DEFAULT_JUDGE_MODEL:
+                return None
+            return {"score": 0.7, "reason": "Fallback worked", "model": model}
+
+        monkeypatch.setattr("gptme_sessions.judge.judge_session", _fake_judge_session)
+
+        result = judge_session_with_fallback(
+            "session text",
+            goals="ship useful work",
+            fallback_models=("fallback/model-a", "fallback/model-b"),
+        )
+
+        assert result is not None
+        assert result["score"] == 0.7
+        assert calls == [DEFAULT_JUDGE_MODEL, "fallback/model-a"]
+
+    def test_returns_none_when_all_models_fail(self, monkeypatch) -> None:
+        """Returns None when every model in the chain fails."""
+        monkeypatch.setattr(
+            "gptme_sessions.judge.judge_session",
+            lambda *a, **kw: None,
+        )
+
+        result = judge_session_with_fallback(
+            "session text",
+            goals="ship useful work",
+            fallback_models=("fallback/model-a",),
+        )
+
+        assert result is None
+
+    def test_no_fallbacks_uses_default_model_only(self, monkeypatch) -> None:
+        """With no fallback_models, only the default model is tried."""
+        calls: list[str] = []
+
+        def _fake_judge_session(text, category=None, *, goals, model, **kw):
+            calls.append(model)
+            return None
+
+        monkeypatch.setattr("gptme_sessions.judge.judge_session", _fake_judge_session)
+
+        result = judge_session_with_fallback("session text", goals="ship work")
+        assert result is None
+        assert calls == [DEFAULT_JUDGE_MODEL]
+
+
+class TestJudgeAndWritebackFallback:
+    """Tests for judge_and_writeback() fallback_models parameter."""
+
+    def test_uses_fallback_when_provided(self, tmp_path: Path, monkeypatch) -> None:
+        """When fallback_models is given, judge_session_with_fallback is used."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="sid1", outcome="productive"))
+
+        calls: list[str] = []
+
+        def _fake_fallback(text, category=None, *, goals, default_model, fallback_models, **kw):
+            calls.append(("fallback", default_model, fallback_models))
+            return {"score": 0.75, "reason": "Fallback judge", "model": "fallback/m"}
+
+        monkeypatch.setattr("gptme_sessions.judge.judge_session_with_fallback", _fake_fallback)
+
+        result = judge_and_writeback(
+            text="text",
+            category="code",
+            goals="ship work",
+            session_id="sid1",
+            sessions_dir=tmp_path,
+            fallback_models=("fallback/m",),
+        )
+
+        assert result["status"] == "ok"
+        assert calls == [("fallback", DEFAULT_JUDGE_MODEL, ("fallback/m",))]
 
 
 class TestJudgeFromSignals:
