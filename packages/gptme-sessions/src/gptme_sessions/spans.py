@@ -46,7 +46,7 @@ _FRAC_RE = re.compile(r"\.(\d+)(?=[+\-Z]|$)")
 def _normalize_ts(ts_str: str) -> str:
     """Pad fractional seconds to 6 digits for Python 3.10 fromisoformat() compat."""
 
-    def _pad(m: re.Match) -> str:  # type: ignore[type-arg]
+    def _pad(m: re.Match[str]) -> str:
         return "." + m.group(1).ljust(6, "0")[:6]
 
     return _FRAC_RE.sub(_pad, ts_str.replace("Z", "+00:00"))

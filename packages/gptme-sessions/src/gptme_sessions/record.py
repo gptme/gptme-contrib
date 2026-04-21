@@ -7,6 +7,7 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 # Normalize model names to short canonical forms
@@ -208,7 +209,7 @@ class SessionRecord:
     llm_judge_reason: str | None = None  # 1-sentence explanation
     llm_judge_model: str | None = None  # model used for judging (e.g. claude-haiku-4-5)
 
-    # Per-tool-call span aggregates (Phase 2 of span-level tracing, idea #158).
+    # Per-tool-call span aggregates (Phase 3 of span-level tracing, idea #158).
     # Dict shape mirrors SpanAggregates fields (total_spans, error_spans,
     # error_rate, dominant_tool, avg_duration_ms, max_duration_ms,
     # tool_counts, retry_depth) so downstream consumers can read it without
@@ -314,8 +315,6 @@ class SessionRecord:
         trajectory path is missing, unreadable, or the harness is unknown.
         Idempotent: safe to re-run when new trajectory data arrives.
         """
-        from pathlib import Path
-
         # Lazy import avoids a top-level cycle and keeps record.py independent
         # of the spans module for users who never call this helper.
         from gptme_sessions.spans import (
