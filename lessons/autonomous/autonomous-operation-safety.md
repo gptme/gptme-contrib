@@ -6,6 +6,7 @@ match:
   - untrusted content
   - external communication
   - prompt injection
+target_grade: harm
 status: active
 ---
 

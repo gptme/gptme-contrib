@@ -14,6 +14,7 @@ match:
   - "DROP TABLE"
   - "production change"
   - "risky operation"
+target_grade: harm
 status: active
 ---
 
