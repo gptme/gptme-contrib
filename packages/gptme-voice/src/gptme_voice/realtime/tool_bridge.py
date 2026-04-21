@@ -118,9 +118,11 @@ class GptmeToolBridge:
             return output
         if stdout_lines:
             return stdout_lines[-1]
-        fallback_stderr = stderr.strip()
-        if fallback_stderr:
-            return fallback_stderr
+        # Don't fall back to raw stderr here: if we got this far, the primary
+        # stderr filter already excluded ignorable lines (e.g. the non-TTY
+        # warning from prompt_toolkit). Returning raw stderr would re-surface
+        # exactly those filtered lines as the "error" reported to the user.
+        # Returning "" lets the caller fall back to the exit-code message.
         return ""
 
     @staticmethod
@@ -347,6 +349,7 @@ class GptmeToolBridge:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
