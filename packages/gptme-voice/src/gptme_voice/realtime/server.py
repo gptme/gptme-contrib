@@ -237,7 +237,24 @@ class VoiceServer:
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
         agent_name = _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
+        handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
+        # Comma-separated list of agents the running server can hand off to.
+        # Defaults to the known agents minus the current one.
+        _default_agents = [
+            a for a in ["alice", "gordon", "sven", "bob"] if a != agent_name
+        ]
+        self._available_agents: list[str] = (
+            [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
+            if handoff_agents_env
+            else _default_agents
+        )
         if handoff_dir_env:
+            if not handoff_secret_env:
+                logger.warning(
+                    "GPTME_VOICE_HANDOFF_SECRET not set while GPTME_VOICE_HANDOFF_DIR is "
+                    "configured — using insecure fallback. Set GPTME_VOICE_HANDOFF_SECRET "
+                    "to a strong random value in production."
+                )
             handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
             self._handoff_writer: HandoffWriter | None = HandoffWriter(
                 Path(handoff_dir_env),
@@ -526,8 +543,8 @@ class VoiceServer:
                         "The caller will be connected shortly."
                     ),
                 }
-            except ValueError as exc:
-                logger.warning("Handoff rejected: %s", exc)
+            except (ValueError, OSError) as exc:
+                logger.warning("Handoff failed: %s", exc)
                 return {"status": "error", "message": str(exc)}
 
         return _on_handoff
@@ -695,10 +712,15 @@ class VoiceServer:
 
                     if self.model:
                         session_cfg = SessionConfig(
-                            instructions=instructions, model=self.model
+                            instructions=instructions,
+                            model=self.model,
+                            available_agents=self._available_agents,
                         )
                     else:
-                        session_cfg = SessionConfig(instructions=instructions)
+                        session_cfg = SessionConfig(
+                            instructions=instructions,
+                            available_agents=self._available_agents,
+                        )
                     realtime_client = self._make_client(
                         session_cfg,
                         on_audio=lambda audio: self._send_to_twilio(
@@ -825,9 +847,16 @@ class VoiceServer:
                 self.resume_window_seconds,
             )
             if self.model:
-                session_cfg = SessionConfig(instructions=instructions, model=self.model)
+                session_cfg = SessionConfig(
+                    instructions=instructions,
+                    model=self.model,
+                    available_agents=self._available_agents,
+                )
             else:
-                session_cfg = SessionConfig(instructions=instructions)
+                session_cfg = SessionConfig(
+                    instructions=instructions,
+                    available_agents=self._available_agents,
+                )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),

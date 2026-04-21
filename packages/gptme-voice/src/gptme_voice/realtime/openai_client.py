@@ -10,7 +10,7 @@ import base64
 import contextlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -191,6 +191,9 @@ class SessionConfig:
     vad_threshold: float = 0.7
     vad_silence_duration_ms: int = 500
     vad_prefix_padding_ms: int = 300
+    available_agents: list[str] = field(
+        default_factory=lambda: ["alice", "gordon", "sven"]
+    )
 
 
 class OpenAIRealtimeClient:
@@ -386,7 +389,11 @@ class OpenAIRealtimeClient:
                     "type": "function",
                     "name": "handoff_to_agent",
                     "description": (
-                        "Transfer the caller to another AI agent (Alice, Gordon, or Sven). "
+                        "Transfer the caller to another AI agent ("
+                        + ", ".join(
+                            a.capitalize() for a in self.session_config.available_agents
+                        )
+                        + "). "
                         "Use this when the caller explicitly asks to speak with a different "
                         "agent, or when the topic is clearly outside your expertise and "
                         "another agent is better suited. Say a brief handoff notice first "
@@ -398,7 +405,7 @@ class OpenAIRealtimeClient:
                         "properties": {
                             "to_agent": {
                                 "type": "string",
-                                "enum": ["alice", "gordon", "sven"],
+                                "enum": self.session_config.available_agents,
                                 "description": "The agent to transfer the caller to.",
                             },
                             "reason": {
