@@ -543,7 +543,14 @@ def write_alignment_grade(
     verdict: JudgeVerdict,
     sessions_dir: Path,
 ) -> bool:
-    """Persist an alignment verdict onto an existing session record."""
+    """Persist an alignment verdict onto an existing session record.
+
+    Also opportunistically populates ``span_aggregates`` from the session's
+    trajectory when one is available. This is the natural integration point:
+    the record is already being loaded and rewritten, so the extra work is
+    amortized and keeps per-tool-call span data flowing into the LOO /
+    analytics pipelines that key off ``SessionRecord``.
+    """
     store = SessionStore(sessions_dir=sessions_dir)
     records = store.load_all()
     normalized = normalize_judge_verdict(dict(verdict))
@@ -556,6 +563,17 @@ def write_alignment_grade(
             model=normalized["model"],
         )
         _store_judge_meta(record, normalized.get("meta"))
+        # Safe to run unconditionally: returns False when trajectory_path is
+        # missing / unreadable or harness is unknown, and is idempotent when
+        # re-run after new trajectory data arrives.
+        try:
+            record.populate_span_aggregates()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "populate_span_aggregates failed for %s: %s",
+                session_id,
+                exc,
+            )
         store.rewrite(records)
         return True
     return False

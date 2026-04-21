@@ -558,6 +558,69 @@ class TestSessionRecordJudgeFields:
             "judge_version": JUDGE_VERSION,
         }
 
+    def test_writeback_populates_span_aggregates(self, tmp_path: Path) -> None:
+        """write_alignment_grade opportunistically calls populate_span_aggregates."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        with (
+            patch(
+                "gptme_sessions.judge.judge_session",
+                return_value={
+                    "score": 0.74,
+                    "reason": "Real work shipped",
+                    "model": "openai-subscription/gpt-5.4",
+                },
+            ),
+            patch.object(
+                SessionRecord, "populate_span_aggregates", return_value=True
+            ) as mock_populate,
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="abc123",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result["status"] == "ok"
+        mock_populate.assert_called_once()
+
+    def test_writeback_tolerates_span_aggregates_failure(self, tmp_path: Path) -> None:
+        """Writeback still succeeds if span aggregation raises unexpectedly."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        with (
+            patch(
+                "gptme_sessions.judge.judge_session",
+                return_value={
+                    "score": 0.5,
+                    "reason": "Did work",
+                    "model": "openai-subscription/gpt-5.4",
+                },
+            ),
+            patch.object(
+                SessionRecord,
+                "populate_span_aggregates",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="abc123",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result["status"] == "ok"
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert updated.grades["alignment"] == 0.5
+
     def test_judge_and_writeback_reports_missing_record(self, tmp_path: Path) -> None:
         with patch(
             "gptme_sessions.judge.judge_session",
