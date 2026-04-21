@@ -25,6 +25,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
+from ..handoff import HandoffWriter
 from .audio import AudioConverter
 from .openai_client import (
     OpenAIRealtimeClient,
@@ -231,6 +232,23 @@ class VoiceServer:
             _get_config_env("GPTME_VOICE_STATE_DIR") or _DEFAULT_STATE_DIR
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
+        handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
+        agent_name = _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
+        handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
+        if handoff_dir_env:
+            handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
+            self._handoff_writer: HandoffWriter | None = HandoffWriter(
+                Path(handoff_dir_env),
+                from_agent=agent_name,
+                secret=handoff_secret,
+            )
+            logger.info(
+                "Handoff enabled: from_agent=%s, dir=%s", agent_name, handoff_dir_env
+            )
+        else:
+            self._handoff_writer = None
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
@@ -450,6 +468,70 @@ class VoiceServer:
 
         self._pending_post_calls[caller_id] = asyncio.create_task(_runner())
 
+    def _make_handoff_callback(
+        self,
+        caller_id_ref: list[str | None],
+        transcript_ref: list[TranscriptTurn],
+    ):
+        """Return an async callback for tool_bridge.on_handoff that captures call context.
+
+        ``caller_id_ref[0]`` and ``transcript_ref`` are mutable containers so the
+        callback always sees the current transcript at the moment of the handoff, not
+        the snapshot from when the callback was created.
+        """
+
+        async def _on_handoff(
+            to_agent: str, reason: str, context_summary: str | None
+        ) -> dict:
+            if self._handoff_writer is None:
+                return {
+                    "status": "not_supported",
+                    "message": (
+                        "Handoff is not configured. "
+                        "Set GPTME_VOICE_HANDOFF_DIR to enable cross-agent transfers."
+                    ),
+                }
+            caller_id = caller_id_ref[0]
+            if not caller_id:
+                return {
+                    "status": "error",
+                    "message": "Cannot initiate handoff: caller identity not yet established.",
+                }
+            transcript_dicts = [
+                {"role": t.role, "text": t.text} for t in transcript_ref
+            ]
+            extra: dict = {}
+            if context_summary:
+                extra["context_summary"] = context_summary
+            try:
+                published = self._handoff_writer.initiate(
+                    to_agent=to_agent,
+                    caller_id=caller_id,
+                    reason=reason,
+                    transcript=transcript_dicts,
+                    extra=extra or None,
+                )
+                logger.info(
+                    "Handoff published: id=%s to=%s path=%s",
+                    published.payload["handoff_id"],
+                    to_agent,
+                    published.path,
+                )
+                return {
+                    "status": "handoff_initiated",
+                    "handoff_id": published.payload["handoff_id"],
+                    "to_agent": to_agent,
+                    "message": (
+                        f"Transfer to {to_agent} initiated. "
+                        "The caller will be connected shortly."
+                    ),
+                }
+            except ValueError as exc:
+                logger.warning("Handoff rejected: %s", exc)
+                return {"status": "error", "message": str(exc)}
+
+        return _on_handoff
+
     async def _on_call_end(
         self,
         caller_id: str | None,
@@ -646,6 +728,7 @@ class VoiceServer:
                         workspace=self.workspace,
                         on_result=realtime_client.inject_message,
                         on_hangup=_twilio_hangup,
+                        on_handoff=self._make_handoff_callback([caller_id], transcript),
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -770,6 +853,7 @@ class VoiceServer:
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
                 on_hangup=_local_hangup,
+                on_handoff=self._make_handoff_callback([caller_id], transcript),
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
