@@ -5,7 +5,7 @@ timing, input/output sizes, and success recorded. Sessions produce
 sequences of spans that tell the per-turn story of what the agent did
 and how long each operation took.
 
-Supports Claude Code JSONL format. gptme format planned for a follow-up.
+Supports Claude Code and gptme JSONL formats.
 
 Design doc: knowledge/technical-designs/span-level-tracing-design.md
 """
@@ -20,6 +20,23 @@ from datetime import datetime
 from pathlib import Path
 
 _EXIT_CODE_RE = re.compile(r"(?:Exit code|exit code):\s*(\d+)")
+
+# gptme tool-use marker: `@tool_name(call-UUID-N): {json_args}` at the start
+# of a line. Args may be absent (e.g. `@todo(call-...-4): {}`).
+_GPTME_TOOL_RE = re.compile(
+    r"^@(\w+)\(call-([0-9a-f-]+)\):\s*(\{.*\})?\s*$",
+    re.MULTILINE,
+)
+
+# System messages that are NOT tool results — skipped during result pairing.
+_GPTME_NOISE_PREFIXES = (
+    "<system_warning>",
+    "<system_info>",
+    "<workspace-agents-warning>",
+    "<budget:",
+    "# Relevant Lessons",
+    "Shellcheck found potential issues",
+)
 
 
 def _parse_ts(ts_str: str | None) -> datetime | None:
@@ -270,5 +287,136 @@ def extract_spans_from_cc_jsonl(
                         turn_index=tidx,
                     )
                 )
+
+    return spans
+
+
+def _gptme_is_noise(content: str) -> bool:
+    """Return True if a system message is not a tool result (lesson, warning, etc.)."""
+    return any(content.startswith(p) for p in _GPTME_NOISE_PREFIXES)
+
+
+def _gptme_is_error_result(content: str) -> bool:
+    """Heuristic error detection for gptme tool results.
+
+    gptme doesn't emit a structured ``is_error`` flag the way CC does, so we
+    fall back to looking at the result text. Bash subprocess errors are caught
+    separately via ``_EXIT_CODE_RE`` on the caller side.
+    """
+    head = content.lstrip()[:80].lower()
+    return head.startswith("error:") or head.startswith("error ")
+
+
+def extract_spans_from_gptme_jsonl(
+    path: Path | str,
+    session_id: str | None = None,
+) -> list[ToolSpan]:
+    """Extract ToolSpan objects from a gptme conversation.jsonl trajectory.
+
+    gptme tool invocations appear in assistant messages as
+    ``@tool_name(call-UUID-N): {json_args}``. Results arrive as the next
+    non-pinned system message that isn't a lesson injection, system warning,
+    or shellcheck note. Pairing is by sequential FIFO order (gptme doesn't
+    echo the call-ID in the result).
+
+    Args:
+        path: Path to the gptme ``conversation.jsonl`` file.
+        session_id: Session ID to assign to all spans. Defaults to the name
+            of the parent directory (gptme's session naming convention).
+
+    Returns:
+        List of spans in chronological dispatch order.
+    """
+    path = Path(path)
+    if session_id is None:
+        # gptme convention: session lives in a directory, jsonl filename is
+        # always "conversation.jsonl". Use the directory name as session id.
+        session_id = path.parent.name or path.stem
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    # Pending tool dispatches awaiting their result.
+    # Each entry: (tool_name, call_id, dispatch_ts, dispatch_ts_str, input_size, turn_index)
+    pending: list[tuple[str, str, datetime | None, str, int, int]] = []
+    spans: list[ToolSpan] = []
+    turn_index = 0
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        role = record.get("role")
+        content = record.get("content", "")
+        if not isinstance(content, str):
+            continue
+        ts_str = record.get("timestamp", "")
+        ts = _parse_ts(ts_str)
+
+        if role == "assistant":
+            matches = list(_GPTME_TOOL_RE.finditer(content))
+            if not matches:
+                continue
+            for m in matches:
+                tool_name = m.group(1)
+                call_id = m.group(2)
+                args_str = m.group(3) or ""
+                try:
+                    args = json.loads(args_str) if args_str else {}
+                except json.JSONDecodeError:
+                    args = args_str  # fall back to raw string length
+                isize = _input_size(args)
+                pending.append((tool_name, call_id, ts, ts_str, isize, turn_index))
+            turn_index += 1
+
+        elif role == "system":
+            if record.get("pinned"):
+                continue
+            if _gptme_is_noise(content):
+                continue
+            if not pending:
+                continue
+
+            tool_name, _call_id, dispatch_ts, dispatch_ts_str, isize, tidx = pending.pop(0)
+            osize = len(content)
+
+            dur_ms = -1
+            if dispatch_ts is not None and ts is not None:
+                try:
+                    delta = (ts - dispatch_ts).total_seconds()
+                    if delta >= 0:
+                        dur_ms = int(delta * 1000)
+                except TypeError:
+                    pass  # mixed tz-aware/naive timestamps – leave sentinel
+
+            exit_code = _exit_code(content) if tool_name == "shell" else None
+            # Shell success: explicit nonzero exit code overrides text heuristic;
+            # missing exit code means "successful exit 0" (gptme only annotates nonzero)
+            if tool_name == "shell" and exit_code is not None:
+                success = exit_code == 0
+            else:
+                success = not _gptme_is_error_result(content)
+
+            spans.append(
+                ToolSpan(
+                    span_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    timestamp=dispatch_ts_str,
+                    duration_ms=dur_ms,
+                    success=success,
+                    input_size=isize,
+                    output_size=osize,
+                    exit_code=exit_code,
+                    turn_index=tidx,
+                )
+            )
 
     return spans

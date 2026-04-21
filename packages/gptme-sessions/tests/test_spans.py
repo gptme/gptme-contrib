@@ -11,6 +11,7 @@ from gptme_sessions.spans import (
     SpanAggregates,
     ToolSpan,
     extract_spans_from_cc_jsonl,
+    extract_spans_from_gptme_jsonl,
 )
 
 
@@ -336,3 +337,200 @@ def test_aggregates_no_retry() -> None:
     spans = [_span("Bash"), _span("Edit"), _span("Read")]
     agg = SpanAggregates.from_spans(spans)
     assert agg.retry_depth == 0  # no consecutive same-tool calls
+
+
+# ── extract_spans_from_gptme_jsonl ────────────────────────────────────────────
+
+
+def _gptme_assistant(tool: str, call_id: str, args: dict, ts: str) -> dict:
+    args_str = json.dumps(args)
+    return {
+        "role": "assistant",
+        "timestamp": ts,
+        "content": f"\n@{tool}(call-{call_id}): {args_str}",
+    }
+
+
+def _gptme_result(content: str, ts: str, pinned: bool = False) -> dict:
+    return {"role": "system", "timestamp": ts, "content": content, "pinned": pinned}
+
+
+def _write_gptme_session(tmp_path: Path, records: list[dict], session_name: str) -> Path:
+    """gptme stores conversations as <dir>/conversation.jsonl."""
+    session_dir = tmp_path / session_name
+    session_dir.mkdir()
+    p = session_dir / "conversation.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return p
+
+
+def test_gptme_single_shell_span(tmp_path: Path) -> None:
+    records = [
+        _gptme_assistant("shell", "abc-0", {"command": "echo hi"}, "2026-04-21T10:00:00"),
+        _gptme_result(
+            "Ran allowlisted command: `echo hi`\n\n```stdout\nhi\n```",
+            "2026-04-21T10:00:01",
+        ),
+    ]
+    p = _write_gptme_session(tmp_path, records, "autonomous-beef")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 1
+    s = spans[0]
+    assert s.tool_name == "shell"
+    assert s.session_id == "autonomous-beef"  # directory name
+    assert s.duration_ms == 1000
+    assert s.success is True
+    assert s.exit_code is None
+    assert s.turn_index == 0
+    assert s.output_size > 0
+
+
+def test_gptme_error_result_detected(tmp_path: Path) -> None:
+    records = [
+        _gptme_assistant("gh", "abc-0", {"url": "bad"}, "2026-04-21T10:00:00"),
+        _gptme_result("Error: Unknown gh command.", "2026-04-21T10:00:00.1"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].success is False
+
+
+def test_gptme_shell_exit_code_overrides_text(tmp_path: Path) -> None:
+    """Nonzero exit code must mark success=False even without 'Error:' prefix."""
+    records = [
+        _gptme_assistant("shell", "abc-0", {"command": "false"}, "2026-04-21T10:00:00"),
+        _gptme_result(
+            "Ran command: `false`\n\n```stderr\n\n```\nExit code: 1\n",
+            "2026-04-21T10:00:00.5",
+        ),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert spans[0].exit_code == 1
+    assert spans[0].success is False
+
+
+def test_gptme_noise_skipped_lessons_warnings(tmp_path: Path) -> None:
+    """Lesson injections and system warnings must not be paired as tool results."""
+    records = [
+        _gptme_assistant("shell", "abc-0", {"command": "ls"}, "2026-04-21T10:00:00"),
+        _gptme_result(
+            "<system_warning>Token usage: 1/1000</system_warning>", "2026-04-21T10:00:00.1"
+        ),
+        _gptme_result("# Relevant Lessons\n\n## Some Lesson\n...", "2026-04-21T10:00:00.2"),
+        _gptme_result(
+            "Shellcheck found potential issues:\n...",
+            "2026-04-21T10:00:00.3",
+        ),
+        _gptme_result("Ran command: `ls`\n\nfile.txt\n", "2026-04-21T10:00:01"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 1
+    # Duration must span across the noise messages to the real result
+    assert spans[0].duration_ms == 1000
+    # Output size should reflect the actual result, not the warnings
+    assert "Ran command" in "Ran command: `ls`"
+    assert spans[0].output_size == len("Ran command: `ls`\n\nfile.txt\n")
+
+
+def test_gptme_pinned_system_skipped(tmp_path: Path) -> None:
+    """Pinned system messages (system prompt, context) must not pair as results."""
+    records = [
+        _gptme_result("You are Bob, ...", "2026-04-21T09:00:00", pinned=True),
+        _gptme_assistant("shell", "abc-0", {"command": "ls"}, "2026-04-21T10:00:00"),
+        _gptme_result("Ran command: `ls`\n\nfile.txt\n", "2026-04-21T10:00:01"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 1
+
+
+def test_gptme_multiple_tools_fifo_pairing(tmp_path: Path) -> None:
+    """Sequential tool calls pair in FIFO order with their results."""
+    records = [
+        _gptme_assistant("shell", "aa-0", {"command": "a"}, "2026-04-21T10:00:00"),
+        _gptme_result("Ran command: `a`\nout-a", "2026-04-21T10:00:01"),
+        _gptme_assistant("shell", "bb-1", {"command": "b"}, "2026-04-21T10:00:02"),
+        _gptme_result("Ran command: `b`\nout-b", "2026-04-21T10:00:04"),
+        _gptme_assistant("save", "cc-2", {"path": "/x", "content": "y"}, "2026-04-21T10:00:05"),
+        _gptme_result("Saved to /x", "2026-04-21T10:00:05.1"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 3
+    assert [s.tool_name for s in spans] == ["shell", "shell", "save"]
+    assert [s.turn_index for s in spans] == [0, 1, 2]
+    assert spans[0].duration_ms == 1000
+    assert spans[1].duration_ms == 2000
+    # save tool completes quickly
+    assert 0 <= spans[2].duration_ms <= 1000
+
+
+def test_gptme_unpaired_dispatch_drops_span(tmp_path: Path) -> None:
+    """A dispatch without a following result produces no span."""
+    records = [
+        _gptme_assistant("shell", "aa-0", {"command": "a"}, "2026-04-21T10:00:00"),
+        # No result; conversation cut off
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+    assert spans == []
+
+
+def test_gptme_empty_args(tmp_path: Path) -> None:
+    """Tools called with empty args (e.g. @todo, @complete) work fine."""
+    records = [
+        {
+            "role": "assistant",
+            "timestamp": "2026-04-21T10:00:00",
+            "content": "\n@todo(call-abc-4): {}",
+        },
+        _gptme_result("📝 Todo list is empty", "2026-04-21T10:00:00.1"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].tool_name == "todo"
+    assert spans[0].input_size == 0
+
+
+def test_gptme_session_id_override(tmp_path: Path) -> None:
+    records = [
+        _gptme_assistant("shell", "aa-0", {"command": "ls"}, "2026-04-21T10:00:00"),
+        _gptme_result("Ran command: `ls`\n", "2026-04-21T10:00:01"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess-dir")
+    spans = extract_spans_from_gptme_jsonl(p, session_id="explicit-id")
+    assert spans[0].session_id == "explicit-id"
+
+
+def test_gptme_empty_file(tmp_path: Path) -> None:
+    session_dir = tmp_path / "empty-sess"
+    session_dir.mkdir()
+    p = session_dir / "conversation.jsonl"
+    p.write_text("")
+    spans = extract_spans_from_gptme_jsonl(p)
+    assert spans == []
+
+
+def test_gptme_missing_file() -> None:
+    spans = extract_spans_from_gptme_jsonl(Path("/nonexistent/sess/conversation.jsonl"))
+    assert spans == []
+
+
+def test_gptme_malformed_lines_skipped(tmp_path: Path) -> None:
+    session_dir = tmp_path / "malformed"
+    session_dir.mkdir()
+    p = session_dir / "conversation.jsonl"
+    p.write_text("not json\n{}\n")
+    spans = extract_spans_from_gptme_jsonl(p)
+    assert spans == []
