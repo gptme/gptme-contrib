@@ -41,7 +41,9 @@ def _output_size(content: object) -> int:
     if isinstance(content, str):
         return len(content)
     if isinstance(content, list):
-        return sum(len(c.get("text", "")) if isinstance(c, dict) else len(str(c)) for c in content)
+        return sum(
+            len(c.get("text", str(c))) if isinstance(c, dict) else len(str(c)) for c in content
+        )
     return 0
 
 
@@ -97,6 +99,12 @@ class SpanAggregates:
 
     These fields are suitable for inclusion in SessionRecord as optional
     fields (Phase 2 of the design doc).
+
+    Attributes:
+        retry_depth: Max consecutive redundant re-calls to the same tool
+            (first invocation excluded).  A value of 0 means no tool was
+            called twice in a row; 2 means the same tool was called 3 times
+            in succession (1 original + 2 retries).  Proxy for stuck loops.
     """
 
     total_spans: int
@@ -139,15 +147,16 @@ class SpanAggregates:
         avg_ms = sum(known_durations) / len(known_durations) if known_durations else -1.0
         max_ms = max(known_durations) if known_durations else -1
 
-        # Retry depth: max consecutive calls to the same tool
+        # Retry depth: max consecutive redundant re-calls to the same tool
+        # (first call is normal; streak counts re-invocations beyond it)
         retry_depth = 0
-        streak = 1
+        streak = 0
         for i in range(1, len(spans)):
             if spans[i].tool_name == spans[i - 1].tool_name:
                 streak += 1
                 retry_depth = max(retry_depth, streak)
             else:
-                streak = 1
+                streak = 0
 
         return cls(
             total_spans=len(spans),

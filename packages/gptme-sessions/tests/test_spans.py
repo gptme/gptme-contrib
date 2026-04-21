@@ -285,11 +285,38 @@ def test_aggregates_unknown_duration_excluded() -> None:
     assert agg.max_duration_ms == 300
 
 
+def test_output_size_consistent_with_text_extraction(tmp_path: Path) -> None:
+    """output_size should be non-zero when the result is a dict without 'text' key."""
+    records = [
+        _cc_assistant("Bash", "tid1", "cmd", "2026-04-21T10:00:00+00:00"),
+        {
+            "type": "user",
+            "timestamp": "2026-04-21T10:00:01+00:00",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tid1",
+                        "content": [{"type": "image", "source": "data:..."}],
+                    }
+                ]
+            },
+        },
+    ]
+    p = _write_jsonl(tmp_path, records)
+    spans = extract_spans_from_cc_jsonl(p)
+
+    assert len(spans) == 1
+    # With the fix, output_size reflects the actual str() representation;
+    # without it, output_size would be 0 (c.get("text", "") fallback).
+    assert spans[0].output_size > 0
+
+
 def test_aggregates_retry_depth() -> None:
-    # Bash × 3 consecutive = depth 3
+    # Bash × 3 consecutive → 2 retries beyond the first call
     spans = [_span("Bash"), _span("Bash"), _span("Bash"), _span("Edit")]
     agg = SpanAggregates.from_spans(spans)
-    assert agg.retry_depth == 3
+    assert agg.retry_depth == 2
 
 
 def test_aggregates_no_retry() -> None:
