@@ -48,7 +48,12 @@ from .classification import (
     judge_and_classify,
     normalize_category,
 )
-from .spans import SpanAggregates, ToolSpan, extract_spans_from_cc_jsonl
+from .spans import (
+    SpanAggregates,
+    ToolSpan,
+    extract_spans_from_cc_jsonl,
+    extract_spans_from_gptme_jsonl,
+)
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 from .transcript import (
@@ -103,4 +108,5 @@ __all__ = [
     "SpanAggregates",
     "ToolSpan",
     "extract_spans_from_cc_jsonl",
+    "extract_spans_from_gptme_jsonl",
 ]
