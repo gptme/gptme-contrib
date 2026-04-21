@@ -14,7 +14,7 @@ import logging
 import os
 import shlex
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import click
@@ -67,6 +67,7 @@ class RecentCallRecord:
     ended_at: float
     transcript: list[TranscriptTurn]
     metadata: dict[str, str]
+    subagent_timings: list[dict[str, object]] = field(default_factory=list)
 
 
 def _build_caller_instructions(
@@ -280,13 +281,16 @@ class VoiceServer:
         )
 
     def _record_payload(self, record: RecentCallRecord) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "caller_id": record.caller_id,
             "source": record.source,
             "ended_at": record.ended_at,
             "transcript": [asdict(turn) for turn in record.transcript],
             "metadata": record.metadata,
         }
+        if record.subagent_timings:
+            payload["subagent_timings"] = record.subagent_timings
+        return payload
 
     def _write_call_record(self, path: Path, record: RecentCallRecord) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -316,6 +320,10 @@ class VoiceServer:
                     for item in payload.get("transcript", [])
                     if item.get("role") and item.get("text")
                 ]
+                raw_timings = payload.get("subagent_timings") or []
+                subagent_timings = [
+                    dict(item) for item in raw_timings if isinstance(item, dict)
+                ]
                 return RecentCallRecord(
                     caller_id=payload["caller_id"],
                     source=payload.get("source", "unknown"),
@@ -326,6 +334,7 @@ class VoiceServer:
                         for key, value in payload.get("metadata", {}).items()
                         if value is not None
                     },
+                    subagent_timings=subagent_timings,
                 )
             except Exception as exc:
                 logger.warning(
@@ -447,9 +456,17 @@ class VoiceServer:
         source: str,
         transcript: list[TranscriptTurn],
         metadata: dict[str, str],
+        tool_bridge: GptmeToolBridge | None = None,
     ) -> None:
         if not caller_id:
             return
+
+        subagent_timings: list[dict[str, object]] = []
+        if tool_bridge is not None:
+            try:
+                subagent_timings = tool_bridge.get_timings()
+            except Exception as exc:  # defensive: never block archival on telemetry
+                logger.warning("Failed to collect subagent timings: %s", exc)
 
         record = RecentCallRecord(
             caller_id=caller_id,
@@ -457,6 +474,7 @@ class VoiceServer:
             ended_at=time.time(),
             transcript=transcript,
             metadata={k: v for k, v in metadata.items() if v},
+            subagent_timings=subagent_timings,
         )
         self._save_recent_call(record)
         record_path = self._save_call_record(record)
@@ -549,6 +567,7 @@ class VoiceServer:
         stream_sid: str | None = None
         caller_id: str | None = None
         realtime_client: OpenAIRealtimeClient | None = None
+        tool_bridge: GptmeToolBridge | None = None
         audio_converter = AudioConverter()
         transcript: list[TranscriptTurn] = []
         metadata: dict[str, str] = {}
@@ -665,7 +684,13 @@ class VoiceServer:
                 await self._disconnect_realtime_client(realtime_client)
             if call_sid and call_sid in self._connections:
                 del self._connections[call_sid]
-            await self._on_call_end(caller_id, "twilio", transcript, metadata)
+            await self._on_call_end(
+                caller_id,
+                "twilio",
+                transcript,
+                metadata,
+                tool_bridge=tool_bridge,
+            )
 
     async def _send_to_twilio(self, websocket, stream_sid: str, audio_data: bytes):
         """Send audio to Twilio Media Stream."""
@@ -707,6 +732,7 @@ class VoiceServer:
 
         caller_id = self._get_local_caller_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
+        tool_bridge: GptmeToolBridge | None = None
         transcript: list[TranscriptTurn] = []
 
         try:
@@ -781,6 +807,7 @@ class VoiceServer:
                 "local",
                 transcript,
                 {"caller_id": caller_id, "provider": self.provider},
+                tool_bridge=tool_bridge,
             )
 
     async def _schedule_hangup(

@@ -666,6 +666,50 @@ def test_execute_kills_process_on_cancel() -> None:
     asyncio.run(_exercise())
 
 
+def test_get_timings_is_empty_before_any_dispatch() -> None:
+    bridge = GptmeToolBridge(workspace="/fake/workspace")
+    assert bridge.get_timings() == []
+
+
+def test_get_timings_records_completed_subagent_run() -> None:
+    async def _exercise() -> None:
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=0,
+                stdout="[INFO] quick lookup complete\n",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "check active tasks", "mode": "fast"}
+            )
+            task_id = dispatch["task_id"]
+
+            # Let the background task run to completion.
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+        timings = bridge.get_timings()
+        assert len(timings) == 1
+        record = timings[0]
+        assert record["task_id"] == task_id
+        assert record["mode"] == "fast"
+        assert record["model"] == bridge.model_fast
+        assert record["returncode"] == 0
+        assert "check active tasks" in record["task_preview"]
+        assert "timings" in record
+        assert record["timings"]["total_seconds"] >= 0
+
+        # Returned records must be copies, not shared state.
+        record["timings"]["total_seconds"] = 999.0
+        assert bridge.get_timings()[0]["timings"]["total_seconds"] != 999.0
+
+    asyncio.run(_exercise())
+
+
 def test_subagent_cancel_all_cancels_every_pending_task() -> None:
     async def _exercise() -> None:
         class _SlowProcess(_FakeProcess):
