@@ -163,6 +163,22 @@ def test_batched_tool_calls(tmp_path: Path) -> None:
     assert spans[0].turn_index == spans[1].turn_index == 0
 
 
+def test_timestamp_is_dispatch_time(tmp_path: Path) -> None:
+    """span.timestamp must reflect dispatch time, not result-arrival time."""
+    dispatch_ts = "2026-04-21T10:00:00+00:00"
+    arrival_ts = "2026-04-21T10:00:05+00:00"
+    records = [
+        _cc_assistant("Bash", "tid1", "sleep 5", dispatch_ts),
+        _cc_result("tid1", "done", arrival_ts),
+    ]
+    p = _write_jsonl(tmp_path, records)
+    spans = extract_spans_from_cc_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].timestamp == dispatch_ts
+    assert spans[0].duration_ms == 5000
+
+
 def test_session_id_from_filename(tmp_path: Path) -> None:
     records = [
         _cc_assistant("Bash", "tid1", "echo hi", "2026-04-21T10:00:00+00:00"),

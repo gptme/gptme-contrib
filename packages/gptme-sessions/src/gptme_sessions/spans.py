@@ -181,8 +181,8 @@ def extract_spans_from_cc_jsonl(
     if session_id is None:
         session_id = path.stem
 
-    # pending maps tool_use_id → (tool_name, dispatch_ts, input_size, turn_index)
-    pending: dict[str, tuple[str, datetime | None, int, int]] = {}
+    # pending maps tool_use_id → (tool_name, dispatch_ts, dispatch_ts_str, input_size, turn_index)
+    pending: dict[str, tuple[str, datetime | None, str, int, int]] = {}
     spans: list[ToolSpan] = []
     turn_index = 0
 
@@ -216,7 +216,7 @@ def extract_spans_from_cc_jsonl(
                 tool_name = item.get("name", "unknown")
                 isize = _input_size(item.get("input", {}))
                 if tool_id:
-                    pending[tool_id] = (tool_name, ts, isize, turn_index)
+                    pending[tool_id] = (tool_name, ts, ts_str, isize, turn_index)
                     dispatched_this_turn = True
             if dispatched_this_turn:
                 turn_index += 1
@@ -231,7 +231,7 @@ def extract_spans_from_cc_jsonl(
                 tool_use_id = item.get("tool_use_id", "")
                 if tool_use_id not in pending:
                     continue
-                tool_name, dispatch_ts, isize, tidx = pending.pop(tool_use_id)
+                tool_name, dispatch_ts, dispatch_ts_str, isize, tidx = pending.pop(tool_use_id)
                 is_error = bool(item.get("is_error"))
                 result_content = item.get("content", "")
                 osize = _output_size(result_content)
@@ -249,7 +249,7 @@ def extract_spans_from_cc_jsonl(
                         span_id=str(uuid.uuid4()),
                         session_id=session_id,
                         tool_name=tool_name,
-                        timestamp=ts_str,
+                        timestamp=dispatch_ts_str,
                         duration_ms=dur_ms,
                         success=not is_error,
                         input_size=isize,
