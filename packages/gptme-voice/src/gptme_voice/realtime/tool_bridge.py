@@ -18,7 +18,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,9 @@ class GptmeToolBridge:
         try:
             raw_turns = list(self.transcript_provider() or [])
         except Exception as exc:
-            logger.warning("Failed to fetch transcript tail for voice subagent: %s", exc)
+            logger.warning(
+                "Failed to fetch transcript tail for voice subagent: %s", exc
+            )
             return None
 
         formatted_lines: list[str] = []
@@ -216,7 +218,10 @@ class GptmeToolBridge:
                 role, text, self.transcript_tail_chars
             )
             line_chars = len(line) + (1 if formatted_lines else 0)
-            if formatted_lines and total_chars + line_chars > self.transcript_tail_chars:
+            if (
+                formatted_lines
+                and total_chars + line_chars > self.transcript_tail_chars
+            ):
                 break
             formatted_lines.append(line)
             total_chars += line_chars
