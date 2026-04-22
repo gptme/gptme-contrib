@@ -82,11 +82,12 @@ class CheckerConfig:
 
 # Valid state transitions
 VALID_TRANSITIONS: dict[str, list[str]] = {
-    "backlog": ["todo", "cancelled"],
-    "todo": ["active", "backlog", "cancelled"],
-    "active": ["ready_for_review", "waiting", "done", "cancelled"],
+    "backlog": ["todo", "someday", "cancelled"],
+    "todo": ["active", "backlog", "someday", "cancelled"],
+    "active": ["ready_for_review", "waiting", "someday", "done", "cancelled"],
     "ready_for_review": ["active", "done", "cancelled"],  # Can go back to active if review fails
-    "waiting": ["active", "cancelled"],
+    "waiting": ["active", "someday", "cancelled"],
+    "someday": ["backlog", "todo", "cancelled"],  # Can be revived back to actionable lanes
     "done": [],  # Terminal state
     "cancelled": [],  # Terminal state
 }

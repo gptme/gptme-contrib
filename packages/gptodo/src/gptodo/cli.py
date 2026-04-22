@@ -1753,9 +1753,9 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
 @cli.command("ready")
 @click.option(
     "--state",
-    type=click.Choice(["backlog", "active", "both"]),
+    type=click.Choice(["backlog", "active", "someday", "both"]),
     default="both",
-    help="Filter by task state (backlog, active, or both)",
+    help="Filter by task state. 'both' = backlog+active. 'someday' = explicitly query deferred tasks.",
 )
 @click.option(
     "--json",
@@ -1818,6 +1818,8 @@ def ready(state, output_json, output_jsonl, use_cache):
         filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
     elif state == "active":
         filtered_tasks = [task for task in all_tasks if task.state == "active"]
+    elif state == "someday":
+        filtered_tasks = [task for task in all_tasks if task.state == "someday"]
     else:  # both
         filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
 
@@ -3473,8 +3475,22 @@ def list_all_locks(cleanup: bool, output_json: bool):
 )
 @click.option(
     "--state",
-    type=click.Choice(["new", "active", "paused", "done", "cancelled", "someday"]),
-    default="new",
+    type=click.Choice(
+        [
+            "backlog",
+            "todo",
+            "active",
+            "ready_for_review",
+            "waiting",
+            "someday",
+            "done",
+            "cancelled",
+            # Deprecated aliases (backward compatibility)
+            "new",
+            "paused",
+        ]
+    ),
+    default="backlog",
     help="Initial task state",
 )
 @click.option(
@@ -4794,6 +4810,7 @@ def transitions_cmd(output_json: bool):
                 console.print(f"  {state} [dim](terminal state)[/]")
         console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
         console.print("[dim]Alternate: active → waiting → active → done[/]")
+        console.print("[dim]Deferred:  any → someday → backlog/todo (revive when ready)[/]")
 
 
 # =============================================================================
