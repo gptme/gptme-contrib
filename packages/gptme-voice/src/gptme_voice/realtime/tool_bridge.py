@@ -18,7 +18,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,8 @@ _MAX_OUTPUT_LEN = 2000
 _IGNORABLE_ERROR_LINES = {
     "Warning: Input is not a terminal (fd=0).",
 }
+_DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
+_DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
 # Appended to each task so the subagent writes a clean response file
 _RESPONSE_SUFFIX = (
@@ -85,6 +87,7 @@ class GptmeToolBridge:
         on_result: Callable[[str], Awaitable[None]] | None = None,
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
+        transcript_provider: Callable[[], list[object]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -92,14 +95,36 @@ class GptmeToolBridge:
         self.on_result = on_result
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
+        self.transcript_provider = transcript_provider
         legacy_env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         env_model_fast = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_FAST")
         env_model_smart = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_SMART")
         self.model_fast = env_model_fast or legacy_env_model or self.MODEL_FAST
         self.model_smart = env_model_smart or legacy_env_model or self.MODEL_SMART
+        self.transcript_tail_turns = self._parse_env_int(
+            "GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_TURNS",
+            default=_DEFAULT_TRANSCRIPT_TAIL_TURNS,
+            minimum=0,
+        )
+        self.transcript_tail_chars = self._parse_env_int(
+            "GPTME_VOICE_SUBAGENT_TRANSCRIPT_TAIL_CHARS",
+            default=_DEFAULT_TRANSCRIPT_TAIL_CHARS,
+            minimum=0,
+        )
         self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
         self._completed_timings: list[dict[str, object]] = []
+
+    @staticmethod
+    def _parse_env_int(name: str, *, default: int, minimum: int = 0) -> int:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        try:
+            return max(minimum, int(value))
+        except ValueError:
+            logger.warning("%s=%r is not an integer; using %s", name, value, default)
+            return default
 
     @staticmethod
     def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
@@ -132,6 +157,75 @@ class GptmeToolBridge:
         if value is None:
             return None
         return round(max(0.0, value), 1)
+
+    @staticmethod
+    def _extract_transcript_turn(turn: object) -> tuple[str, str] | None:
+        if isinstance(turn, dict):
+            role = turn.get("role")
+            text = turn.get("text")
+        else:
+            role = getattr(turn, "role", None)
+            text = getattr(turn, "text", None)
+
+        if not isinstance(role, str) or not isinstance(text, str):
+            return None
+
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+
+        return role.strip(), cleaned
+
+    @staticmethod
+    def _truncate_transcript_line(role: str, text: str, max_chars: int) -> str:
+        prefix = f"{role.title()}: "
+        if len(prefix) + len(text) <= max_chars:
+            return prefix + text
+
+        remaining = max_chars - len(prefix)
+        if remaining <= 0:
+            return (prefix + text)[-max_chars:]
+        if remaining <= 3:
+            return prefix + text[-remaining:]
+        return prefix + "..." + text[-(remaining - 3) :]
+
+    def _build_transcript_tail(self) -> tuple[str, int] | None:
+        if (
+            self.transcript_provider is None
+            or self.transcript_tail_turns <= 0
+            or self.transcript_tail_chars <= 0
+        ):
+            return None
+
+        try:
+            raw_turns = list(self.transcript_provider() or [])
+        except Exception as exc:
+            logger.warning("Failed to fetch transcript tail for voice subagent: %s", exc)
+            return None
+
+        formatted_lines: list[str] = []
+        total_chars = 0
+        included_turns = 0
+
+        for raw_turn in reversed(raw_turns[-self.transcript_tail_turns :]):
+            turn = self._extract_transcript_turn(raw_turn)
+            if turn is None:
+                continue
+            role, text = turn
+            line = self._truncate_transcript_line(
+                role, text, self.transcript_tail_chars
+            )
+            line_chars = len(line) + (1 if formatted_lines else 0)
+            if formatted_lines and total_chars + line_chars > self.transcript_tail_chars:
+                break
+            formatted_lines.append(line)
+            total_chars += line_chars
+            included_turns += 1
+
+        if not formatted_lines:
+            return None
+
+        return "\n".join(reversed(formatted_lines)), included_turns
 
     def _timing_breakdown(
         self,
@@ -328,6 +422,7 @@ class GptmeToolBridge:
             prefix="gptme-voice-", suffix=".md", delete=False
         ) as tf:
             response_file = Path(tf.name)
+        transcript_tail_file: Path | None = None
         augmented_task = task + _RESPONSE_SUFFIX.format(response_file=response_file)
 
         model = self.model_fast if mode == "fast" else self.model_smart
@@ -346,6 +441,20 @@ class GptmeToolBridge:
         # scripts/context.sh while still giving the subagent its runtime rules.
         if model:
             cmd += ["--model", model, "--tool-format", "tool"]
+        transcript_tail = self._build_transcript_tail()
+        if transcript_tail is not None:
+            transcript_tail_text, transcript_tail_turns = transcript_tail
+            with tempfile.NamedTemporaryFile(
+                prefix="gptme-voice-transcript-", suffix=".txt", delete=False
+            ) as tf:
+                transcript_tail_file = Path(tf.name)
+                tf.write(transcript_tail_text.encode("utf-8"))
+            cmd += [
+                "--transcript-tail-turns",
+                str(transcript_tail_turns),
+                "--transcript-tail-file",
+                str(transcript_tail_file),
+            ]
         cmd.append(augmented_task)
 
         try:
@@ -447,6 +556,8 @@ class GptmeToolBridge:
             return ToolResult(success=False, output="", error=str(e))
         finally:
             response_file.unlink(missing_ok=True)
+            if transcript_tail_file is not None:
+                transcript_tail_file.unlink(missing_ok=True)
 
     def _describe_pending(self, task_id: str, entry: PendingTask) -> dict:
         description = entry.description
