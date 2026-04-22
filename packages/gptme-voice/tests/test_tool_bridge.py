@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 import pytest
 from gptme_voice.realtime.tool_bridge import GptmeToolBridge
@@ -268,6 +269,76 @@ def test_execute_smart_mode_keeps_context_loading() -> None:
         args = tuple(captured["args"])
         assert "--context" in args
         assert "files" in args
+
+    asyncio.run(_exercise())
+
+
+def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        transcript = [
+            {"role": "user", "text": "first question"},
+            {"role": "assistant", "text": "first answer"},
+            {"role": "user", "text": "second question"},
+            {"role": "assistant", "text": "second answer"},
+        ]
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            tail_file_index = args.index("--transcript-tail-file") + 1
+            captured["tail_text"] = Path(args[tail_file_index]).read_text()
+            turns_index = args.index("--transcript-tail-turns") + 1
+            captured["tail_turns"] = args[turns_index]
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace",
+                transcript_provider=lambda: transcript,
+            )
+            bridge.transcript_tail_turns = 3
+            bridge.transcript_tail_chars = 512
+            result = await bridge._execute("detailed analysis", mode="smart")
+
+        assert result.success is True
+        args = tuple(captured["args"])
+        assert "--transcript-tail-file" in args
+        assert "--transcript-tail-turns" in args
+        assert captured["tail_turns"] == "3"
+        assert captured["tail_text"] == (
+            "Assistant: first answer\n"
+            "User: second question\n"
+            "Assistant: second answer"
+        )
+
+    asyncio.run(_exercise())
+
+
+def test_execute_skips_transcript_tail_when_disabled() -> None:
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace",
+                transcript_provider=lambda: [{"role": "user", "text": "hello"}],
+            )
+            bridge.transcript_tail_turns = 0
+            result = await bridge._execute("detailed analysis", mode="smart")
+
+        assert result.success is True
+        args = tuple(captured["args"])
+        assert "--transcript-tail-file" not in args
+        assert "--transcript-tail-turns" not in args
 
     asyncio.run(_exercise())
 

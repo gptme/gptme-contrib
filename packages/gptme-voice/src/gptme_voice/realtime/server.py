@@ -908,6 +908,7 @@ class VoiceServer:
                         on_result=realtime_client.inject_message,
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
+                        transcript_provider=lambda: transcript,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -1040,6 +1041,7 @@ class VoiceServer:
                 on_result=realtime_client.inject_message,
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
+                transcript_provider=lambda: transcript,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
