@@ -61,9 +61,13 @@ class DirectoryConfig:
 
 # Deprecated state aliases - these map to their canonical state
 # Used by normalize_state() to provide backward compatibility
+#
+# Note: `someday` is intentionally NOT in this list. It is a canonical state
+# that means "deferred indefinitely, not currently actionable" and is excluded
+# from `gptodo next` / `gptodo ready` selection. This preserves the GTD
+# someday/maybe distinction so plateau-pivot decisions stick.
 DEPRECATED_STATE_ALIASES: dict[str, str] = {
     "new": "backlog",  # new → backlog (untriaged work)
-    "someday": "backlog",  # someday → backlog (deferred work)
     "paused": "backlog",  # paused → backlog (intentionally deferred)
 }
 
@@ -99,32 +103,42 @@ def normalize_state(state: str, warn: bool = True) -> str:
 
 def get_canonical_states() -> list[str]:
     """Get list of canonical (non-deprecated) task states."""
-    return ["backlog", "todo", "active", "ready_for_review", "waiting", "done", "cancelled"]
+    return [
+        "backlog",
+        "todo",
+        "active",
+        "ready_for_review",
+        "waiting",
+        "someday",
+        "done",
+        "cancelled",
+    ]
 
 
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",
         # State model (Issue #240 design + ready_for_review from Issue #255):
-        # - backlog: not triaged or intentionally deferred (consolidates new/someday/paused)
+        # - backlog: untriaged or generally available work, eligible for `next`/`ready`
         # - todo: triaged and ready to pick up
         # - active: being actively worked on
         # - ready_for_review: work done, awaiting review/verification (Issue #255)
         # - waiting: blocked on external response
+        # - someday: deferred indefinitely, NOT eligible for `next`/`ready` (GTD someday/maybe)
         # - done: completed
         # - cancelled: won't do
-        # Also accepts deprecated aliases: new, someday, paused (with warnings)
+        # Also accepts deprecated aliases: new, paused (with warnings)
         states=[
             "backlog",
             "todo",
             "active",
             "ready_for_review",  # Issue #255: review state before done
             "waiting",
+            "someday",
             "done",
             "cancelled",
             # Deprecated aliases accepted for backward compatibility
             "new",
-            "someday",
             "paused",
         ],
         special_files=["README.md", "templates", "video-scripts"],
@@ -160,6 +174,7 @@ STATE_STYLES = {
     "active": ("blue", "active"),
     "ready_for_review": ("bright_yellow", "review"),  # Issue #255
     "waiting": ("magenta", "waiting"),
+    "someday": ("dim", "someday"),  # canonical: GTD someday/maybe (excluded from next/ready)
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
     # Virtual states (computed, not stored in frontmatter)
@@ -167,7 +182,6 @@ STATE_STYLES = {
     # Deprecated task states (still accepted, mapped to canonical)
     "new": ("yellow", "new"),  # deprecated → backlog
     "paused": ("cyan", "paused"),  # deprecated → backlog
-    "someday": ("yellow", "someday"),  # deprecated → backlog
     # Tweets
     "queued": ("yellow", "queued"),
     "approved": ("blue", "approved"),
@@ -190,12 +204,12 @@ STATE_EMOJIS = {
     "active": "🏃",
     "ready_for_review": "👀",  # Issue #255: review state
     "waiting": "⏳",
+    "someday": "💭",  # canonical: GTD someday/maybe
     "done": "✅",
     "cancelled": "❌",
     # Deprecated task states (still accepted)
     "new": "🆕",  # deprecated → backlog
     "paused": "⚪",  # deprecated → backlog
-    "someday": "💭",  # deprecated → backlog
     "issues": "⚠️",
     "untracked": "❓",
     # priorities
@@ -664,7 +678,7 @@ def load_tasks(
                 issues.append("No state in frontmatter")
                 state = "backlog"  # Default state (canonical)
             else:
-                # Normalize deprecated states (new/someday/paused → backlog)
+                # Normalize deprecated states (new/paused → backlog)
                 # Note: warnings suppressed during load, validated separately
                 state = normalize_state(state, warn=False)
 
@@ -1262,7 +1276,7 @@ def fetch_linear_issue_state(identifier: str) -> str | None:
 def update_task_state(task_path: Path, new_state: str) -> bool:
     """Update task frontmatter state field.
 
-    If new_state is a deprecated alias (new, someday, paused),
+    If new_state is a deprecated alias (new, paused),
     it will be normalized to the canonical state (backlog) with a warning.
     """
     frontmatter = _get_frontmatter()

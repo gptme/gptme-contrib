@@ -93,3 +93,101 @@ def test_next_command_ignores_waiting_task_even_if_higher_priority(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["next_task"]["id"] == "ready-task"
+
+
+def test_someday_state_preserved_not_normalized(tmp_path: Path) -> None:
+    """`someday` is canonical now — must NOT be silently rewritten to backlog."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "deferred-task",
+        state="someday",
+        created="2026-04-22T00:00:00",
+    )
+
+    tasks = load_tasks(tasks_dir)
+    task_lookup = {task.name: task for task in tasks}
+
+    assert task_lookup["deferred-task"].state == "someday"
+
+
+def test_ready_excludes_someday_tasks(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo ready --state both` must skip someday tasks (GTD someday/maybe)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "deferred-task",
+        state="someday",
+        created="2026-04-22T00:00:00",
+        priority="high",
+    )
+    write_task(
+        tasks_dir,
+        "real-task",
+        state="backlog",
+        created="2026-04-22T01:00:00",
+        priority="low",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "both", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert "deferred-task" not in ids
+    assert "real-task" in ids
+
+
+def test_next_skips_someday_even_when_higher_priority(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo next` must not surface someday tasks even if priority is higher."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "deferred-task",
+        state="someday",
+        created="2026-04-22T00:00:00",
+        priority="high",
+    )
+    write_task(
+        tasks_dir,
+        "real-task",
+        state="backlog",
+        created="2026-04-22T01:00:00",
+        priority="low",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["next", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["next_task"]["id"] == "real-task"
+
+
+def test_ready_someday_explicit_query_returns_them(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo ready --state someday` returns the deferred queue for explicit review."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "deferred-task",
+        state="someday",
+        created="2026-04-22T00:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "someday", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert "deferred-task" in ids

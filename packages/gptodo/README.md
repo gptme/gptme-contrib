@@ -119,7 +119,7 @@ Task files should use frontmatter metadata:
 
 ```yaml
 ---
-state: active      # new, active, paused, done, cancelled, someday
+state: active      # backlog, todo, active, ready_for_review, waiting, someday, done, cancelled
 priority: high     # low, medium, high
 task_type: project # project (multi-step) or action (single-step)
 assigned_to: bob   # agent name
