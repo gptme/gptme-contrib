@@ -678,7 +678,7 @@ def load_tasks(
                 issues.append("No state in frontmatter")
                 state = "backlog"  # Default state (canonical)
             else:
-                # Normalize deprecated states (new/someday/paused → backlog)
+                # Normalize deprecated states (new/paused → backlog)
                 # Note: warnings suppressed during load, validated separately
                 state = normalize_state(state, warn=False)
 
@@ -1276,7 +1276,7 @@ def fetch_linear_issue_state(identifier: str) -> str | None:
 def update_task_state(task_path: Path, new_state: str) -> bool:
     """Update task frontmatter state field.
 
-    If new_state is a deprecated alias (new, someday, paused),
+    If new_state is a deprecated alias (new, paused),
     it will be normalized to the canonical state (backlog) with a warning.
     """
     frontmatter = _get_frontmatter()
