@@ -108,7 +108,7 @@ if [ "$PATHSPEC_COUNT" -eq 0 ] && [ "$ALLOW_ALL_STAGED" -ne 1 ] && [ "$ALLOW_EMP
         printf '%s\n' "$STAGED_FILES" | sed 's/^/     /' >&2
         echo "" >&2
         # Build the suggested command with the staged paths on one line.
-        STAGED_ONE_LINE="$(printf '%s\n' "$STAGED_FILES" | tr '\n' ' ' | sed 's/ $//')"
+        STAGED_ONE_LINE="$(printf '%s\n' "$STAGED_FILES" | sed 's/.*/"\&"/' | tr '\n' ' ' | sed 's/ $//')"
         echo "   To commit exactly those files:" >&2
         echo "     git-safe-commit $STAGED_ONE_LINE -m 'your message'" >&2
         echo "" >&2
