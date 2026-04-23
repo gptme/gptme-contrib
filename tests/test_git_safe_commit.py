@@ -88,6 +88,37 @@ def test_safe_commit_basic(git_repo: Path):
     assert "test: basic commit" in log.stdout
 
 
+def test_safe_commit_stages_explicit_dirty_file(git_repo: Path):
+    """Documented file-path usage should not require manual pre-staging."""
+    test_file = git_repo / "test.txt"
+    test_file.write_text("hello")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "test.txt", "-m", "test: explicit dirty file"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert "test: explicit dirty file" in log.stdout
+
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+
 def test_safe_commit_creates_lockfile(git_repo: Path):
     """Safe commit creates a lockfile in .git/ during execution."""
     test_file = git_repo / "test.txt"

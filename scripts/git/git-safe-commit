@@ -31,6 +31,7 @@ NO_VERIFY=0
 ALLOW_ALL_STAGED=0
 ALLOW_EMPTY=0
 PATHSPEC_COUNT=0
+PATHSPECS=()
 PARSE_AFTER_DASHDASH=0
 SKIP_NEXT_ARG=0
 FORWARD_ARGS=()
@@ -59,6 +60,7 @@ for arg in "$@"; do
 
     if [ "$PARSE_AFTER_DASHDASH" -eq 1 ]; then
         PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+        PATHSPECS+=("$arg")
         continue
     fi
 
@@ -82,6 +84,7 @@ for arg in "$@"; do
             ;;
         *)
             PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            PATHSPECS+=("$arg")
             ;;
     esac
 done
@@ -107,8 +110,13 @@ if [ "$PATHSPEC_COUNT" -eq 0 ] && [ "$ALLOW_ALL_STAGED" -ne 1 ] && [ "$ALLOW_EMP
         echo "   You have $STAGED_COUNT file(s) already staged:" >&2
         printf '%s\n' "$STAGED_FILES" | sed 's/^/     /' >&2
         echo "" >&2
-        # Build the suggested command with the staged paths on one line.
-        STAGED_ONE_LINE="$(printf '%s\n' "$STAGED_FILES" | sed 's/.*/"\&"/' | tr '\n' ' ' | sed 's/ $//')"
+        # Build the suggested command with shell-escaped staged paths on one line.
+        STAGED_ONE_LINE=""
+        while IFS= read -r staged_file; do
+            [ -z "$staged_file" ] && continue
+            printf -v staged_quoted '%q' "$staged_file"
+            STAGED_ONE_LINE="${STAGED_ONE_LINE:+$STAGED_ONE_LINE }$staged_quoted"
+        done <<< "$STAGED_FILES"
         echo "   To commit exactly those files:" >&2
         echo "     git-safe-commit $STAGED_ONE_LINE -m 'your message'" >&2
         echo "" >&2
@@ -214,6 +222,18 @@ check_clean_worktree_for_hooks() {
     fi
 }
 
+stage_explicit_pathspecs_for_hooks() {
+    if [ "${#PATHSPECS[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    # The documented wrapper usage is `git-safe-commit file1 file2 -m ...`.
+    # Stage those explicit paths under the commit lock so the pre-commit dirty
+    # worktree guard still blocks unrelated files without forcing callers to
+    # remember a separate `git add`.
+    git add -- "${PATHSPECS[@]}"
+}
+
 resolve_pre_commit_hook() {
     local hooks_dir hook_path
 
@@ -243,6 +263,7 @@ check_index_corruption
 
 MANUAL_PRECOMMIT_RAN=0
 if [ "$NO_VERIFY" -ne 1 ]; then
+    stage_explicit_pathspecs_for_hooks
     check_clean_worktree_for_hooks
     PRE_COMMIT_HOOK=""
     if PRE_COMMIT_HOOK="$(resolve_pre_commit_hook)"; then
