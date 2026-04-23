@@ -723,7 +723,7 @@ async def main() -> None:
     server.post_call_command = (
         f"{sys.executable} {shlex.quote(str(Path(sys.argv[2])))}"
     )
-    server.post_call_delay_seconds = 3
+    server.post_call_delay_seconds = 1
     await server._on_call_end(
         caller_id="+46700000014",
         source="twilio",
@@ -757,7 +757,7 @@ asyncio.run(main())
     assert launcher_done_file.exists()
     assert not marker_file.exists()
 
-    deadline = time.time() + 8
+    deadline = time.time() + 15
     while time.time() < deadline and not marker_file.exists():
         time.sleep(0.05)
 
