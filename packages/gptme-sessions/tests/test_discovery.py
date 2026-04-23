@@ -212,6 +212,43 @@ def test_extract_cc_model_non_dict_lines(tmp_path: Path) -> None:
     assert extract_cc_model(jsonl_file) == "claude-opus-4-6"
 
 
+def test_extract_cc_model_skips_synthetic_sentinel(tmp_path: Path) -> None:
+    """extract_cc_model treats `<synthetic>` (CC's auth-failure sentinel) as no model
+    and continues scanning for a real assistant model.
+    """
+    jsonl_file = tmp_path / "session.jsonl"
+    lines = [
+        # First assistant message is the synthetic 401 reply
+        json.dumps({"message": {"role": "assistant", "model": "<synthetic>", "content": []}}),
+        # Real model on the next assistant message
+        json.dumps({"message": {"role": "assistant", "model": "claude-opus-4-7", "content": []}}),
+    ]
+    jsonl_file.write_text("\n".join(lines) + "\n")
+    assert extract_cc_model(jsonl_file) == "claude-opus-4-7"
+
+
+def test_extract_cc_model_synthetic_only_returns_none(tmp_path: Path) -> None:
+    """All-synthetic trajectory (auth failed before any real call) returns None."""
+    jsonl_file = tmp_path / "session.jsonl"
+    lines = [
+        json.dumps({"message": {"role": "user", "content": "hi"}}),
+        json.dumps({"message": {"role": "assistant", "model": "<synthetic>", "content": []}}),
+    ]
+    jsonl_file.write_text("\n".join(lines) + "\n")
+    assert extract_cc_model(jsonl_file) is None
+
+
+def test_extract_cc_model_skips_unknown_sentinel(tmp_path: Path) -> None:
+    """`unknown` is also a sentinel — skip it like `<synthetic>`."""
+    jsonl_file = tmp_path / "session.jsonl"
+    lines = [
+        json.dumps({"message": {"role": "assistant", "model": "unknown", "content": []}}),
+        json.dumps({"message": {"role": "assistant", "model": "claude-sonnet-4-6", "content": []}}),
+    ]
+    jsonl_file.write_text("\n".join(lines) + "\n")
+    assert extract_cc_model(jsonl_file) == "claude-sonnet-4-6"
+
+
 # --- resolve_cc_session_model ---
 
 
@@ -229,6 +266,22 @@ def _write_stream_log(
     (tmp_dir / f"cc-session-log-ref-{session_id}.txt").write_text(
         str(log_path) + "\n", encoding="utf-8"
     )
+
+
+def test_resolve_cc_session_model_stream_log_synthetic_returns_none(tmp_path: Path) -> None:
+    """Stream log whose init line is `<synthetic>` (auth failed before any real
+    call) returns None — never pollutes the bandit with a sentinel arm."""
+    sid = "synthetic-stream"
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+    log_path = tmp_dir / "cc-session-syn.log"
+    _write_stream_log(
+        tmp_dir,
+        sid,
+        log_path,
+        {"type": "system", "subtype": "init", "session_id": sid, "model": "<synthetic>"},
+    )
+    assert resolve_cc_session_model(sid, tmp_dir=tmp_dir) is None
 
 
 def test_resolve_cc_session_model_from_stream_log(tmp_path: Path) -> None:

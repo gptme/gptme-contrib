@@ -21,6 +21,11 @@ DEFAULT_CC_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 DEFAULT_COPILOT_STATE_DIR = Path.home() / ".copilot" / "session-state"
 
+# CC emits these as the assistant `model` field when no real model ran
+# (e.g. authentication failure 401 → message with model="<synthetic>"),
+# so they must not be returned as the session's model.
+_SENTINEL_MODELS = frozenset({"<synthetic>", "unknown"})
+
 
 def _get_gptme_logs_dir() -> Path:
     """Get gptme logs directory from env or default."""
@@ -158,7 +163,7 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
                 msg = entry.get("message", {})
                 if isinstance(msg, dict) and msg.get("role") == "assistant":
                     model = msg.get("model")
-                    if model:
+                    if model and model not in _SENTINEL_MODELS:
                         return str(model)
     except (OSError, UnicodeDecodeError) as e:
         logger.debug("Failed to read %s for model extraction: %s", jsonl_path, e)
@@ -188,7 +193,7 @@ def _model_from_cc_stream_log(log_path: Path) -> str | None:
                 if not isinstance(obj, dict):
                     return None
                 model = obj.get("model")
-                if isinstance(model, str) and model:
+                if isinstance(model, str) and model and model not in _SENTINEL_MODELS:
                     return model
                 return None
     except (OSError, UnicodeDecodeError) as e:
