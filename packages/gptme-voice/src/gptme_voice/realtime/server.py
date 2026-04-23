@@ -282,6 +282,7 @@ class VoiceServer:
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
         self._pending_post_calls: dict[str, asyncio.Task[None]] = {}
+        self._pending_archive_records: dict[str, list[Path]] = {}
 
         # Create Starlette app
         self.app = Starlette(
@@ -535,7 +536,9 @@ class VoiceServer:
         pending_task = self._pending_post_calls.pop(caller_id, None)
         if pending_task:
             pending_task.cancel()
-            logger.info("Cancelled pending post-call follow-up for %s", caller_id)
+            logger.info(
+                "Deferred pending post-call follow-up for resumed caller %s", caller_id
+            )
 
         # Delete the resume-state file(s) so a crash-resume can't re-inject the old
         # transcript, but keep archived per-call records for post-call analysis.
@@ -556,8 +559,15 @@ class VoiceServer:
         )
         return recent_call
 
-    async def _run_post_call_command(self, caller_id: str, record_path: Path) -> None:
+    async def _run_post_call_command(
+        self, caller_id: str, record_paths: list[Path]
+    ) -> None:
         if not self.post_call_command:
+            return
+        if not record_paths:
+            logger.warning(
+                "Ignoring post-call command for %s with no records", caller_id
+            )
             return
 
         argv = shlex.split(self.post_call_command)
@@ -566,11 +576,14 @@ class VoiceServer:
             return
 
         env = os.environ.copy()
-        env["GPTME_VOICE_POST_CALL_JSON"] = str(record_path)
+        env["GPTME_VOICE_POST_CALL_JSON"] = str(record_paths[0])
+        env["GPTME_VOICE_POST_CALL_JSONS"] = json.dumps(
+            [str(path) for path in record_paths]
+        )
         env["GPTME_VOICE_CALLER_ID"] = caller_id
         process = await asyncio.create_subprocess_exec(
             *argv,
-            str(record_path),
+            *(str(path) for path in record_paths),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -605,25 +618,39 @@ class VoiceServer:
                 stdout.decode("utf-8", errors="replace").strip(),
             )
 
-    async def _schedule_post_call(self, caller_id: str, record_path: Path) -> None:
+    async def _schedule_post_call(
+        self, caller_id: str, record_paths: list[Path]
+    ) -> None:
         existing_task = self._pending_post_calls.pop(caller_id, None)
         if existing_task:
             existing_task.cancel()
 
+        deduped_record_paths = list(dict.fromkeys(record_paths))
+        if not deduped_record_paths:
+            self._pending_archive_records.pop(caller_id, None)
+            logger.warning(
+                "Ignoring post-call schedule for %s with no records", caller_id
+            )
+            return
+
+        self._pending_archive_records[caller_id] = deduped_record_paths
+
         if not self.post_call_command:
+            self._pending_archive_records.pop(caller_id, None)
             return
 
         async def _runner() -> None:
             task = asyncio.current_task()
             try:
                 await asyncio.sleep(self.post_call_delay_seconds)
-                await self._run_post_call_command(caller_id, record_path)
+                await self._run_post_call_command(caller_id, deduped_record_paths)
             except asyncio.CancelledError:
                 raise
             finally:
                 # Only remove our own entry — a newer task may have replaced us
                 if self._pending_post_calls.get(caller_id) is task:
                     self._pending_post_calls.pop(caller_id)
+                    self._pending_archive_records.pop(caller_id, None)
 
         self._pending_post_calls[caller_id] = asyncio.create_task(_runner())
 
@@ -719,7 +746,9 @@ class VoiceServer:
         )
         self._save_recent_call(record)
         record_path = self._save_call_record(record)
-        await self._schedule_post_call(caller_id, record_path)
+        pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
+        pending_record_paths.append(record_path)
+        await self._schedule_post_call(caller_id, pending_record_paths)
 
     def _get_local_caller_id(self, websocket) -> str:
         caller_id = websocket.query_params.get("caller_id")
