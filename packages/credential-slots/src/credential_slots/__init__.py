@@ -23,7 +23,7 @@ Public API::
     mgr.get_active_subscription()       # -> "bob" | None
     mgr.slot_is_fresh("bob")            # -> (True, "valid until ...")
     mgr.detect_live_slot_drift()        # -> dict | None
-    mgr.switch_to("alice", "rebalance") # -> bool
+    mgr.switch_to("alice", "rebalance") # -> SwitchResult (result.ok, result.reason, result.deferred_locks)
 """
 
 from __future__ import annotations
