@@ -17,9 +17,19 @@ check_repo() {
     local repo=$1
     local label=${2:-$repo}
 
-    # Fetch last 5 runs so we can skip disabled-workflow runs and still have fallback
+    # Scope all run queries to the default branch so feature-branch runs do not
+    # appear in the list and trigger false-positive stale annotations (a
+    # feature-branch headSha is always different from the default-branch HEAD).
+    local default_branch
+    default_branch=$(gh api "repos/$repo" --jq '.default_branch' 2>/dev/null || echo "master")
+
+    # Fetch last 5 runs on the default branch so we can skip disabled-workflow
+    # runs and still have a fallback.  headSha is needed so we can detect when
+    # the most recent run lives on an older commit than the current
+    # default-branch HEAD — a common case when path filters skip CI on
+    # journal-only / docs-only commits.
     local run_json
-    run_json=$(gh run list --repo "$repo" --limit 5 --json conclusion,status,url,name 2>/dev/null || echo "error")
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
 
     if [ "$run_json" = "error" ]; then
         echo -e "${YELLOW}-${NC} $label: No Actions"
@@ -51,15 +61,35 @@ check_repo() {
     local suffix=""
     [ -n "$in_progress" ] && suffix=" (run in progress)"
 
+    # Determine index of the run we're reporting on (1 if latest is in-progress, else 0)
+    local idx=0
+    [ -n "$in_progress" ] && idx=1
+
+    # Stale-SHA detection: if the reported run was on a commit that is no longer HEAD
+    # (e.g. because path filters skipped CI on newer commits), annotate the output so
+    # we don't treat a stale red/green as authoritative for HEAD.
+    # Skipped entirely when latest run is in-progress — caller already signaled that
+    # fresh CI is running, so "stale" would be noise.
+    local stale_suffix=""
+    if [ -z "$in_progress" ]; then
+        local run_head_sha
+        run_head_sha=$(echo "$run_json" | jq -r ".[$idx].headSha // \"\"")
+        if [ -n "$run_head_sha" ]; then
+            local current_head_sha
+            current_head_sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
+            if [ -n "$current_head_sha" ] && [ "$run_head_sha" != "$current_head_sha" ]; then
+                stale_suffix=" (stale; HEAD=${current_head_sha:0:7}, run=${run_head_sha:0:7})"
+            fi
+        fi
+    fi
+
     case "$conclusion" in
         "success")
-            echo -e "${GREEN}✓${NC} $label: Passing${suffix}"
+            echo -e "${GREEN}✓${NC} $label: Passing${suffix}${stale_suffix}"
             ;;
         "failure")
-            echo -e "${RED}✗${NC} $label: Failing${suffix}"
-            # Show URL for the failing run (index 1 if in-progress, else 0)
-            local idx=0
-            [ -n "$in_progress" ] && idx=1
+            echo -e "${RED}✗${NC} $label: Failing${suffix}${stale_suffix}"
+            # Show URL for the failing run
             local workflow_url
             workflow_url=$(echo "$run_json" | jq -r ".[$idx].url // \"\"")
             if [ -n "$workflow_url" ]; then
@@ -67,7 +97,7 @@ check_repo() {
             fi
             ;;
         "cancelled"|"skipped")
-            echo -e "${YELLOW}⚠${NC} $label: $conclusion${suffix}"
+            echo -e "${YELLOW}⚠${NC} $label: $conclusion${suffix}${stale_suffix}"
             ;;
         "")
             # No previous run to fall back on
