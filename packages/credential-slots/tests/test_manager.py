@@ -185,6 +185,26 @@ class TestGetActiveSubscription:
         mgr.live_path.write_text("{}")
         assert mgr.get_active_subscription() is None
 
+    def test_path_separator_template_resolves(self, tmp_path: Path) -> None:
+        """Slot template containing a path separator resolves to the right sub.
+
+        Regression: a name-only comparison (``live.resolve().name`` against
+        ``slot_template.format(...)``) silently returned None when the
+        template included any directory component, because the template
+        output contained the separator while the resolved target name did
+        not. The fix compares resolved paths, not string names.
+        """
+        creds_dir = tmp_path / "creds"
+        (creds_dir / "slots").mkdir(parents=True)
+        m = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["bob", "alice"],
+            slot_template="slots/{sub}.json",
+        )
+        _write_slot(m.slot_path("bob"), _ms_from_now(3600))
+        m.live_path.symlink_to("slots/bob.json")
+        assert m.get_active_subscription() == "bob"
+
 
 class TestGetAvailableSubscriptions:
     def test_empty_when_none_exist(self, mgr: SlotManager) -> None:
@@ -249,6 +269,31 @@ class TestDetectLiveSlotDrift:
         assert drift is not None
         expected_keys: set[str] = set(DriftInfo.__annotations__.keys())
         assert expected_keys.issubset(drift.keys())
+
+    def test_broken_symlink_reported_as_drift(self, mgr: SlotManager) -> None:
+        """Broken live symlink must not collapse into the 'no live file' branch.
+
+        Regression: ``Path.exists()`` returns False for broken symlinks, so
+        the prior ``if not live.exists(): return None`` silently masked a
+        broken symlink as "nothing to compare", which is indistinguishable
+        from "no live file at all". The fix: when the live path is a
+        broken symlink, report it as drift with ``live_hash=None`` so
+        callers can detect and repair the broken state.
+        """
+        # Create a broken symlink: target doesn't exist
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        assert mgr.live_path.is_symlink()
+        assert not mgr.live_path.exists()  # broken — target missing
+
+        # Seed a slot so slot_hashes are populated
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None, "broken symlink should not return None"
+        assert drift["drift"] is True
+        assert drift["matching_slot"] is None
+        assert drift["live_hash"] is None  # unreadable
+        assert "alice" in drift["slot_hashes"]
 
 
 class TestSwitchTo:

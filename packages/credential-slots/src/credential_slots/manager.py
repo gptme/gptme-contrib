@@ -213,18 +213,26 @@ class SlotManager:
     def get_active_subscription(self) -> str | None:
         """Return the slot name the live symlink points at, or None.
 
-        Resolves the symlink and checks the target filename against the
-        configured slot_template. Returns None when the live file is a
-        regular file (i.e. drift — see :meth:`detect_live_slot_drift`) or
-        doesn't match any known slot.
+        Resolves the symlink and compares against each slot's resolved
+        path. Returns None when the live file is a regular file (i.e.
+        drift — see :meth:`detect_live_slot_drift`), the symlink is
+        broken, or it doesn't match any known slot.
         """
         live = self.live_path
         if not live.is_symlink():
             return None
-        target_name = live.resolve().name
+        try:
+            target = live.resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            # Broken symlink — cannot resolve target
+            return None
         for sub in self.subscriptions:
-            if target_name == self.slot_template.format(sub=sub):
-                return sub
+            slot = self.slot_path(sub)
+            try:
+                if target == slot.resolve(strict=True):
+                    return sub
+            except (FileNotFoundError, OSError):
+                continue
         return None
 
     def get_available_subscriptions(self) -> list[str]:
@@ -265,20 +273,26 @@ class SlotManager:
     def detect_live_slot_drift(self) -> DriftInfo | None:
         """Check whether the live file matches any known slot.
 
-        Returns None when the live file doesn't exist (nothing to
-        compare). Otherwise returns a :class:`DriftInfo` with
-        ``drift=True`` when no slot hashes match, indicating that the live
-        file was written by something other than :meth:`switch_to` — most
-        commonly an operator running ``/login``.
+        Returns None when the live path doesn't exist at all (no file, no
+        symlink — nothing to compare). A broken live symlink (symlink
+        present, target missing) is reported as drift with
+        ``live_hash=None`` so callers can distinguish "no live file" from
+        "live symlink points at a deleted target" — the latter needs
+        repair, the former is a pristine state.
+
+        Otherwise returns a :class:`DriftInfo` with ``drift=True`` when no
+        slot hashes match, indicating that the live file was written by
+        something other than :meth:`switch_to` — most commonly an operator
+        running ``/login``.
         """
         live = self.live_path
+        broken_symlink = False
         if not live.exists():
-            return None
-        live_hash = _hash_file(live)
-        if live_hash is None:
-            return None
+            if live.is_symlink():
+                broken_symlink = True  # target missing — report as drift
+            else:
+                return None
         slot_hashes: dict[str, str] = {}
-        matching: str | None = None
         for sub in self.subscriptions:
             slot = self.slot_path(sub)
             if not slot.exists():
@@ -287,8 +301,21 @@ class SlotManager:
             if h is None:
                 continue
             slot_hashes[sub] = h
+        if broken_symlink:
+            return DriftInfo(
+                drift=True,
+                matching_slot=None,
+                live_hash=None,
+                slot_hashes=slot_hashes,
+            )
+        live_hash = _hash_file(live)
+        if live_hash is None:
+            return None
+        matching: str | None = None
+        for sub, h in slot_hashes.items():
             if h == live_hash and matching is None:
                 matching = sub
+                break
         return DriftInfo(
             drift=matching is None,
             matching_slot=matching,
