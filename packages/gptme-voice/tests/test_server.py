@@ -114,6 +114,41 @@ def test_build_session_bootstrap_greets_fresh_calls() -> None:
     assert "You are Bob." in bootstrap.instructions
 
 
+def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        people_dir = Path(tmpdir) / "people"
+        people_dir.mkdir()
+        (people_dir / "erik-bjareholt.md").write_text(
+            "# Erik Bjäreholt\n\nPhone: +46700000001\n"
+        )
+        server = VoiceServer(workspace=tmpdir)
+        server._instructions = "You are Bob."
+
+        bootstrap = server._build_session_bootstrap(
+            caller_id="+46700000001",
+            from_number="+46700000001",
+        )
+
+    assert bootstrap.should_greet_first is True
+    assert "Erik Bjäreholt" in bootstrap.initial_response_instructions
+    assert "Do NOT say 'thanks for calling'" in bootstrap.initial_response_instructions
+
+
+def test_build_session_bootstrap_asks_unknown_caller_to_identify() -> None:
+    server = VoiceServer()
+    server._instructions = "You are Bob."
+
+    bootstrap = server._build_session_bootstrap(
+        caller_id="+15551234567",
+        from_number="+15551234567",
+    )
+
+    assert bootstrap.should_greet_first is True
+    assert "caller is unknown" in bootstrap.initial_response_instructions
+    assert "Introduce yourself by name" in bootstrap.initial_response_instructions
+    assert "Who am I speaking to?" in bootstrap.initial_response_instructions
+
+
 def test_truncate_resume_transcript_keeps_line_boundaries() -> None:
     # Lines must exceed max_chars so truncation is actually triggered
     transcript_text = "\n".join(
