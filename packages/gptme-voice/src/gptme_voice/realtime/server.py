@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shlex
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -70,6 +71,8 @@ class RecentCallRecord:
     transcript: list[TranscriptTurn]
     metadata: dict[str, str]
     subagent_timings: list[dict[str, object]] = field(default_factory=list)
+    archive_record_paths: list[str] = field(default_factory=list)
+    pending_post_call_unit: str | None = None
 
 
 @dataclass
@@ -300,7 +303,7 @@ class VoiceServer:
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
-        self._pending_post_calls: dict[str, asyncio.Task[None]] = {}
+        self._pending_post_calls: dict[str, str] = {}
         self._pending_archive_records: dict[str, list[Path]] = {}
 
         # Create Starlette app
@@ -358,7 +361,9 @@ class VoiceServer:
             / f"{ended_at}-{milliseconds:03d}-{record.source}-{safe_identifier}.json"
         )
 
-    def _record_payload(self, record: RecentCallRecord) -> dict[str, object]:
+    def _record_payload(
+        self, record: RecentCallRecord, *, include_pending_state: bool = False
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "caller_id": record.caller_id,
             "source": record.source,
@@ -368,17 +373,37 @@ class VoiceServer:
         }
         if record.subagent_timings:
             payload["subagent_timings"] = record.subagent_timings
+        if include_pending_state and record.archive_record_paths:
+            payload["archive_record_paths"] = record.archive_record_paths
+        if include_pending_state and record.pending_post_call_unit:
+            payload["pending_post_call_unit"] = record.pending_post_call_unit
         return payload
 
-    def _write_call_record(self, path: Path, record: RecentCallRecord) -> Path:
+    def _write_call_record(
+        self,
+        path: Path,
+        record: RecentCallRecord,
+        *,
+        include_pending_state: bool = False,
+    ) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(self._record_payload(record), indent=2, sort_keys=True)
+            json.dumps(
+                self._record_payload(
+                    record, include_pending_state=include_pending_state
+                ),
+                indent=2,
+                sort_keys=True,
+            )
         )
         return path
 
     def _save_recent_call(self, record: RecentCallRecord) -> Path:
-        return self._write_call_record(self._recent_call_path(record.caller_id), record)
+        return self._write_call_record(
+            self._recent_call_path(record.caller_id),
+            record,
+            include_pending_state=True,
+        )
 
     def _save_call_record(self, record: RecentCallRecord) -> Path:
         return self._write_call_record(self._call_record_path(record), record)
@@ -402,6 +427,7 @@ class VoiceServer:
                 subagent_timings = [
                     dict(item) for item in raw_timings if isinstance(item, dict)
                 ]
+                raw_archive_paths = payload.get("archive_record_paths") or []
                 return RecentCallRecord(
                     caller_id=payload["caller_id"],
                     source=payload.get("source", "unknown"),
@@ -413,6 +439,17 @@ class VoiceServer:
                         if value is not None
                     },
                     subagent_timings=subagent_timings,
+                    archive_record_paths=[
+                        str(path)
+                        for path in raw_archive_paths
+                        if isinstance(path, str) and path.strip()
+                    ],
+                    pending_post_call_unit=(
+                        payload.get("pending_post_call_unit")
+                        if isinstance(payload.get("pending_post_call_unit"), str)
+                        and payload.get("pending_post_call_unit")
+                        else None
+                    ),
                 )
             except Exception as exc:
                 logger.warning(
@@ -420,6 +457,59 @@ class VoiceServer:
                 )
 
         return None
+
+    def _dedupe_record_paths(self, record_paths: list[Path]) -> list[Path]:
+        return list(dict.fromkeys(record_paths))
+
+    def _restore_archive_record_paths(self, raw_paths: list[str]) -> list[Path]:
+        restored_paths: list[Path] = []
+        for raw_path in raw_paths:
+            path = Path(raw_path)
+            if path.exists():
+                restored_paths.append(path)
+        return self._dedupe_record_paths(restored_paths)
+
+    def _build_post_call_unit_name(
+        self, caller_id: str, record_paths: list[Path]
+    ) -> str | None:
+        deduped_record_paths = self._dedupe_record_paths(record_paths)
+        if not deduped_record_paths:
+            return None
+
+        digest = hashlib.sha256()
+        digest.update(caller_id.encode("utf-8"))
+        for record_path in deduped_record_paths:
+            digest.update(b"\0")
+            digest.update(str(record_path).encode("utf-8"))
+        return f"gptme-voice-post-call-{digest.hexdigest()[:12]}"
+
+    def _cancel_post_call_schedule(self, unit_name: str | None) -> None:
+        if not unit_name:
+            return
+
+        units = (f"{unit_name}.timer", f"{unit_name}.service")
+        for action in ("stop", "reset-failed"):
+            for unit in units:
+                result = subprocess.run(
+                    ["systemctl", "--user", action, unit],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    continue
+
+                stderr = (result.stderr or "").strip().lower()
+                if "not loaded" in stderr or "not found" in stderr:
+                    continue
+
+                logger.warning(
+                    "Failed to %s pending post-call unit %s: exit=%s stderr=%s",
+                    action,
+                    unit,
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
 
     def _parse_state_timestamp(self, value: object) -> float | None:
         if not isinstance(value, str) or not value.strip():
@@ -491,7 +581,7 @@ class VoiceServer:
         logger.info("Consumed handoff bootstrap %s from %s", handoff_id, path)
         return resume_context
 
-    def _build_session_bootstrap(
+    async def _build_session_bootstrap(
         self,
         *,
         caller_id: str | None,
@@ -511,7 +601,7 @@ class VoiceServer:
                 should_greet_first=False,
             )
 
-        recent_call = self._consume_recent_call(caller_id)
+        recent_call = await self._consume_recent_call(caller_id)
         if recent_call:
             return SessionBootstrap(
                 instructions=_build_resume_instructions(
@@ -531,20 +621,24 @@ class VoiceServer:
             ),
         )
 
-    def _build_session_instructions(
+    async def _build_session_instructions(
         self,
         *,
         caller_id: str | None,
         from_number: str = "",
         handoff_id: str | None = None,
     ) -> str:
-        return self._build_session_bootstrap(
-            caller_id=caller_id,
-            from_number=from_number,
-            handoff_id=handoff_id,
+        return (
+            await self._build_session_bootstrap(
+                caller_id=caller_id,
+                from_number=from_number,
+                handoff_id=handoff_id,
+            )
         ).instructions
 
-    def _consume_recent_call(self, caller_id: str | None) -> RecentCallRecord | None:
+    async def _consume_recent_call(
+        self, caller_id: str | None
+    ) -> RecentCallRecord | None:
         if not caller_id:
             return None
 
@@ -556,12 +650,26 @@ class VoiceServer:
         if age_seconds > self.resume_window_seconds:
             return None
 
-        pending_task = self._pending_post_calls.pop(caller_id, None)
-        if pending_task:
-            pending_task.cancel()
+        pending_unit = (
+            self._pending_post_calls.pop(caller_id, None)
+            or recent_call.pending_post_call_unit
+        )
+        if pending_unit:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._cancel_post_call_schedule, pending_unit
+            )
             logger.info(
                 "Deferred pending post-call follow-up for resumed caller %s", caller_id
             )
+
+        restored_archive_paths = self._restore_archive_record_paths(
+            recent_call.archive_record_paths
+        )
+        if restored_archive_paths:
+            self._pending_archive_records[caller_id] = restored_archive_paths
+        else:
+            self._pending_archive_records.pop(caller_id, None)
 
         # Delete the resume-state file(s) so a crash-resume can't re-inject the old
         # transcript, but keep archived per-call records for post-call analysis.
@@ -583,7 +691,12 @@ class VoiceServer:
         return recent_call
 
     async def _run_post_call_command(
-        self, caller_id: str, record_paths: list[Path]
+        self,
+        caller_id: str,
+        record_paths: list[Path],
+        *,
+        delay_seconds: int = 0,
+        unit_name: str | None = None,
     ) -> None:
         if not self.post_call_command:
             return
@@ -604,6 +717,10 @@ class VoiceServer:
             [str(path) for path in record_paths]
         )
         env["GPTME_VOICE_CALLER_ID"] = caller_id
+        if delay_seconds > 0:
+            env["GPTME_VOICE_POST_CALL_DELAY_SECONDS"] = str(delay_seconds)
+        if unit_name:
+            env["GPTME_VOICE_POST_CALL_UNIT_NAME"] = unit_name
         process = await asyncio.create_subprocess_exec(
             *argv,
             *(str(path) for path in record_paths),
@@ -644,11 +761,14 @@ class VoiceServer:
     async def _schedule_post_call(
         self, caller_id: str, record_paths: list[Path]
     ) -> None:
-        existing_task = self._pending_post_calls.pop(caller_id, None)
-        if existing_task:
-            existing_task.cancel()
+        existing_unit = self._pending_post_calls.pop(caller_id, None)
+        if existing_unit:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._cancel_post_call_schedule, existing_unit
+            )
 
-        deduped_record_paths = list(dict.fromkeys(record_paths))
+        deduped_record_paths = self._dedupe_record_paths(record_paths)
         if not deduped_record_paths:
             self._pending_archive_records.pop(caller_id, None)
             logger.warning(
@@ -659,23 +779,41 @@ class VoiceServer:
         self._pending_archive_records[caller_id] = deduped_record_paths
 
         if not self.post_call_command:
+            self._pending_post_calls.pop(caller_id, None)
             self._pending_archive_records.pop(caller_id, None)
             return
 
-        async def _runner() -> None:
-            task = asyncio.current_task()
-            try:
-                await asyncio.sleep(self.post_call_delay_seconds)
-                await self._run_post_call_command(caller_id, deduped_record_paths)
-            except asyncio.CancelledError:
-                raise
-            finally:
-                # Only remove our own entry — a newer task may have replaced us
-                if self._pending_post_calls.get(caller_id) is task:
-                    self._pending_post_calls.pop(caller_id)
-                    self._pending_archive_records.pop(caller_id, None)
+        unit_name = self._build_post_call_unit_name(caller_id, deduped_record_paths)
+        if unit_name:
+            self._pending_post_calls[caller_id] = unit_name
 
-        self._pending_post_calls[caller_id] = asyncio.create_task(_runner())
+        if self.post_call_delay_seconds > 0:
+            logger.info(
+                "Post-call delay of %ds for %s is delegated to the external command "
+                "via GPTME_VOICE_POST_CALL_DELAY_SECONDS; the server no longer enforces it directly",
+                self.post_call_delay_seconds,
+                caller_id,
+            )
+
+        # Cap the dispatch command at 30s so a hung systemd-run can't stall _on_call_end
+        # indefinitely. The dispatch command (e.g. post-call-dispatch.sh) is expected to exit
+        # in <1s after scheduling a systemd timer, not after the full post-call delay.
+        try:
+            await asyncio.wait_for(
+                self._run_post_call_command(
+                    caller_id,
+                    deduped_record_paths,
+                    delay_seconds=self.post_call_delay_seconds,
+                    unit_name=unit_name,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Post-call dispatch command timed out after 30s for %s — "
+                "follow-up may not have been scheduled",
+                caller_id,
+            )
 
     def _make_handoff_callback(
         self,
@@ -767,11 +905,16 @@ class VoiceServer:
             metadata={k: v for k, v in metadata.items() if v},
             subagent_timings=subagent_timings,
         )
-        self._save_recent_call(record)
         record_path = self._save_call_record(record)
         pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
         pending_record_paths.append(record_path)
-        await self._schedule_post_call(caller_id, pending_record_paths)
+        deduped_record_paths = self._dedupe_record_paths(pending_record_paths)
+        record.archive_record_paths = [str(path) for path in deduped_record_paths]
+        record.pending_post_call_unit = self._build_post_call_unit_name(
+            caller_id, deduped_record_paths
+        )
+        self._save_recent_call(record)
+        await self._schedule_post_call(caller_id, deduped_record_paths)
 
     def _get_local_caller_id(self, websocket) -> str:
         caller_id = websocket.query_params.get("caller_id")
@@ -897,7 +1040,7 @@ class VoiceServer:
                     from_number = custom_params.get("from_number", "")
                     handoff_id = custom_params.get("handoff_id") or None
                     caller_id = from_number or call_sid or stream_sid
-                    bootstrap = self._build_session_bootstrap(
+                    bootstrap = await self._build_session_bootstrap(
                         caller_id=caller_id,
                         from_number=from_number,
                         handoff_id=handoff_id,
@@ -1052,7 +1195,7 @@ class VoiceServer:
         transcript: list[TranscriptTurn] = []
 
         try:
-            instructions = self._build_session_instructions(
+            instructions = await self._build_session_instructions(
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )

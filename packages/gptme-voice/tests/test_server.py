@@ -5,6 +5,8 @@ import os
 import shlex
 import sys
 import tempfile
+import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -104,9 +106,11 @@ def test_build_session_bootstrap_greets_fresh_calls() -> None:
     server = VoiceServer()
     server._instructions = "You are Bob."
 
-    bootstrap = server._build_session_bootstrap(
-        caller_id="+46700000011",
-        from_number="+46700000011",
+    bootstrap = asyncio.run(
+        server._build_session_bootstrap(
+            caller_id="+46700000011",
+            from_number="+46700000011",
+        )
     )
 
     assert bootstrap.should_greet_first is True
@@ -124,9 +128,11 @@ def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
         server = VoiceServer(workspace=tmpdir)
         server._instructions = "You are Bob."
 
-        bootstrap = server._build_session_bootstrap(
-            caller_id="+46700000001",
-            from_number="+46700000001",
+        bootstrap = asyncio.run(
+            server._build_session_bootstrap(
+                caller_id="+46700000001",
+                from_number="+46700000001",
+            )
         )
 
     assert bootstrap.should_greet_first is True
@@ -138,9 +144,11 @@ def test_build_session_bootstrap_asks_unknown_caller_to_identify() -> None:
     server = VoiceServer()
     server._instructions = "You are Bob."
 
-    bootstrap = server._build_session_bootstrap(
-        caller_id="+15551234567",
-        from_number="+15551234567",
+    bootstrap = asyncio.run(
+        server._build_session_bootstrap(
+            caller_id="+15551234567",
+            from_number="+15551234567",
+        )
     )
 
     assert bootstrap.should_greet_first is True
@@ -184,7 +192,7 @@ def test_recent_call_is_consumed_within_resume_window() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            resumed = server._consume_recent_call("+46700000001")
+            resumed = asyncio.run(server._consume_recent_call("+46700000001"))
 
         assert resumed is not None
         assert resumed.caller_id == "+46700000001"
@@ -208,7 +216,9 @@ def test_build_session_bootstrap_skips_greeting_for_recent_resume() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            bootstrap = server._build_session_bootstrap(caller_id=record.caller_id)
+            bootstrap = asyncio.run(
+                server._build_session_bootstrap(caller_id=record.caller_id)
+            )
 
         assert bootstrap.should_greet_first is False
         assert "reconnected after a brief disconnect" in bootstrap.instructions
@@ -231,7 +241,7 @@ def test_recent_call_is_ignored_outside_resume_window() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_400.1)
-            resumed = server._consume_recent_call("+46700000001")
+            resumed = asyncio.run(server._consume_recent_call("+46700000001"))
 
         assert resumed is None
 
@@ -258,9 +268,11 @@ def test_consume_handoff_bootstrap_returns_resume_context_and_deletes_file() -> 
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_200.0)
-            instructions = server._build_session_instructions(
-                caller_id="+46700000007",
-                handoff_id="handoff-123",
+            instructions = asyncio.run(
+                server._build_session_instructions(
+                    caller_id="+46700000007",
+                    handoff_id="handoff-123",
+                )
             )
 
         assert "bob transferred this caller to alice." in instructions
@@ -299,9 +311,11 @@ def test_stale_handoff_bootstrap_falls_back_to_recent_call_resume() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_600.0)
-            instructions = server._build_session_instructions(
-                caller_id=record.caller_id,
-                handoff_id="handoff-stale",
+            instructions = asyncio.run(
+                server._build_session_instructions(
+                    caller_id=record.caller_id,
+                    handoff_id="handoff-stale",
+                )
             )
 
         assert "Resume the old call" in instructions
@@ -326,19 +340,27 @@ def test_schedule_post_call_runs_configured_command_hook() -> None:
             record_path = server._save_call_record(record)
             observed: dict[str, object] = {}
 
-            async def _fake_run_post_call(caller_id: str, paths: list[Path]) -> None:
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
                 observed["caller_id"] = caller_id
                 observed["paths"] = [str(path) for path in paths]
+                observed["delay_seconds"] = delay_seconds
+                observed["unit_name"] = unit_name
 
             server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
 
             await server._schedule_post_call(record.caller_id, [record_path])
-            task = server._pending_post_calls[record.caller_id]
-            await task
 
             assert observed == {
                 "caller_id": "+46700000001",
                 "paths": [str(record_path)],
+                "delay_seconds": 0,
+                "unit_name": server._pending_post_calls[record.caller_id],
             }
 
     asyncio.run(_exercise())
@@ -394,7 +416,7 @@ def test_consume_recent_call_deletes_state_file() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            server._consume_recent_call("+46700000002")
+            asyncio.run(server._consume_recent_call("+46700000002"))
 
         assert not state_path.exists()
 
@@ -416,7 +438,7 @@ def test_consume_recent_call_keeps_archived_record() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            server._consume_recent_call(record.caller_id)
+            asyncio.run(server._consume_recent_call(record.caller_id))
 
         assert archived_path.exists()
         payload = json.loads(archived_path.read_text())
@@ -431,6 +453,19 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
             server.resume_window_seconds = 300
             server.post_call_command = "run-post-call"
             server.post_call_delay_seconds = 1_000
+            cancelled_units: list[str] = []
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                return None
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+            server._cancel_post_call_schedule = cancelled_units.append  # type: ignore[method-assign]
 
             first = RecentCallRecord(
                 caller_id="+46700000010",
@@ -440,17 +475,18 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
                 metadata={"call_sid": "CAfirst"},
             )
             first_path = server._save_call_record(first)
-            server._save_recent_call(first)
             await server._schedule_post_call(first.caller_id, [first_path])
-            first_task = server._pending_post_calls[first.caller_id]
+            first_unit = server._pending_post_calls[first.caller_id]
+            first.archive_record_paths = [str(first_path)]
+            first.pending_post_call_unit = first_unit
+            server._save_recent_call(first)
 
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-                resumed = server._consume_recent_call(first.caller_id)
-            await asyncio.sleep(0)
+                resumed = await server._consume_recent_call(first.caller_id)
 
             assert resumed is not None
-            assert first_task.cancelled()
+            assert cancelled_units == [first_unit]
             assert server._pending_archive_records[first.caller_id] == [first_path]
 
             second = RecentCallRecord(
@@ -467,8 +503,7 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
                 first_path,
                 second_path,
             ]
-
-            server._pending_post_calls[first.caller_id].cancel()
+            assert server._pending_post_calls[first.caller_id] != first_unit
 
     asyncio.run(_exercise())
 
@@ -508,16 +543,30 @@ def test_save_call_record_uses_unique_archive_path_per_call() -> None:
         )
 
 
-def test_schedule_post_call_runner_finally_does_not_evict_newer_task() -> None:
-    """P1 fix: cancelling an old _runner task must not pop the newer task
-    that replaced it in _pending_post_calls."""
+def test_schedule_post_call_replaces_existing_timer_unit() -> None:
+    """Rescheduling a caller should cancel the old transient timer and keep the new one."""
 
     async def _exercise() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             server = VoiceServer()
             server.state_dir = Path(tmpdir)
             server.post_call_command = "run-post-call"
-            server.post_call_delay_seconds = 1_000  # effectively never fires
+            server.post_call_delay_seconds = 1_000
+            cancelled_units: list[str] = []
+            scheduled_units: list[str] = []
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                if unit_name is not None:
+                    scheduled_units.append(unit_name)
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+            server._cancel_post_call_schedule = cancelled_units.append  # type: ignore[method-assign]
 
             record = RecentCallRecord(
                 caller_id="+46700000003",
@@ -526,27 +575,206 @@ def test_schedule_post_call_runner_finally_does_not_evict_newer_task() -> None:
                 transcript=[],
                 metadata={},
             )
-            record_path = server._save_recent_call(record)
+            record_path = server._save_call_record(record)
+            second_path = server._save_call_record(
+                RecentCallRecord(
+                    caller_id=record.caller_id,
+                    source="twilio",
+                    ended_at=1_001.0,
+                    transcript=[],
+                    metadata={},
+                )
+            )
 
-            # Schedule first task (long sleep — won't complete naturally)
             await server._schedule_post_call(record.caller_id, [record_path])
-            first_task = server._pending_post_calls[record.caller_id]
+            first_unit = server._pending_post_calls[record.caller_id]
 
-            # Schedule second task — cancels first and registers itself
-            await server._schedule_post_call(record.caller_id, [record_path])
-            second_task = server._pending_post_calls[record.caller_id]
+            await server._schedule_post_call(
+                record.caller_id, [record_path, second_path]
+            )
+            second_unit = server._pending_post_calls[record.caller_id]
 
-            # Wait for the first task's finally-block to run
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-
-            # The second task must still be registered
-            assert server._pending_post_calls.get(record.caller_id) is second_task
-            assert first_task.cancelled()
-
-            second_task.cancel()
+            assert cancelled_units == [first_unit]
+            assert second_unit != first_unit
+            assert scheduled_units == [first_unit, second_unit]
+            assert server._pending_post_calls.get(record.caller_id) == second_unit
 
     asyncio.run(_exercise())
+
+
+def test_consume_recent_call_restores_pending_schedule_after_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first_server = VoiceServer()
+        first_server.state_dir = Path(tmpdir)
+        record = RecentCallRecord(
+            caller_id="+46700000012",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="Restart-safe resume")],
+            metadata={"call_sid": "CArestart"},
+        )
+        record_path = first_server._save_call_record(record)
+        record.archive_record_paths = [str(record_path)]
+        record.pending_post_call_unit = "gptme-voice-post-call-restart"
+        first_server._save_recent_call(record)
+
+        second_server = VoiceServer()
+        second_server.state_dir = Path(tmpdir)
+        cancelled_units: list[str] = []
+        second_server._cancel_post_call_schedule = cancelled_units.append  # type: ignore[method-assign]
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+            resumed = asyncio.run(second_server._consume_recent_call(record.caller_id))
+
+        assert resumed is not None
+        assert cancelled_units == ["gptme-voice-post-call-restart"]
+        assert second_server._pending_archive_records[record.caller_id] == [record_path]
+
+
+def test_on_call_end_persists_pending_post_call_state() -> None:
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.post_call_command = "run-post-call"
+            server.post_call_delay_seconds = 300
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                return None
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+
+            await server._on_call_end(
+                caller_id="+46700000013",
+                source="twilio",
+                transcript=[TranscriptTurn(role="user", text="Persist the chain")],
+                metadata={"call_sid": "CApersist"},
+            )
+
+            recent = server._load_recent_call("+46700000013")
+            assert recent is not None
+            assert len(recent.archive_record_paths) == 1
+            assert (
+                recent.pending_post_call_unit
+                == server._pending_post_calls["+46700000013"]
+            )
+            assert Path(recent.archive_record_paths[0]).exists()
+
+    asyncio.run(_exercise())
+
+
+def test_post_call_schedule_survives_scheduler_process_exit(tmp_path: Path) -> None:
+    marker_file = tmp_path / "post-call-fired.txt"
+    launcher_done_file = tmp_path / "launcher-done.txt"
+    wrapper_path = tmp_path / "fake_post_call_wrapper.py"
+    launcher_path = tmp_path / "schedule_call.py"
+
+    wrapper_path.write_text(
+        textwrap.dedent(
+            """\
+import os
+import subprocess
+import sys
+
+delay_seconds = float(os.environ.get("GPTME_VOICE_POST_CALL_DELAY_SECONDS", "0"))
+marker_path = os.environ["MARKER_FILE"]
+launcher_done_path = os.environ["LAUNCHER_DONE_FILE"]
+record_path = sys.argv[1]
+payload = os.environ.get("GPTME_VOICE_POST_CALL_UNIT_NAME", record_path)
+child_code = '''
+import pathlib
+import sys
+import time
+
+done_path = pathlib.Path(sys.argv[1])
+while not done_path.exists():
+    time.sleep(0.05)
+time.sleep(float(sys.argv[2]))
+pathlib.Path(sys.argv[3]).write_text(sys.argv[4])
+'''
+subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        child_code,
+        launcher_done_path,
+        str(delay_seconds),
+        marker_path,
+        payload,
+    ],
+    close_fds=True,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+"""
+        )
+    )
+
+    launcher_path.write_text(
+        textwrap.dedent(
+            """\
+import asyncio
+import shlex
+import sys
+from pathlib import Path
+
+from gptme_voice.realtime.server import TranscriptTurn, VoiceServer
+
+async def main() -> None:
+    server = VoiceServer()
+    server.state_dir = Path(sys.argv[1])
+    server.post_call_command = (
+        f"{sys.executable} {shlex.quote(str(Path(sys.argv[2])))}"
+    )
+    server.post_call_delay_seconds = 1
+    await server._on_call_end(
+        caller_id="+46700000014",
+        source="twilio",
+        transcript=[TranscriptTurn(role="user", text="Stay durable")],
+        metadata={"call_sid": "CAsubprocess"},
+    )
+    Path(sys.argv[3]).write_text("done")
+
+asyncio.run(main())
+"""
+        )
+    )
+
+    env = os.environ.copy()
+    env["MARKER_FILE"] = str(marker_file)
+    env["LAUNCHER_DONE_FILE"] = str(launcher_done_file)
+    result = os.spawnve(
+        os.P_WAIT,
+        sys.executable,
+        [
+            sys.executable,
+            str(launcher_path),
+            str(tmp_path),
+            str(wrapper_path),
+            str(launcher_done_file),
+        ],
+        env,
+    )
+
+    assert result == 0
+    assert launcher_done_file.exists()
+    assert not marker_file.exists()
+
+    deadline = time.time() + 15
+    while time.time() < deadline and not marker_file.exists():
+        time.sleep(0.05)
+
+    assert marker_file.exists()
+    assert marker_file.read_text().startswith("gptme-voice-post-call-")
 
 
 def test_cancelled_post_call_command_terminates_subprocess() -> None:
