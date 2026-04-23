@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -313,8 +314,10 @@ class SlotManager:
         - If the target slot is expired or unreadable, the switch is
           refused **regardless of** ``force`` — landing on a known-bad
           credential just moves the 401 crash loop to the next run.
-        - On success, replaces the existing symlink atomically
-          (``unlink`` then ``symlink_to``) and calls ``on_switch``.
+        - On success, replaces the existing symlink atomically via a
+          temp-symlink + ``os.replace`` (single rename syscall) so no
+          concurrent reader sees a missing ``live_path``, then calls
+          ``on_switch``.
 
         Returns a :class:`SwitchResult`. Callers decide whether to surface
         ``reason`` via print / logging / telemetry.
@@ -347,8 +350,13 @@ class SlotManager:
             return SwitchResult(ok=False, reason=msg)
 
         live = self.live_path
-        live.unlink(missing_ok=True)
-        live.symlink_to(self.slot_template.format(sub=sub))
+        tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
+        try:
+            tmp.symlink_to(self.slot_template.format(sub=sub))
+            os.replace(tmp, live)  # atomic rename — no window where live_path is absent
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
         if self.on_switch is not None:
             self.on_switch(sub, reason)
