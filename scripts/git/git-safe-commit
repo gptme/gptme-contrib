@@ -92,11 +92,35 @@ if [ "$PATHSPEC_COUNT" -eq 0 ] && [ "$ALLOW_ALL_STAGED" -ne 1 ] && [ "$ALLOW_EMP
     echo "   Use explicit file paths with git-safe-commit so concurrent sessions" >&2
     echo "   can't accidentally commit unrelated staged changes." >&2
     echo "" >&2
-    echo "   If you intentionally want the entire staged set, rerun with:" >&2
-    echo "     git-safe-commit --all-staged -m 'your message'" >&2
-    echo "" >&2
-    echo "   Safer default:" >&2
-    echo "     git-safe-commit <file1> <file2> -m 'your message'" >&2
+
+    # If the caller already staged specific files, show them and a ready-to-copy
+    # command. This turns the most common "git add X && git-safe-commit -m ..."
+    # antipattern into a one-step fix.
+    STAGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
+    STAGED_COUNT=0
+    if [ -n "$STAGED_FILES" ]; then
+        STAGED_COUNT=$(printf '%s\n' "$STAGED_FILES" | grep -c '^' || echo 0)
+    fi
+    STAGED_SUGGEST_CAP=20
+
+    if [ "$STAGED_COUNT" -gt 0 ] && [ "$STAGED_COUNT" -le "$STAGED_SUGGEST_CAP" ]; then
+        echo "   You have $STAGED_COUNT file(s) already staged:" >&2
+        printf '%s\n' "$STAGED_FILES" | sed 's/^/     /' >&2
+        echo "" >&2
+        # Build the suggested command with the staged paths on one line.
+        STAGED_ONE_LINE="$(printf '%s\n' "$STAGED_FILES" | tr '\n' ' ' | sed 's/ $//')"
+        echo "   To commit exactly those files:" >&2
+        echo "     git-safe-commit $STAGED_ONE_LINE -m 'your message'" >&2
+        echo "" >&2
+        echo "   Or, to commit the entire staged set regardless:" >&2
+        echo "     git-safe-commit --all-staged -m 'your message'" >&2
+    else
+        echo "   If you intentionally want the entire staged set, rerun with:" >&2
+        echo "     git-safe-commit --all-staged -m 'your message'" >&2
+        echo "" >&2
+        echo "   Safer default:" >&2
+        echo "     git-safe-commit <file1> <file2> -m 'your message'" >&2
+    fi
     echo "" >&2
     exit 1
 fi
