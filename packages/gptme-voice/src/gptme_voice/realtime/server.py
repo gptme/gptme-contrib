@@ -48,11 +48,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RESUME_WINDOW_SECONDS = 300
 _DEFAULT_STATE_DIR = "/tmp/gptme-voice-call-state"
 _MAX_RESUME_TRANSCRIPT_CHARS = 2500
-_INITIAL_TWILIO_GREETING_INSTRUCTIONS = (
-    "A fresh inbound phone call has just connected. "
-    "Greet the caller briefly in one sentence, use their name if you know it, "
-    "then stop and wait for them to speak."
-)
 
 # Delay before actually closing the WebSocket after the model requests hangup,
 # so the goodbye utterance has time to reach the caller.
@@ -81,21 +76,10 @@ class RecentCallRecord:
 class SessionBootstrap:
     instructions: str
     should_greet_first: bool = False
+    initial_response_instructions: str = ""
 
 
-def _build_caller_instructions(
-    base_instructions: str, from_number: str, workspace: str | None
-) -> str:
-    """Prepend caller-identity context to session instructions.
-
-    Looks up the caller's phone number in the workspace people/ directory to
-    find a name.  Falls back to the raw phone number so the agent at least
-    knows who is calling instead of being blind.
-    """
-    if not from_number:
-        return base_instructions
-
-    caller_name: str | None = None
+def _lookup_caller_name(from_number: str, workspace: str | None) -> str | None:
     if workspace:
         people_dir = Path(workspace) / "people"
         if people_dir.is_dir():
@@ -112,10 +96,25 @@ def _build_caller_instructions(
                             ),
                             None,
                         )
-                        caller_name = first_h1 or md_file.stem.replace("-", " ").title()
-                        break
+                        return first_h1 or md_file.stem.replace("-", " ").title()
                 except Exception:
                     pass
+    return None
+
+
+def _build_caller_instructions(
+    base_instructions: str, from_number: str, workspace: str | None
+) -> str:
+    """Prepend caller-identity context to session instructions.
+
+    Looks up the caller's phone number in the workspace people/ directory to
+    find a name.  Falls back to the raw phone number so the agent at least
+    knows who is calling instead of being blind.
+    """
+    if not from_number:
+        return base_instructions
+
+    caller_name = _lookup_caller_name(from_number, workspace)
 
     if caller_name:
         caller_ctx = (
@@ -130,6 +129,26 @@ def _build_caller_instructions(
         )
 
     return f"{caller_ctx}\n\n{base_instructions}"
+
+
+def _build_fresh_call_greeting_instructions(
+    from_number: str, workspace: str | None
+) -> str:
+    caller_name = _lookup_caller_name(from_number, workspace) if from_number else None
+    if caller_name:
+        return (
+            f"The caller is {caller_name}. Greet them by name in one short sentence, "
+            f"for example 'Hi {caller_name}' or 'Hey {caller_name}, what's up?'. "
+            "Do NOT say 'thanks for calling' or use other stock phone greetings. "
+            "Then stop and wait for them to speak."
+        )
+
+    return (
+        "A fresh inbound phone call has just connected and the caller is unknown. "
+        "Introduce yourself by name, then ask exactly: 'Who am I speaking to?' "
+        "Do NOT say 'thanks for calling' or use other stock phone greetings. "
+        "Then stop and wait for them to answer."
+    )
 
 
 def _append_transcript_turn(
@@ -506,6 +525,10 @@ class VoiceServer:
         return SessionBootstrap(
             instructions=instructions,
             should_greet_first=True,
+            initial_response_instructions=_build_fresh_call_greeting_instructions(
+                from_number,
+                self.workspace,
+            ),
         )
 
     def _build_session_instructions(
@@ -881,7 +904,7 @@ class VoiceServer:
                     )
                     instructions = bootstrap.instructions
                     initial_response_instructions = (
-                        _INITIAL_TWILIO_GREETING_INSTRUCTIONS
+                        bootstrap.initial_response_instructions
                         if bootstrap.should_greet_first
                         else ""
                     )
