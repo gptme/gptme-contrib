@@ -162,6 +162,49 @@ def test_safe_commit_requires_explicit_paths_or_all_staged(git_repo: Path):
     assert "--all-staged" in result.stderr
 
 
+def test_safe_commit_error_shows_staged_files_as_concrete_hint(git_repo: Path):
+    """When refusing an implicit commit, show staged files + a ready-to-copy command."""
+    (git_repo / "test.txt").write_text("hello")
+    (git_repo / "other.txt").write_text("world")
+    subprocess.run(
+        ["git", "add", "test.txt", "other.txt"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "-m", "test: implicit all staged blocked"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    # Lists the staged files so the user sees what they almost committed.
+    assert "test.txt" in result.stderr
+    assert "other.txt" in result.stderr
+    # Shows a concrete copy-paste-ready git-safe-commit invocation; git sorts
+    # the staged paths alphabetically.
+    assert "git-safe-commit other.txt test.txt" in result.stderr
+    # The existing --all-staged hint is still available as a fallback.
+    assert "--all-staged" in result.stderr
+
+
+def test_safe_commit_error_without_staged_files_keeps_generic_hint(git_repo: Path):
+    """With nothing staged, the error still shows the generic --all-staged fallback."""
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "-m", "test: no paths, nothing staged"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "implicit whole-index commit" in result.stderr.lower()
+    assert "--all-staged" in result.stderr
+
+
 def test_safe_commit_allows_explicit_all_staged_opt_in(git_repo: Path):
     """Intentional whole-index commits require the explicit --all-staged flag."""
     (git_repo / "test.txt").write_text("hello")
