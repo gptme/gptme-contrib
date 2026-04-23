@@ -394,6 +394,23 @@ class TestSwitchTo:
         mgr.switch_to("alice", "revert")
         assert mgr.get_active_subscription() == "alice"
 
+    def test_unknown_subscription_rejected(self, mgr: SlotManager) -> None:
+        """switch_to must refuse subs not in self.subscriptions.
+
+        Without this guard, a successful switch to an off-list name leaves
+        get_active_subscription() returning None — violating the invariant
+        that a successful switch is observable via the inverse call.
+        """
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        # Seed a slot file for an unregistered sub so the freshness check
+        # would otherwise pass — this isolates the guard as the rejection reason.
+        _write_slot(mgr.slot_path("gordon"), _ms_from_now(3600))
+        result = mgr.switch_to("gordon", "rebalance")
+        assert result.ok is False
+        assert "unknown" in result.reason.lower()
+        # Live symlink unchanged — still points at the initial alice slot.
+        assert mgr.get_active_subscription() == "alice"
+
 
 class TestSwitchResult:
     """Shape of :class:`SwitchResult`."""

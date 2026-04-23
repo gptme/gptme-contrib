@@ -349,6 +349,11 @@ class SlotManager:
         Returns a :class:`SwitchResult`. Callers decide whether to surface
         ``reason`` via print / logging / telemetry.
         """
+        if sub not in self.subscriptions:
+            msg = f"unknown subscription: {sub!r} (known: {self.subscriptions})"
+            self._log(msg)
+            return SwitchResult(ok=False, reason=msg)
+
         if not force and self.lock_guard is not None:
             active_locks = list(self.lock_guard())
             if active_locks:
