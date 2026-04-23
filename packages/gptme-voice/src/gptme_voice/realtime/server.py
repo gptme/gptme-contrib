@@ -777,12 +777,33 @@ class VoiceServer:
         if unit_name:
             self._pending_post_calls[caller_id] = unit_name
 
-        await self._run_post_call_command(
-            caller_id,
-            deduped_record_paths,
-            delay_seconds=self.post_call_delay_seconds,
-            unit_name=unit_name,
-        )
+        if self.post_call_delay_seconds > 0:
+            logger.info(
+                "Post-call delay of %ds for %s is delegated to the external command "
+                "via GPTME_VOICE_POST_CALL_DELAY_SECONDS; the server no longer enforces it directly",
+                self.post_call_delay_seconds,
+                caller_id,
+            )
+
+        # Cap the dispatch command at 30s so a hung systemd-run can't stall _on_call_end
+        # indefinitely. The dispatch command (e.g. post-call-dispatch.sh) is expected to exit
+        # in <1s after scheduling a systemd timer, not after the full post-call delay.
+        try:
+            await asyncio.wait_for(
+                self._run_post_call_command(
+                    caller_id,
+                    deduped_record_paths,
+                    delay_seconds=self.post_call_delay_seconds,
+                    unit_name=unit_name,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Post-call dispatch command timed out after 30s for %s — "
+                "follow-up may not have been scheduled",
+                caller_id,
+            )
 
     def _make_handoff_callback(
         self,
