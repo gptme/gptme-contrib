@@ -289,21 +289,21 @@ def test_schedule_post_call_runs_configured_command_hook() -> None:
                 metadata={},
             )
             record_path = server._save_call_record(record)
-            observed: dict[str, str] = {}
+            observed: dict[str, object] = {}
 
-            async def _fake_run_post_call(caller_id: str, path: Path) -> None:
+            async def _fake_run_post_call(caller_id: str, paths: list[Path]) -> None:
                 observed["caller_id"] = caller_id
-                observed["path"] = str(path)
+                observed["paths"] = [str(path) for path in paths]
 
             server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
 
-            await server._schedule_post_call(record.caller_id, record_path)
+            await server._schedule_post_call(record.caller_id, [record_path])
             task = server._pending_post_calls[record.caller_id]
             await task
 
             assert observed == {
                 "caller_id": "+46700000001",
-                "path": str(record_path),
+                "paths": [str(record_path)],
             }
 
     asyncio.run(_exercise())
@@ -388,6 +388,56 @@ def test_consume_recent_call_keeps_archived_record() -> None:
         assert payload["transcript"][0]["text"] == "Archive me"
 
 
+def test_resume_carries_prior_archive_into_next_post_call() -> None:
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.resume_window_seconds = 300
+            server.post_call_command = "run-post-call"
+            server.post_call_delay_seconds = 1_000
+
+            first = RecentCallRecord(
+                caller_id="+46700000010",
+                source="twilio",
+                ended_at=1_000.0,
+                transcript=[TranscriptTurn(role="user", text="first leg")],
+                metadata={"call_sid": "CAfirst"},
+            )
+            first_path = server._save_call_record(first)
+            server._save_recent_call(first)
+            await server._schedule_post_call(first.caller_id, [first_path])
+            first_task = server._pending_post_calls[first.caller_id]
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+                resumed = server._consume_recent_call(first.caller_id)
+            await asyncio.sleep(0)
+
+            assert resumed is not None
+            assert first_task.cancelled()
+            assert server._pending_archive_records[first.caller_id] == [first_path]
+
+            second = RecentCallRecord(
+                caller_id=first.caller_id,
+                source="twilio",
+                ended_at=1_200.0,
+                transcript=[TranscriptTurn(role="user", text="second leg")],
+                metadata={"call_sid": "CAsecond"},
+            )
+            second_path = server._save_call_record(second)
+            await server._schedule_post_call(first.caller_id, [first_path, second_path])
+
+            assert server._pending_archive_records[first.caller_id] == [
+                first_path,
+                second_path,
+            ]
+
+            server._pending_post_calls[first.caller_id].cancel()
+
+    asyncio.run(_exercise())
+
+
 def test_save_call_record_uses_unique_archive_path_per_call() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         server = VoiceServer()
@@ -444,11 +494,11 @@ def test_schedule_post_call_runner_finally_does_not_evict_newer_task() -> None:
             record_path = server._save_recent_call(record)
 
             # Schedule first task (long sleep — won't complete naturally)
-            await server._schedule_post_call(record.caller_id, record_path)
+            await server._schedule_post_call(record.caller_id, [record_path])
             first_task = server._pending_post_calls[record.caller_id]
 
             # Schedule second task — cancels first and registers itself
-            await server._schedule_post_call(record.caller_id, record_path)
+            await server._schedule_post_call(record.caller_id, [record_path])
             second_task = server._pending_post_calls[record.caller_id]
 
             # Wait for the first task's finally-block to run
@@ -493,7 +543,7 @@ def test_cancelled_post_call_command_terminates_subprocess() -> None:
             with pytest.MonkeyPatch.context() as mp:
                 mp.setenv("PID_FILE", str(pid_file))
                 task = asyncio.create_task(
-                    server._run_post_call_command("+46700000004", record_path)
+                    server._run_post_call_command("+46700000004", [record_path])
                 )
 
                 deadline = asyncio.get_running_loop().time() + 5

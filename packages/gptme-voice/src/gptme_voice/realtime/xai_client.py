@@ -58,13 +58,13 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
 
         # VAD tuning for Grok interruption (from task #651 / Erik feedback)
         # Lower threshold = more sensitive to speech, easier to interrupt
-        # Reduce silence duration so Bob stops faster
+        # Keep end-of-turn silence conservative so noisy lines do not chop up speech
         # Prefix padding reduced to minimize lag
         if cfg.vad_threshold >= 0.65:  # only override default/high values
             cfg = dataclasses.replace(
                 cfg,
                 vad_threshold=0.55,
-                vad_silence_duration_ms=250,
+                vad_silence_duration_ms=500,
                 vad_prefix_padding_ms=150,
             )
 

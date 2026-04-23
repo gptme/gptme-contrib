@@ -29,6 +29,9 @@ def test_xai_client_uses_xai_defaults() -> None:
     client = XAIRealtimeClient(api_key="test-key", session_config=SessionConfig())
 
     assert client.session_config.voice == "rex"  # male voice for Bob persona
+    assert client.session_config.vad_threshold == 0.55
+    assert client.session_config.vad_silence_duration_ms == 500
+    assert client.session_config.vad_prefix_padding_ms == 150
     assert client._get_ws_url() == "wss://api.x.ai/v1/realtime"
 
 
