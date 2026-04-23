@@ -581,7 +581,7 @@ class VoiceServer:
         logger.info("Consumed handoff bootstrap %s from %s", handoff_id, path)
         return resume_context
 
-    def _build_session_bootstrap(
+    async def _build_session_bootstrap(
         self,
         *,
         caller_id: str | None,
@@ -601,7 +601,7 @@ class VoiceServer:
                 should_greet_first=False,
             )
 
-        recent_call = self._consume_recent_call(caller_id)
+        recent_call = await self._consume_recent_call(caller_id)
         if recent_call:
             return SessionBootstrap(
                 instructions=_build_resume_instructions(
@@ -621,20 +621,24 @@ class VoiceServer:
             ),
         )
 
-    def _build_session_instructions(
+    async def _build_session_instructions(
         self,
         *,
         caller_id: str | None,
         from_number: str = "",
         handoff_id: str | None = None,
     ) -> str:
-        return self._build_session_bootstrap(
-            caller_id=caller_id,
-            from_number=from_number,
-            handoff_id=handoff_id,
+        return (
+            await self._build_session_bootstrap(
+                caller_id=caller_id,
+                from_number=from_number,
+                handoff_id=handoff_id,
+            )
         ).instructions
 
-    def _consume_recent_call(self, caller_id: str | None) -> RecentCallRecord | None:
+    async def _consume_recent_call(
+        self, caller_id: str | None
+    ) -> RecentCallRecord | None:
         if not caller_id:
             return None
 
@@ -651,7 +655,10 @@ class VoiceServer:
             or recent_call.pending_post_call_unit
         )
         if pending_unit:
-            self._cancel_post_call_schedule(pending_unit)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._cancel_post_call_schedule, pending_unit
+            )
             logger.info(
                 "Deferred pending post-call follow-up for resumed caller %s", caller_id
             )
@@ -756,7 +763,10 @@ class VoiceServer:
     ) -> None:
         existing_unit = self._pending_post_calls.pop(caller_id, None)
         if existing_unit:
-            self._cancel_post_call_schedule(existing_unit)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._cancel_post_call_schedule, existing_unit
+            )
 
         deduped_record_paths = self._dedupe_record_paths(record_paths)
         if not deduped_record_paths:
@@ -1030,7 +1040,7 @@ class VoiceServer:
                     from_number = custom_params.get("from_number", "")
                     handoff_id = custom_params.get("handoff_id") or None
                     caller_id = from_number or call_sid or stream_sid
-                    bootstrap = self._build_session_bootstrap(
+                    bootstrap = await self._build_session_bootstrap(
                         caller_id=caller_id,
                         from_number=from_number,
                         handoff_id=handoff_id,
@@ -1185,7 +1195,7 @@ class VoiceServer:
         transcript: list[TranscriptTurn] = []
 
         try:
-            instructions = self._build_session_instructions(
+            instructions = await self._build_session_instructions(
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )

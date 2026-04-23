@@ -106,9 +106,11 @@ def test_build_session_bootstrap_greets_fresh_calls() -> None:
     server = VoiceServer()
     server._instructions = "You are Bob."
 
-    bootstrap = server._build_session_bootstrap(
-        caller_id="+46700000011",
-        from_number="+46700000011",
+    bootstrap = asyncio.run(
+        server._build_session_bootstrap(
+            caller_id="+46700000011",
+            from_number="+46700000011",
+        )
     )
 
     assert bootstrap.should_greet_first is True
@@ -126,9 +128,11 @@ def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
         server = VoiceServer(workspace=tmpdir)
         server._instructions = "You are Bob."
 
-        bootstrap = server._build_session_bootstrap(
-            caller_id="+46700000001",
-            from_number="+46700000001",
+        bootstrap = asyncio.run(
+            server._build_session_bootstrap(
+                caller_id="+46700000001",
+                from_number="+46700000001",
+            )
         )
 
     assert bootstrap.should_greet_first is True
@@ -140,9 +144,11 @@ def test_build_session_bootstrap_asks_unknown_caller_to_identify() -> None:
     server = VoiceServer()
     server._instructions = "You are Bob."
 
-    bootstrap = server._build_session_bootstrap(
-        caller_id="+15551234567",
-        from_number="+15551234567",
+    bootstrap = asyncio.run(
+        server._build_session_bootstrap(
+            caller_id="+15551234567",
+            from_number="+15551234567",
+        )
     )
 
     assert bootstrap.should_greet_first is True
@@ -186,7 +192,7 @@ def test_recent_call_is_consumed_within_resume_window() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            resumed = server._consume_recent_call("+46700000001")
+            resumed = asyncio.run(server._consume_recent_call("+46700000001"))
 
         assert resumed is not None
         assert resumed.caller_id == "+46700000001"
@@ -210,7 +216,9 @@ def test_build_session_bootstrap_skips_greeting_for_recent_resume() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            bootstrap = server._build_session_bootstrap(caller_id=record.caller_id)
+            bootstrap = asyncio.run(
+                server._build_session_bootstrap(caller_id=record.caller_id)
+            )
 
         assert bootstrap.should_greet_first is False
         assert "reconnected after a brief disconnect" in bootstrap.instructions
@@ -233,7 +241,7 @@ def test_recent_call_is_ignored_outside_resume_window() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_400.1)
-            resumed = server._consume_recent_call("+46700000001")
+            resumed = asyncio.run(server._consume_recent_call("+46700000001"))
 
         assert resumed is None
 
@@ -260,9 +268,11 @@ def test_consume_handoff_bootstrap_returns_resume_context_and_deletes_file() -> 
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_200.0)
-            instructions = server._build_session_instructions(
-                caller_id="+46700000007",
-                handoff_id="handoff-123",
+            instructions = asyncio.run(
+                server._build_session_instructions(
+                    caller_id="+46700000007",
+                    handoff_id="handoff-123",
+                )
             )
 
         assert "bob transferred this caller to alice." in instructions
@@ -301,9 +311,11 @@ def test_stale_handoff_bootstrap_falls_back_to_recent_call_resume() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_600.0)
-            instructions = server._build_session_instructions(
-                caller_id=record.caller_id,
-                handoff_id="handoff-stale",
+            instructions = asyncio.run(
+                server._build_session_instructions(
+                    caller_id=record.caller_id,
+                    handoff_id="handoff-stale",
+                )
             )
 
         assert "Resume the old call" in instructions
@@ -404,7 +416,7 @@ def test_consume_recent_call_deletes_state_file() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            server._consume_recent_call("+46700000002")
+            asyncio.run(server._consume_recent_call("+46700000002"))
 
         assert not state_path.exists()
 
@@ -426,7 +438,7 @@ def test_consume_recent_call_keeps_archived_record() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            server._consume_recent_call(record.caller_id)
+            asyncio.run(server._consume_recent_call(record.caller_id))
 
         assert archived_path.exists()
         payload = json.loads(archived_path.read_text())
@@ -471,7 +483,7 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
 
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-                resumed = server._consume_recent_call(first.caller_id)
+                resumed = await server._consume_recent_call(first.caller_id)
 
             assert resumed is not None
             assert cancelled_units == [first_unit]
@@ -613,7 +625,7 @@ def test_consume_recent_call_restores_pending_schedule_after_restart() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
-            resumed = second_server._consume_recent_call(record.caller_id)
+            resumed = asyncio.run(second_server._consume_recent_call(record.caller_id))
 
         assert resumed is not None
         assert cancelled_units == ["gptme-voice-post-call-restart"]
