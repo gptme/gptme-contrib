@@ -10,6 +10,10 @@ match:
     - "greptile found issues in PR"
     - "greptile score"
     - "trigger greptile"
+    - "retrigger a re-review"
+    - "retrigger greptile"
+    - "pushed fixes after the earlier Greptile"
+    - "after the earlier Greptile review"
 status: active
 ---
 
