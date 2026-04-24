@@ -154,6 +154,14 @@ def _build_fresh_call_greeting_instructions(
     )
 
 
+def _build_standup_call_instructions(brief_text: str) -> str:
+    """Build initial response instructions for a standup call with a pre-generated brief."""
+    return (
+        f"Deliver this standup brief to Erik verbatim, then wait for his response:\n\n"
+        f"{brief_text}"
+    )
+
+
 def _append_transcript_turn(
     transcript: list[TranscriptTurn], role: str, text: str
 ) -> None:
@@ -587,6 +595,7 @@ class VoiceServer:
         caller_id: str | None,
         from_number: str = "",
         handoff_id: str | None = None,
+        standup_brief: str | None = None,
     ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
@@ -610,6 +619,15 @@ class VoiceServer:
                     self.resume_window_seconds,
                 ),
                 should_greet_first=False,
+            )
+
+        if standup_brief:
+            return SessionBootstrap(
+                instructions=f"{standup_brief}\n\n{instructions}",
+                should_greet_first=True,
+                initial_response_instructions=_build_standup_call_instructions(
+                    standup_brief
+                ),
             )
 
         return SessionBootstrap(
@@ -1039,11 +1057,13 @@ class VoiceServer:
                     custom_params = start.get("customParameters", {})
                     from_number = custom_params.get("from_number", "")
                     handoff_id = custom_params.get("handoff_id") or None
+                    standup_brief = custom_params.get("standup_brief") or None
                     caller_id = from_number or call_sid or stream_sid
                     bootstrap = await self._build_session_bootstrap(
                         caller_id=caller_id,
                         from_number=from_number,
                         handoff_id=handoff_id,
+                        standup_brief=standup_brief,
                     )
                     instructions = bootstrap.instructions
                     initial_response_instructions = (

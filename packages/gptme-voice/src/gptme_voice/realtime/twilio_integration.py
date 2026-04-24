@@ -27,6 +27,7 @@ class OutboundCallSettings:
     auth_token: str
     from_number: str
     stream_url: str
+    custom_params: dict[str, str] | None = None
 
 
 def _get_config_env(name: str) -> str | None:
@@ -114,7 +115,10 @@ def build_connect_stream_twiml(
 
 
 def resolve_outbound_call_settings(
-    *, from_number: str | None = None, public_base_url: str | None = None
+    *,
+    from_number: str | None = None,
+    public_base_url: str | None = None,
+    custom_params: dict[str, str] | None = None,
 ) -> OutboundCallSettings:
     """Resolve Twilio credentials and stream target for outbound calls."""
     resolved_from_number = from_number or _require_config_value("TWILIO_PHONE_NUMBER")
@@ -125,6 +129,7 @@ def resolve_outbound_call_settings(
         auth_token=_require_config_value("TWILIO_AUTH_TOKEN"),
         from_number=resolved_from_number,
         stream_url=build_stream_url(resolved_public_base_url),
+        custom_params=custom_params,
     )
 
 
@@ -147,6 +152,6 @@ def create_outbound_call(
     call = client.calls.create(
         to=to_number,
         from_=settings.from_number,
-        twiml=build_connect_stream_twiml(settings.stream_url),
+        twiml=build_connect_stream_twiml(settings.stream_url, settings.custom_params),
     )
     return call.sid
