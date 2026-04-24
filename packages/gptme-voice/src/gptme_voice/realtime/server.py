@@ -610,6 +610,17 @@ class VoiceServer:
                 should_greet_first=False,
             )
 
+        # standup_brief takes priority over recent-call resume: an explicit outbound
+        # standup should always deliver the brief, not silently resume a prior session.
+        if standup_brief:
+            return SessionBootstrap(
+                instructions=f"{standup_brief}\n\n{instructions}",
+                should_greet_first=True,
+                initial_response_instructions=_build_standup_call_instructions(
+                    standup_brief
+                ),
+            )
+
         recent_call = await self._consume_recent_call(caller_id)
         if recent_call:
             return SessionBootstrap(
@@ -619,15 +630,6 @@ class VoiceServer:
                     self.resume_window_seconds,
                 ),
                 should_greet_first=False,
-            )
-
-        if standup_brief:
-            return SessionBootstrap(
-                instructions=f"{standup_brief}\n\n{instructions}",
-                should_greet_first=True,
-                initial_response_instructions=_build_standup_call_instructions(
-                    standup_brief
-                ),
             )
 
         return SessionBootstrap(

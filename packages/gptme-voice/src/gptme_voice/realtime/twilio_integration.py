@@ -2,7 +2,7 @@
 Twilio helpers for gptme-voice.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import escape as _html_escape
 from urllib.parse import urlsplit, urlunsplit
 
@@ -27,7 +27,7 @@ class OutboundCallSettings:
     auth_token: str
     from_number: str
     stream_url: str
-    custom_params: dict[str, str] | None = None
+    custom_params: dict[str, str] | None = field(default=None, hash=False)
 
 
 def _get_config_env(name: str) -> str | None:
