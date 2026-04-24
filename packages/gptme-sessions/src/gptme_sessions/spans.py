@@ -131,10 +131,13 @@ class SpanAggregates:
     fields (Phase 2 of the design doc).
 
     Attributes:
-        retry_depth: Max consecutive redundant re-calls to the same tool
-            (first invocation excluded).  A value of 0 means no tool was
-            called twice in a row; 2 means the same tool was called 3 times
-            in succession (1 original + 2 retries).  Proxy for stuck loops.
+        retry_depth: Max consecutive same-tool calls where the preceding
+            call *failed*. A retry semantically implies the prior attempt
+            didn't work — without the failure gate, generic dispatcher
+            tools (Bash running distinct shell commands) inflate this to
+            uselessness. 0 means no failed-then-same-tool pattern; 2 means
+            two successive failed-tool calls followed by another same-tool
+            call. Proxy for stuck loops / flailing.
     """
 
     total_spans: int
@@ -177,12 +180,14 @@ class SpanAggregates:
         avg_ms = sum(known_durations) / len(known_durations) if known_durations else -1.0
         max_ms = max(known_durations) if known_durations else -1
 
-        # Retry depth: max consecutive redundant re-calls to the same tool
-        # (first call is normal; streak counts re-invocations beyond it)
+        # Retry depth: max consecutive same-tool calls where the preceding
+        # call failed. A retry semantically implies the previous attempt
+        # didn't work — without this gate, generic dispatcher tools (Bash
+        # running unrelated commands) inflate the signal to uselessness.
         retry_depth = 0
         streak = 0
         for i in range(1, len(spans)):
-            if spans[i].tool_name == spans[i - 1].tool_name:
+            if spans[i].tool_name == spans[i - 1].tool_name and not spans[i - 1].success:
                 streak += 1
                 retry_depth = max(retry_depth, streak)
             else:
