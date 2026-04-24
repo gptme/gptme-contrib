@@ -556,6 +556,48 @@ check_greptile_scores() {
     done
 }
 
+# Check if the bot account has already posted a maintainer-facing status comment
+# on this PR indicating that the ball is in the maintainer's court.
+#
+# Signals the bot acknowledged it lacks merge permission on the target repo, so
+# re-emitting merge_ready produces fake-ready churn (the same PR reappears every
+# cooldown window despite nothing being actionable).
+#
+# We check the full comment history (not just the last comment) because later
+# "CI is now green" status updates often overwrite the canonical waiting phrase,
+# but the acknowledgment is still valid — subsequent re-emits would still
+# produce the same "nothing changed" churn.
+#
+# Bot username is resolved from $BOT_USERNAME (default: TimeToBuildBob) to keep
+# the helper reusable across forks.
+#
+# Returns 0 when the maintainer-waiting signal is present (i.e. SUPPRESS),
+# 1 otherwise (emit as normal).
+has_maintainer_waiting_comment() {
+    local repo=$1
+    local number=$2
+    local bot="${BOT_USERNAME:-TimeToBuildBob}"
+
+    local bot_comments
+    bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
+        --jq "[.[] | select(.user.login == \"$bot\") | .body] | join(\"\n\")" 2>/dev/null) || return 1
+
+    [ -n "$bot_comments" ] || return 1
+
+    # Match any of the canonical or real-world phrasings that signal "waiting
+    # only on a maintainer click." Matching is case-insensitive on the anchor
+    # word so minor capitalisation drift doesn't defeat the guard.
+    local lower
+    lower=$(printf '%s' "$bot_comments" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        *"waiting only on a maintainer click"*) return 0 ;;
+        *"waiting only on a maintainer merge click"*) return 0 ;;
+        *"ready to merge when convenient"*) return 0 ;;
+        *"blocked by missing mergepullrequest permission"*) return 0 ;;
+    esac
+    return 1
+}
+
 # Find PRs that are ready to merge: CI green, no conflicts, and Greptile score
 # is acceptable (>= 5/5, or no Greptile review at all for simple PRs).
 #
@@ -566,8 +608,14 @@ check_greptile_scores() {
 #   Cooldown: 12 hours — merge decisions shouldn't be nagged frequently.
 #   Re-emits when HEAD SHA changes (new commits may change merge readiness).
 #
-# API cost: Zero additional API calls. Reads Greptile score from the state file
-# written by check_greptile_scores() instead of re-fetching issue comments.
+# Suppression: If the bot already left a "waiting only on a maintainer click"
+# status comment (see has_maintainer_waiting_comment), we skip emitting for
+# that HEAD even after the cooldown expires. The state file is still bumped so
+# subsequent runs follow the normal cooldown path once a new HEAD arrives.
+#
+# API cost: +1 comments fetch per CLEAN/MERGEABLE candidate that passes the
+# Greptile and cooldown gates. Typical workload is a handful of PRs per cycle,
+# so the added cost is negligible compared to the existing PR search calls.
 check_merge_ready() {
     local repo=$1
     local prs=$2
@@ -618,6 +666,16 @@ check_merge_ready() {
             # HEAD changed or cooldown expired — re-emit
         fi
         # First-time discovery OR state change — emit immediately (no seed-only behavior)
+
+        # Suppress re-emits when the bot already signalled it is waiting only on
+        # a maintainer merge click. The state file is still updated so we stay
+        # on the normal cooldown schedule once the situation changes (new HEAD,
+        # new review, CI change that forces the "waiting" comment to be
+        # refreshed into a different status).
+        if has_maintainer_waiting_comment "$repo" "$pr_number"; then
+            echo "${head_sha}:${now}" > "$state_file"
+            continue
+        fi
 
         echo "${head_sha}:${now}" > "$state_file"
 
