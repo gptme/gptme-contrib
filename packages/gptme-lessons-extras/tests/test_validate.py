@@ -320,3 +320,20 @@ def test_automation_must_be_mapping():
         validator.validate()
         automation_errors = [e for e in validator.errors if "automation" in e]
         assert automation_errors, "Non-mapping automation value should produce an error"
+
+
+def test_automation_coexists_with_flat_fields_warns():
+    """Having both 'automation' block and flat automated_by/automated_date should warn."""
+    content = _VALID_LESSON.format(
+        extra="automation:\n  status: automated\nautomated_by: some-validator\nautomated_date: 2025-01-01"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        coexist_warnings = [
+            w for w in validator.warnings if "automation" in w and "automated_by" in w
+        ]
+        assert (
+            coexist_warnings
+        ), "Coexisting 'automation' block and flat automated_by field should warn"

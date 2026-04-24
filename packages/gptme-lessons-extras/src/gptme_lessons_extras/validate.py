@@ -161,7 +161,8 @@ class LessonValidator:
         - ``automation``: Structured automation metadata (alternative to the flat
           ``automated_by``/``automated_date`` fields). Nested mapping that may carry
           ``status`` (``automated``), ``validator`` (relative path to enforcer),
-          ``enforcement`` (``warning`` | ``error``), and ``automated_date``.
+          ``enforcement`` (``warning`` | ``error``), ``automated_date``, and
+          ``notes`` (free-form description of partial automation or caveats).
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
 
@@ -212,6 +213,15 @@ class LessonValidator:
                 self._check_target_grade_field(frontmatter["target_grade"])
             if "automation" in frontmatter:
                 self._check_automation_field(frontmatter["automation"])
+                flat_automation_fields = {"automated_by", "automated_date"} & set(
+                    frontmatter.keys()
+                )
+                if flat_automation_fields:
+                    self.warnings.append(
+                        f"Both 'automation' block and flat field(s) "
+                        f"{', '.join(sorted(flat_automation_fields))} are present; "
+                        "remove the flat fields in favour of the 'automation' block"
+                    )
 
         except (ValueError, yaml.YAMLError) as e:
             self.errors.append(f"Invalid YAML frontmatter: {e}")
