@@ -237,3 +237,103 @@ def test_target_grade_non_string_list_item_rejected():
         validator.validate()
         target_errors = [e for e in validator.errors if "target_grade" in e]
         assert target_errors, "Non-string target_grade entries should produce an error"
+
+
+# ---------------------------------------------------------------------------
+# automation field tests
+# ---------------------------------------------------------------------------
+
+
+_AUTOMATION_BLOCK = """\
+automation:
+  status: automated
+  validator: scripts/precommit/validators/validate_example.py
+  enforcement: {enforcement}
+  automated_date: 2026-04-19"""
+
+
+def test_automation_field_accepted():
+    """A well-formed automation mapping should be accepted silently."""
+    content = _VALID_LESSON.format(
+        extra=_AUTOMATION_BLOCK.format(enforcement="warning")
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+        automation_warnings = [w for w in validator.warnings if "automation" in w]
+        assert (
+            not automation_warnings
+        ), f"Unexpected automation warnings: {automation_warnings}"
+
+
+def test_automation_enforcement_error_accepted():
+    """enforcement: error should also be valid."""
+    content = _VALID_LESSON.format(extra=_AUTOMATION_BLOCK.format(enforcement="error"))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+
+
+def test_automation_invalid_enforcement_rejected():
+    """enforcement must be 'warning' or 'error'."""
+    content = _VALID_LESSON.format(
+        extra=_AUTOMATION_BLOCK.format(enforcement="critical")
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        automation_errors = [e for e in validator.errors if "automation" in e]
+        assert (
+            automation_errors
+        ), "Invalid automation.enforcement should produce an error"
+
+
+def test_automation_unknown_subfield_warns():
+    """Unknown sub-fields under automation should produce a warning (not error)."""
+    content = _VALID_LESSON.format(
+        extra="automation:\n  status: automated\n  weirdfield: nope"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not [
+            e for e in validator.errors if "automation" in e
+        ], f"Unknown sub-fields should warn, not error: {validator.errors}"
+        warnings = [
+            w for w in validator.warnings if "automation" in w and "weirdfield" in w
+        ]
+        assert warnings, "Unknown automation sub-fields should produce a warning"
+
+
+def test_automation_must_be_mapping():
+    """automation as a non-mapping (e.g. a string) should be an error."""
+    content = _VALID_LESSON.format(extra='automation: "just a string"')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        automation_errors = [e for e in validator.errors if "automation" in e]
+        assert automation_errors, "Non-mapping automation value should produce an error"
+
+
+def test_automation_coexists_with_flat_fields_warns():
+    """Having both 'automation' block and flat automated_by/automated_date should warn."""
+    content = _VALID_LESSON.format(
+        extra="automation:\n  status: automated\nautomated_by: some-validator\nautomated_date: 2025-01-01"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        coexist_warnings = [
+            w for w in validator.warnings if "automation" in w and "automated_by" in w
+        ]
+        assert (
+            coexist_warnings
+        ), "Coexisting 'automation' block and flat automated_by field should warn"

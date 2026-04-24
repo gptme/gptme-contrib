@@ -158,6 +158,11 @@ class LessonValidator:
           Increment when making significant keyword or content changes so effectiveness
           data can be correlated to a specific lesson variant.
         - ``automated_by`` / ``automated_date``: Set once when a lesson is automated.
+        - ``automation``: Structured automation metadata (alternative to the flat
+          ``automated_by``/``automated_date`` fields). Nested mapping that may carry
+          ``status`` (``automated``), ``validator`` (relative path to enforcer),
+          ``enforcement`` (``warning`` | ``error``), ``automated_date``, and
+          ``notes`` (free-form description of partial automation or caveats).
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
 
@@ -189,6 +194,7 @@ class LessonValidator:
                 "version",
                 "automated_by",
                 "automated_date",
+                "automation",
                 "deprecated_by",
                 "deprecated_date",
                 "archived_reason",
@@ -205,6 +211,17 @@ class LessonValidator:
                 self._check_version_field(frontmatter["version"])
             if "target_grade" in frontmatter:
                 self._check_target_grade_field(frontmatter["target_grade"])
+            if "automation" in frontmatter:
+                self._check_automation_field(frontmatter["automation"])
+                flat_automation_fields = {"automated_by", "automated_date"} & set(
+                    frontmatter.keys()
+                )
+                if flat_automation_fields:
+                    self.warnings.append(
+                        f"Both 'automation' block and flat field(s) "
+                        f"{', '.join(sorted(flat_automation_fields))} are present; "
+                        "remove the flat fields in favour of the 'automation' block"
+                    )
 
         except (ValueError, yaml.YAMLError) as e:
             self.errors.append(f"Invalid YAML frontmatter: {e}")
@@ -276,6 +293,34 @@ class LessonValidator:
             self.errors.append(
                 f"target_grade contains unknown dimensions: {unknown_list} "
                 f"(allowed: {allowed})"
+            )
+
+    def _check_automation_field(self, value: object) -> None:
+        """Validate the optional ``automation`` frontmatter field.
+
+        Allowed sub-fields:
+        - ``status``: Lifecycle marker (typically ``automated``).
+        - ``validator``: Relative path to the enforcing script.
+        - ``enforcement``: ``warning`` or ``error``.
+        - ``automated_date``: ISO date the lesson was automated.
+        - ``notes``: Free-form description of partial automation or caveats.
+        """
+        if not isinstance(value, dict):
+            self.errors.append(
+                f"automation must be a mapping, got {type(value).__name__}"
+            )
+            return
+        allowed_sub = {"status", "validator", "enforcement", "automated_date", "notes"}
+        unknown = sorted(set(value.keys()) - allowed_sub)
+        if unknown:
+            self.warnings.append(
+                f"automation contains unknown sub-fields: {', '.join(unknown)} "
+                f"(allowed: {', '.join(sorted(allowed_sub))})"
+            )
+        enforcement = value.get("enforcement")
+        if enforcement is not None and enforcement not in ("warning", "error"):
+            self.errors.append(
+                f"automation.enforcement must be 'warning' or 'error', got {enforcement!r}"
             )
 
     def _validate_two_file_format(self):
