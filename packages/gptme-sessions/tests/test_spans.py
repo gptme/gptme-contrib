@@ -327,8 +327,13 @@ def test_output_size_consistent_with_text_extraction(tmp_path: Path) -> None:
 
 
 def test_aggregates_retry_depth() -> None:
-    # Bash × 3 consecutive → 2 retries beyond the first call
-    spans = [_span("Bash"), _span("Bash"), _span("Bash"), _span("Edit")]
+    # Bash fails, Bash fails, Bash succeeds → 2 retries (each preceded by failure)
+    spans = [
+        _span("Bash", success=False),
+        _span("Bash", success=False),
+        _span("Bash"),
+        _span("Edit"),
+    ]
     agg = SpanAggregates.from_spans(spans)
     assert agg.retry_depth == 2
 
@@ -337,6 +342,28 @@ def test_aggregates_no_retry() -> None:
     spans = [_span("Bash"), _span("Edit"), _span("Read")]
     agg = SpanAggregates.from_spans(spans)
     assert agg.retry_depth == 0  # no consecutive same-tool calls
+
+
+def test_aggregates_no_retry_when_successful_streak() -> None:
+    # Bash × 3 consecutive, all successful → NOT retries; these are distinct
+    # shell commands (grep, ls, cat, etc.), not stuck-loop behavior.
+    spans = [_span("Bash"), _span("Bash"), _span("Bash"), _span("Edit")]
+    agg = SpanAggregates.from_spans(spans)
+    assert agg.retry_depth == 0
+
+
+def test_aggregates_retry_only_after_failure() -> None:
+    # Only the Bash after a failed Bash counts as a retry.
+    spans = [
+        _span("Bash"),  # ok
+        _span("Bash"),  # consecutive but prev succeeded → not a retry
+        _span("Bash", success=False),  # consecutive; prev succeeded → not a retry
+        _span("Bash"),  # consecutive; prev failed → retry streak=1
+        _span("Bash", success=False),  # consecutive; prev succeeded → not counted
+        _span("Bash"),  # consecutive; prev failed → retry streak=1
+    ]
+    agg = SpanAggregates.from_spans(spans)
+    assert agg.retry_depth == 1
 
 
 # ── extract_spans_from_gptme_jsonl ────────────────────────────────────────────
