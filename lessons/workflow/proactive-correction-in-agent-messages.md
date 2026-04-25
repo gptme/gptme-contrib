@@ -7,6 +7,15 @@ match:
     - "sent wrong advice to agent"
     - "need to correct prior message"
     - "earlier message was wrong"
+    - "send a correction"
+    - "correction to my earlier"
+    - "correct my previous message"
+    - "correct earlier advice"
+    - "ignore my last message"
+    - "wrong recommendation to"
+    - "follow-up correction"
+    - "before they act on it"
+    - "I gave the wrong advice"
 ---
 
 # Proactive Correction in Agent Messages
