@@ -91,6 +91,16 @@ if not result.ok:
     print(f"could not switch: {result.reason}")
     if result.deferred_locks:
         print(f"deferred by: {result.deferred_locks}")
+
+# Healing drift after CC OAuth refresh (live file replaced by a regular file
+# with a fresh token; named slots stranded at the old token).
+# Caller decides which sub was active before the refresh — typically by
+# inspecting their own switch log.
+last_active = read_my_switch_log()  # caller-owned
+if last_active:
+    result = mgr.heal_drift_to(last_active)
+    if result.ok:
+        print(result.reason)  # "healed: synced live → .credentials.json.bob, ..."
 ```
 
 ## Design
@@ -114,5 +124,11 @@ uv run pytest packages/credential-slots/tests/ -v
 
 ## Status
 
-`v0.1.0` — ported from `manage-subscription.py` in ErikBjare/bob,
-commit `e9ea27097`. See `CHANGELOG` for future releases.
+- **`v0.2.0`** — added `SlotManager.heal_drift_to(sub, *, force=False)`
+  for OAuth-refresh recovery. Ported from Bob's `manage-subscription.py`
+  auto-heal logic (commit `b59d54d72`, ErikBjare/bob#685). Handles the
+  recurring case where CC writes a fresh OAuth token to the live file
+  (turning the symlink into a regular file) and every named slot is
+  stranded at the old token.
+- `v0.1.0` — initial release, ported from `manage-subscription.py` in
+  ErikBjare/bob, commit `e9ea27097`.

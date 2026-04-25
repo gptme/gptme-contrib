@@ -1,6 +1,6 @@
 [project]
 name = "credential-slots"
-version = "0.1.0"
+version = "0.2.0"
 description = "Safe credential-slot rotation for agents running Claude Max / OAuth-backed subscriptions"
 authors = [
     {name = "gptme contributors", email = "gptme@superuserlabs.org"}
