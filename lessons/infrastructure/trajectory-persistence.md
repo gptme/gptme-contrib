@@ -8,6 +8,7 @@ match:
     - session data
     - cleanupPeriodDays
     - log cleanup
+  session_categories: [infrastructure, cleanup]
 target_grade: harm
 status: active
 ---

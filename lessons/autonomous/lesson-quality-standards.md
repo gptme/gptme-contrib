@@ -14,6 +14,7 @@ match:
   - lesson creation
   - lesson quality
   - dated lesson variants
+  session_categories: [cleanup, self-review]
 ---
 
 # Lesson Quality Standards

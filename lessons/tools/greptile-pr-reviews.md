@@ -14,6 +14,7 @@ match:
     - "retrigger greptile"
     - "pushed fixes after the earlier Greptile"
     - "after the earlier Greptile review"
+  session_categories: [cross-repo, code]
 status: active
 ---
 

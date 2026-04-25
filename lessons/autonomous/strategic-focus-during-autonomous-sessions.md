@@ -19,6 +19,7 @@ match:
   - "productivity theater"
   - "low-ROI work"
   - "idea backlog"
+  session_categories: [strategic, self-review]
 status: active
 ---
 

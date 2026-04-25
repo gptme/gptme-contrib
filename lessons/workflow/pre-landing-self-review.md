@@ -1,6 +1,7 @@
 ---
 match:
   keywords: ["self-review", "pre-landing", "review iteration", "code review", "substantial change"]
+  session_categories: [code, self-review]
 status: active
 ---
 
