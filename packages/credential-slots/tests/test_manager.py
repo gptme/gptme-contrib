@@ -8,6 +8,7 @@ constructor instead of monkeypatching module globals.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -423,3 +424,213 @@ class TestSwitchResult:
         assert SwitchResult(ok=False, reason="x", deferred_locks=["a"]) == SwitchResult(
             ok=False, reason="x", deferred_locks=["a"]
         )
+
+
+class TestHealDriftTo:
+    """heal_drift_to() syncs the live cred to ``sub``'s slot after CC OAuth refresh.
+
+    Recurring incident: ErikBjare/bob#685 — every CC OAuth token refresh
+    rewrites the live credential file, breaking the symlink and stranding
+    every named slot at a stale token. Without heal, the auto-switcher
+    refuses to act because every slot looks expired.
+
+    Workspace caller (e.g. ``manage-subscription.py``) owns *which* sub to
+    heal into (typically inferred from a switch log they own); this method
+    just performs the file ops safely.
+    """
+
+    def _seed_drifted(
+        self,
+        mgr: SlotManager,
+        *,
+        live_oauth_expires_ms: int | None,
+        live_is_symlink: bool = False,
+        live_present: bool = True,
+        slots_expires_ms: int | None = None,
+    ) -> Path:
+        """Set up a drifted state and return the live path.
+
+        Default: all named slots have a 1h-stale token; live is a regular
+        file with caller-supplied expiry. Override flags exercise the
+        symlink-drift and missing-live paths.
+        """
+        stale_ms = (
+            slots_expires_ms if slots_expires_ms is not None else _ms_from_now(-3600)
+        )
+        for sub in mgr.subscriptions:
+            _write_slot(mgr.slot_path(sub), stale_ms)
+        live = mgr.live_path
+        if live_present:
+            if live_is_symlink:
+                # Broken symlink — detect_live_slot_drift reports drift with
+                # live_hash=None, distinct from the regular-file OAuth-refresh
+                # case. heal_drift_to must refuse this since it cannot
+                # determine which slot the operator meant to heal.
+                live.symlink_to(".credentials.json.deleted-target")
+            else:
+                payload: dict[str, object] = {
+                    "claudeAiOauth": {"accessToken": "fresh-token-from-cc-refresh"}
+                }
+                if live_oauth_expires_ms is not None:
+                    payload["claudeAiOauth"]["expiresAt"] = live_oauth_expires_ms  # type: ignore[index]
+                live.write_text(json.dumps(payload))
+        return live
+
+    def test_no_drift_returns_false(self, mgr: SlotManager) -> None:
+        """Heal is a no-op when drift detector reports no drift."""
+        bob_slot = mgr.slot_path("bob")
+        bob_slot.write_bytes(b'{"claudeAiOauth":{"accessToken":"x"}}')
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "no drift" in result.reason
+
+    def test_drift_executes_heal(self, mgr: SlotManager) -> None:
+        """Drift + fresh live token: copy live → slot, replace with symlink."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        original_live_content = live.read_text()
+        bob_slot = mgr.slot_path("bob")
+
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True
+        assert "healed" in result.reason
+        # Live is now a symlink pointing at bob's slot
+        assert live.is_symlink()
+        assert os.readlink(str(live)) == ".credentials.json.bob"
+        # Bob's slot now contains the freshest token (was overwritten)
+        assert bob_slot.read_text() == original_live_content
+        # No drift now
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None
+        assert drift["drift"] is False
+
+    def test_symlink_live_refused(self, mgr: SlotManager) -> None:
+        """Drift via symlink-with-missing-target is ambiguous; refuse."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=None, live_is_symlink=True)
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "symlink" in result.reason
+        # Untouched
+        assert live.is_symlink()
+
+    def test_expired_live_token_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse to heal when the live token itself is expired."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(-3600))
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "expired or in grace" in result.reason
+        assert not live.is_symlink()
+
+    def test_missing_oauth_payload_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse to heal when live file lacks the claudeAiOauth payload."""
+        for sub in mgr.subscriptions:
+            _write_slot(mgr.slot_path(sub), _ms_from_now(-3600))
+        live = mgr.live_path
+        live.write_text(json.dumps({"some_other_format": True}))
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "claudeAiOauth" in result.reason
+
+    def test_missing_expires_at_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse when payload exists but has no parseable expiresAt."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=None)
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "expiresAt" in result.reason
+        assert not live.is_symlink()
+
+    def test_unknown_subscription_rejected(self, mgr: SlotManager) -> None:
+        """Refuse to heal into a sub not in self.subscriptions."""
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        result = mgr.heal_drift_to("gordon")
+        assert result.ok is False
+        assert "unknown" in result.reason.lower()
+
+    def test_malformed_json_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse cleanly when live file is not valid JSON."""
+        for sub in mgr.subscriptions:
+            _write_slot(mgr.slot_path(sub), _ms_from_now(-3600))
+        live = mgr.live_path
+        live.write_text("not json{")
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "unreadable or malformed JSON" in result.reason
+
+    def test_invokes_on_switch_callback(self, tmp_path: Path) -> None:
+        """Successful heal calls on_switch with the auto-heal reason."""
+        creds_dir = tmp_path / "creds"
+        creds_dir.mkdir()
+        events: list[tuple[str, str]] = []
+        mgr = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["bob", "alice"],
+            on_switch=lambda sub, reason: events.append((sub, reason)),
+        )
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        result = mgr.heal_drift_to("alice")
+        assert result.ok is True
+        assert events == [("alice", "auto-heal drift (live cred resynced to slot)")]
+
+    def test_lock_guard_defers_unless_forced(self, tmp_path: Path) -> None:
+        """When lock_guard returns active locks, heal defers; force bypasses."""
+        creds_dir = tmp_path / "creds"
+        creds_dir.mkdir()
+        mgr = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["bob", "alice"],
+            lock_guard=lambda: ["session-abc"],
+        )
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+
+        # Default: defers
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "deferred" in result.reason
+        assert result.deferred_locks == ["session-abc"]
+        assert not live.is_symlink()  # untouched
+
+        # force=True: heals through the lock
+        result = mgr.heal_drift_to("bob", force=True)
+        assert result.ok is True
+        assert live.is_symlink()
+
+    def test_slot_file_chmod_to_user_only(self, mgr: SlotManager) -> None:
+        """Healed slot file has 0600 perms (no group/other read)."""
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        bob_slot = mgr.slot_path("bob")
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True
+        mode = bob_slot.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_atomicity_preserves_state_on_failure(
+        self, mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If os.replace fails mid-heal, no partial state is left behind.
+
+        Simulate failure of the second os.replace (the symlink swap). The
+        slot has already been replaced with fresh content (acceptable —
+        slot now matches live) but the live file remains a regular file.
+        Verify that no .tmp* artifacts remain.
+        """
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+
+        original_replace = os.replace
+        call_count = {"n": 0}
+
+        def flaky_replace(src: object, dst: object) -> None:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated EACCES")
+            original_replace(src, dst)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "replace", flaky_replace)
+        with pytest.raises(OSError, match="simulated EACCES"):
+            mgr.heal_drift_to("bob")
+
+        # Live file remains as a regular file (heal aborted before symlink swap)
+        assert live.exists()
+        assert not live.is_symlink()
+        # No leftover .tmp* artifacts in creds_dir
+        leftovers = sorted(p.name for p in mgr.creds_dir.iterdir() if ".tmp" in p.name)
+        assert leftovers == [], f"unexpected tmp files: {leftovers}"

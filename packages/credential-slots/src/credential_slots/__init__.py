@@ -24,6 +24,7 @@ Public API::
     mgr.slot_is_fresh("bob")            # -> (True, "valid until ...")
     mgr.detect_live_slot_drift()        # -> dict | None
     mgr.switch_to("alice", "rebalance") # -> SwitchResult (result.ok, result.reason, result.deferred_locks)
+    mgr.heal_drift_to("bob")            # -> SwitchResult (resync live → slot, restore symlink)
 """
 
 from __future__ import annotations
@@ -50,4 +51,4 @@ __all__ = [
     "slot_is_fresh",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

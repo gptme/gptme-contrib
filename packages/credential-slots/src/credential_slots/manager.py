@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -393,6 +394,127 @@ class SlotManager:
         if self.on_switch is not None:
             self.on_switch(sub, reason)
         return SwitchResult(ok=True, reason=f"switched to {sub}")
+
+    # ---- Healing ----
+
+    def heal_drift_to(
+        self,
+        sub: str,
+        *,
+        force: bool = False,
+    ) -> SwitchResult:
+        """Sync the drifted live file into ``sub``'s slot, then re-symlink.
+
+        When CC's OAuth refresh writes a fresh token to the live file, the
+        symlink is replaced by a regular file and the named slot snapshots
+        are stranded at the old token. :meth:`detect_live_slot_drift`
+        reports drift, and :meth:`switch_to` refuses to act because every
+        slot looks expired.
+
+        ``heal_drift_to`` resolves this by treating the live file as the
+        source of truth: copy live → ``sub``'s slot atomically, then replace
+        the live path with a symlink to the slot. The caller decides which
+        ``sub`` was active before the refresh (typically by inspecting a
+        switch log they own).
+
+        Refuses (returns ``ok=False`` with diagnostic ``reason``) when:
+
+        - ``sub`` is not in :attr:`subscriptions`
+        - No drift is detected
+        - Live is a symlink (drift implies a slot rewrite, not OAuth
+          refresh — ambiguous which slot to heal into)
+        - Live file is missing, unreadable, or has no ``claudeAiOauth``
+          payload
+        - Live token is expired or within ``grace_seconds`` of expiry
+        - ``force=False`` and :attr:`lock_guard` reports active locks
+
+        On success, :attr:`on_switch` is called with reason
+        ``"auto-heal drift (live cred resynced to slot)"`` so caller-owned
+        switch logs see the action.
+        """
+        if sub not in self.subscriptions:
+            msg = f"unknown subscription: {sub!r} (known: {self.subscriptions})"
+            self._log(msg)
+            return SwitchResult(ok=False, reason=msg)
+
+        drift = self.detect_live_slot_drift()
+        if drift is None or not drift["drift"]:
+            return SwitchResult(ok=False, reason="no drift")
+
+        live = self.live_path
+        if live.is_symlink():
+            return SwitchResult(
+                ok=False,
+                reason="live is a symlink — drift implies slot rewrite, not OAuth refresh",
+            )
+        if not live.exists():
+            return SwitchResult(ok=False, reason="live file missing")
+
+        try:
+            payload = json.loads(live.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return SwitchResult(
+                ok=False,
+                reason=f"live file unreadable or malformed JSON: {e}",
+            )
+        oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+        if not isinstance(oauth, dict):
+            return SwitchResult(
+                ok=False,
+                reason="live file missing claudeAiOauth payload",
+            )
+        expires_ms = oauth.get("expiresAt")
+        if not isinstance(expires_ms, int | float):
+            return SwitchResult(
+                ok=False,
+                reason="live file missing expiresAt",
+            )
+        try:
+            expiry = datetime.fromtimestamp(float(expires_ms) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as e:
+            return SwitchResult(
+                ok=False,
+                reason=f"live file expiresAt unparseable: {e}",
+            )
+        now = datetime.now(timezone.utc)
+        if expiry <= now + timedelta(seconds=self.grace_seconds):
+            return SwitchResult(
+                ok=False,
+                reason=f"live token expired or in grace ({expiry.isoformat()})",
+            )
+
+        if not force and self.lock_guard is not None:
+            active_locks = list(self.lock_guard())
+            if active_locks:
+                lock_desc = ", ".join(active_locks)
+                msg = f"deferred: active lock(s) {lock_desc}; would heal to {sub}"
+                self._log(msg)
+                return SwitchResult(
+                    ok=False,
+                    reason=msg,
+                    deferred_locks=active_locks,
+                )
+
+        target_slot = self.slot_path(sub)
+        slot_tmp = target_slot.with_suffix(target_slot.suffix + f".tmp{os.getpid()}")
+        link_tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
+        try:
+            shutil.copy2(live, slot_tmp)
+            os.chmod(slot_tmp, 0o600)
+            os.replace(slot_tmp, target_slot)
+            link_tmp.symlink_to(self.slot_template.format(sub=sub))
+            os.replace(link_tmp, live)
+        except BaseException:
+            slot_tmp.unlink(missing_ok=True)
+            link_tmp.unlink(missing_ok=True)
+            raise
+
+        if self.on_switch is not None:
+            self.on_switch(sub, "auto-heal drift (live cred resynced to slot)")
+        return SwitchResult(
+            ok=True,
+            reason=f"healed: synced live → {target_slot.name}, symlink restored",
+        )
 
     # ---- Internals ----
 
