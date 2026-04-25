@@ -7,6 +7,13 @@ match:
   - "nothing to do while waiting"
   - "everything blocked on external"
   - "no unblocked tasks found"
+  - "all active tasks are blocked"
+  - "all active tasks blocked"
+  - "all primary tasks blocked"
+  - "all primary items are blocked"
+  - "tasks blocked on external dependencies"
+  - "blocked on external dependencies"
+  - "all tasks blocked on external"
 status: active
 ---
 
