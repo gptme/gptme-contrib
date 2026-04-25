@@ -5,6 +5,14 @@ match:
     - "ACT vs DEF notification classification"
     - "monitoring session derailing into investigation"
     - "multi-project notification triage"
+    - "project monitoring session"
+    - "monitoring session structure"
+    - "time-box monitoring"
+    - "classify each notification"
+    - "github notifications triage"
+    - "triage notifications across repos"
+    - "monitoring run derailing"
+    - "act vs defer"
 status: active
 ---
 
