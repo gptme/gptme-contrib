@@ -18,8 +18,15 @@ from .openai_client import OpenAIRealtimeClient, SessionConfig
 logger = logging.getLogger(__name__)
 
 _OPENAI_DEFAULT_VOICE = "echo"
+# Derived from SessionConfig field default — stays in sync without duplication
+_OPENAI_DEFAULT_MODEL: str = next(
+    f.default  # type: ignore[assignment]
+    for f in dataclasses.fields(SessionConfig)
+    if f.name == "model"
+)
 # "rex" = male, confident, clear — matches the Bob persona better than "eve" (female)
 _DEFAULT_XAI_VOICE = "rex"
+_DEFAULT_XAI_MODEL = "grok-voice-think-fast-1.0"
 
 
 def _get_xai_api_key() -> str | None:
@@ -55,6 +62,8 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
         cfg = session_config or SessionConfig()
         if cfg.voice == _OPENAI_DEFAULT_VOICE:
             cfg = dataclasses.replace(cfg, voice=_DEFAULT_XAI_VOICE)
+        if cfg.model == _OPENAI_DEFAULT_MODEL:
+            cfg = dataclasses.replace(cfg, model=_DEFAULT_XAI_MODEL)
 
         # VAD tuning for Grok interruption (from task #651 / Erik feedback)
         # Lower threshold = more sensitive to speech, easier to interrupt
@@ -71,8 +80,8 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
         super().__init__(api_key=resolved_key, session_config=cfg, **kwargs)
 
     def _get_ws_url(self) -> str:
-        """xAI uses the base URL only — no ?model= parameter."""
-        return self.WS_URL
+        """xAI supports ?model= in the WebSocket URL."""
+        return f"{self.WS_URL}?model={self.session_config.model}"
 
     def _get_ws_headers(self) -> dict[str, str]:
         """xAI auth — bearer token only, no OpenAI-Beta header."""

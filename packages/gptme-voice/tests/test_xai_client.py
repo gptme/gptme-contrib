@@ -29,10 +29,24 @@ def test_xai_client_uses_xai_defaults() -> None:
     client = XAIRealtimeClient(api_key="test-key", session_config=SessionConfig())
 
     assert client.session_config.voice == "rex"  # male voice for Bob persona
+    assert client.session_config.model == "grok-voice-think-fast-1.0"
     assert client.session_config.vad_threshold == 0.55
     assert client.session_config.vad_silence_duration_ms == 500
     assert client.session_config.vad_prefix_padding_ms == 150
-    assert client._get_ws_url() == "wss://api.x.ai/v1/realtime"
+    assert (
+        client._get_ws_url()
+        == "wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-1.0"
+    )
+
+
+def test_xai_client_respects_explicit_model() -> None:
+    # Use a model that is NOT the xAI default to verify passthrough is genuine
+    explicit_model = "grok-voice-think-1.0"
+    cfg = SessionConfig(model=explicit_model)
+    client = XAIRealtimeClient(api_key="test-key", session_config=cfg)
+
+    assert client.session_config.model == explicit_model
+    assert client._get_ws_url() == f"wss://api.x.ai/v1/realtime?model={explicit_model}"
 
 
 def test_xai_client_treats_session_updated_as_ready_signal() -> None:
