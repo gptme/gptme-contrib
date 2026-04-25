@@ -6,6 +6,7 @@ match:
     - "uv workspace package missing"
     - "cannot import workspace package after adding"
     - "uv sync all packages after changes"
+  session_categories: [code, infrastructure]
 status: active
 ---
 

@@ -11,6 +11,7 @@ match:
   - "task selection"
   - "what to work on"
   - "work queue"
+  session_categories: [strategic, self-review]
 status: active
 ---
 

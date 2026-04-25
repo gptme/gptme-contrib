@@ -5,6 +5,7 @@ match:
     - "git push -u origin"
     - "branch from master"
     - "push.default=upstream"
+  session_categories: [code, cross-repo]
 target_grade: [harm, productivity]
 status: active
 ---

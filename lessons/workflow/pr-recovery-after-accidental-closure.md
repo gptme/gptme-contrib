@@ -7,6 +7,7 @@ match:
     - reopen pr
     - force-push closed
     - replace pr
+  session_categories: [cross-repo, cleanup]
 status: active
 ---
 

@@ -6,6 +6,7 @@ match:
     - brain repo
     - claude memory
     - local memory
+  session_categories: [self-review, infrastructure]
 status: active
 ---
 
