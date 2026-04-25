@@ -99,7 +99,7 @@ def test_evaluate_pr_blocks_changes_requested() -> None:
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
             999,
-            workspace_repo="gptme/gptme-contrib",
+            workspace_repos=["gptme/gptme-contrib"],
         )
 
     assert not result.eligible
@@ -366,8 +366,8 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
     assert self_merge_check.is_sensitive_path(path) is expected
 
 
-def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
-    """Explicit opt-out (workspace_repo='') emits a warning but does not disqualify."""
+def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
+    """Explicit opt-out (workspace_repos=[]) emits a warning but does not disqualify."""
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
@@ -391,7 +391,7 @@ def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
             999,
-            workspace_repo="",  # explicit opt-out via WORKSPACE_REPO=''
+            workspace_repos=[],  # explicit opt-out via WORKSPACE_REPO=''
         )
 
     # Explicit opt-out → warning, but PR is still eligible
@@ -401,8 +401,8 @@ def test_evaluate_pr_warns_when_workspace_repo_empty() -> None:
     ), f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
 
 
-def test_evaluate_pr_disqualified_when_workspace_repo_unknown() -> None:
-    """Detection failure (workspace_repo=None) must disqualify the PR."""
+def test_evaluate_pr_disqualified_when_workspace_repos_unknown() -> None:
+    """Detection failure (workspace_repos=None) must disqualify the PR."""
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
@@ -426,7 +426,7 @@ def test_evaluate_pr_disqualified_when_workspace_repo_unknown() -> None:
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
             999,
-            workspace_repo=None,  # detection failed — unknown workspace
+            workspace_repos=None,  # detection failed — unknown workspace
         )
 
     # Detection failure → disqualified (not just a warning)
@@ -494,14 +494,14 @@ def test_evaluate_pr_ineligible_on_auth_failure() -> None:
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
             999,
-            workspace_repo="gptme/gptme-contrib",
+            workspace_repos=["gptme/gptme-contrib"],
         )
 
     assert any("author-identity check failed" in r for r in result.reasons)
     assert not result.eligible
 
 
-def test_resolve_workspace_repo_honors_empty_env_opt_out() -> None:
+def test_resolve_workspace_repos_honors_empty_env_opt_out() -> None:
     """WORKSPACE_REPO='' should disable the cross-repo restriction (opt-out)."""
     import argparse
     import os
@@ -509,9 +509,86 @@ def test_resolve_workspace_repo_honors_empty_env_opt_out() -> None:
     args = argparse.Namespace(workspace_repo=None)
 
     with patch.dict(os.environ, {"WORKSPACE_REPO": ""}, clear=False):
-        workspace_repo = self_merge_check._resolve_workspace_repo(args)
+        workspace_repos = self_merge_check._resolve_workspace_repos(args)
 
-    assert workspace_repo == "", (
-        f"WORKSPACE_REPO='' should yield empty workspace_repo so cross-repo "
-        f"restriction is disabled; got: {workspace_repo!r}"
+    assert workspace_repos == [], (
+        f"WORKSPACE_REPO='' should yield [] so cross-repo restriction is "
+        f"disabled; got: {workspace_repos!r}"
     )
+
+
+# --- WORKSPACE_REPO allowlist parsing + cross-repo check --------------------
+
+
+def test_parse_workspace_repos_none() -> None:
+    assert self_merge_check._parse_workspace_repos(None) is None
+
+
+def test_parse_workspace_repos_empty_is_opt_out() -> None:
+    # Explicit empty string opts out of the cross-repo restriction entirely.
+    assert self_merge_check._parse_workspace_repos("") == []
+    assert self_merge_check._parse_workspace_repos("   ") == []
+
+
+def test_parse_workspace_repos_comma_separated() -> None:
+    assert self_merge_check._parse_workspace_repos("a/b,c/d") == ["a/b", "c/d"]
+
+
+def test_parse_workspace_repos_whitespace_separated() -> None:
+    assert self_merge_check._parse_workspace_repos("a/b c/d") == ["a/b", "c/d"]
+
+
+def test_parse_workspace_repos_mixed_and_trimmed() -> None:
+    # Trailing spaces, spaces around commas, multiple whitespace — all normalized.
+    assert self_merge_check._parse_workspace_repos("  a/b, c/d , e/f  ") == [
+        "a/b",
+        "c/d",
+        "e/f",
+    ]
+
+
+def test_parse_workspace_repos_skips_empty_entries() -> None:
+    assert self_merge_check._parse_workspace_repos("a/b,,c/d") == ["a/b", "c/d"]
+
+
+def test_check_workspace_repo_detection_failed_disqualifies() -> None:
+    reasons, warnings = self_merge_check._check_workspace_repo("gptme/gptme", None)
+    assert reasons and "could not be auto-detected" in reasons[0]
+    assert warnings == []
+
+
+def test_check_workspace_repo_opt_out_warns_but_allows() -> None:
+    reasons, warnings = self_merge_check._check_workspace_repo("gptme/gptme", [])
+    assert reasons == []
+    assert warnings and "cross-repo restriction is not enforced" in warnings[0]
+
+
+def test_check_workspace_repo_allowed_single() -> None:
+    reasons, warnings = self_merge_check._check_workspace_repo(
+        "ErikBjare/bob", ["ErikBjare/bob"]
+    )
+    assert reasons == []
+    assert warnings == []
+
+
+def test_check_workspace_repo_allowed_in_multi() -> None:
+    reasons, warnings = self_merge_check._check_workspace_repo(
+        "gptme/gptme",
+        ["ErikBjare/bob", "gptme/gptme", "gptme/gptme-contrib"],
+    )
+    assert reasons == []
+    assert warnings == []
+
+
+def test_check_workspace_repo_not_in_allowlist_disqualifies() -> None:
+    reasons, warnings = self_merge_check._check_workspace_repo(
+        "some-other/repo",
+        ["ErikBjare/bob", "gptme/gptme"],
+    )
+    assert warnings == []
+    assert reasons
+    # Error must surface both the PR repo and the allowed list so the user
+    # can see at a glance why the PR was rejected and what to add.
+    assert "some-other/repo" in reasons[0]
+    assert "ErikBjare/bob" in reasons[0]
+    assert "gptme/gptme" in reasons[0]

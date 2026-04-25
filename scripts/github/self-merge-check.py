@@ -14,7 +14,12 @@ Policy summary:
 
 The workspace repo (the repo where the agent's brain lives) is detected automatically.
 Cross-repo PRs (agent pushing to external repos) are disqualified by default.
-To allow cross-repo merges, clear WORKSPACE_REPO (set it to empty string).
+To allow cross-repo merges, either:
+- Set WORKSPACE_REPO to a comma- or whitespace-separated allowlist of owner/name
+  entries (e.g. "ErikBjare/bob,gptme/gptme,gptme/gptme-contrib") — all other
+  category/CI/Greptile checks still apply.
+- Or clear WORKSPACE_REPO entirely (set it to empty string) to disable the
+  cross-repo restriction (not recommended; widens the merge surface).
 
 Usage:
     python3 scripts/github/self-merge-check.py <pr-url>
@@ -22,10 +27,10 @@ Usage:
     python3 scripts/github/self-merge-check.py --json <pr-url>
 
 Environment:
-    WORKSPACE_REPO  Override auto-detected workspace repo (owner/name format).
-                    Set to empty string to disable cross-repo restriction.
-                    Defaults to the repo inferred from `git remote get-url origin`
-                    in the script's directory tree.
+    WORKSPACE_REPO  Allowlist of workspace repos (owner/name), comma- or
+                    whitespace-separated. Auto-detected single repo used when
+                    unset. Set to empty string to disable the cross-repo
+                    restriction entirely.
 """
 
 from __future__ import annotations
@@ -179,6 +184,28 @@ def detect_workspace_repo() -> str:
                 break
             candidate = parent
     return ""
+
+
+def _parse_workspace_repos(value: str | None) -> list[str] | None:
+    """Parse a WORKSPACE_REPO value into an allowlist.
+
+    Returns:
+        None       — caller passed None (detection failed / unset)
+        []         — explicit empty-string opt-out of the cross-repo restriction
+        list[str]  — one or more owner/repo entries, comma- or whitespace-separated
+
+    Whitespace around entries is trimmed. Empty entries between separators
+    (e.g. ``"a/b,, c/d"``) are silently dropped.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return []
+    # Support both comma- and whitespace-separated input. Replace commas with
+    # spaces then split on whitespace to normalize across ``"a/b,c/d"``,
+    # ``"a/b c/d"``, and ``"a/b, c/d"``.
+    return [r for r in stripped.replace(",", " ").split() if r]
 
 
 def _parse_remote_url(url: str) -> str:
@@ -690,7 +717,53 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
     ]
 
 
-def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckResult:
+def _check_workspace_repo(
+    repo: str, workspace_repos: list[str] | None
+) -> tuple[list[str], list[str]]:
+    """Evaluate the cross-repo policy against a PR's repo.
+
+    Returns a ``(reasons, warnings)`` pair. ``reasons`` disqualify the PR from
+    self-merge; ``warnings`` are informational only.
+
+    Semantics:
+    - ``workspace_repos is None``  → detection failed, disqualify (we cannot
+      tell whether the PR is cross-repo)
+    - ``workspace_repos == []``    → explicit opt-out, emit a warning but do
+      not disqualify on cross-repo grounds
+    - ``repo in workspace_repos``  → allowlisted, no reasons or warnings
+    - otherwise                    → cross-repo, disqualify
+    """
+    if workspace_repos is None:
+        return (
+            [
+                "Workspace repo could not be auto-detected; cross-repo restriction cannot be "
+                "enforced. Pass --workspace-repo or set WORKSPACE_REPO (use '' to opt out)."
+            ],
+            [],
+        )
+    if not workspace_repos:
+        return (
+            [],
+            [
+                "Workspace repo check disabled via WORKSPACE_REPO='' or --workspace-repo ''; "
+                "cross-repo restriction is not enforced."
+            ],
+        )
+    if repo not in workspace_repos:
+        allowed = ", ".join(workspace_repos)
+        return (
+            [
+                f"Cross-repo PR ({repo}) is not in allowed workspace repos: {allowed}. "
+                "Clear WORKSPACE_REPO or add this repo to the allowlist."
+            ],
+            [],
+        )
+    return [], []
+
+
+def evaluate_pr(
+    repo: str, number: int, *, workspace_repos: list[str] | None
+) -> CheckResult:
     pr = fetch_pr(repo, number)
     author = pr.get("author", {}).get("login", "")
     title = pr.get("title", "")
@@ -715,21 +788,11 @@ def evaluate_pr(repo: str, number: int, *, workspace_repo: str | None) -> CheckR
     elif author != current_user:
         result.reasons.append(f"PR author is {author}, expected {current_user}")
 
-    if workspace_repo is None:
-        result.reasons.append(
-            "Workspace repo could not be auto-detected; cross-repo restriction cannot be "
-            "enforced. Pass --workspace-repo or set WORKSPACE_REPO (use '' to opt out)."
-        )
-    elif not workspace_repo:
-        result.warnings.append(
-            "Workspace repo check disabled via WORKSPACE_REPO='' or --workspace-repo ''; "
-            "cross-repo restriction is not enforced."
-        )
-    elif repo != workspace_repo:
-        result.reasons.append(
-            f"Cross-repo PR ({repo}) is not eligible for workspace {workspace_repo}. "
-            "Clear WORKSPACE_REPO to disable cross-repo restriction."
-        )
+    cross_repo_reasons, cross_repo_warnings = _check_workspace_repo(
+        repo, workspace_repos
+    )
+    result.reasons.extend(cross_repo_reasons)
+    result.warnings.extend(cross_repo_warnings)
 
     if pr.get("isDraft"):
         result.reasons.append("PR is still a draft")
@@ -800,20 +863,25 @@ def format_human(result: CheckResult) -> str:
     return "\n".join(lines)
 
 
-def _resolve_workspace_repo(args: argparse.Namespace) -> str | None:
-    """Resolve workspace repo from CLI args, env, or auto-detection.
+def _resolve_workspace_repos(args: argparse.Namespace) -> list[str] | None:
+    """Resolve the workspace-repo allowlist from CLI args, env, or auto-detection.
+
+    ``--workspace-repo`` / ``WORKSPACE_REPO`` accept a comma- or whitespace-
+    separated list of ``owner/repo`` entries.
 
     Returns:
-        str  — explicit value (including "" to opt out of cross-repo restriction)
-        None — detection was attempted but failed; cross-repo restriction will disqualify
+        list[str]  — one or more allowed workspace repos
+        []         — explicit opt-out via empty string (cross-repo restriction disabled)
+        None       — detection was attempted but failed; cross-repo restriction
+                     will disqualify because we cannot tell whether the PR is cross-repo
     """
     cli_value: str | None = getattr(args, "workspace_repo", None)
     if cli_value is not None:
-        return cli_value  # explicit "" = opt out
+        return _parse_workspace_repos(cli_value)
     if "WORKSPACE_REPO" in os.environ:
-        return os.environ["WORKSPACE_REPO"]  # "" still means opt out
+        return _parse_workspace_repos(os.environ["WORKSPACE_REPO"])
     detected = detect_workspace_repo()
-    return detected if detected else None  # None = unknown, not opt-out
+    return [detected] if detected else None
 
 
 def main() -> int:
@@ -829,19 +897,20 @@ def main() -> int:
     parser.add_argument(
         "--workspace-repo",
         help=(
-            "Workspace repo (owner/name) for cross-repo policy. "
-            "Auto-detected from git remote if not provided."
+            "Workspace-repo allowlist (owner/name, comma- or whitespace-separated) "
+            "for cross-repo policy. Auto-detected single repo from git remote if "
+            "not provided. Pass '' to disable the cross-repo restriction entirely."
         ),
     )
     args = parser.parse_args()
-    workspace_repo = _resolve_workspace_repo(args)
+    workspace_repos = _resolve_workspace_repos(args)
 
     try:
         repo, number = parse_pr_target(args.pr, args.repo, args.number)
         result = evaluate_pr(
             repo,
             number,
-            workspace_repo=workspace_repo,
+            workspace_repos=workspace_repos,
         )
     except Exception as exc:
         if args.json:
@@ -853,8 +922,8 @@ def main() -> int:
     if args.json:
         print(json.dumps(asdict(result), indent=2))
     else:
-        if workspace_repo:
-            print(f"Workspace repo: {workspace_repo}")
+        if workspace_repos:
+            print(f"Workspace repos: {', '.join(workspace_repos)}")
         print(format_human(result))
 
     return 0 if result.eligible else 1
