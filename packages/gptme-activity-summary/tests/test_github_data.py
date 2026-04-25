@@ -11,6 +11,7 @@ from gptme_activity_summary.github_data import (
     format_activity_for_prompt,
     get_cross_repo_prs,
     get_merged_prs,
+    get_reviews_received,
     get_user_commits,
     get_user_issues,
     get_user_prs,
@@ -111,6 +112,30 @@ def test_get_merged_prs_handles_none():
     with patch("gptme_activity_summary.github_data._run_command", return_value=None):
         prs = get_merged_prs(date(2025, 1, 1), date(2025, 1, 7), "o/r")
     assert prs == []
+
+
+def test_get_reviews_received_deduplicates_same_reviewer_same_pr():
+    """Repeated reviews from the same reviewer on one PR should collapse to one item."""
+    mock_output = """
+    [
+      {
+        "number": 42,
+        "title": "Fix duplicated summary lines",
+        "url": "https://github.com/o/r/pull/42",
+        "reviews": [
+          {"author": {"login": "greptile-apps"}},
+          {"author": {"login": "greptile-apps"}},
+          {"author": {"login": "ErikBjare"}}
+        ]
+      }
+    ]
+    """
+    with patch("gptme_activity_summary.github_data._run_command", return_value=mock_output):
+        reviews = get_reviews_received(date(2025, 1, 1), date(2025, 1, 7), ["o/r"])
+
+    assert len(reviews) == 1
+    assert reviews[0].reviewer == "greptile-apps"
+    assert reviews[0].pr_number == 42
 
 
 def test_github_activity_properties():

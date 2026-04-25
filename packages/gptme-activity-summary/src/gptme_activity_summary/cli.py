@@ -119,6 +119,41 @@ def _build_interactions_from_github(activity) -> list[Interaction]:  # type: ign
     ]
 
 
+def _normalize_interaction_key(interaction: Interaction) -> tuple[str, str, str]:
+    """Normalize an interaction into a stable dedupe key."""
+    normalized_type = interaction.type.strip().replace(" ", "_").lower()
+    normalized_person = " ".join(interaction.person.split())
+    normalized_summary = " ".join(interaction.summary.split())
+    return normalized_type, normalized_person, normalized_summary
+
+
+def _dedupe_interactions(interactions: list[Interaction]) -> list[Interaction]:
+    """Remove duplicate interactions while preserving order.
+
+    If the same interaction appears twice, keep the first one unless a later
+    duplicate adds a missing URL.
+    """
+    deduped: list[Interaction] = []
+    seen: dict[tuple[str, str, str], int] = {}
+    for interaction in interactions:
+        key = _normalize_interaction_key(interaction)
+        existing_idx = seen.get(key)
+        if existing_idx is None:
+            seen[key] = len(deduped)
+            deduped.append(interaction)
+            continue
+
+        existing = deduped[existing_idx]
+        if not existing.url and interaction.url:
+            deduped[existing_idx] = Interaction(
+                type=existing.type,
+                person=existing.person,
+                summary=existing.summary,
+                url=interaction.url,
+            )
+    return deduped
+
+
 def _build_external_contributions(activity) -> list[ExternalContribution]:  # type: ignore[no-untyped-def]
     """Build ExternalContribution list from cross-repo PRs."""
     return [
@@ -320,6 +355,7 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
     # Build interactions from LLM + GitHub reviews
     interactions = _build_interactions_from_result(result)
     interactions.extend(_build_interactions_from_github(activity))
+    interactions = _dedupe_interactions(interactions)
 
     # Convert to DailySummary schema with real metrics
     return DailySummary(
@@ -427,7 +463,7 @@ def generate_weekly_summary_cc(week: str, verbose: bool = False):
         key_decisions=decisions,
         trends=cc_result.get("patterns", []),
         narrative=cc_result.get("narrative", ""),
-        interactions=_build_interactions_from_github(activity),
+        interactions=_dedupe_interactions(_build_interactions_from_github(activity)),
         external_contributions=_build_external_contributions(activity),
         metrics=Metrics(
             sessions=session_stats.session_count,

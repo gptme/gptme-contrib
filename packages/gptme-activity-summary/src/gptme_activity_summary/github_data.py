@@ -194,6 +194,7 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
 def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRReview]:
     """Get PR review comments received on our PRs in a date range."""
     reviews: list[PRReview] = []
+    seen: set[tuple[str, int, str]] = set()
     for repo in repos:
         output = _run_command(
             [
@@ -217,16 +218,23 @@ def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRRev
         try:
             prs = json.loads(output)
             for pr in prs:
+                pr_number = pr.get("number", 0)
+                pr_title = pr.get("title", "")
+                pr_url = pr.get("url", "")
                 for review in pr.get("reviews", []):
                     author = review.get("author", {}).get("login", "")
                     if author and author not in ("ErikBjare", "bot"):
+                        key = (repo, pr_number, author)
+                        if key in seen:
+                            continue
+                        seen.add(key)
                         reviews.append(
                             PRReview(
                                 repo=repo,
-                                pr_number=pr.get("number", 0),
-                                pr_title=pr.get("title", ""),
+                                pr_number=pr_number,
+                                pr_title=pr_title,
                                 reviewer=author,
-                                url=pr.get("url", ""),
+                                url=pr_url,
                             )
                         )
         except (json.JSONDecodeError, TypeError):
