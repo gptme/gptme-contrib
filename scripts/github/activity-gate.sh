@@ -595,6 +595,13 @@ has_maintainer_waiting_comment() {
         *"ready to merge when convenient"*) return 0 ;;
         *"blocked by missing mergepullrequest permission"*) return 0 ;;
     esac
+    # "ready (to|for) merge @<maintainer>" — the @-mention indicates the ball
+    # is explicitly in the maintainer's court. Bare "ready to merge" is too
+    # broad (Bob says it about his own PRs in unrelated contexts), so we
+    # require the @-mention as the maintainer-handoff signal.
+    if printf '%s' "$lower" | grep -qE 'ready (to|for) merge @[a-z0-9_-]+'; then
+        return 0
+    fi
     return 1
 }
 
