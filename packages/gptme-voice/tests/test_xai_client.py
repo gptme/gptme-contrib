@@ -40,14 +40,13 @@ def test_xai_client_uses_xai_defaults() -> None:
 
 
 def test_xai_client_respects_explicit_model() -> None:
-    cfg = SessionConfig(model="grok-voice-think-fast-1.0")
+    # Use a model that is NOT the xAI default to verify passthrough is genuine
+    explicit_model = "grok-voice-think-1.0"
+    cfg = SessionConfig(model=explicit_model)
     client = XAIRealtimeClient(api_key="test-key", session_config=cfg)
 
-    assert client.session_config.model == "grok-voice-think-fast-1.0"
-    assert (
-        client._get_ws_url()
-        == "wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-1.0"
-    )
+    assert client.session_config.model == explicit_model
+    assert client._get_ws_url() == f"wss://api.x.ai/v1/realtime?model={explicit_model}"
 
 
 def test_xai_client_treats_session_updated_as_ready_signal() -> None:

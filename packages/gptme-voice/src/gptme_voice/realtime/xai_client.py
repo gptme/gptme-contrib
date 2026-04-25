@@ -18,7 +18,12 @@ from .openai_client import OpenAIRealtimeClient, SessionConfig
 logger = logging.getLogger(__name__)
 
 _OPENAI_DEFAULT_VOICE = "echo"
-_OPENAI_DEFAULT_MODEL = "gpt-4o-realtime-preview-2024-12-17"
+# Derived from SessionConfig field default — stays in sync without duplication
+_OPENAI_DEFAULT_MODEL: str = next(
+    f.default  # type: ignore[assignment]
+    for f in dataclasses.fields(SessionConfig)
+    if f.name == "model"
+)
 # "rex" = male, confident, clear — matches the Bob persona better than "eve" (female)
 _DEFAULT_XAI_VOICE = "rex"
 _DEFAULT_XAI_MODEL = "grok-voice-think-fast-1.0"
