@@ -48,6 +48,16 @@ check_repo() {
         run_json=$(echo "$run_json" | jq --argjson disabled "$disabled_json" '[.[] | select(.name as $n | $disabled | index($n) | not)]')
     fi
 
+    # Filter out runs with "skipped" conclusion — conditional workflows that don't apply
+    # to the current event type (e.g. gptme-bot only runs on PR/issue events, gets
+    # "skipped" on master pushes and otherwise masks the passing build/test runs).
+    # Only filter if there are non-skipped runs to fall back to.
+    local non_skipped_json
+    non_skipped_json=$(echo "$run_json" | jq '[.[] | select(.conclusion != "skipped")]')
+    if [ "$(echo "$non_skipped_json" | jq 'length')" -gt 0 ]; then
+        run_json="$non_skipped_json"
+    fi
+
     local conclusion status in_progress=""
     conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // ""')
     status=$(echo "$run_json" | jq -r '.[0].status // ""')
