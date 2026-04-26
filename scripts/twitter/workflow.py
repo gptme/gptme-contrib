@@ -654,7 +654,7 @@ def list_drafts(status: str) -> List[Path]:
 @click.group()
 @click.option(
     "--model",
-    default=os.getenv("MODEL", "anthropic/claude-sonnet-4-5"),
+    default=None,
     help="Model to use for LLM operations",
 )
 def cli(model: str | None = None) -> None:
@@ -667,6 +667,9 @@ def cli(model: str | None = None) -> None:
     # override=False so values already in the environment (e.g. set by the
     # systemd loop) still win.
     load_dotenv(override=False)
+    # Defer MODEL resolution until after load_dotenv() so .env takes effect.
+    if model is None:
+        model = os.getenv("MODEL", "anthropic/claude-sonnet-4-5")
     init_gptme(
         model=model, interactive=False, tool_allowlist=[], tool_format="markdown"
     )
