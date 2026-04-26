@@ -1008,12 +1008,14 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     Codex format uses typed entries:
     - session_meta: session start metadata
     - turn_context: per-turn context (model, cwd)
-    - response_item: messages and tool calls (function_call / function_call_output)
+    - response_item: messages and tool calls (function_call / function_call_output /
+      custom_tool_call for apply_patch)
     - event_msg: events (token_count, task lifecycle)
 
-    Codex uses exec_command for all tool calls (shell-based). File writes are
-    detected from shell redirect patterns rather than individual tool names
-    since all operations go through the shell.
+    File writes are detected from two sources:
+    - apply_patch (custom_tool_call): "Add File" / "Update File" directives in patch input
+    - exec_command (function_call): shell redirect patterns in the command string
+    Git commits are detected from exec_command and write_stdin outputs.
     """
     tool_calls: dict[str, int] = {}
     error_count = 0
@@ -1050,14 +1052,15 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
             payload_type = payload.get("type", "")
 
             # Codex uses custom_tool_call (not function_call) for apply_patch.
-            # Parse "*** Add File: PATH" and "*** Update File: PATH" directives.
+            # Only "Add File" and "Update File" directives count as writes;
+            # "Delete File" removes files rather than writing them.
             if payload_type == "custom_tool_call" and payload.get("name") == "apply_patch":
                 tool_calls["apply_patch"] = tool_calls.get("apply_patch", 0) + 1
                 current_turn_has_tool = True
                 patch_input = payload.get("input", "") or ""
                 if isinstance(patch_input, str):
                     for patch_match in re.finditer(
-                        r"^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s+(.+?)\s*$",
+                        r"^\*\*\*\s+(?:Add|Update)\s+File:\s+(.+?)\s*$",
                         patch_input,
                         re.MULTILINE,
                     ):
