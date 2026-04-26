@@ -1325,7 +1325,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     "set_fields",
     type=(str, str),
     multiple=True,
-    help="Set a field value (state, priority, created)",
+    help="Set a field value (state, priority, created). Pass 'none' to clear an optional field (e.g. --set waiting_since none).",
 )
 @click.option(
     "--add",
@@ -1359,6 +1359,15 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         tasks edit task-123 --remove tag wip
         tasks edit task-123 --set state active --add tag feature --add depends other-task
         tasks edit task-123 --set-subtask "Handle simple responses" done
+
+    Clearing optional fields:
+        Pass 'none' as the value to clear (unset) an optional field.
+        Useful when transitioning a task to a terminal state (done/cancelled)
+        and removing now-stale waiting metadata:
+
+        tasks edit task-123 --set waiting_for none --set waiting_since none
+        tasks edit task-123 --set priority none
+        tasks edit task-123 --set next_action none
 
     Date formats:
         The created field accepts ISO format dates:
