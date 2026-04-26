@@ -3513,6 +3513,133 @@ def test_extract_signals_codex_tee_flags():
     assert "/tmp/output.log" in signals["file_writes"]
 
 
+def test_extract_signals_codex_apply_patch_file_writes():
+    """Codex uses custom_tool_call name=apply_patch for file edits.
+
+    Regression test for codex misclassification: real productive codex
+    sessions were grading 0.25 because apply_patch was invisible to the
+    extractor (it only checked function_call payloads, not custom_tool_call).
+    """
+    patch_input = (
+        "*** Begin Patch\n"
+        "*** Add File: knowledge/strategic/decision.md\n"
+        "+# Decision\n"
+        "+content\n"
+        "*** Update File: tasks/example.md\n"
+        "@@\n"
+        "-old line\n"
+        "+new line\n"
+        "*** Add File: journal/2026-04-25/autonomous-session-1994.md\n"
+        "+# Session\n"
+        "*** End Patch\n"
+    )
+    msgs = [
+        {
+            "timestamp": "2026-04-25T06:39:09Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-04-25T06:40:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "call_p1",
+                "input": patch_input,
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["tool_calls"].get("apply_patch") == 1
+    assert "knowledge/strategic/decision.md" in signals["file_writes"]
+    assert "tasks/example.md" in signals["file_writes"]
+    # Journal paths route to journal_paths, not file_writes
+    assert "journal/2026-04-25/autonomous-session-1994.md" in signals["journal_paths"]
+    assert "journal/2026-04-25/autonomous-session-1994.md" not in signals["file_writes"]
+
+
+def test_extract_signals_codex_commit_in_write_stdin_output():
+    """Commit hash output gets attached to write_stdin call_id, not exec_command.
+
+    Codex uses a persistent shell: exec_command spawns it, write_stdin sends
+    subsequent commands. The commit hash often lands in a write_stdin output.
+    """
+    msgs = [
+        {
+            "timestamp": "2026-04-25T06:39:09Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-04-25T06:40:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "write_stdin",
+                "call_id": "call_w1",
+                "arguments": json.dumps({"session_id": 1, "chars": "git commit ...\n"}),
+            },
+        },
+        {
+            "timestamp": "2026-04-25T06:40:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_w1",
+                "output": (
+                    "Output:\n"
+                    "✓ All pre-commit checks passed\n"
+                    "[master b16170f38] docs(strategic): codify tauri BYOK as Q2 primary surface\n"
+                    " 6 files changed, 265 insertions(+), 1 deletion(-)\n"
+                ),
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert len(signals["git_commits"]) == 1
+    assert "b16170f38" in signals["git_commits"][0]
+    assert "tauri BYOK" in signals["git_commits"][0]
+
+
+def test_extract_signals_codex_commit_in_long_output():
+    """Commit hash buried after >500 chars of output should still be detected.
+
+    Codex outputs are verbose (full file dumps from sed/cat reads), so the
+    legacy 500-char cap missed real commits.
+    """
+    long_prefix = "x" * 1500 + "\n"
+    msgs = [
+        {
+            "timestamp": "2026-04-25T06:39:09Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-04-25T06:40:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "git commit ..."}),
+            },
+        },
+        {
+            "timestamp": "2026-04-25T06:40:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": long_prefix + "[master abc1234] feat: new feature\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert len(signals["git_commits"]) == 1
+    assert "abc1234" in signals["git_commits"][0]
+
+
 def test_extract_usage_codex():
     """Extract model and rate-limit info from Codex trajectory."""
     msgs = [

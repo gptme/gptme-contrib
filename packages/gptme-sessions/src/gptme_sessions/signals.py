@@ -1049,7 +1049,31 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
             payload = record.get("payload") or {}
             payload_type = payload.get("type", "")
 
-            if payload_type == "function_call":
+            # Codex uses custom_tool_call (not function_call) for apply_patch.
+            # Parse "*** Add File: PATH" and "*** Update File: PATH" directives.
+            if payload_type == "custom_tool_call" and payload.get("name") == "apply_patch":
+                tool_calls["apply_patch"] = tool_calls.get("apply_patch", 0) + 1
+                current_turn_has_tool = True
+                patch_input = payload.get("input", "") or ""
+                if isinstance(patch_input, str):
+                    for patch_match in re.finditer(
+                        r"^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s+(.+?)\s*$",
+                        patch_input,
+                        re.MULTILINE,
+                    ):
+                        path = patch_match.group(1).strip()
+                        if "/journal/" in path or path.startswith("journal/"):
+                            journal_paths.append(path)
+                        else:
+                            file_writes.append(path)
+                            sig = f"apply_patch:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append("apply_patch")
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+
+            elif payload_type == "function_call":
                 tool = payload.get("name", "")
                 if tool:
                     tool_calls[tool] = tool_calls.get(tool, 0) + 1
@@ -1099,9 +1123,15 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                     if code_match and code_match.group(1) != "0":
                         error_count += 1
 
-                # Git commit detection from exec_command output
-                if tool_name == "exec_command":
-                    for commit_match in _COMMIT_RE.finditer(output[:500]):
+                # Git commit detection from shell output. Codex uses a persistent
+                # shell session: an initial exec_command spawns the shell, and
+                # subsequent commands (including `git commit`) are piped through
+                # write_stdin — so the commit hash often appears in output
+                # attached to a write_stdin call. Codex outputs are also verbose
+                # (full file dumps), so scan a wider window than the legacy
+                # 500-char head.
+                if tool_name in ("exec_command", "write_stdin"):
+                    for commit_match in _COMMIT_RE.finditer(output[:8000]):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         git_commits.append(f"{commit_msg} ({commit_hash})")
