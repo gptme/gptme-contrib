@@ -144,7 +144,7 @@ state: active
 ...
 ```
 
-See also: [Agent Event Watch Workflow](./agent-event-watch-workflow.md) for detailed pattern.
+See also: [Agent Event Watch Workflow](../autonomous/agent-event-watch-workflow.md) for detailed pattern.
 
 ## Anti-Patterns
 
@@ -181,6 +181,6 @@ Following this pattern:
 
 ## Related
 
-- [Agent Event Watch Workflow](./agent-event-watch-workflow.md) — structured pattern for monitoring time-bounded events
+- [Agent Event Watch Workflow](../autonomous/agent-event-watch-workflow.md) — structured pattern for monitoring time-bounded events
 - [Inter-Agent Communication](./inter-agent-communication.md) — channel selection for agent-to-agent messages
 - [Memory Failure Prevention](./memory-failure-prevention.md) — session startup checks
