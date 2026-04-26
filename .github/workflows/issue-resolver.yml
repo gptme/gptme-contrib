@@ -1,0 +1,107 @@
+name: Issue Resolver (opt-in draft PR)
+
+# Opt-in resolver: trusted users trigger a gptme run against a labeled issue,
+# or a `/gptme-resolve` comment macro, and the workflow either opens a draft PR
+# with proposed changes OR pushes an attempt branch and posts a failure
+# explanation. This is distinct from the warning-only hygiene Action in
+# `issue-hygiene.yml`.
+#
+# Design invariants (Phase 1):
+#   - Opt-in only (explicit label or macro), never fires on every issue.
+#   - Never auto-merges; always opens a DRAFT PR.
+#   - Preserves failed attempts as branches so the user can pick them up.
+#   - Idempotent: re-triggering updates the existing attempt branch.
+#   - Uploads gptme session log as an artifact for post-hoc inspection.
+#
+# Source script: scripts/github_resolver/resolve_issue.py
+# Research note: knowledge/research/2026-04-23-openhands-resolver-runtime-patterns.md
+#                (lives in Bob's private brain repo; public summary in PR body)
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_call:
+    inputs:
+      issue-number:
+        description: "Issue number to resolve (defaults to triggering issue)."
+        required: false
+        type: number
+      model:
+        description: "Optional gptme --model override."
+        required: false
+        type: string
+      trigger-label:
+        description: "Label that activates the resolver when present."
+        required: false
+        type: string
+        default: gptme-resolve
+      trigger-macro:
+        description: "Macro that activates the resolver in issue comments."
+        required: false
+        type: string
+        default: "/gptme-resolve"
+    secrets:
+      gptme-provider-key:
+        description: "API key gptme should use (e.g. OPENAI_API_KEY)."
+        required: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'labeled'
+        && github.event.label.name == (inputs.trigger-label || 'gptme-resolve'))
+      || (github.event_name == 'issue_comment' && github.event.action == 'created'
+        && startsWith(github.event.comment.body, (inputs.trigger-macro || '/gptme-resolve'))
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+      || github.event_name == 'workflow_call'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install gptme
+        run: uv tool install gptme
+
+      - name: Resolve issue
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPTME_MODEL: ${{ inputs.model }}
+          OPENAI_API_KEY: ${{ secrets.gptme-provider-key }}
+        run: |
+          ISSUE_NUMBER="${{ inputs.issue-number || github.event.issue.number }}"
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "No issue number available; nothing to do."
+            exit 0
+          fi
+
+          mkdir -p output
+          uv run python scripts/github_resolver/resolve_issue.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue "$ISSUE_NUMBER" \
+            --output-dir output
+
+      - name: Upload session artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gptme-resolver-output
+          path: output/
+          retention-days: 30
+          if-no-files-found: ignore
