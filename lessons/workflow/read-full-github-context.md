@@ -14,6 +14,11 @@ match:
     - "review pr comments"
     - "look at the pr discussion"
     - "check the github discussion"
+    - "reading the issue"
+    - "looking at the issue"
+    - "looking at the pr"
+    - "let me check the issue"
+    - "checking the issue"
 status: active
 ---
 
