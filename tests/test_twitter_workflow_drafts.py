@@ -268,12 +268,12 @@ def test_find_live_duplicate_reply_ids_matches_own_replies(
     workflow_module: Any,
 ) -> None:
     workflow_module.cached_get_me = lambda *args, **kwargs: SimpleNamespace(
-        data=SimpleNamespace(username="TimeToBuildBob")
+        data=SimpleNamespace(username="TestBotUser")
     )
     workflow_module.get_conversation_thread = lambda *args, **kwargs: [
-        {"id": "9001", "author": "TimeToBuildBob", "replied_to_id": "4242"},
+        {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
         {"id": "9002", "author": "someoneelse", "replied_to_id": "4242"},
-        {"id": "9003", "author": "TimeToBuildBob", "replied_to_id": "1111"},
+        {"id": "9003", "author": "TestBotUser", "replied_to_id": "1111"},
     ]
 
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
@@ -286,7 +286,7 @@ def test_find_live_duplicate_reply_ids_returns_empty_without_identity(
 ) -> None:
     workflow_module.cached_get_me = lambda *args, **kwargs: SimpleNamespace(data=None)
     workflow_module.get_conversation_thread = lambda *args, **kwargs: [
-        {"id": "9001", "author": "TimeToBuildBob", "replied_to_id": "4242"},
+        {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
     ]
 
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
