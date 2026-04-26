@@ -1221,6 +1221,7 @@ def post(
                         f"[red]  - Live tweet on Twitter: {live_tweet_id}[/red]"
                     )
                 console.print("[red]Skipping duplicate reply.[/red]\n")
+                move_draft(path, "rejected")
                 continue
 
         console.print(f"[white]{draft.text}")
