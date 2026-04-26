@@ -1393,7 +1393,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         # Optional fields with validation
         "priority": {"type": "enum", "values": ["high", "medium", "low", "none"]},
         "task_type": {"type": "enum", "values": ["project", "action", "none"]},
-        "assigned_to": {"type": "enum", "values": ["agent", "human", "both", "none"]},
+        # Real workspaces use named assignees (bob, erik, alice, etc.).
+        # Keep "none" as the explicit clear value; otherwise accept any string.
+        "assigned_to": {"type": "string"},
         "waiting_since": {"type": "date"},
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},
@@ -1651,6 +1653,128 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
     # Show success message
     count = len(target_tasks)
     console.print(f"[green]✓ Updated {count} task{'s' if count > 1 else ''}[/]")
+
+
+# States that cannot be claimed (already terminal or deliberately deferred/blocked).
+_CLAIM_REFUSED_STATES = {"waiting", "ready_for_review", "someday", "done", "cancelled"}
+# States that get auto-promoted to active on claim.
+_CLAIM_PROMOTABLE_STATES = {"backlog", "todo"}
+
+
+def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
+    """Resolve the agent name for a claim.
+
+    Order:
+        1. ``--agent NAME`` CLI override
+        2. ``GPTODO_AGENT_NAME`` env var
+        3. ``[agent].name`` from ``gptme.toml`` (lowercased)
+        4. fallback ``"agent"``
+    """
+    if override:
+        return override.strip()
+
+    env_name = os.environ.get("GPTODO_AGENT_NAME")
+    if env_name:
+        return env_name.strip()
+
+    gptme_toml = repo_root / "gptme.toml"
+    if gptme_toml.exists():
+        try:
+            try:
+                import tomllib  # type: ignore[import-not-found]
+            except ModuleNotFoundError:
+                import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+            data = tomllib.loads(gptme_toml.read_text())
+            agent_section = data.get("agent")
+            if isinstance(agent_section, dict):
+                name = agent_section.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip().lower()
+        except Exception:
+            pass
+
+    return "agent"
+
+
+@cli.command("claim")
+@click.argument("task_id")
+@click.option("--agent", "agent_override", default=None, help="Agent name to record as owner.")
+def claim(task_id: str, agent_override: str | None):
+    """Claim a task for the current agent.
+
+    Sets ``state: active`` (for backlog/todo), records ``assigned_to`` and
+    ``assigned_at``, and refuses to claim waiting / ready_for_review /
+    someday / terminal tasks.
+
+    Agent name resolution: --agent flag, then GPTODO_AGENT_NAME env var,
+    then [agent].name from gptme.toml (lowercased), else "agent".
+
+    Examples:
+        gptodo claim my-task
+        gptodo claim my-task --agent bob
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        sys.exit(1)
+
+    try:
+        target_tasks = resolve_tasks([task_id], tasks, tasks_dir)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    if len(target_tasks) != 1:
+        console.print(f"[red]claim requires exactly one task, got {len(target_tasks)}[/]")
+        sys.exit(1)
+
+    task = target_tasks[0]
+    agent = _resolve_agent_name(repo_root, agent_override)
+
+    current_state = normalize_state(task.metadata.get("state", "backlog"), warn=False)
+    current_assignee = task.metadata.get("assigned_to")
+    current_assigned_at = task.metadata.get("assigned_at")
+
+    if current_state in _CLAIM_REFUSED_STATES:
+        console.print(
+            f"[red]Refusing to claim {task.id}: state is '{current_state}'. "
+            "Resolve the blocker (or revive from someday) before claiming.[/]"
+        )
+        sys.exit(1)
+
+    # Idempotent no-op: already active, same owner, has assigned_at.
+    if current_state == "active" and current_assignee == agent and current_assigned_at is not None:
+        console.print(
+            f"[yellow]Already claimed:[/] {task.id} (owner={agent}, since={current_assigned_at})"
+        )
+        return
+
+    post = frontmatter.load(task.path)
+
+    new_state = "active" if current_state in _CLAIM_PROMOTABLE_STATES else current_state
+    if current_state in _CLAIM_PROMOTABLE_STATES:
+        post.metadata["state"] = new_state
+
+    post.metadata["assigned_to"] = agent
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    post.metadata["assigned_at"] = now_utc
+
+    with open(task.path, "w") as f:
+        f.write(frontmatter.dumps(post))
+
+    if current_state in _CLAIM_PROMOTABLE_STATES:
+        console.print(
+            f"[green]✓ Claimed[/] {task.id} (state: {current_state} → active, owner: {agent})"
+        )
+    elif current_assignee != agent:
+        prev = current_assignee or "unassigned"
+        console.print(f"[green]✓ Reassigned[/] {task.id} (owner: {prev} → {agent}, state: active)")
+    else:
+        console.print(f"[green]✓ Re-claimed[/] {task.id} (owner: {agent}, state: active)")
 
 
 @cli.command("tags")
