@@ -8,10 +8,16 @@ match:
     - confirm completion in thread
     - missing follow-up response
     - broken communication loop
-status: active
+status: deprecated
 ---
 
 # GitHub Issue Follow-Through Pattern
+
+> **Deprecated 2026-04-26**: shadowed by Bob-local
+> `social/github-issue-engagement.md` (TS=0.416, n=1200), which fires reliably
+> on the same surface (close the loop on the original issue when work
+> completes). Rationale:
+> `knowledge/analysis/silent-lessons-shadowing-2026-04-26.md` in ErikBjare/bob.
 
 ## Rule
 ALWAYS respond in the original issue thread when completing any action requested in that thread.
