@@ -158,6 +158,31 @@ def test_claim_resolves_agent_from_env(workspace: Path, monkeypatch: pytest.Monk
     assert meta["assigned_to"] == "alice"
 
 
+def test_claim_ignores_blank_agent_override(workspace: Path) -> None:
+    path = write_task(
+        workspace, "blank-override-task", state="backlog", created="2026-04-26T00:00:00+00:00"
+    )
+
+    result = CliRunner().invoke(cli, ["claim", "blank-override-task", "--agent", "   "])
+
+    assert result.exit_code == 0, result.output
+    meta = load_meta(path)
+    assert meta["assigned_to"] == "bob"
+
+
+def test_claim_ignores_blank_env(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPTODO_AGENT_NAME", "   ")
+    path = write_task(
+        workspace, "blank-env-task", state="backlog", created="2026-04-26T00:00:00+00:00"
+    )
+
+    result = CliRunner().invoke(cli, ["claim", "blank-env-task"])
+
+    assert result.exit_code == 0, result.output
+    meta = load_meta(path)
+    assert meta["assigned_to"] == "bob"
+
+
 def test_claim_resolves_agent_from_gptme_toml(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,6 +195,23 @@ def test_claim_resolves_agent_from_gptme_toml(
     assert result.exit_code == 0
     meta = load_meta(path)
     assert meta["assigned_to"] == "bob"
+
+
+def test_claim_warns_on_invalid_gptme_toml(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GPTODO_AGENT_NAME", raising=False)
+    (workspace / "gptme.toml").write_text("[agent\nname = Bob\n")
+    path = write_task(
+        workspace, "invalid-toml-task", state="backlog", created="2026-04-26T00:00:00+00:00"
+    )
+
+    result = CliRunner().invoke(cli, ["claim", "invalid-toml-task"])
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: Failed to load" in result.output
+    meta = load_meta(path)
+    assert meta["assigned_to"] == "agent"
 
 
 def test_edit_accepts_named_assigned_to(workspace: Path) -> None:

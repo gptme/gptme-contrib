@@ -6,6 +6,7 @@
 #     "rich>=13.0.0",
 #     "python-frontmatter>=1.1.0",
 #     "tabulate>=0.9.0",
+#     "tomli>=2.0.1; python_version < '3.11'",
 # ]
 # [tool.uv]
 # exclude-newer = "2024-04-01T00:00:00Z"
@@ -1670,12 +1671,14 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
         3. ``[agent].name`` from ``gptme.toml`` (lowercased)
         4. fallback ``"agent"``
     """
-    if override:
-        return override.strip()
+    if override is not None:
+        stripped = override.strip()
+        if stripped:
+            return stripped
 
-    env_name = os.environ.get("GPTODO_AGENT_NAME")
+    env_name = os.environ.get("GPTODO_AGENT_NAME", "").strip()
     if env_name:
-        return env_name.strip()
+        return env_name
 
     gptme_toml = repo_root / "gptme.toml"
     if gptme_toml.exists():
@@ -1683,15 +1686,27 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
             try:
                 import tomllib  # type: ignore[import-not-found]
             except ModuleNotFoundError:
-                import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+                try:
+                    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+                except ModuleNotFoundError:
+                    console.print(
+                        "[yellow]Warning: tomli is required on Python <3.11 to read "
+                        "gptme.toml; falling back to 'agent'[/]"
+                    )
+                    return "agent"
+
             data = tomllib.loads(gptme_toml.read_text())
-            agent_section = data.get("agent")
-            if isinstance(agent_section, dict):
-                name = agent_section.get("name")
-                if isinstance(name, str) and name.strip():
-                    return name.strip().lower()
-        except Exception:
-            pass
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            console.print(
+                f"[yellow]Warning: Failed to load {gptme_toml}: {exc}. Falling back to 'agent'.[/]"
+            )
+            return "agent"
+
+        agent_section = data.get("agent")
+        if isinstance(agent_section, dict):
+            name = agent_section.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip().lower()
 
     return "agent"
 
