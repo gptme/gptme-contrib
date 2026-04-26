@@ -137,6 +137,7 @@ POSTED_DIR = TWEETS_DIR / "posted"
 REJECTED_DIR = TWEETS_DIR / "rejected"
 CACHE_DIR = TWEETS_DIR / "cache"
 MAX_POSTS_PER_CYCLE = 2  # Rate limit to prevent mass posting in auto mode
+DRAFT_FILE_SUFFIXES = (".yml", ".yaml", ".md")
 
 # Ensure directories exist
 for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR, CACHE_DIR]:
@@ -181,6 +182,39 @@ def load_from_cache(tweet_id: str) -> Tuple[dict | None, dict | None]:
         cache_data = json.load(f)
 
     return cache_data.get("evaluation"), cache_data.get("response")
+
+
+def _list_draft_files(directory: Path) -> List[Path]:
+    """Return draft files for all supported draft formats."""
+    files_by_name: dict[str, Path] = {}
+    for suffix in DRAFT_FILE_SUFFIXES:
+        for path in directory.glob(f"*{suffix}"):
+            files_by_name[path.name] = path
+    return [files_by_name[name] for name in sorted(files_by_name)]
+
+
+def _parse_markdown_frontmatter(text: str) -> tuple[dict[str, Any], str] | None:
+    """Split markdown frontmatter and body if present."""
+    if not text.startswith("---"):
+        return None
+
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return None
+
+    end_idx = next(
+        (i for i, line in enumerate(lines[1:], start=1) if line.rstrip() == "---"),
+        None,
+    )
+    if end_idx is None:
+        return None
+
+    metadata = yaml.safe_load("\n".join(lines[1:end_idx])) or {}
+    if not isinstance(metadata, dict):
+        raise ValueError("Markdown frontmatter must be a YAML dictionary")
+
+    body = "\n".join(lines[end_idx + 1 :]).strip()
+    return metadata, body
 
 
 class TweetDraft:
@@ -272,14 +306,38 @@ class TweetDraft:
 
     def save(self, path: Path) -> None:
         """Save draft to file"""
+        if path.suffix == ".md":
+            data = self.to_dict()
+            body = data.pop("text", "").strip()
+            with path.open("w") as f:
+                f.write("---\n")
+                yaml.safe_dump(data, f, sort_keys=False)
+                f.write("---\n")
+                if body:
+                    f.write("\n")
+                    f.write(body)
+                    f.write("\n")
+            return
+
         with path.open("w") as f:
-            yaml.dump(self.to_dict(), f)
+            yaml.safe_dump(self.to_dict(), f, sort_keys=False)
 
     @classmethod
     def load(cls, path: Path) -> "TweetDraft":
         """Load draft from file"""
-        with path.open("r") as f:
-            data = yaml.safe_load(f)
+        text = path.read_text()
+        frontmatter = (
+            _parse_markdown_frontmatter(text) if path.suffix == ".md" else None
+        )
+        if frontmatter is not None:
+            data, body = frontmatter
+            if body and not data.get("text") and not data.get("content"):
+                data["text"] = body
+        else:
+            data = yaml.safe_load(text)
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid draft payload in {path}")
         return cls.from_dict(data)
 
 
@@ -612,16 +670,28 @@ def find_draft(
     if "/" in draft_id:
         draft_path = Path(draft_id)
         if not draft_path.exists() and not draft_path.suffix:
-            draft_path = draft_path.with_suffix(".yml")
-        if draft_path.exists():
+            for suffix in DRAFT_FILE_SUFFIXES:
+                candidate = draft_path.with_suffix(suffix)
+                if candidate.exists():
+                    return candidate
+        elif draft_path.exists():
             return draft_path
     else:
         # Search in specified directories
         search_dirs = [status_dirs[status]] if status else status_dirs.values()
         for dir in search_dirs:
-            for path in [dir / draft_id, (dir / draft_id).with_suffix(".yml")] + list(
-                dir.glob(f"*{draft_id}*.yml")
-            ):
+            candidates = [dir / draft_id]
+            if not Path(draft_id).suffix:
+                candidates.extend(
+                    (dir / draft_id).with_suffix(suffix)
+                    for suffix in DRAFT_FILE_SUFFIXES
+                )
+            candidates.extend(
+                path
+                for path in _list_draft_files(dir)
+                if draft_id in path.stem or draft_id in path.name
+            )
+            for path in candidates:
                 if path.exists():
                     return path
 
@@ -629,7 +699,7 @@ def find_draft(
         status_msg = f" in {status} directory" if status else ""
         console.print(f"[red]No draft found{status_msg}: {draft_id}")
         console.print(
-            "[yellow]ID can be: simple ID, filename, or full path (e.g., tweet_20250419, reply_*.yml, tweets/new/*.yml)"
+            "[yellow]ID can be: simple ID, filename, or full path (e.g., tweet_20250419, reply_*.yml, manual-draft.md)"
         )
 
     return None
@@ -648,7 +718,7 @@ def list_drafts(status: str) -> List[Path]:
     if status not in status_dirs:
         raise ValueError(f"Invalid status: {status}")
 
-    return sorted(status_dirs[status].glob("*.yml"))
+    return _list_draft_files(status_dirs[status])
 
 
 @click.group()
@@ -734,7 +804,7 @@ def _check_for_duplicate_replies_internal(draft: TweetDraft) -> dict[str, list[P
             continue
 
         matching_drafts = []
-        for draft_path in status_dir.glob("*.yml"):
+        for draft_path in _list_draft_files(status_dir):
             try:
                 other_draft = TweetDraft.load(draft_path)
                 if other_draft.in_reply_to == tweet_id:
@@ -1193,7 +1263,7 @@ def process_timeline_tweets(
     tweets_skipped_prefilter = 0
 
     # Count existing drafts in new/ directory
-    existing_drafts = len(list(NEW_DIR.glob("*.yml")))
+    existing_drafts = len(_list_draft_files(NEW_DIR))
     total_drafts = existing_drafts + drafts_generated
 
     # Check if we're already at or over the limit
@@ -1216,7 +1286,7 @@ def process_timeline_tweets(
         status_dir = TWEETS_DIR / status_dir_name
         if not status_dir.exists():
             continue
-        for draft_path in status_dir.glob("*.yml"):
+        for draft_path in _list_draft_files(status_dir):
             try:
                 other_draft = TweetDraft.load(draft_path)
                 if other_draft.in_reply_to is not None:
