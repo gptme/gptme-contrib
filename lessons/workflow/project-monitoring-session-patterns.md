@@ -13,6 +13,7 @@ match:
     - "triage notifications across repos"
     - "monitoring run derailing"
     - "act vs defer"
+  session_categories: [monitoring, triage]
 status: active
 ---
 
