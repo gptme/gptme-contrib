@@ -14,6 +14,7 @@ match:
   - "tasks blocked on external dependencies"
   - "blocked on external dependencies"
   - "all tasks blocked on external"
+  session_categories: [code, cross-repo, triage, cleanup, infrastructure]
 status: active
 ---
 
