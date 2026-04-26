@@ -5,10 +5,16 @@ match:
   - command dumped 10k+ tokens
   - large output 1000+ lines
   - token efficiency shell
-status: active
+status: deprecated
 ---
 
 # Shell Output Filtering for Token Efficiency
+
+> **Deprecated 2026-04-26**: shadowed by Bob-local
+> `tools/grep-recursive-safety.md` (TS=0.510, n=445) and
+> `tools/extract-code-sections-with-sed.md` (TS=0.520, n=198), which carry the
+> same principle with concrete tool guidance and active matching. Rationale:
+> `knowledge/analysis/silent-lessons-shadowing-2026-04-26.md` in ErikBjare/bob.
 
 ## Rule
 Always filter shell output with grep/head/tail when expecting large results (>1000 lines).

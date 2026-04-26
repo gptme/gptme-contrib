@@ -1,5 +1,5 @@
 ---
-status: active
+status: deprecated
 category: autonomous
 tags:
 - thompson-sampling
@@ -16,6 +16,13 @@ match:
 ---
 
 # Thompson Sampling for Work Category Optimization
+
+> **Deprecated 2026-04-26**: shadowed by Bob-local
+> `workflow/category-conditional-bandit-routing.md` and
+> `patterns/friction-analysis.md` (TS=0.525, n=763), which carry the runtime
+> decision in production. Justification content for category-level TS belongs
+> in `knowledge/`, not as runtime lesson guidance. Rationale:
+> `knowledge/analysis/silent-lessons-shadowing-2026-04-26.md` in ErikBjare/bob.
 
 ## Rule
 Use Thompson sampling over *work categories* (code, triage, infrastructure, content), not *session modes* (autonomous, monitoring, email). Categories are the explore/exploit decision; modes are a scheduling choice.

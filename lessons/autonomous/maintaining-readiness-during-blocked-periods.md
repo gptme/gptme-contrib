@@ -8,10 +8,17 @@ match:
     - strategic pause framework
     - blocked waiting for response
     - stakeholder hasn't replied
-status: active
+status: deprecated
 ---
 
 # Maintaining Readiness During Blocked Periods
+
+> **Deprecated 2026-04-26**: shadowed by Bob-local
+> `strategic/pivot-to-secondary-tasks-when-.md` (TS=0.450, n=49) and
+> `workflow/autonomous-run.md` (TS=0.439, n=1896), which cover the same
+> actionable kernel without 274 lines of Alice-specific framework material.
+> Rationale: `knowledge/analysis/silent-lessons-shadowing-2026-04-26.md` in
+> ErikBjare/bob.
 
 ## Rule
 Maintain strategic readiness and productive capacity when all primary work is blocked by external dependencies.
