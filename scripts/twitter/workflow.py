@@ -818,6 +818,37 @@ def _check_for_duplicate_replies_internal(draft: TweetDraft) -> dict[str, list[P
     return duplicates
 
 
+def _find_live_duplicate_reply_ids(client, tweet_id: str) -> list[str]:
+    """Return recent live reply tweet IDs we already posted to ``tweet_id``.
+
+    This closes the gap where file-based draft history is missing (for example after
+    a branch checkout) but the reply already exists on Twitter.
+    """
+    try:
+        me = cached_get_me(client, user_auth=False)
+        username = getattr(getattr(me, "data", None), "username", None)
+        if not username:
+            return []
+
+        thread_context = get_conversation_thread(client, tweet_id)
+        tweet_id = str(tweet_id)
+        username = username.lower()
+
+        duplicate_ids = {
+            str(tweet["id"])
+            for tweet in thread_context
+            if str(tweet.get("replied_to_id")) == tweet_id
+            and str(tweet.get("author", "")).lower() == username
+        }
+        return sorted(duplicate_ids)
+    except Exception as e:
+        logger.warning(
+            "Live duplicate reply lookup failed",
+            extra={"tweet_id": str(tweet_id), "error": str(e)},
+        )
+        return []
+
+
 @cli.command()
 @click.argument("draft_path", type=click.Path(exists=True))
 def check_for_duplicate_replies(draft_path: str):
@@ -1169,16 +1200,29 @@ def post(
 
             # Check for already posted duplicates
             duplicates = _check_for_duplicate_replies_internal(draft)
-            if "posted" in duplicates:
-                console.print(
-                    f"\n[red]⚠ WARNING: Already posted {len(duplicates['posted'])} reply(ies) to this tweet![/red]"
+            live_duplicate_ids = []
+            if "posted" not in duplicates:
+                live_duplicate_ids = _find_live_duplicate_reply_ids(
+                    client, str(draft.in_reply_to)
                 )
-                for dup_path in duplicates["posted"]:
-                    dup_draft = TweetDraft.load(dup_path)
-                    console.print(f"[red]  - Posted: {dup_draft.text[:80]}...[/red]")
+
+            if "posted" in duplicates or live_duplicate_ids:
                 console.print(
-                    "[red]This would be a duplicate reply. Consider rejecting instead.[/red]\n"
+                    "\n[red]⚠ WARNING: Already posted reply to this tweet![/red]"
                 )
+                if "posted" in duplicates:
+                    for dup_path in duplicates["posted"]:
+                        dup_draft = TweetDraft.load(dup_path)
+                        console.print(
+                            f"[red]  - Posted draft: {dup_draft.text[:80]}...[/red]"
+                        )
+                for live_tweet_id in live_duplicate_ids:
+                    console.print(
+                        f"[red]  - Live tweet on Twitter: {live_tweet_id}[/red]"
+                    )
+                console.print("[red]Skipping duplicate reply.[/red]\n")
+                move_draft(path, "rejected")
+                continue
 
         console.print(f"[white]{draft.text}")
 
@@ -1978,10 +2022,20 @@ def auto(
 
                     # Check for already posted duplicates
                     duplicates = _check_for_duplicate_replies_internal(draft)
-                    if "posted" in duplicates:
+                    live_duplicate_ids = []
+                    if "posted" not in duplicates:
+                        live_duplicate_ids = _find_live_duplicate_reply_ids(
+                            client, str(draft.in_reply_to)
+                        )
+
+                    if "posted" in duplicates or live_duplicate_ids:
                         console.print(
                             f"[red]⚠ Skipping duplicate reply to {draft.in_reply_to}[/red]"
                         )
+                        for live_tweet_id in live_duplicate_ids:
+                            console.print(
+                                f"[red]  - Live tweet on Twitter: {live_tweet_id}[/red]"
+                            )
                         move_draft(path, "rejected")
                         continue
 
