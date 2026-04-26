@@ -14,6 +14,15 @@ match:
     - "retrigger greptile"
     - "pushed fixes after the earlier Greptile"
     - "after the earlier Greptile review"
+    - "addressed automated reviewer feedback"
+    - "addressed the automated reviewer's feedback"
+    - "make the bot take another look"
+    - "have the bot review again"
+    - "trigger bot re-review"
+    - "retrigger automated review"
+    - "bot re-review after fixes"
+    - "new commits after bot review"
+    - "request another bot review"
   session_categories: [cross-repo, code]
 status: active
 ---
