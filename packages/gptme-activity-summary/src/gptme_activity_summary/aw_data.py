@@ -6,11 +6,13 @@ from a local ActivityWatch server.
 Default AW server: http://localhost:5600 (configurable via AW_SERVER env var)
 """
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.request import urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,45 @@ def _run_aw_query(
     return None
 
 
+def _fetch_category_rules() -> list[list[Any]]:
+    """Fetch category rules from the ActivityWatch settings API.
+
+    AW webui persists categorization rules under the ``classes`` setting and
+    injects them directly into queries. The Python aw-client does not expose a
+    settings helper, so we read the REST endpoint directly and convert the saved
+    categories into the ``[category_path, rule]`` shape expected by
+    ``categorize(...)``.
+
+    Returns an empty list when no classes are saved or the settings endpoint is
+    unavailable. That fallback still produces a valid ``categorize(events, [])``
+    query, which yields ``["Uncategorized"]`` instead of a server-side parse
+    error.
+    """
+    settings_url = f"{AW_SERVER.rstrip('/')}/api/0/settings/classes"
+    try:
+        with urlopen(settings_url, timeout=AW_TIMEOUT) as response:
+            payload = json.load(response)
+    except Exception as e:
+        logger.debug("AW category settings fetch failed: %s", e)
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    rules: list[list[Any]] = []
+    for category in payload:
+        if not isinstance(category, dict):
+            continue
+        name = category.get("name")
+        rule = category.get("rule")
+        if not isinstance(name, list) or not isinstance(rule, dict):
+            continue
+        if rule.get("type") is None:
+            continue
+        rules.append([name, rule])
+    return rules
+
+
 def _fetch_app_usage(
     client: Any, window_bucket: str, afk_bucket: str | None, timeperiod: tuple[datetime, datetime]
 ) -> tuple[list[AppUsage], float]:
@@ -248,10 +289,10 @@ def _fetch_browser_domains(
 def _fetch_category_usage(
     client: Any, window_bucket: str, afk_bucket: str | None, timeperiod: tuple[datetime, datetime]
 ) -> list[CategoryUsage]:
-    """Fetch time per category using AW's user-configured categorization rules.
+    """Fetch time per category using AW's saved categorization rules.
 
-    Uses AW's built-in categorize() function with the user's saved $categories rules.
-    Returns an empty list only if the query fails.
+    Uses AW's built-in ``categorize()`` function with rules loaded from the
+    ActivityWatch settings API. Returns an empty list only if the query fails.
 
     When no categories are configured, AW assigns all events to ["Uncategorized"],
     so this returns [CategoryUsage(["Uncategorized"], total_duration)] rather than [].
@@ -259,13 +300,14 @@ def _fetch_category_usage(
 
     The $category field in results is a list like ["Coding", "Python"] or ["Uncategorized"].
     """
+    category_rules = json.dumps(_fetch_category_rules())
     if afk_bucket:
         query = [
             f'afk_events = query_bucket("{afk_bucket}");',
             'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
             f'window_events = query_bucket("{window_bucket}");',
             "events = filter_period_intersect(window_events, afk_events);",
-            "events = categorize(events, $categories);",
+            f"events = categorize(events, {category_rules});",
             'events = merge_events_by_keys(events, ["$category"]);',
             "events = sort_by_duration(events);",
             "RETURN = events;",
@@ -273,7 +315,7 @@ def _fetch_category_usage(
     else:
         query = [
             f'window_events = query_bucket("{window_bucket}");',
-            "events = categorize(window_events, $categories);",
+            f"events = categorize(window_events, {category_rules});",
             'events = merge_events_by_keys(events, ["$category"]);',
             "events = sort_by_duration(events);",
             "RETURN = events;",

@@ -1,6 +1,9 @@
 """Tests for aw_data.py — ActivityWatch integration."""
 
+import json
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
+from io import BytesIO
 
 import pytest
 
@@ -13,6 +16,7 @@ from gptme_activity_summary.aw_data import (
     format_aw_activity_for_prompt,
     _build_timeperiod,
     _fetch_category_usage,
+    _fetch_category_rules,
     _get_client,
 )
 
@@ -326,6 +330,100 @@ def test_fetch_category_usage_non_list_category():
     assert len(result) == 1
     assert result[0].category == ["FlatString"]
     assert result[0].duration == 3600
+
+
+def test_fetch_category_rules_reads_aw_settings_classes():
+    """Saved AW classes are converted into categorize() query rules."""
+    from unittest.mock import patch
+
+    payload = [
+        {"name": ["Coding"], "rule": {"type": "regex", "regex": "nvim"}},
+        {"name": ["IgnoreMe"], "rule": {"type": None}},
+        {"name": "bad-shape", "rule": {"type": "regex", "regex": "bad"}},
+    ]
+
+    with patch(
+        "gptme_activity_summary.aw_data.urlopen",
+        return_value=nullcontext(BytesIO(json.dumps(payload).encode())),
+    ):
+        result = _fetch_category_rules()
+
+    assert result == [[["Coding"], {"type": "regex", "regex": "nvim"}]]
+
+
+def test_fetch_category_rules_returns_empty_when_setting_missing():
+    """Null or missing classes settings should degrade to an empty rule list."""
+    from unittest.mock import patch
+
+    with patch(
+        "gptme_activity_summary.aw_data.urlopen",
+        return_value=nullcontext(BytesIO(b"null")),
+    ):
+        result = _fetch_category_rules()
+
+    assert result == []
+
+
+def test_fetch_category_usage_inlines_saved_category_rules():
+    """Category queries inline server-backed rules instead of the dead $categories token."""
+    from unittest.mock import MagicMock, patch
+
+    timeperiod = (
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+        datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(_client, query, _timeperiod):
+        captured["query"] = query
+        return []
+
+    with (
+        patch(
+            "gptme_activity_summary.aw_data._fetch_category_rules",
+            return_value=[[["Coding"], {"type": "regex", "regex": "nvim"}]],
+        ),
+        patch("gptme_activity_summary.aw_data._run_aw_query", side_effect=fake_run),
+    ):
+        mock_client = MagicMock()
+        _fetch_category_usage(mock_client, "aw-watcher-window_host", None, timeperiod)
+
+    query_text = "\n".join(captured["query"])
+    assert "$categories" not in query_text
+    assert (
+        'categorize(window_events, [[["Coding"], {"type": "regex", "regex": "nvim"}]])'
+        in query_text
+    )
+
+
+def test_fetch_category_usage_uses_empty_rules_fallback():
+    """When no classes are saved, categorize(events, []) should still produce a valid query."""
+    from unittest.mock import MagicMock, patch
+
+    timeperiod = (
+        datetime(2026, 3, 1, tzinfo=timezone.utc),
+        datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(_client, query, _timeperiod):
+        captured["query"] = query
+        return []
+
+    with (
+        patch(
+            "gptme_activity_summary.aw_data._fetch_category_rules",
+            return_value=[],
+        ),
+        patch("gptme_activity_summary.aw_data._run_aw_query", side_effect=fake_run),
+    ):
+        mock_client = MagicMock()
+        _fetch_category_usage(
+            mock_client, "aw-watcher-window_host", "aw-watcher-afk_host", timeperiod
+        )
+
+    query_text = "\n".join(captured["query"])
+    assert "events = categorize(events, []);" in query_text
 
 
 @pytest.mark.skipif(_get_client() is None, reason="aw-client not installed")
