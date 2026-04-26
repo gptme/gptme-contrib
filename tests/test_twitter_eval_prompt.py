@@ -47,6 +47,11 @@ def _load_llm_module() -> types.ModuleType:
     gptme_message_stub.Message = type("Message", (), {})  # type: ignore[attr-defined]
     gptme_prompts_stub = types.ModuleType("gptme.prompts")
     gptme_prompts_stub.prompt_workspace = lambda *args, **kwargs: iter([])  # type: ignore[attr-defined]
+    rich_stub: Any = _make_pkg("rich")
+    rich_console_stub: Any = types.ModuleType("rich.console")
+    rich_console_stub.Console = lambda *args, **kwargs: types.SimpleNamespace(
+        print=lambda *print_args, **print_kwargs: None
+    )
 
     sys.modules.setdefault("gptme", gptme_stub)
     sys.modules.setdefault("gptme.llm", gptme_llm_stub)
@@ -54,6 +59,8 @@ def _load_llm_module() -> types.ModuleType:
     sys.modules.setdefault("gptme.dirs", gptme_dirs_stub)
     sys.modules.setdefault("gptme.message", gptme_message_stub)
     sys.modules.setdefault("gptme.prompts", gptme_prompts_stub)
+    sys.modules.setdefault("rich", rich_stub)
+    sys.modules.setdefault("rich.console", rich_console_stub)
 
     spec = importlib.util.spec_from_file_location("twitter_llm_under_test", LLM_PATH)
     assert spec and spec.loader
@@ -72,6 +79,8 @@ def llm_module() -> Generator[types.ModuleType, None, None]:
         "gptme.dirs",
         "gptme.message",
         "gptme.prompts",
+        "rich",
+        "rich.console",
     )
     pre_existing = {k for k in _STUB_KEYS if k in sys.modules}
     module = _load_llm_module()
