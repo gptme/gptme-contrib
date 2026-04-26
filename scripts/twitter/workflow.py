@@ -199,11 +199,11 @@ def _parse_markdown_frontmatter(text: str) -> tuple[dict[str, Any], str] | None:
         return None
 
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not lines or lines[0].rstrip() != "---":
         return None
 
     end_idx = next(
-        (i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        (i for i, line in enumerate(lines[1:], start=1) if line.rstrip() == "---"),
         None,
     )
     if end_idx is None:
