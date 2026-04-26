@@ -1,0 +1,68 @@
+name: Issue Hygiene (warning-only)
+
+# Warning-only prototype: on every newly-opened issue, run gptme against a
+# narrow prompt and post AT MOST ONE marker-tagged comment with duplicate /
+# missing-info / routing hints.
+#
+# This workflow NEVER closes issues, NEVER edits labels, and NEVER edits the
+# issue body. It is intentionally reusable (workflow_call) so downstream repos
+# can adopt it with a one-liner once we're happy with false-positive rates.
+#
+# Source: scripts/github_hygiene/issue_hygiene.py
+# Research: knowledge/research/2026-04-23-opencode-github-hygiene-agents.md
+#           (in Bob's private brain repo; public summary in PR)
+
+on:
+  issues:
+    types: [opened]
+  workflow_call:
+    inputs:
+      issue-number:
+        description: "Issue number to check (defaults to triggering issue)."
+        required: false
+        type: number
+      model:
+        description: "Optional gptme --model override."
+        required: false
+        type: string
+    secrets:
+      gptme-provider-key:
+        description: "API key gptme should use (e.g. OPENAI_API_KEY)."
+        required: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install gptme
+        run: |
+          uv tool install gptme
+
+      - name: Run hygiene check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPTME_MODEL: ${{ inputs.model }}
+          OPENAI_API_KEY: ${{ secrets.gptme-provider-key }}
+        run: |
+          ISSUE_NUMBER="${{ inputs.issue-number || github.event.issue.number }}"
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "No issue number available; nothing to do."
+            exit 0
+          fi
+          uv run python scripts/github_hygiene/issue_hygiene.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue "$ISSUE_NUMBER"
