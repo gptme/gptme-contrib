@@ -1914,6 +1914,7 @@ dependencies = [
     { name = "python-frontmatter" },
     { name = "rich" },
     { name = "tabulate" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -1938,6 +1939,7 @@ requires-dist = [
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
 ]
 provides-extras = ["dev", "test"]
 
