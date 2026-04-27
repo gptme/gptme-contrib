@@ -16,8 +16,12 @@ PEP 723 dependencies on each invocation.
 import subprocess
 from pathlib import Path
 
-
-SCRIPT = Path(__file__).parent.parent / "scripts" / "precommit" / "validate_task_frontmatter.py"
+SCRIPT = (
+    Path(__file__).parent.parent
+    / "scripts"
+    / "precommit"
+    / "validate_task_frontmatter.py"
+)
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess:
