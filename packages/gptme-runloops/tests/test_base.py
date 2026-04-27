@@ -12,6 +12,8 @@ from gptme_runloops.utils.execution import ExecutionResult
 class TestRunLoop(BaseRunLoop):
     """Concrete test implementation of BaseRunLoop."""
 
+    __test__ = False  # Tell pytest this is a helper class, not a test class
+
     def generate_prompt(self) -> str:
         return "Test prompt"
 
