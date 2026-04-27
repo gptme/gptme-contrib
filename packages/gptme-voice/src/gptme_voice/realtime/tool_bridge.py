@@ -139,9 +139,7 @@ class GptmeToolBridge:
             stripped = line.strip()
             if stripped in _IGNORABLE_ERROR_LINES:
                 return True
-            return any(
-                stripped.endswith(p) or p in stripped for p in _IGNORABLE_ERROR_PREFIXES
-            )
+            return any(stripped.startswith(p) for p in _IGNORABLE_ERROR_PREFIXES)
 
         stderr_lines = [
             line.strip()
