@@ -1901,9 +1901,14 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
 @cli.command("ready")
 @click.option(
     "--state",
-    type=click.Choice(["backlog", "active", "someday", "both"]),
+    type=click.Choice(["backlog", "active", "ready_for_review", "someday", "both", "actionable"]),
     default="both",
-    help="Filter by task state. 'both' = backlog+active. 'someday' = explicitly query deferred tasks.",
+    help=(
+        "Filter by task state. 'both' = backlog+active (default, current behavior). "
+        "'actionable' = backlog+active+ready_for_review (everything locally workable). "
+        "'ready_for_review' = only tasks awaiting local review/verification. "
+        "'someday' = explicitly query deferred tasks."
+    ),
 )
 @click.option(
     "--json",
@@ -1966,8 +1971,14 @@ def ready(state, output_json, output_jsonl, use_cache):
         filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
     elif state == "active":
         filtered_tasks = [task for task in all_tasks if task.state == "active"]
+    elif state == "ready_for_review":
+        filtered_tasks = [task for task in all_tasks if task.state == "ready_for_review"]
     elif state == "someday":
         filtered_tasks = [task for task in all_tasks if task.state == "someday"]
+    elif state == "actionable":
+        filtered_tasks = [
+            task for task in all_tasks if task.state in ["backlog", "active", "ready_for_review"]
+        ]
     else:  # both
         filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
 

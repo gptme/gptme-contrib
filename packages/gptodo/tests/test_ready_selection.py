@@ -191,3 +191,105 @@ def test_ready_someday_explicit_query_returns_them(tmp_path: Path, monkeypatch) 
     payload = json.loads(payload_text)
     ids = [t["id"] for t in payload["ready_tasks"]]
     assert "deferred-task" in ids
+
+
+def test_ready_for_review_excluded_from_both_default(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo ready --state both` must NOT surface ready_for_review tasks.
+
+    Preserves backwards-compatible default: 'both' = backlog+active only.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "review-task",
+        state="ready_for_review",
+        created="2026-04-26T00:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "active-task",
+        state="active",
+        created="2026-04-26T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "both", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert "review-task" not in ids
+    assert "active-task" in ids
+
+
+def test_ready_for_review_explicit_query_returns_them(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo ready --state ready_for_review` lists tasks awaiting local review."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "review-task",
+        state="ready_for_review",
+        created="2026-04-26T00:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "active-task",
+        state="active",
+        created="2026-04-26T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "ready_for_review", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert "review-task" in ids
+    assert "active-task" not in ids
+
+
+def test_ready_actionable_includes_all_local_workable(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo ready --state actionable` returns backlog + active + ready_for_review."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "backlog-task",
+        state="backlog",
+        created="2026-04-26T00:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "active-task",
+        state="active",
+        created="2026-04-26T01:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "review-task",
+        state="ready_for_review",
+        created="2026-04-26T02:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "deferred-task",
+        state="someday",
+        created="2026-04-26T03:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "actionable", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = sorted(t["id"] for t in payload["ready_tasks"])
+    assert ids == ["active-task", "backlog-task", "review-task"]
+    assert "deferred-task" not in ids
