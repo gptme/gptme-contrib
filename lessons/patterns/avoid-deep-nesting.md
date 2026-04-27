@@ -1,19 +1,8 @@
 ---
 match:
   keywords:
-  - deep nesting 4+ levels
-  - nested if statement pyramid
-  - guard clause pattern
-  - early return for simplicity
-  - function extraction for nesting
-  - arrow code smell
-  - too many indentation levels
   - "deeply nested"
-  - "flatten the code"
-  - "nesting level"
-  - "guard clauses"
   - "early return"
-  - "refactor nesting"
 status: active
 ---
 
