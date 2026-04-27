@@ -1,6 +1,7 @@
 ---
 match:
   keywords: ["create branch", "git checkout -b", "new feature branch", "PR contains unrelated commits"]
+  session_categories: [code, cross-repo, workflow]
 status: active
 ---
 
