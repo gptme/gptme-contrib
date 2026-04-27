@@ -943,9 +943,13 @@ def check(fix: bool, task_files: list[str]):
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
-    # ALWAYS load all tasks to build complete task_ids set for dependency checking
-    all_tasks = load_tasks(tasks_dir)
-    if not all_tasks:
+    # ALWAYS load all tasks to build complete task_ids set for dependency checking.
+    # Capture per-file load errors so we can surface invisible tasks (files that
+    # fail to parse, e.g. broken YAML frontmatter, are otherwise silently dropped
+    # by load_tasks and the user sees a misleading "All N tasks verified" report).
+    load_errors: list[tuple[Path, str]] = []
+    all_tasks = load_tasks(tasks_dir, errors_out=load_errors)
+    if not all_tasks and not load_errors:
         console.print("[yellow]No tasks found in tasks directory![/]")
         return
 
@@ -969,14 +973,18 @@ def check(fix: bool, task_files: list[str]):
                 # Just filename, resolve from tasks_dir
                 path = tasks_dir / path
             try:
-                file_tasks = load_tasks(path.parent, single_file=path)
+                file_errors: list[tuple[Path, str]] = []
+                file_tasks = load_tasks(path.parent, single_file=path, errors_out=file_errors)
+                if file_errors:
+                    existing_paths = {e[0] for e in load_errors}
+                    load_errors.extend(e for e in file_errors if e[0] not in existing_paths)
                 if file_tasks:
                     tasks_to_validate.extend(file_tasks)
                 else:
                     console.print(f"[yellow]Warning: No valid task found in {file}[/]")
             except Exception as e:
                 console.print(f"[red]Error reading {file}: {e}[/]")
-        if not tasks_to_validate:
+        if not tasks_to_validate and not load_errors:
             console.print("[yellow]No valid tasks to validate![/]")
             return
     else:
@@ -1036,6 +1044,15 @@ def check(fix: bool, task_files: list[str]):
 
     # Report results by category
     has_issues = False
+
+    if load_errors:
+        has_issues = True
+        console.print(
+            f"\n[bold red]Unloadable Task Files ({len(load_errors)}) — "
+            "these were silently dropped from selection:[/]"
+        )
+        for unloadable_path, err in load_errors:
+            console.print(f"  • {unloadable_path.relative_to(repo_root)}: {err}")
 
     if validation_issues:
         has_issues = True
