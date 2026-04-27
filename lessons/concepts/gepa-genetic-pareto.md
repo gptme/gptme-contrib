@@ -2,6 +2,7 @@
 match:
   keywords:
     - "gepa-lesson-optimizer"
+    - "gepa optimizer"
 status: active
 ---
 

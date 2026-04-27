@@ -2,6 +2,7 @@
 match:
   keywords:
     - "update submodule to latest"
+    - "submodule is behind"
 status: active
 ---
 

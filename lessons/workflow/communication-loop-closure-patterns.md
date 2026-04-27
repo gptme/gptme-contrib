@@ -2,6 +2,8 @@
 match:
   keywords:
   - close the loop
+  - update the issue
+  - reply to the issue
 status: active
 ---
 
