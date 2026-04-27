@@ -123,6 +123,7 @@ from gptodo.utils import (
     get_cache_path,
     has_new_activity,
     is_task_ready,
+    task_has_waiting_blocker,
     load_cache,
     load_tasks,
     normalize_state,
@@ -1901,9 +1902,14 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
 @cli.command("ready")
 @click.option(
     "--state",
-    type=click.Choice(["backlog", "active", "someday", "both"]),
+    type=click.Choice(["backlog", "active", "ready_for_review", "someday", "both", "actionable"]),
     default="both",
-    help="Filter by task state. 'both' = backlog+active. 'someday' = explicitly query deferred tasks.",
+    help=(
+        "Filter by task state. 'both' = backlog+active (default, current behavior). "
+        "'actionable' = backlog+active+ready_for_review (everything locally workable). "
+        "'ready_for_review' = only tasks awaiting local review/verification. "
+        "'someday' = explicitly query deferred tasks."
+    ),
 )
 @click.option(
     "--json",
@@ -1966,13 +1972,35 @@ def ready(state, output_json, output_jsonl, use_cache):
         filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
     elif state == "active":
         filtered_tasks = [task for task in all_tasks if task.state == "active"]
+    elif state == "ready_for_review":
+        filtered_tasks = [task for task in all_tasks if task.state == "ready_for_review"]
     elif state == "someday":
         filtered_tasks = [task for task in all_tasks if task.state == "someday"]
+    elif state == "actionable":
+        filtered_tasks = [
+            task for task in all_tasks if task.state in ["backlog", "active", "ready_for_review"]
+        ]
     else:  # both
         filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
 
-    # Filter for ready (unblocked) tasks
-    ready_tasks = [task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)]
+    # Filter for ready (unblocked) tasks.
+    # ready_for_review tasks: work is done; skip dependency checks, only check waiting_for.
+    if state == "ready_for_review":
+        ready_tasks = [task for task in filtered_tasks if not task_has_waiting_blocker(task)]
+    elif state == "actionable":
+        # backlog/active go through full is_task_ready; ready_for_review only needs waiting check
+        ready_tasks = [
+            task
+            for task in filtered_tasks
+            if (task.state == "ready_for_review" and not task_has_waiting_blocker(task))
+            or (
+                task.state in ["backlog", "active"] and is_task_ready(task, tasks_dict, issue_cache)
+            )
+        ]
+    else:
+        ready_tasks = [
+            task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)
+        ]
 
     if not ready_tasks:
         if output_json:
