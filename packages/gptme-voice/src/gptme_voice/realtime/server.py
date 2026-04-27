@@ -96,7 +96,8 @@ def _extract_preferred_spoken_name(text: str, canonical_name: str) -> str:
             value = stripped.split(":", 1)[1].strip()
             if value:
                 return value
-    return canonical_name.split()[0] if canonical_name.split() else canonical_name
+    parts = canonical_name.split()
+    return parts[0] if parts else canonical_name
 
 
 def _lookup_caller_identity(
@@ -171,11 +172,20 @@ def _build_fresh_call_greeting_instructions(
     if caller_identity:
         spoken_name = caller_identity.preferred_spoken_name
         canonical_name = caller_identity.canonical_name
+        if spoken_name == canonical_name:
+            greeting_target = (
+                f"The caller is {canonical_name}. Greet them by name in one short sentence, "
+                f"for example 'Hi {spoken_name}' or 'Hey {spoken_name}, what's up?'. "
+            )
+        else:
+            greeting_target = (
+                f"The caller is {canonical_name}. On voice calls, greet them using '{spoken_name}', "
+                f"not their full name, in one short sentence, for example 'Hi {spoken_name}' "
+                f"or 'Hey {spoken_name}, what's up?'. "
+            )
         return (
-            f"The caller is {canonical_name}. On voice calls, greet them using '{spoken_name}', "
-            f"not their full name, in one short sentence, for example 'Hi {spoken_name}' "
-            f"or 'Hey {spoken_name}, what's up?'. "
-            "Do NOT say 'thanks for calling' or use other stock phone greetings. "
+            greeting_target
+            + "Do NOT say 'thanks for calling' or use other stock phone greetings. "
             "Then stop and wait for them to speak."
         )
 

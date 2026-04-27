@@ -159,6 +159,31 @@ def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
     assert "Do NOT say 'thanks for calling'" in bootstrap.initial_response_instructions
 
 
+def test_build_session_bootstrap_avoids_full_name_warning_for_single_token_name() -> (
+    None
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        people_dir = Path(tmpdir) / "people"
+        people_dir.mkdir()
+        (people_dir / "erik.md").write_text("# Erik\n\nPhone: +46700000002\n")
+        server = VoiceServer(workspace=tmpdir)
+        server._instructions = "You are Bob."
+
+        bootstrap = asyncio.run(
+            server._build_session_bootstrap(
+                caller_id="+46700000002",
+                from_number="+46700000002",
+            )
+        )
+
+    assert bootstrap.should_greet_first is True
+    assert (
+        "The caller is Erik. Greet them by name"
+        in bootstrap.initial_response_instructions
+    )
+    assert "not their full name" not in bootstrap.initial_response_instructions
+
+
 def test_build_session_bootstrap_asks_unknown_caller_to_identify() -> None:
     server = VoiceServer()
     server._instructions = "You are Bob."
