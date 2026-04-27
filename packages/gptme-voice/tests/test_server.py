@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from gptme_voice.realtime.audio import AudioConverter
 from gptme_voice.realtime.server import (
     RecentCallRecord,
     TranscriptTurn,
@@ -25,9 +26,73 @@ from gptme_voice.realtime.server import (
 class _DummyWebSocket:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.binary_messages: list[bytes] = []
 
     async def send_text(self, message: str) -> None:
         self.messages.append(message)
+
+    async def send_bytes(self, message: bytes) -> None:
+        self.binary_messages.append(message)
+
+
+class _DummyBrowserWebSocket:
+    def __init__(self, incoming: list[dict[str, object]]) -> None:
+        self.query_params: dict[str, str] = {}
+        self._incoming = incoming
+        self.accepted = False
+        self.text_messages: list[str] = []
+        self.binary_messages: list[bytes] = []
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def receive(self) -> dict[str, object]:
+        if self._incoming:
+            return self._incoming.pop(0)
+        return {"type": "websocket.disconnect"}
+
+    async def send_text(self, message: str) -> None:
+        self.text_messages.append(message)
+
+    async def send_bytes(self, message: bytes) -> None:
+        self.binary_messages.append(message)
+
+
+class _FakeRealtimeClient:
+    def __init__(self) -> None:
+        self.sent_audio: list[bytes] = []
+        self.commit_count = 0
+        self.disconnect_kwargs: dict[str, object] | None = None
+        self.on_function_call = None
+
+    async def connect(self) -> None:
+        return None
+
+    async def send_audio(self, audio_data: bytes) -> None:
+        self.sent_audio.append(audio_data)
+
+    async def commit_audio(self) -> None:
+        self.commit_count += 1
+
+    async def disconnect(self, **kwargs: object) -> None:
+        self.disconnect_kwargs = kwargs
+
+    async def inject_message(self, _text: str) -> None:
+        return None
+
+
+class _DummyToolBridge:
+    def __init__(self, *args, **kwargs) -> None:
+        return None
+
+    async def handle_function_call(self, _name: str, _args: dict) -> None:
+        return None
+
+    def pending_task_ids(self) -> list[str]:
+        return []
+
+    def get_timings(self) -> list[dict[str, object]]:
+        return []
 
 
 def test_build_caller_instructions_no_number() -> None:
@@ -96,6 +161,92 @@ def test_send_to_twilio_uses_stream_sid_field_name() -> None:
         "streamSid": "MZ123",
         "media": {"payload": base64.b64encode(b"\x00\x01").decode("utf-8")},
     }
+
+
+def test_voice_route_disabled_by_default() -> None:
+    server = VoiceServer()
+
+    websocket_paths = {
+        route.path for route in server.app.routes if hasattr(route, "path")
+    }
+
+    assert "/voice" not in websocket_paths
+
+
+def test_voice_route_enabled_when_requested() -> None:
+    server = VoiceServer(enable_browser_transport=True)
+
+    websocket_paths = {
+        route.path for route in server.app.routes if hasattr(route, "path")
+    }
+
+    assert "/voice" in websocket_paths
+
+
+def test_send_browser_audio_uses_binary_frames() -> None:
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyWebSocket()
+
+    asyncio.run(server._send_browser_audio(websocket, b"\x00\x01"))
+
+    assert websocket.binary_messages == [b"\x00\x01"]
+
+
+def test_send_browser_audio_end_uses_text_control_message() -> None:
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyWebSocket()
+
+    asyncio.run(server._send_browser_audio_end(websocket))
+
+    assert [json.loads(message) for message in websocket.messages] == [
+        {"type": "audio_end"}
+    ]
+
+
+def test_handle_browser_websocket_resamples_binary_pcm_and_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {"type": "websocket.receive", "bytes": b"\x00\x00\x01\x00"},
+            {"type": "websocket.receive", "text": json.dumps({"type": "commit"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _FakeRealtimeClient()
+
+    async def _fake_build_session_instructions(
+        *, caller_id: str, handoff_id: str | None
+    ) -> str:
+        return "You are Bob."
+
+    def _fake_make_client(_session_cfg, **_kwargs):
+        return fake_client
+
+    async def _fake_on_call_end(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        server, "_build_session_instructions", _fake_build_session_instructions
+    )
+    monkeypatch.setattr(server, "_make_client", _fake_make_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    expected_audio = AudioConverter().browser_to_openai(b"\x00\x00\x01\x00")
+    assert websocket.accepted is True
+    assert json.loads(websocket.text_messages[0]) == {
+        "type": "ready",
+        "input_sample_rate": AudioConverter.BROWSER_RATE,
+        "output_sample_rate": AudioConverter.OPENAI_RATE,
+    }
+    assert fake_client.sent_audio == [expected_audio]
+    assert fake_client.commit_count == 1
+    assert fake_client.disconnect_kwargs is not None
+    assert fake_client.disconnect_kwargs["commit_audio"] is True
 
 
 def test_build_resume_instructions_includes_prior_transcript() -> None:
@@ -936,3 +1087,68 @@ def test_twilio_handler_reraises_unrelated_runtimeerror(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="unexpected failure"):
         asyncio.run(server.handle_twilio_websocket(websocket))
+
+
+def test_browser_websocket_ignores_malformed_json_text_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed JSON text frame must not kill the browser voice session (P1 fix)."""
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {"type": "websocket.receive", "text": "not-valid-json"},
+            {"type": "websocket.receive", "text": json.dumps({"type": "commit"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _FakeRealtimeClient()
+
+    async def _fake_build_session_instructions(
+        *, caller_id: str, handoff_id: str | None
+    ) -> str:
+        return "You are Bob."
+
+    def _fake_make_client(_session_cfg, **_kwargs):
+        return fake_client
+
+    async def _fake_on_call_end(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        server, "_build_session_instructions", _fake_build_session_instructions
+    )
+    monkeypatch.setattr(server, "_make_client", _fake_make_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    # Should not raise — malformed frame is skipped, commit still fires
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    assert fake_client.commit_count == 1
+
+
+def test_audio_converter_independent_resample_states() -> None:
+    """Twilio (8kHz) and Browser (16kHz) upsampling must not share resampler state (P2 fix).
+
+    After priming the Twilio (8kHz→24kHz) path, Browser (16kHz→24kHz) output must
+    be identical to a fresh converter that has never seen Twilio audio. If the two
+    paths shared one _resample_state the state from the 8kHz path would corrupt
+    the 16kHz conversion.
+    """
+    twilio_pcm = b"\x00\x00" * 160  # 160 samples @ 8kHz = 20ms
+    browser_pcm = (
+        b"\x01\x00" * 320
+    )  # 320 samples @ 16kHz = 20ms (non-zero to detect corruption)
+
+    # Converter that sees both paths interleaved
+    combined = AudioConverter()
+    combined.twilio_to_openai(twilio_pcm)  # prime 8kHz state
+    combined_browser_out = combined.browser_to_openai(browser_pcm)
+
+    # Fresh converter that has only ever seen browser audio
+    fresh = AudioConverter()
+    fresh_browser_out = fresh.browser_to_openai(browser_pcm)
+
+    # With per-rate state slots the browser path starts fresh regardless of prior
+    # Twilio calls — outputs must be identical.
+    assert combined_browser_out == fresh_browser_out

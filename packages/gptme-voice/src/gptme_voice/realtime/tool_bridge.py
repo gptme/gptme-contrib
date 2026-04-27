@@ -18,7 +18,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class GptmeToolBridge:
         on_result: Callable[[str], Awaitable[None]] | None = None,
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
-        transcript_provider: Callable[[], list[object]] | None = None,
+        transcript_provider: Callable[[], Sequence[object]] | None = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout

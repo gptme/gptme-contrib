@@ -298,11 +298,13 @@ class VoiceServer:
         workspace: str | None = None,
         provider: str = _PROVIDER_OPENAI,
         model: str | None = None,
+        enable_browser_transport: bool = False,
     ):
         self.host = host
         self.port = port
         self.provider = provider
         self.model = model
+        self.enable_browser_transport = enable_browser_transport
         if provider == _PROVIDER_GROK:
             self._api_key = _get_xai_api_key()
         else:
@@ -362,15 +364,16 @@ class VoiceServer:
         self._pending_post_calls: dict[str, str] = {}
         self._pending_archive_records: dict[str, list[Path]] = {}
 
-        # Create Starlette app
-        self.app = Starlette(
-            routes=[
-                Route("/", self.health_check, methods=["GET"]),
-                Route("/incoming", self.handle_incoming_call, methods=["POST"]),
-                WebSocketRoute("/twilio", self.handle_twilio_websocket),
-                WebSocketRoute("/local", self.handle_local_websocket),
-            ]
-        )
+        routes = [
+            Route("/", self.health_check, methods=["GET"]),
+            Route("/incoming", self.handle_incoming_call, methods=["POST"]),
+            WebSocketRoute("/twilio", self.handle_twilio_websocket),
+            WebSocketRoute("/local", self.handle_local_websocket),
+        ]
+        if self.enable_browser_transport:
+            routes.append(WebSocketRoute("/voice", self.handle_browser_websocket))
+
+        self.app = Starlette(routes=routes)
 
     def _recent_call_path(self, caller_id: str) -> Path:
         digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
@@ -1351,6 +1354,129 @@ class VoiceServer:
                 tool_bridge=tool_bridge,
             )
 
+    async def handle_browser_websocket(self, websocket):
+        """
+        Handle WebSocket connection for browser voice transport.
+
+        Accepts raw binary PCM16 audio frames at 16kHz from the browser side.
+        Control messages remain JSON text frames.
+        """
+        await websocket.accept()
+
+        caller_id = self._get_local_caller_id(websocket)
+        handoff_id = self._get_local_handoff_id(websocket)
+        realtime_client: OpenAIRealtimeClient | None = None
+        tool_bridge: GptmeToolBridge | None = None
+        transcript: list[TranscriptTurn] = []
+        audio_converter = AudioConverter()
+
+        try:
+            instructions = await self._build_session_instructions(
+                caller_id=caller_id,
+                handoff_id=handoff_id,
+            )
+            if self.model:
+                session_cfg = SessionConfig(
+                    instructions=instructions,
+                    model=self.model,
+                    available_agents=self._available_agents,
+                )
+            else:
+                session_cfg = SessionConfig(
+                    instructions=instructions,
+                    available_agents=self._available_agents,
+                )
+            realtime_client = self._make_client(
+                session_cfg,
+                on_audio=lambda audio: self._send_browser_audio(websocket, audio),
+                on_audio_end=lambda: self._send_browser_audio_end(websocket),
+                on_ai_transcript=lambda text: _append_transcript_turn(
+                    transcript, "assistant", text
+                ),
+                on_user_transcript=lambda text: _append_transcript_turn(
+                    transcript, "user", text
+                ),
+            )
+            browser_ws = websocket
+
+            async def _browser_hangup(reason: str | None) -> None:
+                await self._schedule_hangup(
+                    browser_ws,
+                    source="browser",
+                    reason=reason,
+                    call_sid=None,
+                )
+
+            tool_bridge = GptmeToolBridge(
+                workspace=self.workspace,
+                on_result=realtime_client.inject_message,
+                on_hangup=_browser_hangup,
+                on_handoff=self._make_handoff_callback([caller_id], transcript),
+                transcript_provider=lambda: transcript,
+            )
+            realtime_client.on_function_call = tool_bridge.handle_function_call
+
+            await realtime_client.connect()
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "ready",
+                        "input_sample_rate": AudioConverter.BROWSER_RATE,
+                        "output_sample_rate": AudioConverter.OPENAI_RATE,
+                    }
+                )
+            )
+
+            while True:
+                message = await websocket.receive()
+                message_type = message.get("type")
+                if message_type == "websocket.disconnect":
+                    break
+
+                audio_data = message.get("bytes")
+                if isinstance(audio_data, bytes):
+                    await realtime_client.send_audio(
+                        audio_converter.browser_to_openai(audio_data)
+                    )
+                    continue
+
+                text = message.get("text")
+                if not isinstance(text, str):
+                    continue
+
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Browser websocket: ignoring malformed JSON text frame"
+                    )
+                    continue
+                if data.get("type") == "commit":
+                    await realtime_client.commit_audio()
+
+        except WebSocketDisconnect:
+            pass
+        except RuntimeError as exc:
+            if "not connected" not in str(exc).lower():
+                raise
+            logger.debug("Browser websocket already closed before receive: %s", exc)
+        except Exception as e:
+            logger.exception("Error handling browser connection: %s", e)
+        finally:
+            if realtime_client:
+                await self._disconnect_realtime_client(realtime_client)
+            await self._on_call_end(
+                caller_id,
+                "browser",
+                transcript,
+                {
+                    "caller_id": caller_id,
+                    "provider": self.provider,
+                    **({"handoff_id": handoff_id} if handoff_id else {}),
+                },
+                tool_bridge=tool_bridge,
+            )
+
     async def _schedule_hangup(
         self,
         websocket,
@@ -1406,6 +1532,15 @@ class VoiceServer:
         message = {"type": "audio_end"}
         await websocket.send_text(json.dumps(message))
 
+    async def _send_browser_audio(self, websocket, audio_data: bytes):
+        """Send raw PCM audio frames to the browser transport."""
+        await websocket.send_bytes(audio_data)
+
+    async def _send_browser_audio_end(self, websocket):
+        """Signal to the browser transport that playback is complete."""
+        message = {"type": "audio_end"}
+        await websocket.send_text(json.dumps(message))
+
     def run(self):
         """Run the server."""
         uvicorn.run(self.app, host=self.host, port=self.port)
@@ -1430,6 +1565,11 @@ class VoiceServer:
         "unless you need a specific model alias from the xAI console."
     ),
 )
+@click.option(
+    "--enable-browser-transport",
+    is_flag=True,
+    help="Expose /voice WebSocket for browser PCM transport.",
+)
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def main(
     host: str,
@@ -1437,6 +1577,7 @@ def main(
     workspace: str | None,
     provider: str,
     model: str | None,
+    enable_browser_transport: bool,
     debug: bool,
 ):
     """Voice Interface Server for gptme."""
@@ -1454,10 +1595,13 @@ def main(
         workspace=workspace,
         provider=provider,
         model=model,
+        enable_browser_transport=enable_browser_transport,
     )
 
     logger.info(f"Starting voice server on {host}:{port} (provider={provider})")
     logger.info(f"Local test endpoint: ws://{host}:{port}/local")
+    if enable_browser_transport:
+        logger.info(f"Browser test endpoint: ws://{host}:{port}/voice")
 
     server.run()
 

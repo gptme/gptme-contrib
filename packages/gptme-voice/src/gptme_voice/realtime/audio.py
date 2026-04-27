@@ -15,11 +15,40 @@ class AudioConverter:
 
     # Twilio uses 8kHz μ-law
     TWILIO_RATE = 8000
+    # Browser AudioWorklet path uses PCM 16kHz
+    BROWSER_RATE = 16000
     # OpenAI Realtime uses 24kHz PCM
     OPENAI_RATE = 24000
 
     def __init__(self):
-        self._resample_state: tuple | None = None
+        # Keyed by input_rate so Twilio (8kHz) and Browser (16kHz) paths
+        # don't corrupt each other's resampler state when called on the same instance.
+        self._resample_states: dict[int, tuple | None] = {}
+
+    def pcm_to_openai(self, pcm_data: bytes, input_rate: int) -> bytes:
+        """
+        Convert linear PCM audio to OpenAI PCM 24kHz.
+
+        Args:
+            pcm_data: PCM audio at ``input_rate`` (16-bit signed little-endian)
+            input_rate: Sample rate of ``pcm_data``
+
+        Returns:
+            PCM audio at 24kHz (16-bit signed little-endian)
+        """
+        if input_rate == self.OPENAI_RATE:
+            return pcm_data
+
+        pcm_24k, new_state = audioop.ratecv(
+            pcm_data,
+            2,  # 2 bytes per sample (16-bit)
+            1,  # mono
+            input_rate,
+            self.OPENAI_RATE,
+            self._resample_states.get(input_rate),
+        )
+        self._resample_states[input_rate] = new_state
+        return pcm_24k
 
     def twilio_to_openai(self, mulaw_data: bytes) -> bytes:
         """
@@ -33,18 +62,19 @@ class AudioConverter:
         """
         # Convert μ-law to linear PCM (16-bit)
         pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+        return self.pcm_to_openai(pcm_data, self.TWILIO_RATE)
 
-        # Resample from 8kHz to 24kHz (3x upsample)
-        pcm_24k, self._resample_state = audioop.ratecv(
-            pcm_data,
-            2,  # 2 bytes per sample (16-bit)
-            1,  # mono
-            self.TWILIO_RATE,
-            self.OPENAI_RATE,
-            self._resample_state,
-        )
+    def browser_to_openai(self, pcm_data: bytes) -> bytes:
+        """
+        Convert browser PCM 16kHz audio to OpenAI PCM 24kHz.
 
-        return pcm_24k
+        Args:
+            pcm_data: PCM audio at 16kHz (16-bit signed little-endian)
+
+        Returns:
+            PCM audio at 24kHz (16-bit signed little-endian)
+        """
+        return self.pcm_to_openai(pcm_data, self.BROWSER_RATE)
 
     def openai_to_twilio(self, pcm_data: bytes) -> bytes:
         """
