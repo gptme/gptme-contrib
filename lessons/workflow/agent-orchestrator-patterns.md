@@ -3,11 +3,13 @@ status: active
 match:
   keywords:
     - "orchestrating multiple agents"
-    - "agent team health check"
-    - "daily agent standup"
-    - "inference utilization across agents"
-    - "monitor agent work queue"
-    - "coordinate parallel agent sessions"
+    - "agent team health"
+    - "daily standup"
+    - "inference utilization"
+    - "agent work queue"
+    - "coordinate agents"
+    - "agent orchestrator"
+    - "multi-agent health"
 ---
 
 # Agent Orchestrator Patterns
