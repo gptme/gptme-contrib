@@ -3,6 +3,10 @@ match:
   keywords:
     - "gepa-lesson-optimizer"
     - "gepa optimizer"
+    - "bottom performing lesson"
+    - "lesson mutation"
+    - "mutate lesson"
+  session_categories: [monitoring]
 status: active
 ---
 
