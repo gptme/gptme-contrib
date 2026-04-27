@@ -4,7 +4,7 @@ match:
   - "commit web changes without testing"
   - "push without browser check"
   - "claiming fixed without testing"
-  - "javascript changes"
+  - "javascript fix without testing"
   - "webui change"
   - "html fix"
   session_categories: [code]

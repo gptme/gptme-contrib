@@ -7,7 +7,7 @@ match:
   - this looks complex so it must be slow
   - pytest --profile
   - premature optimization
-  - optimize performance
+  - optimize without profiling
   session_categories: [code]
 status: active
 ---
