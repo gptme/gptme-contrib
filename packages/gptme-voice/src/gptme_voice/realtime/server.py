@@ -148,11 +148,16 @@ def _build_caller_instructions(
     caller_identity = _lookup_caller_identity(from_number, workspace)
 
     if caller_identity:
+        name_hint = (
+            f" On voice calls, prefer '{caller_identity.preferred_spoken_name}' over their full name."
+            if caller_identity.preferred_spoken_name != caller_identity.canonical_name
+            else ""
+        )
         caller_ctx = (
             f"The current caller's phone number is {from_number} "
             f"({caller_identity.canonical_name}). "
-            f"You know this person — refer to them by name. "
-            f"On voice calls, prefer '{caller_identity.preferred_spoken_name}' over their full name."
+            f"You know this person — refer to them by name."
+            f"{name_hint}"
         )
     else:
         caller_ctx = (
