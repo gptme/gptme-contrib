@@ -46,6 +46,13 @@ from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class CallerIdentity:
+    canonical_name: str
+    preferred_spoken_name: str
+
+
 _DEFAULT_RESUME_WINDOW_SECONDS = 300
 _DEFAULT_STATE_DIR = "/tmp/gptme-voice-call-state"
 _MAX_RESUME_TRANSCRIPT_CHARS = 2500
@@ -82,7 +89,19 @@ class SessionBootstrap:
     initial_response_instructions: str = ""
 
 
-def _lookup_caller_name(from_number: str, workspace: str | None) -> str | None:
+def _extract_preferred_spoken_name(text: str, canonical_name: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("- call name:"):
+            value = stripped.split(":", 1)[1].strip()
+            if value:
+                return value
+    return canonical_name.split()[0] if canonical_name.split() else canonical_name
+
+
+def _lookup_caller_identity(
+    from_number: str, workspace: str | None
+) -> CallerIdentity | None:
     if workspace:
         people_dir = Path(workspace) / "people"
         if people_dir.is_dir():
@@ -90,7 +109,6 @@ def _lookup_caller_name(from_number: str, workspace: str | None) -> str | None:
                 try:
                     text = md_file.read_text()
                     if from_number in text:
-                        # Use the stem as a hint; the file header is the canonical name
                         first_h1 = next(
                             (
                                 line.lstrip("# ").strip()
@@ -99,7 +117,16 @@ def _lookup_caller_name(from_number: str, workspace: str | None) -> str | None:
                             ),
                             None,
                         )
-                        return first_h1 or md_file.stem.replace("-", " ").title()
+                        canonical_name = (
+                            first_h1 or md_file.stem.replace("-", " ").title()
+                        )
+                        preferred_spoken_name = _extract_preferred_spoken_name(
+                            text, canonical_name
+                        )
+                        return CallerIdentity(
+                            canonical_name=canonical_name,
+                            preferred_spoken_name=preferred_spoken_name,
+                        )
                 except Exception:
                     pass
     return None
@@ -117,13 +144,14 @@ def _build_caller_instructions(
     if not from_number:
         return base_instructions
 
-    caller_name = _lookup_caller_name(from_number, workspace)
+    caller_identity = _lookup_caller_identity(from_number, workspace)
 
-    if caller_name:
+    if caller_identity:
         caller_ctx = (
             f"The current caller's phone number is {from_number} "
-            f"({caller_name}). "
-            f"You know this person — refer to them by name."
+            f"({caller_identity.canonical_name}). "
+            f"You know this person — refer to them by name. "
+            f"On voice calls, prefer '{caller_identity.preferred_spoken_name}' over their full name."
         )
     else:
         caller_ctx = (
@@ -137,11 +165,16 @@ def _build_caller_instructions(
 def _build_fresh_call_greeting_instructions(
     from_number: str, workspace: str | None
 ) -> str:
-    caller_name = _lookup_caller_name(from_number, workspace) if from_number else None
-    if caller_name:
+    caller_identity = (
+        _lookup_caller_identity(from_number, workspace) if from_number else None
+    )
+    if caller_identity:
+        spoken_name = caller_identity.preferred_spoken_name
+        canonical_name = caller_identity.canonical_name
         return (
-            f"The caller is {caller_name}. Greet them by name in one short sentence, "
-            f"for example 'Hi {caller_name}' or 'Hey {caller_name}, what's up?'. "
+            f"The caller is {canonical_name}. On voice calls, greet them using '{spoken_name}', "
+            f"not their full name, in one short sentence, for example 'Hi {spoken_name}' "
+            f"or 'Hey {spoken_name}, what's up?'. "
             "Do NOT say 'thanks for calling' or use other stock phone greetings. "
             "Then stop and wait for them to speak."
         )

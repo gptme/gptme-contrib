@@ -17,6 +17,7 @@ from gptme_voice.realtime.server import (
     _build_caller_instructions,
     _build_resume_instructions,
     _get_twilio_field,
+    _lookup_caller_identity,
     _truncate_resume_transcript,
 )
 
@@ -53,6 +54,21 @@ def test_build_caller_instructions_known_number_from_people_dir() -> None:
     assert "Erik Bjäreholt" in result
     assert "+46700000001" in result
     assert "You are Bob." in result
+
+
+def test_lookup_caller_identity_uses_call_name_when_present() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        people_dir = Path(tmpdir) / "people"
+        people_dir.mkdir()
+        (people_dir / "erik-bjareholt.md").write_text(
+            "# Erik Bjäreholt\n\n- Call name: Erik\nPhone: +46700000001\n"
+        )
+
+        identity = _lookup_caller_identity("+46700000001", tmpdir)
+
+    assert identity is not None
+    assert identity.canonical_name == "Erik Bjäreholt"
+    assert identity.preferred_spoken_name == "Erik"
 
 
 def test_get_twilio_field_prefers_camel_case() -> None:
@@ -137,6 +153,9 @@ def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
 
     assert bootstrap.should_greet_first is True
     assert "Erik Bjäreholt" in bootstrap.initial_response_instructions
+    assert (
+        "using 'Erik', not their full name" in bootstrap.initial_response_instructions
+    )
     assert "Do NOT say 'thanks for calling'" in bootstrap.initial_response_instructions
 
 
