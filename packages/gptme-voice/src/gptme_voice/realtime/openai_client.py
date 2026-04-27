@@ -124,6 +124,9 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "SUBAGENT TOOL RULES:\n"
         "- Use the subagent tool ONLY for small, specific lookups: a single task status, "
         "a recent journal entry, a quick file check. One focused question per call.\n"
+        "- If you need a live lookup, you may say one short acknowledgement before "
+        "calling subagent (for example: 'One moment, checking that.'). After dispatch, "
+        "wait for the actual subagent result instead of narrating progress or guessing.\n"
         "- Do NOT dispatch broad investigation tasks (e.g. 'investigate the whole system', "
         "'run a full review') — these always time out and leave the call hanging.\n"
         "- NEVER use the subagent tool to run post-call analysis, summarise the session, "
@@ -304,8 +307,10 @@ class OpenAIRealtimeClient:
                         "Use it only for one small, focused workspace lookup or action: "
                         "check one task, inspect one file, run one quick command, or verify "
                         "one recent fact. Do not use it for broad investigations, full "
-                        "reviews, or post-call analysis. Describe one concrete request in "
-                        "natural language."
+                        "reviews, or post-call analysis. Say at most one brief "
+                        "acknowledgement before calling it, then wait for the real "
+                        "subagent result instead of answering early. Describe one "
+                        "concrete request in natural language."
                     ),
                     "parameters": {
                         "type": "object",
@@ -462,6 +467,22 @@ class OpenAIRealtimeClient:
             },
         )
         await self._send_event("response.create", {})
+
+    @staticmethod
+    def _should_auto_respond_after_function_output(name: str, result: Any) -> bool:
+        """Decide whether a function-call result should trigger immediate speech.
+
+        Async subagent dispatch only returns a receipt. Auto-responding to that
+        receipt makes the model talk as if it already has the answer. The real
+        spoken answer should wait for the injected subagent result instead.
+        """
+        if (
+            name == "subagent"
+            and isinstance(result, dict)
+            and result.get("status") == "dispatched"
+        ):
+            return False
+        return True
 
     async def disconnect(
         self,
@@ -742,8 +763,10 @@ class OpenAIRealtimeClient:
                         }
                     },
                 )
-                # Trigger a new response after function output
-                await self._send_event("response.create", {})
+                if self._should_auto_respond_after_function_output(name, result):
+                    # Trigger a new response after function output when the
+                    # tool returned an answer the caller should hear now.
+                    await self._send_event("response.create", {})
 
         # Errors
         elif event_type == "error":
