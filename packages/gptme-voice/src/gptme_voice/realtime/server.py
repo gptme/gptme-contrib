@@ -1444,7 +1444,13 @@ class VoiceServer:
                 if not isinstance(text, str):
                     continue
 
-                data = json.loads(text)
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Browser websocket: ignoring malformed JSON text frame"
+                    )
+                    continue
                 if data.get("type") == "commit":
                     await realtime_client.commit_audio()
 

@@ -21,7 +21,9 @@ class AudioConverter:
     OPENAI_RATE = 24000
 
     def __init__(self):
-        self._resample_state: tuple | None = None
+        # Keyed by input_rate so Twilio (8kHz) and Browser (16kHz) paths
+        # don't corrupt each other's resampler state when called on the same instance.
+        self._resample_states: dict[int, tuple | None] = {}
 
     def pcm_to_openai(self, pcm_data: bytes, input_rate: int) -> bytes:
         """
@@ -37,14 +39,15 @@ class AudioConverter:
         if input_rate == self.OPENAI_RATE:
             return pcm_data
 
-        pcm_24k, self._resample_state = audioop.ratecv(
+        pcm_24k, new_state = audioop.ratecv(
             pcm_data,
             2,  # 2 bytes per sample (16-bit)
             1,  # mono
             input_rate,
             self.OPENAI_RATE,
-            self._resample_state,
+            self._resample_states.get(input_rate),
         )
+        self._resample_states[input_rate] = new_state
         return pcm_24k
 
     def twilio_to_openai(self, mulaw_data: bytes) -> bytes:

@@ -1087,3 +1087,68 @@ def test_twilio_handler_reraises_unrelated_runtimeerror(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="unexpected failure"):
         asyncio.run(server.handle_twilio_websocket(websocket))
+
+
+def test_browser_websocket_ignores_malformed_json_text_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed JSON text frame must not kill the browser voice session (P1 fix)."""
+    server = VoiceServer(enable_browser_transport=True)
+    websocket = _DummyBrowserWebSocket(
+        [
+            {"type": "websocket.receive", "text": "not-valid-json"},
+            {"type": "websocket.receive", "text": json.dumps({"type": "commit"})},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    fake_client = _FakeRealtimeClient()
+
+    async def _fake_build_session_instructions(
+        *, caller_id: str, handoff_id: str | None
+    ) -> str:
+        return "You are Bob."
+
+    def _fake_make_client(_session_cfg, **_kwargs):
+        return fake_client
+
+    async def _fake_on_call_end(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        server, "_build_session_instructions", _fake_build_session_instructions
+    )
+    monkeypatch.setattr(server, "_make_client", _fake_make_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    # Should not raise — malformed frame is skipped, commit still fires
+    asyncio.run(server.handle_browser_websocket(websocket))
+
+    assert fake_client.commit_count == 1
+
+
+def test_audio_converter_independent_resample_states() -> None:
+    """Twilio (8kHz) and Browser (16kHz) upsampling must not share resampler state (P2 fix).
+
+    After priming the Twilio (8kHz→24kHz) path, Browser (16kHz→24kHz) output must
+    be identical to a fresh converter that has never seen Twilio audio. If the two
+    paths shared one _resample_state the state from the 8kHz path would corrupt
+    the 16kHz conversion.
+    """
+    twilio_pcm = b"\x00\x00" * 160  # 160 samples @ 8kHz = 20ms
+    browser_pcm = (
+        b"\x01\x00" * 320
+    )  # 320 samples @ 16kHz = 20ms (non-zero to detect corruption)
+
+    # Converter that sees both paths interleaved
+    combined = AudioConverter()
+    combined.twilio_to_openai(twilio_pcm)  # prime 8kHz state
+    combined_browser_out = combined.browser_to_openai(browser_pcm)
+
+    # Fresh converter that has only ever seen browser audio
+    fresh = AudioConverter()
+    fresh_browser_out = fresh.browser_to_openai(browser_pcm)
+
+    # With per-rate state slots the browser path starts fresh regardless of prior
+    # Twilio calls — outputs must be identical.
+    assert combined_browser_out == fresh_browser_out
