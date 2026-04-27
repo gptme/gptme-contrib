@@ -5,6 +5,7 @@ match:
   - "no way to verify"
   - "unclear completion criteria"
   - "task success is unclear"
+  session_categories: [strategic, code]
 status: active
 ---
 

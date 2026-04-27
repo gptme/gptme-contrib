@@ -11,6 +11,7 @@ match:
   - "external repository PR"
   - "multiple branches simultaneously"
   - "work on PR in separate directory"
+  session_categories: [cross-repo, code]
 status: active
 ---
 
