@@ -627,7 +627,10 @@ class GptmeToolBridge:
             return {
                 "status": "dispatched",
                 "task_id": task_id,
-                "message": f"Working on it: {task}",
+                "message": (
+                    "Async lookup dispatched. Wait for the subagent result "
+                    "before giving the substantive answer."
+                ),
             }
 
         if name == "subagent_status":

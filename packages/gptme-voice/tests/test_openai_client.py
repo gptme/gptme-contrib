@@ -81,6 +81,7 @@ def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
         assert "small, focused workspace lookup or action" in description
         assert "broad investigations" in description
         assert "post-call analysis" in description
+        assert "wait for the real subagent result" in description
         assert fake_ws.closed is True
 
     asyncio.run(_exercise())
@@ -99,6 +100,7 @@ def test_load_project_instructions_includes_post_call_follow_up_guard(
 
     # The preamble was applied (sanity — otherwise we'd get _DEFAULT_INSTRUCTIONS).
     assert "real-time voice conversation" in instructions
+    assert "wait for the actual subagent result" in instructions
 
     # The new POST-CALL FOLLOW-UP section exists.
     assert "POST-CALL FOLLOW-UP:" in instructions
@@ -258,6 +260,144 @@ def test_load_project_instructions_guards_present_without_personality_files(
     assert "real-time voice conversation" in instructions
     assert "POST-CALL FOLLOW-UP:" in instructions
     assert "Do NOT claim, announce, or imply that you have dispatched" in instructions
+    assert "wait for the actual subagent result" in instructions
+
+
+def test_function_call_subagent_dispatch_does_not_auto_create_response() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        async def _on_function_call(name: str, arguments: dict) -> dict:
+            assert name == "subagent"
+            assert arguments == {"task": "check latest standup"}
+            return {
+                "status": "dispatched",
+                "task_id": "task-1",
+                "message": "Async lookup dispatched. Wait for the subagent result before giving the substantive answer.",
+            }
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                on_function_call=_on_function_call,
+            )
+            await client.connect()
+            await client._handle_event({"type": "session.created"})
+
+            baseline = len(fake_ws.sent)
+            await client._handle_event(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "call-1",
+                    "name": "subagent",
+                    "arguments": json.dumps({"task": "check latest standup"}),
+                }
+            )
+
+            new_events = fake_ws.sent[baseline:]
+            assert new_events == [
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": json.dumps(
+                            {
+                                "status": "dispatched",
+                                "task_id": "task-1",
+                                "message": "Async lookup dispatched. Wait for the subagent result before giving the substantive answer.",
+                            }
+                        ),
+                    },
+                }
+            ]
+
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_function_call_subagent_status_still_auto_creates_response() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        async def _on_function_call(name: str, arguments: dict) -> dict:
+            assert name == "subagent_status"
+            assert arguments == {}
+            return {
+                "status": "ok",
+                "pending_count": 1,
+                "pending": [
+                    {
+                        "task_id": "task-1",
+                        "task": "check latest standup",
+                        "mode": "fast",
+                        "elapsed_seconds": 2.3,
+                        "stage": "running",
+                    }
+                ],
+            }
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                on_function_call=_on_function_call,
+            )
+            await client.connect()
+            await client._handle_event({"type": "session.created"})
+
+            baseline = len(fake_ws.sent)
+            await client._handle_event(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "call-2",
+                    "name": "subagent_status",
+                    "arguments": json.dumps({}),
+                }
+            )
+
+            new_events = fake_ws.sent[baseline:]
+            assert new_events == [
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": "call-2",
+                        "output": json.dumps(
+                            {
+                                "status": "ok",
+                                "pending_count": 1,
+                                "pending": [
+                                    {
+                                        "task_id": "task-1",
+                                        "task": "check latest standup",
+                                        "mode": "fast",
+                                        "elapsed_seconds": 2.3,
+                                        "stage": "running",
+                                    }
+                                ],
+                            }
+                        ),
+                    },
+                },
+                {"type": "response.create"},
+            ]
+
+            await client.disconnect()
+
+    asyncio.run(_exercise())
 
 
 def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -> None:
