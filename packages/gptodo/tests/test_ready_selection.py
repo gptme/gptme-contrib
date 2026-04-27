@@ -293,3 +293,37 @@ def test_ready_actionable_includes_all_local_workable(tmp_path: Path, monkeypatc
     ids = sorted(t["id"] for t in payload["ready_tasks"])
     assert ids == ["active-task", "backlog-task", "review-task"]
     assert "deferred-task" not in ids
+
+
+def test_ready_for_review_not_silenced_by_stale_requires(tmp_path: Path, monkeypatch) -> None:
+    """ready_for_review tasks with unresolved `requires` must NOT be silently excluded.
+
+    The work is done; dependency metadata may be stale. We should surface the task
+    so the reviewer/CASCADE can act on it, not hide it.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    # A task whose work is complete but the requires pointer was never closed
+    write_task(
+        tasks_dir,
+        "review-task",
+        state="ready_for_review",
+        created="2026-04-26T00:00:00",
+        requires=["still-open-task"],
+    )
+    write_task(
+        tasks_dir,
+        "still-open-task",
+        state="active",  # not done/cancelled — simulates stale metadata
+        created="2026-04-26T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "ready_for_review", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert "review-task" in ids, "ready_for_review task must not be hidden by stale requires"
