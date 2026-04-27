@@ -3,6 +3,10 @@ match:
   keywords:
     - "update submodule to latest"
     - "submodule is behind"
+    - "git submodule update"
+    - "update gptme-contrib"
+    - "bump the submodule"
+  session_categories: [cleanup]
 status: active
 ---
 

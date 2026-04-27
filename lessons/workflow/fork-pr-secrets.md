@@ -5,6 +5,9 @@ match:
     - "push directly to repo"
     - "ANTHROPIC_API_KEY not set"
     - "permission denied pushing to org repo"
+    - "fork PR failing CI"
+    - "CI secret not available"
+  session_categories: [code, cross-repo]
 status: active
 ---
 

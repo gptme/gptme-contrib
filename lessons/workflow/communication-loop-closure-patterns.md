@@ -4,6 +4,9 @@ match:
   - close the loop
   - update the issue
   - reply to the issue
+  - comment on the issue
+  - follow up on the request
+  session_categories: [triage, cross-repo]
 status: active
 ---
 
