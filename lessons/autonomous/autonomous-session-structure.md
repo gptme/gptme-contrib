@@ -6,6 +6,7 @@ match:
   - session phase planning
   - structured autonomous session
   - autonomous work phases
+  session_categories: [autonomous, self-review]
 status: active
 ---
 
