@@ -10,6 +10,7 @@ match:
     - waiting for input
     - strategic pause
     - productive while blocked
+  session_categories: [strategic, self-review, cleanup]
 status: active
 ---
 
