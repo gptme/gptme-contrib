@@ -5,8 +5,8 @@ match:
   - "push without browser check"
   - "claiming fixed without testing"
   - "javascript fix without testing"
-  - "webui change"
-  - "html fix"
+  - "webui change without testing"
+  - "html fix without checking"
   session_categories: [code]
 status: active
 ---
