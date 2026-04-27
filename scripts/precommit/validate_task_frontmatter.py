@@ -153,7 +153,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     default="tasks",
     help="Type of files to validate",
 )
-def main(files: List[Path], type_name: str = "tasks") -> int:
+def main(files: List[Path], type_name: str = "tasks") -> None:
     """Validate YAML frontmatter in task/tweet files."""
     exit_code = 0
 
@@ -164,8 +164,11 @@ def main(files: List[Path], type_name: str = "tasks") -> int:
                 console.print(f"  - {error}")
             exit_code = 1
 
-    return exit_code
+    # click discards return values from command callbacks, so we must call
+    # sys.exit() directly. Without this, the precommit hook silently passes
+    # even when validate_frontmatter() reports errors.
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
