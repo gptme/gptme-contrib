@@ -32,6 +32,9 @@ gptmail = { workspace = true }
 # Without this, multiple packages with tests/__init__.py cause namespace collisions
 addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
