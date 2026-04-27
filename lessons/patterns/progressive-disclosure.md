@@ -4,11 +4,6 @@ match:
     - "documentation file consuming excessive context tokens"
     - "always-included file over 500 lines"
     - "context budget consumed by rarely-needed content"
-    - "monolithic documentation needs restructuring"
-    - "restructure large documentation"
-    - "split monolithic docs"
-    - "auto-included file too large"
-    - "context window budget"
 status: active
 ---
 

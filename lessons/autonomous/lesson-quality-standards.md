@@ -8,10 +8,6 @@ tags:
 status: active
 match:
   keywords:
-  - knowledge base bloat
-  - lesson bloat
-  - knowledge capture
-  - lesson creation
   - lesson quality
   - dated lesson variants
   session_categories: [cleanup, self-review]

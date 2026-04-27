@@ -1,15 +1,8 @@
 ---
 match:
   keywords:
-  - start of autonomous session
-  - autonomous work workflow
-  - task selection in autonomous
-  - session startup workflow
-  - select what to work on
   - "autonomous session"
-  - "PRIMARY SECONDARY TERTIARY"
   - "task selection"
-  - "what to work on"
   - "work queue"
   session_categories: [strategic, self-review]
 status: active
