@@ -973,14 +973,18 @@ def check(fix: bool, task_files: list[str]):
                 # Just filename, resolve from tasks_dir
                 path = tasks_dir / path
             try:
-                file_tasks = load_tasks(path.parent, single_file=path)
+                file_errors: list[tuple[Path, str]] = []
+                file_tasks = load_tasks(path.parent, single_file=path, errors_out=file_errors)
+                if file_errors:
+                    existing_paths = {e[0] for e in load_errors}
+                    load_errors.extend(e for e in file_errors if e[0] not in existing_paths)
                 if file_tasks:
                     tasks_to_validate.extend(file_tasks)
                 else:
                     console.print(f"[yellow]Warning: No valid task found in {file}[/]")
             except Exception as e:
                 console.print(f"[red]Error reading {file}: {e}[/]")
-        if not tasks_to_validate:
+        if not tasks_to_validate and not load_errors:
             console.print("[yellow]No valid tasks to validate![/]")
             return
     else:

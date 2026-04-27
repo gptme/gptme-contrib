@@ -88,3 +88,22 @@ def test_check_command_surfaces_unloadable_files(tmp_path: Path, monkeypatch) ->
     assert "broken.md" in result.output
     # Must NOT claim success
     assert "tasks verified successfully" not in result.output
+
+
+def test_check_targeted_file_surfaces_unloadable(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo check tasks/broken.md` must also fail loud — the early-return
+    path in the task_files branch must not suppress load_errors (P1 gap)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "valid.md").write_text(VALID_TASK)
+    (tasks_dir / "broken.md").write_text(BROKEN_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["check", "tasks/broken.md"])
+
+    assert result.exit_code == 1, (
+        f"check tasks/broken.md must exit non-zero when the file is unloadable, "
+        f"got {result.exit_code}\noutput: {result.output}"
+    )
+    assert "Unloadable Task Files" in result.output
+    assert "broken.md" in result.output
