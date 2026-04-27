@@ -627,7 +627,10 @@ def load_task(file: Path) -> Tuple[fmPost, SubtaskCount]:
 
 
 def load_tasks(
-    tasks_dir: Path, recursive: bool = False, single_file: Path | None = None
+    tasks_dir: Path,
+    recursive: bool = False,
+    single_file: Path | None = None,
+    errors_out: list[Tuple[Path, str]] | None = None,
 ) -> List[TaskInfo]:
     """Load tasks from directory or single file with metadata.
 
@@ -635,6 +638,10 @@ def load_tasks(
         tasks_dir: Directory containing task files
         recursive: Whether to search subdirectories
         single_file: Optional specific file to load
+        errors_out: Optional list to append (file, error_message) tuples for files
+            that failed to load. When None (default), errors are only logged via
+            ``logging.error`` — preserving the legacy behaviour. Pass a list to
+            surface dropped files to the caller (e.g. for ``gptodo check``).
 
     Returns:
         List of TaskInfo objects
@@ -793,6 +800,8 @@ def load_tasks(
 
         except Exception as e:
             logging.error(f"Error reading {file}: {e}")
+            if errors_out is not None:
+                errors_out.append((file, str(e)))
 
     return tasks
 
