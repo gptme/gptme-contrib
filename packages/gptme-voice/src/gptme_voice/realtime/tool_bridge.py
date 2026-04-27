@@ -30,6 +30,13 @@ _MAX_OUTPUT_LEN = 2000
 _IGNORABLE_ERROR_LINES = {
     "Warning: Input is not a terminal (fd=0).",
 }
+# Prefix patterns for stderr lines that should never be treated as the
+# subagent error text.  These are gptme startup/runtime diagnostics that
+# appear regardless of whether the task succeeded or failed.
+_IGNORABLE_ERROR_PREFIXES = (
+    "WARNING  Failed to load plugin ",  # gptme plugin discovery noise
+    "WARNING  OpenTelemetry dependencies not available",
+)
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -128,10 +135,16 @@ class GptmeToolBridge:
 
     @staticmethod
     def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
+        def _is_ignorable(line: str) -> bool:
+            stripped = line.strip()
+            if stripped in _IGNORABLE_ERROR_LINES:
+                return True
+            return any(stripped.startswith(p) for p in _IGNORABLE_ERROR_PREFIXES)
+
         stderr_lines = [
             line.strip()
             for line in stderr.splitlines()
-            if line.strip() and line.strip() not in _IGNORABLE_ERROR_LINES
+            if line.strip() and not _is_ignorable(line)
         ]
         if stderr_lines:
             return "\n".join(stderr_lines)
