@@ -1,8 +1,6 @@
 ---
 match:
   keywords:
-    - "CI secret not available"
-    - "fork PR failing CI"
     - "secret not accessible via fork"
     - "push directly to repo"
     - "ANTHROPIC_API_KEY not set"

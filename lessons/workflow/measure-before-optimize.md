@@ -7,11 +7,6 @@ match:
   - this looks complex so it must be slow
   - pytest --profile
   - premature optimization
-  - claiming latency win without measurement
-  - PR description promises speedup
-  - expected speedup not verified
-  - context size is the bottleneck
-  - skipping context will speed this up
 status: active
 ---
 

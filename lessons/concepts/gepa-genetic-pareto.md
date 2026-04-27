@@ -2,11 +2,7 @@
 match:
   keywords:
     - "gepa-lesson-optimizer"
-    - "gepa mutation run"
-    - "lesson mutation with gepa"
-    - "genetic-pareto lesson optimization"
-    - "apply gepa to lessons"
-    - "gepa optimizer bottom lessons"
+    - "gepa optimizer"
 status: active
 ---
 

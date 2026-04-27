@@ -2,11 +2,8 @@
 match:
   keywords:
   - close the loop
-  - reply to issue comment
-  - update the requestor
-  - silent work completion
-  - memory failure response
-  - completed action without response
+  - update the issue
+  - reply to the issue
 status: active
 ---
 
