@@ -363,6 +363,11 @@ class VoiceServer:
         self._connections: dict[str, tuple] = {}
         self._pending_post_calls: dict[str, str] = {}
         self._pending_archive_records: dict[str, list[Path]] = {}
+        # Pre-warmed realtime connections: from_number -> (client, created_at)
+        # Keyed by from_number, claimed and discarded when the Twilio stream starts.
+        self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
+        # Max seconds a pre-warm session is kept before being discarded
+        self._prewarm_ttl_seconds = 30
 
         routes = [
             Route("/", self.health_check, methods=["GET"]),
@@ -647,6 +652,7 @@ class VoiceServer:
         from_number: str = "",
         handoff_id: str | None = None,
         standup_brief: str | None = None,
+        consume_recent: bool = True,
     ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
@@ -672,7 +678,7 @@ class VoiceServer:
                 ),
             )
 
-        recent_call = await self._consume_recent_call(caller_id)
+        recent_call = await self._consume_recent_call(caller_id, consume=consume_recent)
         if recent_call:
             return SessionBootstrap(
                 instructions=_build_resume_instructions(
@@ -692,6 +698,73 @@ class VoiceServer:
             ),
         )
 
+    def _evict_stale_prewarms(self) -> None:
+        """Discard pre-warm entries that exceeded TTL without being claimed."""
+        now = time.monotonic()
+        stale = [
+            num
+            for num, (_, created_at) in self._prewarm_sessions.items()
+            if now - created_at > self._prewarm_ttl_seconds
+        ]
+        for num in stale:
+            client, _ = self._prewarm_sessions.pop(num)
+            logger.info("Evicting stale pre-warm for %s", num)
+            asyncio.create_task(self._disconnect_realtime_client(client))
+
+    async def _prewarm_for_inbound(self, from_number: str) -> None:
+        """Pre-connect to the realtime API while Twilio is setting up the media stream.
+
+        Called as a background task from handle_incoming_call so the provider
+        WebSocket and session handshake complete before the Twilio stream's
+        ``start`` event arrives.  The client is stored with
+        ``hold_initial_response=True`` so no greeting is sent before the
+        call-side WebSocket is ready; activate_session() releases it.
+        """
+        self._evict_stale_prewarms()
+        try:
+            # Peek at the resume record (consume_recent=False) so the on-disk
+            # state file is NOT deleted until connect() succeeds.  If connect()
+            # raises, the file stays intact and the cold-path _build_session_bootstrap
+            # can still resume the caller normally.
+            bootstrap = await self._build_session_bootstrap(
+                caller_id=from_number,
+                from_number=from_number,
+                consume_recent=False,
+            )
+            session_cfg = self._build_session_config(
+                instructions=bootstrap.instructions,
+                initial_response_instructions=(
+                    bootstrap.initial_response_instructions
+                    if bootstrap.should_greet_first
+                    else ""
+                ),
+            )
+            client = self._make_client(session_cfg, hold_initial_response=True)
+            await client.connect()
+            # connect() succeeded — now safely consume the resume state so a
+            # cold-path fallback won't re-inject the same transcript.
+            await self._consume_recent_call(from_number)
+            self._prewarm_sessions[from_number] = (client, time.monotonic())
+            logger.info("Pre-warm ready for %s", from_number)
+        except Exception as exc:
+            logger.warning("Pre-warm failed for %s: %s", from_number, exc)
+
+    def _claim_prewarm(self, from_number: str) -> OpenAIRealtimeClient | None:
+        """Claim and remove a pre-warmed session for from_number if still fresh."""
+        entry = self._prewarm_sessions.pop(from_number, None)
+        if entry is None:
+            return None
+        client, created_at = entry
+        age = time.monotonic() - created_at
+        if age > self._prewarm_ttl_seconds:
+            logger.info(
+                "Discarding stale pre-warm for %s (%.1fs old)", from_number, age
+            )
+            asyncio.create_task(self._disconnect_realtime_client(client))
+            return None
+        logger.info("Claimed pre-warm for %s (%.1fs old)", from_number, age)
+        return client
+
     async def _build_session_instructions(
         self,
         *,
@@ -708,8 +781,16 @@ class VoiceServer:
         ).instructions
 
     async def _consume_recent_call(
-        self, caller_id: str | None
+        self, caller_id: str | None, *, consume: bool = True
     ) -> RecentCallRecord | None:
+        """Load the most recent call record for *caller_id*.
+
+        When *consume* is True (default) the on-disk state file is deleted,
+        any pending post-call schedule is cancelled, and archive record paths
+        are restored.  Pass ``consume=False`` to peek at the record without
+        side effects — useful when building bootstrap instructions before a
+        connect() that may fail, to avoid losing resume context.
+        """
         if not caller_id:
             return None
 
@@ -720,6 +801,9 @@ class VoiceServer:
         age_seconds = time.time() - recent_call.ended_at
         if age_seconds > self.resume_window_seconds:
             return None
+
+        if not consume:
+            return recent_call
 
         pending_unit = (
             self._pending_post_calls.pop(caller_id, None)
@@ -1057,6 +1141,12 @@ class VoiceServer:
             host = request.headers.get("host", f"{self.host}:{self.port}")
             ws_url = build_stream_url(host)
 
+        # Fire-and-forget: pre-warm the provider connection so it is ready before
+        # Twilio's media-stream WebSocket sends its "start" event.  This eliminates
+        # most of the ~1-3s dead air between call answer and first greeting audio.
+        if from_number:
+            asyncio.create_task(self._prewarm_for_inbound(from_number))
+
         # Forward caller number to WebSocket handler via TwiML custom parameters.
         custom_params: dict[str, str] = {}
         if from_number:
@@ -1112,18 +1202,6 @@ class VoiceServer:
                     handoff_id = custom_params.get("handoff_id") or None
                     standup_brief = custom_params.get("standup_brief") or None
                     caller_id = from_number or call_sid or stream_sid
-                    bootstrap = await self._build_session_bootstrap(
-                        caller_id=caller_id,
-                        from_number=from_number,
-                        handoff_id=handoff_id,
-                        standup_brief=standup_brief,
-                    )
-                    instructions = bootstrap.instructions
-                    initial_response_instructions = (
-                        bootstrap.initial_response_instructions
-                        if bootstrap.should_greet_first
-                        else ""
-                    )
                     metadata = {
                         "from_number": from_number,
                         "call_sid": call_sid,
@@ -1133,33 +1211,67 @@ class VoiceServer:
                     if handoff_id:
                         metadata["handoff_id"] = handoff_id
 
-                    if self.model:
-                        session_cfg = SessionConfig(
-                            instructions=instructions,
-                            initial_response_instructions=initial_response_instructions,
-                            model=self.model,
-                            available_agents=self._available_agents,
-                        )
-                    else:
-                        session_cfg = SessionConfig(
-                            instructions=instructions,
-                            initial_response_instructions=initial_response_instructions,
-                            available_agents=self._available_agents,
-                        )
-                    realtime_client = self._make_client(
-                        session_cfg,
-                        on_audio=lambda audio: self._send_to_twilio(
-                            websocket,
-                            stream_sid,
-                            audio_converter.openai_to_twilio(audio),
-                        ),
-                        on_ai_transcript=lambda text: _append_transcript_turn(
-                            transcript, "assistant", text
-                        ),
-                        on_user_transcript=lambda text: _append_transcript_turn(
-                            transcript, "user", text
-                        ),
+                    # Callbacks — closures capture stream_sid and transcript from this scope.
+                    # Use a factory to bind stream_sid by value so the async coroutine
+                    # is detected and awaited by _call_callback.
+                    def _make_on_audio(_stream_sid: str):
+                        async def _on_audio(audio: bytes) -> None:
+                            await self._send_to_twilio(
+                                websocket,
+                                _stream_sid,
+                                audio_converter.openai_to_twilio(audio),
+                            )
+
+                        return _on_audio
+
+                    on_audio = _make_on_audio(stream_sid)
+
+                    def on_ai_transcript(text: str) -> None:
+                        _append_transcript_turn(transcript, "assistant", text)
+
+                    def on_user_transcript(text: str) -> None:
+                        _append_transcript_turn(transcript, "user", text)
+
+                    # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
+                    prewarm_eligible = (
+                        from_number and not handoff_id and not standup_brief
                     )
+                    prewarm_client = (
+                        self._claim_prewarm(from_number) if prewarm_eligible else None
+                    )
+
+                    if prewarm_client is not None:
+                        realtime_client = prewarm_client
+                        realtime_client.on_audio = on_audio
+                        realtime_client.on_ai_transcript = on_ai_transcript
+                        realtime_client.on_user_transcript = on_user_transcript
+                    else:
+                        # Cold path: build session from scratch
+                        bootstrap = await self._build_session_bootstrap(
+                            caller_id=caller_id,
+                            from_number=from_number,
+                            handoff_id=handoff_id,
+                            standup_brief=standup_brief,
+                        )
+                        instructions = bootstrap.instructions
+                        initial_response_instructions = (
+                            bootstrap.initial_response_instructions
+                            if bootstrap.should_greet_first
+                            else ""
+                        )
+                        session_cfg = self._build_session_config(
+                            instructions=instructions,
+                            initial_response_instructions=initial_response_instructions,
+                        )
+                        realtime_client = self._make_client(
+                            session_cfg,
+                            on_audio=on_audio,
+                            on_ai_transcript=on_ai_transcript,
+                            on_user_transcript=on_user_transcript,
+                        )
+
+                    # Wire tool bridge BEFORE connect/activate so on_function_call
+                    # is set when the initial greeting response fires.
                     hangup_ws = websocket
                     hangup_call_sid = call_sid
 
@@ -1180,7 +1292,11 @@ class VoiceServer:
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
-                    await realtime_client.connect()
+                    if prewarm_client is not None:
+                        await realtime_client.activate_session()
+                    else:
+                        await realtime_client.connect()
+
                     self._connections[call_sid] = (websocket, realtime_client)
 
                 elif event == "media":
@@ -1234,9 +1350,25 @@ class VoiceServer:
         }
         await websocket.send_text(json.dumps(message))
 
+    def _build_session_config(
+        self,
+        instructions: str,
+        initial_response_instructions: str = "",
+    ) -> SessionConfig:
+        """Build a SessionConfig with optional model override."""
+        kwargs: dict = dict(
+            instructions=instructions,
+            initial_response_instructions=initial_response_instructions,
+            available_agents=self._available_agents,
+        )
+        if self.model:
+            kwargs["model"] = self.model
+        return SessionConfig(**kwargs)
+
     def _make_client(
         self,
         session_config: SessionConfig,
+        hold_initial_response: bool = False,
         **kwargs,
     ) -> OpenAIRealtimeClient:
         """Instantiate the realtime client for the configured provider."""
@@ -1244,11 +1376,13 @@ class VoiceServer:
             return XAIRealtimeClient(
                 api_key=self._api_key,
                 session_config=session_config,
+                hold_initial_response=hold_initial_response,
                 **kwargs,
             )
         return OpenAIRealtimeClient(
             api_key=self._api_key,
             session_config=session_config,
+            hold_initial_response=hold_initial_response,
             **kwargs,
         )
 
@@ -1272,17 +1406,7 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            if self.model:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    model=self.model,
-                    available_agents=self._available_agents,
-                )
-            else:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    available_agents=self._available_agents,
-                )
+            session_cfg = self._build_session_config(instructions=instructions)
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
@@ -1375,17 +1499,7 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            if self.model:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    model=self.model,
-                    available_agents=self._available_agents,
-                )
-            else:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    available_agents=self._available_agents,
-                )
+            session_cfg = self._build_session_config(instructions=instructions)
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_browser_audio(websocket, audio),

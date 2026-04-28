@@ -616,6 +616,56 @@ def test_consume_recent_call_deletes_state_file() -> None:
         assert not state_path.exists()
 
 
+def test_prewarm_connect_failure_preserves_resume_state() -> None:
+    """P1 fix: if _prewarm_for_inbound's connect() raises, the on-disk resume
+    state file must NOT be deleted so the cold-path _build_session_bootstrap
+    can still resume the caller normally."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        record = RecentCallRecord(
+            caller_id="+46700000099",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="Keep this resume")],
+            metadata={},
+        )
+        server._save_recent_call(record)
+        state_path = server._recent_call_path("+46700000099")
+        assert state_path.exists()
+
+        # Simulate a connect() failure inside _prewarm_for_inbound
+        class _FailingClient:
+            async def connect(self):
+                raise ConnectionError("simulated provider failure")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                server,
+                "_make_client",
+                lambda *args, **kwargs: _FailingClient(),  # type: ignore[assignment]
+            )
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+            asyncio.run(server._prewarm_for_inbound("+46700000099"))
+
+        # Resume file must survive the failed prewarm
+        assert state_path.exists(), (
+            "Resume state file was deleted despite connect() failure — "
+            "caller would get a fresh greeting instead of resuming"
+        )
+
+        # And the cold path must still see the resume context
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_200.0)
+            bootstrap = asyncio.run(
+                server._build_session_bootstrap(caller_id="+46700000099")
+            )
+        assert (
+            not bootstrap.should_greet_first
+        ), "Cold-path bootstrap should resume (no greeting) after failed prewarm"
+
+
 def test_consume_recent_call_keeps_archived_record() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         server = VoiceServer()
