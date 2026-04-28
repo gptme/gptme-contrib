@@ -1,13 +1,14 @@
 ---
 match:
   keywords:
-    - trajectory
-    - cleanup
-    - delete
-    - retention
-    - session data
-    - cleanupPeriodDays
-    - log cleanup
+    - "delete trajectory"
+    - "delete session data"
+    - "session data retention"
+    - "trajectory files"
+    - "session records"
+    - "cleanupPeriodDays"
+    - "log cleanup"
+    - "retention policy"
   session_categories: [infrastructure, cleanup]
 target_grade: harm
 status: active
