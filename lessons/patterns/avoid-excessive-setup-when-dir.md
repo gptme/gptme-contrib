@@ -4,8 +4,6 @@ match:
     - "spending too much time on setup"
     - "5+ chains on prerequisites"
     - "need to understand full pipeline before testing"
-    - "excessive setup before testing component"
-    - "use mock data instead of full pipeline"
 status: active
 ---
 
