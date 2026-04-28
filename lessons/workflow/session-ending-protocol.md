@@ -1,6 +1,7 @@
 ---
 match:
   keywords: ["session complete"]
+  session_categories: [code, cross-repo, infrastructure, cleanup]
 status: active
 ---
 
