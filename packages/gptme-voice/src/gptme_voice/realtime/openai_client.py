@@ -222,6 +222,7 @@ class OpenAIRealtimeClient:
         on_ai_transcript: Callable[[str], None] | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         on_function_call: Callable[[str, dict], Any] | None = None,
+        hold_initial_response: bool = False,
     ):
         self.api_key = api_key or _get_openai_api_key()
         if not self.api_key:
@@ -253,7 +254,7 @@ class OpenAIRealtimeClient:
         # When True, the initial response is held back even after session.created.
         # Set this on pre-warmed sessions; call activate_session() once the
         # call-side WebSocket is ready to receive audio.
-        self._hold_initial_response = False
+        self._hold_initial_response = hold_initial_response
 
     def _get_ws_url(self) -> str:
         """WebSocket URL for this provider (override in subclasses)."""

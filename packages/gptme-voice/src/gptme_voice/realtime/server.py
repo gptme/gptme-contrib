@@ -697,43 +697,43 @@ class VoiceServer:
             ),
         )
 
+    def _evict_stale_prewarms(self) -> None:
+        """Discard pre-warm entries that exceeded TTL without being claimed."""
+        now = time.monotonic()
+        stale = [
+            num
+            for num, (_, created_at) in self._prewarm_sessions.items()
+            if now - created_at > self._prewarm_ttl_seconds
+        ]
+        for num in stale:
+            client, _ = self._prewarm_sessions.pop(num)
+            logger.info("Evicting stale pre-warm for %s", num)
+            asyncio.create_task(self._disconnect_realtime_client(client))
+
     async def _prewarm_for_inbound(self, from_number: str) -> None:
         """Pre-connect to the realtime API while Twilio is setting up the media stream.
 
         Called as a background task from handle_incoming_call so the provider
         WebSocket and session handshake complete before the Twilio stream's
         ``start`` event arrives.  The client is stored with
-        ``_hold_initial_response=True`` so no greeting is sent before the
+        ``hold_initial_response=True`` so no greeting is sent before the
         call-side WebSocket is ready; activate_session() releases it.
         """
+        self._evict_stale_prewarms()
         try:
             bootstrap = await self._build_session_bootstrap(
                 caller_id=from_number,
                 from_number=from_number,
             )
-            if self.model:
-                session_cfg = SessionConfig(
-                    instructions=bootstrap.instructions,
-                    initial_response_instructions=(
-                        bootstrap.initial_response_instructions
-                        if bootstrap.should_greet_first
-                        else ""
-                    ),
-                    model=self.model,
-                    available_agents=self._available_agents,
-                )
-            else:
-                session_cfg = SessionConfig(
-                    instructions=bootstrap.instructions,
-                    initial_response_instructions=(
-                        bootstrap.initial_response_instructions
-                        if bootstrap.should_greet_first
-                        else ""
-                    ),
-                    available_agents=self._available_agents,
-                )
-            client = self._make_client(session_cfg)
-            client._hold_initial_response = True
+            session_cfg = self._build_session_config(
+                instructions=bootstrap.instructions,
+                initial_response_instructions=(
+                    bootstrap.initial_response_instructions
+                    if bootstrap.should_greet_first
+                    else ""
+                ),
+            )
+            client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
             self._prewarm_sessions[from_number] = (client, time.monotonic())
             logger.info("Pre-warm ready for %s", from_number)
@@ -1239,19 +1239,10 @@ class VoiceServer:
                             if bootstrap.should_greet_first
                             else ""
                         )
-                        if self.model:
-                            session_cfg = SessionConfig(
-                                instructions=instructions,
-                                initial_response_instructions=initial_response_instructions,
-                                model=self.model,
-                                available_agents=self._available_agents,
-                            )
-                        else:
-                            session_cfg = SessionConfig(
-                                instructions=instructions,
-                                initial_response_instructions=initial_response_instructions,
-                                available_agents=self._available_agents,
-                            )
+                        session_cfg = self._build_session_config(
+                            instructions=instructions,
+                            initial_response_instructions=initial_response_instructions,
+                        )
                         realtime_client = self._make_client(
                             session_cfg,
                             on_audio=on_audio,
@@ -1339,9 +1330,25 @@ class VoiceServer:
         }
         await websocket.send_text(json.dumps(message))
 
+    def _build_session_config(
+        self,
+        instructions: str,
+        initial_response_instructions: str = "",
+    ) -> SessionConfig:
+        """Build a SessionConfig with optional model override."""
+        kwargs: dict = dict(
+            instructions=instructions,
+            initial_response_instructions=initial_response_instructions,
+            available_agents=self._available_agents,
+        )
+        if self.model:
+            kwargs["model"] = self.model
+        return SessionConfig(**kwargs)
+
     def _make_client(
         self,
         session_config: SessionConfig,
+        hold_initial_response: bool = False,
         **kwargs,
     ) -> OpenAIRealtimeClient:
         """Instantiate the realtime client for the configured provider."""
@@ -1349,11 +1356,13 @@ class VoiceServer:
             return XAIRealtimeClient(
                 api_key=self._api_key,
                 session_config=session_config,
+                hold_initial_response=hold_initial_response,
                 **kwargs,
             )
         return OpenAIRealtimeClient(
             api_key=self._api_key,
             session_config=session_config,
+            hold_initial_response=hold_initial_response,
             **kwargs,
         )
 
@@ -1377,17 +1386,7 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            if self.model:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    model=self.model,
-                    available_agents=self._available_agents,
-                )
-            else:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    available_agents=self._available_agents,
-                )
+            session_cfg = self._build_session_config(instructions=instructions)
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
@@ -1480,17 +1479,7 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            if self.model:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    model=self.model,
-                    available_agents=self._available_agents,
-                )
-            else:
-                session_cfg = SessionConfig(
-                    instructions=instructions,
-                    available_agents=self._available_agents,
-                )
+            session_cfg = self._build_session_config(instructions=instructions)
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_browser_audio(websocket, audio),
