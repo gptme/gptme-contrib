@@ -1,12 +1,9 @@
 ---
 match:
   keywords:
-    - compression
     - llmlingua
-    - token pruning
-    - prompt compression
     - text compression
-    - llm compression
+    - compression
 status: active
 ---
 # LLMLingua (Compression Technique)

@@ -1,11 +1,8 @@
 ---
 match:
   keywords:
-    - pr recovery
     - closed pr
-    - accidental closure
     - reopen pr
-    - force-push closed
     - replace pr
   session_categories: [cross-repo, cleanup]
 status: active

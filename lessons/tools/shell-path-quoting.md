@@ -4,9 +4,6 @@ match:
   - path with spaces
   - quoted path
   - spaces quoting
-  - 'cd: too many arguments'
-  - too many arguments
-  - unquoted file path
 status: active
 ---
 

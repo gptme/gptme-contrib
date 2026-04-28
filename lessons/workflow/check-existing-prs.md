@@ -1,12 +1,9 @@
 ---
 match:
   keywords:
-  - about to create PR
   - gh pr create
   - git checkout -b fix-
   - gh pr list --search
-  - issue has been open for a while
-  - duplicate PR risk
   session_categories: [cross-repo, code, triage]
 status: active
 ---

@@ -6,10 +6,7 @@ match:
     - watch task
     - settlement watch
     - upcoming event
-    - scheduled result
     - event trigger
-    - monitor for result
-    - waiting for outcome
 ---
 
 # Agent Event Watch Workflow

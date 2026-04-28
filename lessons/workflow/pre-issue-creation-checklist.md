@@ -2,10 +2,7 @@
 match:
   keywords:
     - "duplicate prevention"
-    - "issue creation"
-    - "pre-action check"
     - "memory failure"
-    - "work verification"
 status: active
 ---
 
