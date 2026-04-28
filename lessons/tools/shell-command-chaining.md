@@ -5,9 +5,6 @@ match:
   - "shell blocks lose context"
   - "chain shell commands"
   - "command chaining"
-  - "variable not found in second block"
-  - "shell command fails silently"
-  - "combine multiple commands"
 status: active
 ---
 

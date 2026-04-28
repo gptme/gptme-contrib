@@ -5,9 +5,6 @@ match:
   - github comment formatting
   - file reference link
   - clickable file link
-  - github file reference
-  - format file paths in comments
-  - file references in github
 tags:
 - github-comments
 - file-references

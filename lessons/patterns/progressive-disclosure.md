@@ -4,9 +4,6 @@ match:
     - "documentation file consuming excessive context tokens"
     - "always-included file over 500 lines"
     - "context budget consumed by rarely-needed content"
-    - "file is too large for context"
-    - "large documentation file"
-    - "reduce context tokens"
   session_categories: [knowledge, cleanup]
 status: active
 ---
