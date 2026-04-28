@@ -4,8 +4,6 @@ match:
   - context window management
   - organize context across steps
   - prune older conversation context
-  - layered context approach
-  - context accumulating across steps
 status: active
 ---
 
