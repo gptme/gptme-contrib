@@ -652,6 +652,7 @@ class VoiceServer:
         from_number: str = "",
         handoff_id: str | None = None,
         standup_brief: str | None = None,
+        consume_recent: bool = True,
     ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
@@ -677,7 +678,7 @@ class VoiceServer:
                 ),
             )
 
-        recent_call = await self._consume_recent_call(caller_id)
+        recent_call = await self._consume_recent_call(caller_id, consume=consume_recent)
         if recent_call:
             return SessionBootstrap(
                 instructions=_build_resume_instructions(
@@ -721,9 +722,14 @@ class VoiceServer:
         """
         self._evict_stale_prewarms()
         try:
+            # Peek at the resume record (consume_recent=False) so the on-disk
+            # state file is NOT deleted until connect() succeeds.  If connect()
+            # raises, the file stays intact and the cold-path _build_session_bootstrap
+            # can still resume the caller normally.
             bootstrap = await self._build_session_bootstrap(
                 caller_id=from_number,
                 from_number=from_number,
+                consume_recent=False,
             )
             session_cfg = self._build_session_config(
                 instructions=bootstrap.instructions,
@@ -735,6 +741,9 @@ class VoiceServer:
             )
             client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
+            # connect() succeeded — now safely consume the resume state so a
+            # cold-path fallback won't re-inject the same transcript.
+            await self._consume_recent_call(from_number)
             self._prewarm_sessions[from_number] = (client, time.monotonic())
             logger.info("Pre-warm ready for %s", from_number)
         except Exception as exc:
@@ -772,8 +781,16 @@ class VoiceServer:
         ).instructions
 
     async def _consume_recent_call(
-        self, caller_id: str | None
+        self, caller_id: str | None, *, consume: bool = True
     ) -> RecentCallRecord | None:
+        """Load the most recent call record for *caller_id*.
+
+        When *consume* is True (default) the on-disk state file is deleted,
+        any pending post-call schedule is cancelled, and archive record paths
+        are restored.  Pass ``consume=False`` to peek at the record without
+        side effects — useful when building bootstrap instructions before a
+        connect() that may fail, to avoid losing resume context.
+        """
         if not caller_id:
             return None
 
@@ -784,6 +801,9 @@ class VoiceServer:
         age_seconds = time.time() - recent_call.ended_at
         if age_seconds > self.resume_window_seconds:
             return None
+
+        if not consume:
+            return recent_call
 
         pending_unit = (
             self._pending_post_calls.pop(caller_id, None)
