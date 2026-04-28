@@ -250,6 +250,10 @@ class OpenAIRealtimeClient:
         self._pending_audio_dropped = 0
         self._event_notice: asyncio.Event | None = None
         self._initial_response_sent = False
+        # When True, the initial response is held back even after session.created.
+        # Set this on pre-warmed sessions; call activate_session() once the
+        # call-side WebSocket is ready to receive audio.
+        self._hold_initial_response = False
 
     def _get_ws_url(self) -> str:
         """WebSocket URL for this provider (override in subclasses)."""
@@ -607,7 +611,11 @@ class OpenAIRealtimeClient:
     async def _send_initial_response_if_needed(self) -> None:
         """Trigger a one-shot startup response once the provider session is ready."""
         instructions = self.session_config.initial_response_instructions.strip()
-        if self._initial_response_sent or not instructions:
+        if (
+            self._initial_response_sent
+            or not instructions
+            or self._hold_initial_response
+        ):
             return
 
         self._initial_response_sent = True
@@ -620,6 +628,16 @@ class OpenAIRealtimeClient:
                 }
             },
         )
+
+    async def activate_session(self) -> None:
+        """Release the held initial response on a pre-warmed session.
+
+        Call this after attaching audio/transcript callbacks to a pre-warmed
+        client so the greeting fires once the call-side WebSocket is ready.
+        """
+        self._hold_initial_response = False
+        if self._session_ready is not None and self._session_ready.is_set():
+            await self._send_initial_response_if_needed()
 
     async def _flush_pending_audio(self) -> None:
         """Send any audio that was buffered before the session was ready."""
