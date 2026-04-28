@@ -2,9 +2,7 @@
 match:
   keywords:
     - "exit code 8"
-    - "gh pr checks watch pending"
     - "checks still pending"
-    - "pr checks not complete"
 status: active
 generated_from:
   sessions: 538

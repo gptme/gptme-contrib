@@ -4,8 +4,6 @@ match:
     - "examine source code to understand CLI"
     - "planning complex workaround"
     - "making assumptions about CLI options"
-    - "unfamiliar command usage"
-    - "discover CLI flags and options"
 status: active
 ---
 

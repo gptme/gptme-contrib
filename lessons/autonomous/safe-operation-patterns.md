@@ -4,8 +4,6 @@ match:
   - "classify operation before executing"
   - "safe to execute autonomously"
   - "requires human approval"
-  - "operation safety classification"
-  - "risky operation"
 status: active
 ---
 

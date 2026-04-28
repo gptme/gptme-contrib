@@ -5,7 +5,6 @@ match:
     - "OAuth blocked at password"
     - "API key for agent workspace"
     - "store credentials in .env"
-    - "secret rotation for agent"
 status: active
 ---
 
