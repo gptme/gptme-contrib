@@ -54,9 +54,8 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
     # autonomous run. Each `claude -p` call still writes an ai-title entry to
     # ~/.claude/projects/, which fires Stop hooks and would otherwise be tagged
     # as run_type=autonomous (default), polluting session-records.jsonl with
-    # 0-duration noops. Alice's post-session.py reads ALICE_SESSION_TYPE; the
-    # generic GPTME_SUBPROCESS=1 is for future cross-agent hook adoption.
-    env["ALICE_SESSION_TYPE"] = "subprocess"
+    # 0-duration noops. Agent hooks should check GPTME_SUBPROCESS=1 to detect
+    # subprocess sessions (the generic cross-agent signal).
     env["GPTME_SUBPROCESS"] = "1"
 
     cmd = ["claude", "-p", "-"]
