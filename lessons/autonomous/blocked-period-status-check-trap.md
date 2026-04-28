@@ -3,9 +3,7 @@ match:
   keywords:
     - blocked period
     - status check
-    - repetitive commits
     - all tasks blocked
-    - status check trap
     - nothing to do
     - waiting for input
     - strategic pause

@@ -4,8 +4,6 @@ match:
   - sg run --pattern
   - ast-grep structural search
   - code refactoring across files
-  - replace pattern in codebase
-  - AST-based code transformation
 status: active
 ---
 

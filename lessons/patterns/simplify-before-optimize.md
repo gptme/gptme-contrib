@@ -13,7 +13,6 @@ match:
   - "too slow"
   - "needs caching"
   - "optimize the code"
-  - "add memoization"
 status: active
 ---
 

@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: ["session ending", "session complete"]
+  keywords: ["session complete"]
 status: active
 ---
 
