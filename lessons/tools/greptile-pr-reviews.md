@@ -18,6 +18,11 @@ match:
     - "bot re-review after fixes"
     - "new commits after bot review"
     - "request another bot review"
+    - "make the bot take another look"
+    - "bot take another look"
+    - "addressed the automated reviewer"
+    - "automated reviewer's feedback"
+    - "how do I retrigger"
   session_categories: [cross-repo, code]
 status: active
 ---
