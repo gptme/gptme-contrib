@@ -176,3 +176,89 @@ def test_collect_waiting_tasks_respects_limit(tmp_path: Path) -> None:
     assert len(out) == 4
     # Sorted alphabetically by stem
     assert [t["task"] for t in out] == ["w00", "w01", "w02", "w03"]
+
+
+def _pr_payload(number: int, login: str, title: str = "x") -> dict:
+    return {
+        "number": number,
+        "title": title,
+        "draft": False,
+        "user": {"login": login},
+    }
+
+
+def test_collect_open_prs_paginates_when_first_page_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full first page (100 items) must trigger a second-page fetch."""
+    import json as _json
+
+    from gptme_daily_briefing import collectors as col
+
+    captured: list[str] = []
+    page1 = [_pr_payload(i, "alice" if i % 10 == 0 else "other") for i in range(100)]
+    page2 = [_pr_payload(1000, "alice", "from-page-2")]
+    pages = {1: page1, 2: page2, 3: []}
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        url = cmd[-1]
+        captured.append(url)
+        page = int(url.split("page=")[-1])
+        return _json.dumps(pages.get(page, []))
+
+    monkeypatch.setattr(col, "_run", fake_run)
+
+    out = col.collect_open_prs(["owner/repo"], "alice", limit_per_repo=20)
+
+    # Walked at least pages 1 and 2 (3 may or may not be hit depending on impl,
+    # but the contract is "stops at first empty page")
+    assert any("page=1" in u for u in captured), captured
+    assert any("page=2" in u for u in captured), captured
+    # Page-2-only PR must be present (the original bug: silent miss)
+    assert any(p["number"] == 1000 and p["title"] == "from-page-2" for p in out), out
+
+
+def test_collect_open_prs_stops_on_short_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page returning <100 items signals the last page — don't fetch more."""
+    import json as _json
+
+    from gptme_daily_briefing import collectors as col
+
+    captured: list[str] = []
+    page1 = [_pr_payload(i, "alice") for i in range(5)]
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        url = cmd[-1]
+        captured.append(url)
+        page = int(url.split("page=")[-1])
+        return _json.dumps(page1 if page == 1 else [])
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    col.collect_open_prs(["owner/repo"], "alice")
+
+    # Only one HTTP call: short first page is the last page
+    assert len(captured) == 1, captured
+
+
+def test_collect_open_prs_respects_max_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cap at max_pages even if every page returns 100 results."""
+    import json as _json
+
+    from gptme_daily_briefing import collectors as col
+
+    captured: list[str] = []
+    full_page = [_pr_payload(i, "alice") for i in range(100)]
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        captured.append(cmd[-1])
+        return _json.dumps(full_page)
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    col.collect_open_prs(["owner/repo"], "alice", max_pages=2)
+
+    # Exactly 2 pages walked, no more
+    assert len(captured) == 2, captured
