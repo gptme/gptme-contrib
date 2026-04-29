@@ -218,5 +218,7 @@ def collect_open_prs(
                 break
             if len(batch) < 100:
                 break
+            if len(repo_prs) >= limit_per_repo:
+                break
         prs.extend(repo_prs[:limit_per_repo])
     return prs
