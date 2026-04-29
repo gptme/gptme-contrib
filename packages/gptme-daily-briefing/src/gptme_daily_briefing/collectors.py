@@ -17,6 +17,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+
+import yaml
 
 
 def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
@@ -51,13 +54,16 @@ def collect_graphql_rate_limit() -> dict[str, Any] | None:
 def collect_blockers(repo: str, label: str, limit: int = 6) -> list[str]:
     """Open issues with `label` in `repo` (excludes PRs).
 
-    Returns formatted strings like ``"#570: Title"``.
+    Returns formatted strings like ``"#570: Title"``. The label is
+    URL-encoded so values containing spaces (``"help wanted"``) or
+    ampersands work correctly.
     """
+    encoded_label = quote(label, safe="")
     out = _run(
         [
             "gh",
             "api",
-            f"repos/{repo}/issues?labels={label}&state=open&per_page={limit}",
+            f"repos/{repo}/issues?labels={encoded_label}&state=open&per_page={limit}",
         ]
     )
     if not out:
@@ -106,8 +112,6 @@ def collect_waiting_tasks(workspace_root: Path, limit: int = 8) -> list[dict[str
         if not m:
             continue
         try:
-            import yaml
-
             fm = yaml.safe_load(m.group(1)) or {}
         except Exception:
             continue
@@ -120,18 +124,22 @@ def collect_waiting_tasks(workspace_root: Path, limit: int = 8) -> list[dict[str
 
 
 def collect_recent_highlights(workspace_root: Path, limit: int = 6) -> list[str]:
-    """Recent commit subjects from ``origin/master``, fall back to local master."""
+    """Recent commit subjects from the agent's main integration branch.
+
+    Tries refs in order: ``origin/master`` → ``origin/main`` → ``master`` →
+    ``main``. Explicitly avoids logging the bare current ``HEAD`` because on
+    a feature branch that would silently surface off-topic commits instead
+    of landed integration work.
+    """
     fetch_n = max(limit * 2, 10)
-    out = _run(
-        ["git", "log", "--pretty=format:%s", f"-{fetch_n}", "origin/master"],
-        cwd=workspace_root,
-    )
-    if not out:
+    for ref in ("origin/master", "origin/main", "master", "main"):
         out = _run(
-            ["git", "log", "--pretty=format:%s", f"-{fetch_n}"],
+            ["git", "log", "--pretty=format:%s", f"-{fetch_n}", ref],
             cwd=workspace_root,
         )
-    return [line.strip() for line in out.splitlines() if line.strip()][:limit]
+        if out:
+            return [line.strip() for line in out.splitlines() if line.strip()][:limit]
+    return []
 
 
 def collect_session_stats(sessions_dir: Path, days: int = 1) -> dict[str, Any]:

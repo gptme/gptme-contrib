@@ -19,12 +19,14 @@ def _git(*args: str, cwd: Path) -> None:
 
 @pytest.fixture
 def git_workspace(tmp_path: Path) -> Path:
-    """A fresh git repo with a couple of commits, so highlights have data.
+    """A fresh git repo with a couple of commits on a `master` branch.
 
-    Uses a non-master default branch to dodge any global hook that blocks
-    direct commits to master in unfamiliar repos.
+    `collect_recent_highlights` only logs from `origin/master`, `origin/main`,
+    `master`, or `main` (it explicitly avoids bare HEAD). The fixture also
+    sets `commit.gpgsign=false` and uses `--no-verify` so any global commit
+    hooks don't interfere.
     """
-    _git("init", "-q", "-b", "test-default", cwd=tmp_path)
+    _git("init", "-q", "-b", "master", cwd=tmp_path)
     _git("config", "user.email", "test@example.com", cwd=tmp_path)
     _git("config", "user.name", "Test", cwd=tmp_path)
     _git("config", "commit.gpgsign", "false", cwd=tmp_path)
@@ -38,10 +40,34 @@ def git_workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def feature_branch_workspace(git_workspace: Path) -> Path:
+    """Same as git_workspace but checked out on an unrelated feature branch.
+
+    The fallback should still surface the *master* commits, NOT whatever the
+    feature branch added — that's the whole point of the explicit branch list.
+    """
+    _git("checkout", "-q", "-b", "feature", cwd=git_workspace)
+    (git_workspace / "feature.md").write_text("feature wip\n")
+    _git("add", "feature.md", cwd=git_workspace)
+    _git("commit", "-q", "--no-verify", "-m", "WIP do not surface this", cwd=git_workspace)
+    return git_workspace
+
+
 def test_collect_recent_highlights_returns_subjects_in_order(git_workspace: Path) -> None:
-    # `origin/master` doesn't exist in the fixture repo; the function falls back to local log
+    # `origin/master` doesn't exist in the fixture repo; the fallback chain
+    # finds local `master` and surfaces those commits in newest-first order.
     out = collect_recent_highlights(git_workspace, limit=3)
     assert out == ["fix: trailing body", "docs: add section", "feat: first commit"]
+
+
+def test_collect_recent_highlights_uses_master_not_head_on_feature_branch(
+    feature_branch_workspace: Path,
+) -> None:
+    """Even on a feature branch with extra commits, only master is surfaced."""
+    out = collect_recent_highlights(feature_branch_workspace, limit=4)
+    assert "WIP do not surface this" not in out
+    assert out[0] == "fix: trailing body"
 
 
 def test_collect_recent_highlights_respects_limit(git_workspace: Path) -> None:
@@ -53,6 +79,40 @@ def test_collect_recent_highlights_empty_repo(tmp_path: Path) -> None:
     # No git repo at all — should return [] without raising
     out = collect_recent_highlights(tmp_path, limit=5)
     assert out == []
+
+
+def test_collect_blockers_url_encodes_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A label containing a space must be percent-encoded so the gh URL is valid."""
+    captured: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        captured.append(cmd)
+        return "[]"
+
+    from gptme_daily_briefing import collectors as col
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    col.collect_blockers("owner/repo", "help wanted")
+    assert captured, "no command captured"
+    url = captured[0][-1]
+    assert "labels=help%20wanted" in url, f"label not encoded: {url}"
+    assert "labels=help wanted" not in url
+
+
+def test_collect_blockers_url_encodes_special_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A label containing '&' must not leak into the query as a separator."""
+    captured: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        captured.append(cmd)
+        return "[]"
+
+    from gptme_daily_briefing import collectors as col
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    col.collect_blockers("owner/repo", "p1&urgent")
+    url = captured[0][-1]
+    assert "labels=p1%26urgent" in url, f"& not encoded: {url}"
 
 
 def test_collect_waiting_tasks_parses_frontmatter(tmp_path: Path) -> None:
