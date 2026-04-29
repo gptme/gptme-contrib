@@ -176,29 +176,47 @@ def collect_session_stats(sessions_dir: Path, days: int = 1) -> dict[str, Any]:
 
 
 def collect_open_prs(
-    repos: list[str], username: str, limit_per_repo: int = 5
+    repos: list[str],
+    username: str,
+    limit_per_repo: int = 5,
+    max_pages: int = 5,
 ) -> list[dict[str, Any]]:
-    """Open PRs by ``username`` across the given repositories."""
+    """Open PRs by ``username`` across the given repositories.
+
+    Paginates through ``state=open&per_page=100`` results so users with PRs
+    beyond the first 100 in a repo aren't silently dropped. Stops at the
+    first empty page or when ``max_pages`` is reached (default 5 → up to
+    500 PRs scanned per repo).
+    """
     prs: list[dict[str, Any]] = []
     for repo in repos:
-        out = _run(["gh", "api", f"repos/{repo}/pulls?state=open&per_page=100"])
-        if not out:
-            continue
-        try:
-            repo_prs = []
-            for pr in json.loads(out):
-                if pr.get("user", {}).get("login") != username:
-                    continue
-                repo_prs.append(
-                    {
-                        "repo": repo,
-                        "number": pr["number"],
-                        "title": pr["title"],
-                        "draft": pr.get("draft", False),
-                        "url": f"https://github.com/{repo}/pull/{pr['number']}",
-                    }
-                )
-            prs.extend(repo_prs[:limit_per_repo])
-        except (json.JSONDecodeError, KeyError):
-            continue
+        repo_prs: list[dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            out = _run(["gh", "api", f"repos/{repo}/pulls?state=open&per_page=100&page={page}"])
+            if not out:
+                break
+            try:
+                batch = json.loads(out)
+            except json.JSONDecodeError:
+                break
+            if not batch:
+                break
+            try:
+                for pr in batch:
+                    if pr.get("user", {}).get("login") != username:
+                        continue
+                    repo_prs.append(
+                        {
+                            "repo": repo,
+                            "number": pr["number"],
+                            "title": pr["title"],
+                            "draft": pr.get("draft", False),
+                            "url": f"https://github.com/{repo}/pull/{pr['number']}",
+                        }
+                    )
+            except KeyError:
+                break
+            if len(batch) < 100:
+                break
+        prs.extend(repo_prs[:limit_per_repo])
     return prs
