@@ -263,6 +263,42 @@ def test_load_project_instructions_guards_present_without_personality_files(
     assert "wait for the actual subagent result" in instructions
 
 
+def test_load_project_instructions_includes_hangup_tool_rules(
+    tmp_path: Path,
+) -> None:
+    """Preamble must instruct the model to actually CALL the hangup tool.
+
+    Regression for the 2026-04-29 pre-event call where the model said goodbye
+    five-plus times verbally without ever calling the hangup tool. Once Erik
+    explicitly asked, the model still verbalized "I'll end the call now" three
+    more turns before finally invoking the tool. The fix is a prompt-level
+    instruction that verbal-only goodbyes are the failure mode and the tool
+    must be called whenever the call should end.
+    """
+    (tmp_path / "gptme.toml").write_text(
+        '[prompt]\nfiles = ["ABOUT.md"]\n',
+    )
+    (tmp_path / "ABOUT.md").write_text("# ABOUT\nYou are Bob.\n")
+
+    instructions = _load_project_instructions(str(tmp_path))
+
+    # The dedicated section exists.
+    assert "HANGUP TOOL RULES:" in instructions
+
+    # The core constraint: only the tool ends the call.
+    assert "only ends when you call the hangup tool" in instructions
+
+    # Anti-pattern guidance: don't ask permission, don't verbalize without calling.
+    assert "Do not ask for confirmation" in instructions
+    assert (
+        "without calling the hangup tool in the same turn" in instructions
+        or "without calling the hangup tool" in instructions
+    )
+
+    # Self-recovery hint when the model notices it forgot.
+    assert "you forgot to call the tool" in instructions
+
+
 def test_function_call_subagent_dispatch_does_not_auto_create_response() -> None:
     async def _exercise() -> None:
         fake_ws = _FakeWebSocket()

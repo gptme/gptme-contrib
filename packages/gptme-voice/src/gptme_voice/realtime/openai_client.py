@@ -149,6 +149,20 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "happened yet and you are not the one who starts it.\n"
         "- It is fine to acknowledge that follow-up will happen automatically after "
         "hangup if the user asks. Just do not take credit for dispatching it.\n\n"
+        "HANGUP TOOL RULES:\n"
+        "- The call only ends when you call the hangup tool. A spoken goodbye does NOT "
+        "end the call by itself — verbal-only goodbyes leave the line open and frustrate "
+        "the caller.\n"
+        "- Once the caller has clearly said goodbye OR asked you to end the call, call "
+        "the hangup tool immediately. Do not ask for confirmation ('Would you like me "
+        "to end the call?') — their goodbye is the confirmation.\n"
+        "- Do not say 'I'll end the call now', 'one moment while I end the call', or "
+        "similar without calling the hangup tool in the same turn. Saying it without "
+        "calling the tool is the failure mode.\n"
+        "- Say a brief farewell first if you want; then call the tool. The 5-second "
+        "farewell delay gives your goodbye time to play before the line drops.\n"
+        "- If you have already said goodbye verbally and the caller is still on the "
+        "line, that means you forgot to call the tool. Call it now.\n\n"
         "HANDOFF TO ANOTHER AGENT:\n"
         "- Use handoff_to_agent ONLY when the caller explicitly asks to speak with "
         "Alice, Gordon, or Sven, or when the topic is clearly outside your expertise "
@@ -380,10 +394,15 @@ class OpenAIRealtimeClient:
                     "type": "function",
                     "name": "hangup",
                     "description": (
-                        "End the current voice call cleanly. Use this only when the caller "
-                        "has clearly said goodbye or explicitly asked to hang up. Do not use "
-                        "this to interrupt ongoing work or avoid a question. "
-                        "Say a brief farewell first; the call will terminate shortly after."
+                        "End the current voice call. This is the ONLY way the call ends — "
+                        "saying goodbye verbally does not hang up. Call this tool whenever "
+                        "the caller has said goodbye or explicitly asked to end the call. "
+                        "Do not ask for confirmation; the caller's goodbye is the "
+                        "confirmation. Do not announce 'I'll end the call now' without "
+                        "calling the tool in the same turn. Say a brief farewell first if "
+                        "you like — the call drops a few seconds after the tool fires so "
+                        "your goodbye still reaches the caller. Do not use this tool to "
+                        "interrupt ongoing work or avoid a question."
                     ),
                     "parameters": {
                         "type": "object",
