@@ -199,7 +199,7 @@ def collect_open_prs(
                 batch = json.loads(out)
             except json.JSONDecodeError:
                 break
-            if not batch:
+            if not isinstance(batch, list) or not batch:
                 break
             try:
                 for pr in batch:
