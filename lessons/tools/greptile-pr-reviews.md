@@ -22,7 +22,7 @@ match:
     - "bot take another look"
     - "addressed the automated reviewer"
     - "automated reviewer's feedback"
-    - "how do I retrigger"
+    - "how do I retrigger greptile"
   session_categories: [cross-repo, code]
 status: active
 ---
