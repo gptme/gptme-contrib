@@ -207,21 +207,25 @@ def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> st
         f"Closes #{issue_number}\n\n"
         f"**Resolver summary:** {summary}\n"
     )
-    raw = gh(
-        [
-            "pr",
-            "create",
-            "--repo",
-            repo,
-            "--draft",
-            "--head",
-            branch,
-            "--title",
-            f"[gptme-resolver] attempt for #{issue_number}",
-            "--body",
-            body,
-        ]
-    )
+    try:
+        raw = gh(
+            [
+                "pr",
+                "create",
+                "--repo",
+                repo,
+                "--draft",
+                "--head",
+                branch,
+                "--title",
+                f"[gptme-resolver] attempt for #{issue_number}",
+                "--body",
+                body,
+            ]
+        )
+    except subprocess.CalledProcessError:
+        # PR already exists for this branch (re-trigger). Return existing URL.
+        raw = gh(["pr", "view", "--repo", repo, "--json", "url", "-q", ".url", branch])
     return raw.strip().splitlines()[-1] if raw.strip() else ""
 
 

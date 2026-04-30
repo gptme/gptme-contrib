@@ -146,3 +146,28 @@ def test_status_regex_ignores_prose_mentions():
     prose = "I'll now emit RESOLVER_STATUS: changes inline like this."
     status, _ = resolve_issue.parse_status(prose)
     assert status == "error"
+
+
+def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
+    # On re-trigger, `gh pr create` exits 1 ("a pull request … already exists").
+    # open_draft_pr must catch CalledProcessError and return the existing PR URL
+    # via `gh pr view` so the caller can still post the issue comment.
+    import subprocess
+
+    calls: list[list[str]] = []
+
+    def fake_gh(args, *, check=True):
+        calls.append(args)
+        if args[0] == "pr" and args[1] == "create":
+            raise subprocess.CalledProcessError(1, "gh")
+        if args[0] == "pr" and args[1] == "view":
+            return "https://github.com/gptme/gptme-contrib/pull/99\n"
+        return ""
+
+    monkeypatch.setattr(resolve_issue, "gh", fake_gh)
+    url = resolve_issue.open_draft_pr(
+        "gptme/gptme-contrib", 42, "gptme-resolver/issue-42", "fixed the crash"
+    )
+    assert url == "https://github.com/gptme/gptme-contrib/pull/99"
+    # Verify we fell back to `gh pr view`
+    assert any(a[0] == "pr" and a[1] == "view" for a in calls)
