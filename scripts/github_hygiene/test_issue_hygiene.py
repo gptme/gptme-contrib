@@ -122,5 +122,26 @@ def test_skip_token_matches_template_contract():
     )
 
 
+def test_skip_token_matches_with_role_prefix():
+    # gptme may emit role-prefix framing like "assistant: NO_ISSUES"; the check
+    # must not require exact equality so those cases are silently skipped too.
+    prefixed = f"assistant: {issue_hygiene.SKIP_TOKEN}"
+    assert issue_hygiene.SKIP_TOKEN in prefixed
+
+
+def test_model_arg_comes_before_stdin_dash():
+    # --model must precede the positional `-` arg; appending it after `-` breaks
+    # most CLI parsers since positional args terminate option parsing.
+    import inspect
+
+    src = inspect.getsource(issue_hygiene.run_gptme)
+    # Verify `-` is appended last (after any --model extension)
+    append_dash_pos = src.rfind('append("-")')
+    extend_model_pos = src.rfind('cmd.extend(["--model"')
+    assert (
+        append_dash_pos > extend_model_pos
+    ), "--model must be added to cmd before the positional '-' is appended"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

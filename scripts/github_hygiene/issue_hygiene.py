@@ -164,9 +164,10 @@ def run_gptme(prompt: str, *, model: str | None = None) -> str:
     We pipe the prompt via stdin and use `--non-interactive` so the action
     does not block waiting on stdin TTY.
     """
-    cmd = ["gptme", "--non-interactive", "-"]
+    cmd = ["gptme", "--non-interactive"]
     if model:
         cmd.extend(["--model", model])
+    cmd.append("-")
     try:
         result = subprocess.run(
             cmd,
@@ -231,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     if not verdict:
         print("gptme returned empty output; skipping.")
         return 0
-    if verdict.strip() == SKIP_TOKEN:
+    if SKIP_TOKEN in verdict:
         print("gptme reported NO_ISSUES; skipping.")
         return 0
 
