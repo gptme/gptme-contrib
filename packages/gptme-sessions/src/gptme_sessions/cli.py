@@ -1265,11 +1265,15 @@ def sync(
         )
         return
 
-    since_days = _parse_since(since) or 14
-    discovered = _discover_all(since_days=since_days, harness_filter=harness)
+    since_days = _parse_since(since)  # None means "all time"
+    since_days_effective = since_days if since_days is not None else 36500  # ~100 years
+    discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
 
     if not discovered:
-        click.echo(f"No sessions found in the last {since_days} day(s).")
+        window_desc = (
+            f"last {since_days_effective} day(s)" if since_days is not None else "all time"
+        )
+        click.echo(f"No sessions found in the {window_desc}.")
         return
 
     # Build lookup structures for deduplication and in-place updates.
