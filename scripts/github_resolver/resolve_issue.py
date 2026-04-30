@@ -122,8 +122,10 @@ def render_prompt(template: str, *, repo: str, issue: Issue) -> str:
     )
 
 
-def run_gptme(prompt: str, *, model: str | None = None, workdir: Path) -> str:
-    """Invoke gptme non-interactively. Fail soft: return empty on error."""
+def run_gptme(
+    prompt: str, *, model: str | None = None, workdir: Path
+) -> tuple[str, str]:
+    """Invoke gptme non-interactively. Fail soft: return (stdout, stderr)."""
     cmd = ["gptme", "--non-interactive", "--no-confirm", "-"]
     if model:
         cmd.extend(["--model", model])
@@ -137,11 +139,12 @@ def run_gptme(prompt: str, *, model: str | None = None, workdir: Path) -> str:
             cwd=workdir,
         )
     except FileNotFoundError:
-        sys.stderr.write("gptme not found on PATH; skipping resolver.\n")
-        return ""
+        msg = "gptme not found on PATH; skipping resolver.\n"
+        sys.stderr.write(msg)
+        return "", msg
     if result.returncode != 0:
         sys.stderr.write(f"gptme failed (rc={result.returncode}):\n{result.stderr}\n")
-    return result.stdout
+    return result.stdout, result.stderr
 
 
 def parse_status(gptme_output: str) -> tuple[str, str]:
@@ -307,10 +310,11 @@ def main(argv: list[str] | None = None) -> int:
     template = args.prompt_file.read_text()
     prompt = render_prompt(template, repo=args.repo, issue=issue)
 
-    gptme_output = run_gptme(
+    gptme_output, gptme_stderr = run_gptme(
         prompt, model=os.environ.get("GPTME_MODEL"), workdir=args.workdir
     )
     write_output(args.output_dir, "gptme-stdout.log", gptme_output or "")
+    write_output(args.output_dir, "gptme-stderr.log", gptme_stderr or "")
 
     status, message = parse_status(gptme_output)
     write_output(
