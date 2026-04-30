@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from gptme_sessions.record import SessionRecord, normalize_model
+from gptme_sessions.record import HARM_CATEGORY_LABELS, SessionRecord, normalize_model
 
 
 def test_context_tier_default():
@@ -491,3 +491,41 @@ def test_populate_span_aggregates_idempotent_rerun(tmp_path: Path):
     first = dict(r.span_aggregates or {})
     assert r.populate_span_aggregates() is True
     assert r.span_aggregates == first
+
+
+# --- harm_category tests ---
+
+
+def test_harm_category_default():
+    """harm_category defaults to None."""
+    r = SessionRecord()
+    assert r.harm_category is None
+
+
+def test_harm_category_valid():
+    """Valid harm_category values are preserved."""
+    for label in HARM_CATEGORY_LABELS:
+        r = SessionRecord(harm_category=label)
+        assert r.harm_category == label
+
+
+def test_harm_category_invalid_reset():
+    """Invalid harm_category values are silently reset to None."""
+    r = SessionRecord(harm_category="not_a_real_category")
+    assert r.harm_category is None
+
+
+def test_harm_category_roundtrip():
+    """harm_category survives to_dict/from_dict round-trip."""
+    r = SessionRecord(harm_category="deception")
+    d = r.to_dict()
+    assert d["harm_category"] == "deception"
+    r2 = SessionRecord.from_dict(d)
+    assert r2.harm_category == "deception"
+
+
+def test_harm_category_corrupt_jsonl_roundtrip():
+    """Corrupt harm_category from JSONL is silently dropped on load."""
+    raw = {"session_id": "abc123", "harm_category": "unknown_garbage"}
+    r = SessionRecord.from_dict(raw)
+    assert r.harm_category is None

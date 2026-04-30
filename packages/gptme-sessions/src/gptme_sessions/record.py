@@ -262,6 +262,10 @@ class SessionRecord:
         # Model stored as-is (raw) — use model_normalized for display
         # Normalize run_type — reject numeric values (session numbers) and clean prefixes
         self.run_type = normalize_run_type(self.run_type)
+        # Discard unrecognized harm_category values (e.g. from corrupt JSONL rows)
+        # so downstream --by-category consumers never see unexpected keys.
+        if self.harm_category is not None and self.harm_category not in HARM_CATEGORY_LABELS:
+            self.harm_category = None
 
     def set_productivity_grade(self, score: float) -> None:
         """Store the productivity dimension alongside the legacy scalar field."""
