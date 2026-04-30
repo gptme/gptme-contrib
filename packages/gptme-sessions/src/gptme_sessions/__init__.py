@@ -24,7 +24,13 @@ from .discovery import (
     session_datetime_from_path,
 )
 from .post_session import PostSessionResult, post_session
-from .record import MODEL_ALIASES, SessionRecord, normalize_model
+from .record import (
+    HARM_CATEGORY_LABELS,
+    HARM_CATEGORY_TAXONOMY,
+    MODEL_ALIASES,
+    SessionRecord,
+    normalize_model,
+)
 from .signals import (
     detect_format,
     extract_from_path,
@@ -74,6 +80,8 @@ __all__ = [
     "normalize_category",
     "SessionRecord",
     "SessionStore",
+    "HARM_CATEGORY_LABELS",
+    "HARM_CATEGORY_TAXONOMY",
     "MODEL_ALIASES",
     "normalize_model",
     "detect_format",

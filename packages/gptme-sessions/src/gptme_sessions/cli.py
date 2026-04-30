@@ -1265,11 +1265,15 @@ def sync(
         )
         return
 
-    since_days = _parse_since(since) or 14
-    discovered = _discover_all(since_days=since_days, harness_filter=harness)
+    since_days = _parse_since(since)  # None means "all time"
+    since_days_effective = since_days if since_days is not None else 36500  # ~100 years
+    discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
 
     if not discovered:
-        click.echo(f"No sessions found in the last {since_days} day(s).")
+        window_desc = (
+            f"last {since_days_effective} day(s)" if since_days is not None else "all time"
+        )
+        click.echo(f"No sessions found in the {window_desc}.")
         return
 
     # Build lookup structures for deduplication and in-place updates.
@@ -1286,9 +1290,10 @@ def sync(
     # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
     new_count_estimate = sum(1 for e in discovered if str(e["path"]) not in existing_by_path)
     if not dry_run and new_count_estimate > 100:
+        window_warn = f"{since_days}d" if since_days is not None else "all time"
         click.echo(
             f"Warning: {new_count_estimate} new session(s) would be imported "
-            f"(window: {since_days}d). Use --dry-run to preview. Proceeding...",
+            f"(window: {window_warn}). Use --dry-run to preview. Proceeding...",
             err=True,
         )
 
