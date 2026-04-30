@@ -55,6 +55,7 @@ from github_actions_common import (  # noqa: E402
     Issue,
     fetch_issue,
     gh,
+    post_issue_comment,
     write_output,
 )
 
@@ -228,19 +229,7 @@ def comment_on_issue(
         if branch:
             lines.append(f"\nPartial attempt preserved on branch `{branch}`.")
     body = "\n".join(lines)
-    subprocess.run(
-        [
-            "gh",
-            "issue",
-            "comment",
-            str(issue_number),
-            "--repo",
-            repo,
-            "--body",
-            body,
-        ],
-        check=True,
-    )
+    post_issue_comment(repo, issue_number, body)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -41,6 +41,7 @@ from github_actions_common import (  # noqa: E402
     fetch_issue,
     gh,
     has_marker_comment,
+    post_issue_comment,
 )
 
 MARKER = "<!-- gptme-issue-hygiene: v1 -->"
@@ -146,14 +147,6 @@ def build_comment(verdict: str) -> str:
     return f"{MARKER}\n\n{preface}{verdict.strip()}\n"
 
 
-def post_comment(repo: str, issue_number: int, body: str) -> None:
-    subprocess.run(
-        ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body", body],
-        check=True,
-        timeout=60,
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/repo")
@@ -193,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         print(body)
         return 0
 
-    post_comment(args.repo, args.issue, body)
+    post_issue_comment(args.repo, args.issue, body)
     print(f"Posted hygiene comment on {args.repo}#{args.issue}.")
     return 0
 
