@@ -745,6 +745,34 @@ def cli(model: str | None = None) -> None:
     )
 
 
+def _validate_urls_in_text(text: str) -> list[tuple[str, int]]:
+    """HEAD-check any http(s) URLs in tweet text. Return [(url, status)] for unreachable ones (4xx/5xx).
+
+    Network errors are treated as non-fatal (returns nothing for those URLs) — the goal is to
+    catch deterministic 404s like the recurring `/YYYY/MM/DD/title/` vs `/blog/title/` permalink
+    bug, not to require connectivity. Mirrors the check in scripts/twitter/post-blog-tweet.py.
+    """
+    import re
+    import urllib.error
+    import urllib.request
+
+    url_pattern = re.compile(r"https?://[^\s\"'<>)]+")
+    bad: list[tuple[str, int]] = []
+    for url in url_pattern.findall(text):
+        url = url.rstrip(".,;:!?")
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            req.add_header("User-Agent", "Mozilla/5.0 (URL checker)")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status >= 400:
+                    bad.append((url, resp.status))
+        except urllib.error.HTTPError as e:
+            bad.append((url, e.code))
+        except Exception:
+            pass
+    return bad
+
+
 @cli.command()
 @click.argument("text")
 @click.option(
@@ -752,11 +780,35 @@ def cli(model: str | None = None) -> None:
 )
 @click.option("--reply-to", help="Tweet ID to reply to")
 @click.option("--schedule", help="Schedule time (ISO format)")
-def draft(text: str, type: str, reply_to: str | None, schedule: str | None) -> None:
+@click.option(
+    "--skip-url-check",
+    is_flag=True,
+    help="Skip HEAD-check of URLs in tweet text (use for pre-publish drafts)",
+)
+def draft(
+    text: str,
+    type: str,
+    reply_to: str | None,
+    schedule: str | None,
+    skip_url_check: bool,
+) -> None:
     """Create a new tweet draft"""
     op = metrics.start_operation("draft_creation", "twitter")
 
     try:
+        if not skip_url_check:
+            bad_urls = _validate_urls_in_text(text)
+            if bad_urls:
+                for url, status in bad_urls:
+                    console.print(
+                        f"[red]✗ URL returns {status}: {url}[/red]",
+                    )
+                console.print(
+                    "[red]Aborting draft — fix URLs or pass --skip-url-check.[/red]"
+                )
+                op.complete(success=False, error="bad_url")
+                sys.exit(1)
+
         scheduled_time = datetime.fromisoformat(schedule) if schedule else None
 
         draft = TweetDraft(
