@@ -1290,9 +1290,10 @@ def sync(
     # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
     new_count_estimate = sum(1 for e in discovered if str(e["path"]) not in existing_by_path)
     if not dry_run and new_count_estimate > 100:
+        window_warn = f"{since_days}d" if since_days is not None else "all time"
         click.echo(
             f"Warning: {new_count_estimate} new session(s) would be imported "
-            f"(window: {since_days}d). Use --dry-run to preview. Proceeding...",
+            f"(window: {window_warn}). Use --dry-run to preview. Proceeding...",
             err=True,
         )
 
