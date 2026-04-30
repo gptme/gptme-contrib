@@ -50,6 +50,13 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     env.pop("CC_SESSION_ID", None)
     env.pop("CC_MODEL", None)
+    # Tag the subprocess so agent Stop hooks can distinguish it from a real
+    # autonomous run. Each `claude -p` call still writes an ai-title entry to
+    # ~/.claude/projects/, which fires Stop hooks and would otherwise be tagged
+    # as run_type=autonomous (default), polluting session-records.jsonl with
+    # 0-duration noops. Agent hooks should check GPTME_SUBPROCESS=1 to detect
+    # subprocess sessions (the generic cross-agent signal).
+    env["GPTME_SUBPROCESS"] = "1"
 
     cmd = ["claude", "-p", "-"]
     if nested:
