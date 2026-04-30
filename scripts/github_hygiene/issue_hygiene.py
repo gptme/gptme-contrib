@@ -164,7 +164,7 @@ def run_gptme(prompt: str, *, model: str | None = None) -> str:
     We pipe the prompt via stdin and use `--non-interactive` so the action
     does not block waiting on stdin TTY.
     """
-    cmd = ["gptme", "--non-interactive"]
+    cmd = ["gptme", "--non-interactive", "--tools", "read"]
     if model:
         cmd.extend(["--model", model])
     cmd.append("-")

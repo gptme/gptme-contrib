@@ -129,6 +129,26 @@ def test_skip_token_matches_with_role_prefix():
     assert issue_hygiene.SKIP_TOKEN in prefixed
 
 
+def test_run_gptme_restricts_tools():
+    # Prevent prompt injection from untrusted issue bodies executing shell/gh/python.
+    # --tools must restrict to a safe read-only allowlist so CI runners can't be
+    # exfiltrated via crafted issue content.
+    import inspect
+
+    src = inspect.getsource(issue_hygiene.run_gptme)
+    assert "--tools" in src, (
+        "run_gptme must pass --tools to gptme to restrict tool access and prevent "
+        "prompt injection from untrusted issue bodies executing arbitrary commands"
+    )
+    # Ensure dangerous tools are not in the allowlist
+    tools_line_pos = src.find('"--tools"')
+    assert tools_line_pos != -1
+    # The value after --tools should not include shell or ipython
+    after_tools = src[tools_line_pos:]
+    assert "shell" not in after_tools[:100], "shell tool must not be in allowlist"
+    assert "ipython" not in after_tools[:100], "ipython tool must not be in allowlist"
+
+
 def test_model_arg_comes_before_stdin_dash():
     # --model must precede the positional `-` arg; appending it after `-` breaks
     # most CLI parsers since positional args terminate option parsing.
