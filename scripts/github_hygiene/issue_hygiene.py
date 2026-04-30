@@ -32,62 +32,26 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+# Make the sibling `github_actions_common` package importable when the script
+# is run directly inside the Action workflow (no editable install).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from github_actions_common import (  # noqa: E402
+    Issue,
+    fetch_issue,
+    gh,
+    has_marker_comment,
+)
+
 MARKER = "<!-- gptme-issue-hygiene: v1 -->"
 SKIP_TOKEN = "NO_ISSUES"
 MAX_RECENT_ISSUES = 15
-MAX_BODY_CHARS = 6000
-
-
-@dataclass
-class Issue:
-    number: int
-    title: str
-    body: str
-    author: str
-    labels: list[str]
 
 
 @dataclass
 class RecentIssue:
     number: int
     title: str
-
-
-def gh(args: list[str], *, check: bool = True) -> str:
-    """Run `gh` CLI, return stdout. Raises CalledProcessError on non-zero."""
-    result = subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        check=check,
-        timeout=60,
-    )
-    return result.stdout
-
-
-def fetch_issue(repo: str, issue_number: int) -> Issue:
-    raw = gh(
-        [
-            "issue",
-            "view",
-            str(issue_number),
-            "--repo",
-            repo,
-            "--json",
-            "number,title,body,author,labels",
-        ]
-    )
-    data = json.loads(raw)
-    body = (data.get("body") or "").strip()
-    if len(body) > MAX_BODY_CHARS:
-        body = body[:MAX_BODY_CHARS] + "\n…(truncated)"
-    return Issue(
-        number=int(data["number"]),
-        title=data["title"],
-        body=body,
-        author=(data.get("author") or {}).get("login", "unknown"),
-        labels=[label["name"] for label in data.get("labels", [])],
-    )
 
 
 def fetch_recent_issues(
@@ -120,22 +84,7 @@ def fetch_recent_issues(
 
 
 def already_commented(repo: str, issue_number: int) -> bool:
-    raw = gh(
-        [
-            "issue",
-            "view",
-            str(issue_number),
-            "--repo",
-            repo,
-            "--json",
-            "comments",
-        ]
-    )
-    data = json.loads(raw)
-    for comment in data.get("comments", []):
-        if MARKER in (comment.get("body") or ""):
-            return True
-    return False
+    return has_marker_comment(repo, issue_number, MARKER)
 
 
 def render_prompt(

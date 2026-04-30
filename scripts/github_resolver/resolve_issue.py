@@ -44,24 +44,25 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+# Make the sibling `github_actions_common` package importable when the script
+# is run directly inside the Action workflow (no editable install).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from github_actions_common import (  # noqa: E402
+    Issue,
+    fetch_issue,
+    gh,
+    write_output,
+)
 
 MARKER_COMMENT = "<!-- gptme-issue-resolver: v1 -->"
 STATUS_RE = re.compile(r"^RESOLVER_STATUS:\s*(changes|no_changes)\s*$", re.MULTILINE)
 SUMMARY_RE = re.compile(r"^RESOLVER_SUMMARY:\s*(.+?)\s*$", re.MULTILINE)
 REASON_RE = re.compile(r"^RESOLVER_REASON:\s*(.+?)\s*$", re.MULTILINE)
-MAX_BODY_CHARS = 6000
 BRANCH_PREFIX = "gptme-resolver/issue-"
-
-
-@dataclass
-class Issue:
-    number: int
-    title: str
-    body: str
-    author: str
-    labels: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -72,42 +73,11 @@ class ResolverOutcome:
     pr_url: str | None
 
 
-def gh(args: list[str], *, check: bool = True) -> str:
-    """Run `gh` CLI and return stdout."""
-    result = subprocess.run(["gh", *args], capture_output=True, text=True, check=check)
-    return result.stdout
-
-
 def git(args: list[str], *, check: bool = True, cwd: Path | None = None) -> str:
     result = subprocess.run(
         ["git", *args], capture_output=True, text=True, check=check, cwd=cwd
     )
     return result.stdout
-
-
-def fetch_issue(repo: str, issue_number: int) -> Issue:
-    raw = gh(
-        [
-            "issue",
-            "view",
-            str(issue_number),
-            "--repo",
-            repo,
-            "--json",
-            "number,title,body,author,labels",
-        ]
-    )
-    data = json.loads(raw)
-    body = (data.get("body") or "").strip()
-    if len(body) > MAX_BODY_CHARS:
-        body = body[:MAX_BODY_CHARS] + "\n…(truncated)"
-    return Issue(
-        number=int(data["number"]),
-        title=data["title"],
-        body=body,
-        author=(data.get("author") or {}).get("login", "unknown"),
-        labels=[label["name"] for label in data.get("labels", [])],
-    )
 
 
 def render_prompt(template: str, *, repo: str, issue: Issue) -> str:
@@ -271,11 +241,6 @@ def comment_on_issue(
         ],
         check=True,
     )
-
-
-def write_output(output_dir: Path, name: str, data: str) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / name).write_text(data)
 
 
 def main(argv: list[str] | None = None) -> int:
