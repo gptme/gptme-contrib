@@ -11,10 +11,27 @@ name: Issue Hygiene (warning-only)
 # Source: scripts/github_hygiene/issue_hygiene.py
 # Research: knowledge/research/2026-04-23-opencode-github-hygiene-agents.md
 #           (in Bob's private brain repo; public summary in PR)
+#
+# Staged rollout: manual dispatch only on gptme-contrib first. Promote to
+# `issues: opened` auto-trigger only after a one-week false-positive audit.
+# See README.md for full rollout plan.
 
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue-number:
+        description: "Issue number to run hygiene check on."
+        required: true
+        type: number
+      model:
+        description: "Optional gptme --model override."
+        required: false
+        type: string
+      provider-key-env:
+        description: "Env var name for the provider API key (e.g. ANTHROPIC_API_KEY)."
+        required: false
+        default: "OPENAI_API_KEY"
+        type: string
   workflow_call:
     inputs:
       issue-number:
@@ -25,9 +42,13 @@ on:
         description: "Optional gptme --model override."
         required: false
         type: string
+      provider-key-env:
+        description: "Env var name for the provider API key (e.g. ANTHROPIC_API_KEY)."
+        required: false
+        type: string
     secrets:
       gptme-provider-key:
-        description: "API key gptme should use (e.g. OPENAI_API_KEY)."
+        description: "API key gptme should use."
         required: false
 
 permissions:
@@ -56,8 +77,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPTME_MODEL: ${{ inputs.model }}
-          OPENAI_API_KEY: ${{ secrets.gptme-provider-key }}
+          GPTME_PROVIDER_KEY: ${{ secrets.gptme-provider-key }}
+          GPTME_PROVIDER_KEY_ENV: ${{ inputs.provider-key-env || 'OPENAI_API_KEY' }}
         run: |
+          # Export the provider key under the caller-specified env var name.
+          if [ -n "$GPTME_PROVIDER_KEY" ]; then
+            export "${GPTME_PROVIDER_KEY_ENV}=${GPTME_PROVIDER_KEY}"
+          fi
           ISSUE_NUMBER="${{ inputs.issue-number || github.event.issue.number }}"
           if [ -z "$ISSUE_NUMBER" ]; then
             echo "No issue number available; nothing to do."
