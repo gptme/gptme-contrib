@@ -60,6 +60,7 @@ def gh(args: list[str], *, check: bool = True) -> str:
         capture_output=True,
         text=True,
         check=check,
+        timeout=60,
     )
     return result.stdout
 
@@ -200,6 +201,7 @@ def post_comment(repo: str, issue_number: int, body: str) -> None:
     subprocess.run(
         ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body", body],
         check=True,
+        timeout=60,
     )
 
 
