@@ -4,6 +4,11 @@ match:
     - "noted for future reference"
     - "I'll remember this"
     - "will keep this in mind"
+    - "good to know"
+    - "thanks for the clarification"
+    - "won't forget"
+    - "for next time"
+    - "should write this down"
 status: active
 ---
 

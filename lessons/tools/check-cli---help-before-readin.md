@@ -4,6 +4,11 @@ match:
     - "examine source code to understand CLI"
     - "planning complex workaround"
     - "making assumptions about CLI options"
+    - "read the source to find the flag"
+    - "doesn't have a flag for"
+    - "wrap the command to add"
+    - "reading source to figure out"
+    - "before patching the wrapper"
 status: active
 ---
 
