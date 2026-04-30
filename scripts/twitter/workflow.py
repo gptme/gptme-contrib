@@ -763,9 +763,8 @@ def _validate_urls_in_text(text: str) -> list[tuple[str, int]]:
         try:
             req = urllib.request.Request(url, method="HEAD")
             req.add_header("User-Agent", "Mozilla/5.0 (URL checker)")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status >= 400:
-                    bad.append((url, resp.status))
+            with urllib.request.urlopen(req, timeout=5):
+                pass  # 4xx/5xx raise HTTPError before reaching here
         except urllib.error.HTTPError as e:
             bad.append((url, e.code))
         except Exception:
