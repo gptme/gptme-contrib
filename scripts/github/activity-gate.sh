@@ -56,9 +56,12 @@
 #   open PR (issue comments endpoint). HEAD SHA comes from fetch_pr_data().
 #
 #   Notifications: Filters for actionable reasons (review_requested, mention,
-#   assign, author, comment). State-tracked by notification ID. State files
-#   accumulate in STATE_DIR/notif-*.state. GitHub notifications clear when
-#   marked as read upstream, so old state files become inert.
+#   assign, author, comment). State-tracked by notification ID + updated_at:
+#   follow-ups on the same thread reuse the same ID but advance updated_at, so
+#   the gate re-emits when updated_at advances. State files store the last-seen
+#   updated_at timestamp. State files accumulate in STATE_DIR/notif-*.state.
+#   GitHub notifications clear when marked as read upstream, so old state files
+#   become inert.
 #
 #   Item grouping: This gate emits one item per event (a PR can produce separate
 #   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
@@ -736,9 +739,10 @@ check_notifications() {
             if [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
-                    printf '%s' "$notif_updated" > "$state_file"
-                    # Strip id and updated_at before emitting (consumer doesn't need them)
+                    # Emit first so a jq failure leaves the state file untouched and the
+                    # notification is retried on the next run (emit-before-persist semantics).
                     echo "$item" | jq -c 'del(.id, .updated_at)'
+                    printf '%s' "$notif_updated" > "$state_file"
                 fi
             fi
         done
