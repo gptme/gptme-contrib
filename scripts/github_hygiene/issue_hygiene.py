@@ -167,13 +167,18 @@ def run_gptme(prompt: str, *, model: str | None = None) -> str:
     cmd = ["gptme", "--non-interactive", "-"]
     if model:
         cmd.extend(["--model", model])
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write("gptme timed out after 300s; skipping comment.\n")
+        return ""
     if result.returncode != 0:
         # Fail soft: print stderr but return empty to suppress commenting.
         sys.stderr.write(f"gptme failed (rc={result.returncode}):\n{result.stderr}\n")

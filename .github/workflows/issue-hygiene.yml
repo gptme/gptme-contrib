@@ -71,7 +71,7 @@ jobs:
 
       - name: Install gptme
         run: |
-          uv tool install gptme
+          uv tool install "gptme>=0.21,<1"
 
       - name: Run hygiene check
         env:
