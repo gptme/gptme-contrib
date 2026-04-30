@@ -56,9 +56,12 @@
 #   open PR (issue comments endpoint). HEAD SHA comes from fetch_pr_data().
 #
 #   Notifications: Filters for actionable reasons (review_requested, mention,
-#   assign, author, comment). State-tracked by notification ID. State files
-#   accumulate in STATE_DIR/notif-*.state. GitHub notifications clear when
-#   marked as read upstream, so old state files become inert.
+#   assign, author, comment). State-tracked by notification ID + updated_at:
+#   follow-ups on the same thread reuse the same ID but advance updated_at, so
+#   the gate re-emits when updated_at advances. State files store the last-seen
+#   updated_at timestamp. State files accumulate in STATE_DIR/notif-*.state.
+#   GitHub notifications clear when marked as read upstream, so old state files
+#   become inert.
 #
 #   Item grouping: This gate emits one item per event (a PR can produce separate
 #   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
@@ -709,37 +712,55 @@ check_notifications() {
     # Only emitted notifications get state files — unemitted ones retry next run.
     local max_notif_per_run=5
 
+    # Notification state files store the most recently seen `updated_at`. GitHub
+    # re-uses the same notification ID across follow-up comments on the same
+    # thread (only `updated_at` advances), so a presence-only check would dedupe
+    # legitimate follow-up activity. Re-emit when `updated_at` is strictly newer
+    # than the stored timestamp.
     if [ "$FORMAT" = "jsonl" ]; then
         local _notif_emitted=0
         echo "$notifs" | jq -c '{
             id: .id,
+            updated_at: .updated_at,
             type: "notification",
             repo: .repository.full_name,
             number: (.subject.url // "" | split("/") | last | tonumber? // 0),
             title: .subject.title,
             detail: .reason
         }' 2>/dev/null | while IFS= read -r item; do
-            local notif_id state_file
+            local notif_id notif_updated state_file prior
             notif_id=$(echo "$item" | jq -r '.id')
+            notif_updated=$(echo "$item" | jq -r '.updated_at')
             state_file="$STATE_DIR/notif-${notif_id}.state"
-            if [ ! -f "$state_file" ]; then
+            prior=""
+            [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
+            # Re-emit if no state file yet OR stored timestamp is older than current.
+            # String comparison works on ISO-8601 timestamps.
+            if [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
-                    touch "$state_file"
-                    # Strip the id field before emitting (consumer doesn't need it)
-                    echo "$item" | jq -c 'del(.id)'
+                    # Emit first so a jq failure leaves the state file untouched and the
+                    # notification is retried on the next run (emit-before-persist semantics).
+                    echo "$item" | jq -c 'del(.id, .updated_at)'
+                    printf '%s' "$notif_updated" > "$state_file"
                 fi
             fi
         done
     else
         # Count new notifications and create state files (process substitution avoids subshell)
         local new_count=0
-        while IFS= read -r notif_id; do
-            if [ ! -f "$STATE_DIR/notif-${notif_id}.state" ]; then
-                touch "$STATE_DIR/notif-${notif_id}.state"
+        while IFS= read -r line; do
+            local notif_id notif_updated state_file prior
+            notif_id=${line%%$'\t'*}
+            notif_updated=${line#*$'\t'}
+            state_file="$STATE_DIR/notif-${notif_id}.state"
+            prior=""
+            [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
+            if [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
+                printf '%s' "$notif_updated" > "$state_file"
                 new_count=$((new_count + 1))
             fi
-        done < <(echo "$notifs" | jq -r '.id' 2>/dev/null)
+        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)"' 2>/dev/null)
         echo "$new_count"
     fi
 }
