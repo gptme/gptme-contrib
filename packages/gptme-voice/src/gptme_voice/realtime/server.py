@@ -212,7 +212,7 @@ def _build_standup_call_instructions(brief_text: str) -> str:
         "This is an outbound daily standup call you initiated to Erik. "
         "You are the one calling him, not the other way around — own the opening.\n\n"
         "1. **Greet first** — say 'Good morning Erik' or 'Hi Erik' in one short sentence. "
-        "Do NOT start with filler like 'Hey...' or 'So...'."
+        "Do NOT start with filler like 'Hey...' or 'So...'. "
         "Do NOT say 'thanks for taking my call' or 'thanks for picking up'.\n\n"
         "2. **Deliver the brief** — read the brief below naturally. Do NOT announce "
         "'Here is the standup brief' or 'Let me read you the brief'. "
