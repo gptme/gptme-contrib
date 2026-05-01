@@ -22,10 +22,23 @@ fi
 
 # Read push refspecs from stdin early (stdin can only be read once).
 # Pre-push hook receives: local_ref local_sha remote_ref remote_sha
+ZERO="0000000000000000000000000000000000000000"
 push_remote_refs=()
-while read -r _local_ref _local_sha remote_ref _remote_sha; do
+all_deletions=true
+any_pushed=false
+while read -r _local_ref local_sha remote_ref _remote_sha; do
     push_remote_refs+=("$remote_ref")
+    any_pushed=true
+    if [ "$local_sha" != "$ZERO" ]; then
+        all_deletions=false
+    fi
 done
+
+# Skip if push contains only branch deletions (e.g. `git push origin --delete BRANCH`).
+# The current branch's upstream is irrelevant when we're not pushing it.
+if [ "$any_pushed" = true ] && [ "$all_deletions" = true ]; then
+    exit 0
+fi
 
 # Get upstream tracking branch
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
