@@ -203,10 +203,29 @@ def _build_fresh_call_greeting_instructions(
 
 
 def _build_standup_call_instructions(brief_text: str) -> str:
-    """Build initial response instructions for a standup call with a pre-generated brief."""
+    """Build initial response instructions for a standup call with a pre-generated brief.
+
+    Guides the voice model to deliver an outbound standup call that sounds
+    deliberate, prepared, and confident — not like a pre-recorded message.
+    """
     return (
-        f"Deliver this standup brief to Erik verbatim, then wait for his response:\n\n"
-        f"{brief_text}"
+        "This is an outbound daily standup call you initiated to Erik. "
+        "You are the one calling him, not the other way around — own the opening.\n\n"
+        "1. **Greet first** — say 'Good morning Erik' or 'Hi Erik' in one short sentence. "
+        "Do NOT start with filler like 'Hey...' or 'So...'."
+        "Do NOT say 'thanks for taking my call' or 'thanks for picking up'.\n\n"
+        "2. **Deliver the brief** — read the brief below naturally. Do NOT announce "
+        "'Here is the standup brief' or 'Let me read you the brief'. "
+        "Just lead into it conversationally. "
+        "Pause briefly between items. Do not rush.\n\n"
+        "3. **Sound deliberate and confident** — speak at a measured pace. "
+        "You prepared this brief for a reason; deliver it like you mean it. "
+        "If something is blocking progress, say so plainly. "
+        "If something went well, acknowledge it.\n\n"
+        "4. **Hand off** — after the brief, say something like "
+        "'That's what I've got — what do you think?' or 'Over to you — any questions?' "
+        "Then stop and wait for Erik to respond.\n\n"
+        f"--- Standup brief ---\n\n{brief_text}"
     )
 
 
