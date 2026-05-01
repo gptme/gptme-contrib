@@ -86,9 +86,25 @@ class AudioConverter:
         Returns:
             μ-law encoded audio at 8kHz
         """
+        # Anti-aliasing pre-filter: gentle IIR low-pass at 24kHz before downsampling.
+        # weightA=2, weightB=1 gives fc≈4.7kHz (-3dB) at 24kHz sample rate.
+        # This attenuates 5–12kHz spectral energy by 3–6dB, reducing fold-back
+        # artifacts when downsampling 3x to 8kHz. Voice content (0–3.4kHz) loses
+        # at most ~2dB. Uses no extra dependencies (audioop is stdlib).
+        pcm_filtered, _ = audioop.ratecv(
+            pcm_data,
+            2,  # 2 bytes per sample (16-bit)
+            1,  # mono
+            self.OPENAI_RATE,
+            self.OPENAI_RATE,
+            None,
+            2,  # weightA
+            1,  # weightB
+        )
+
         # Resample from 24kHz to 8kHz (3x downsample)
         pcm_8k, _ = audioop.ratecv(
-            pcm_data,
+            pcm_filtered,
             2,  # 2 bytes per sample (16-bit)
             1,  # mono
             self.OPENAI_RATE,
@@ -97,9 +113,7 @@ class AudioConverter:
         )
 
         # Convert linear PCM to μ-law
-        mulaw_data = audioop.lin2ulaw(pcm_8k, 2)
-
-        return mulaw_data
+        return audioop.lin2ulaw(pcm_8k, 2)
 
     @staticmethod
     def pcm_to_base64(pcm_data: bytes) -> str:
