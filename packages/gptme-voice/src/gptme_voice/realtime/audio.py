@@ -24,6 +24,9 @@ class AudioConverter:
         # Keyed by input_rate so Twilio (8kHz) and Browser (16kHz) paths
         # don't corrupt each other's resampler state when called on the same instance.
         self._resample_states: dict[int, tuple | None] = {}
+        # Pre-filter state persisted across calls to avoid step-response transients
+        # at chunk boundaries during continuous streaming.
+        self._prefilter_state: tuple | None = None
 
     def pcm_to_openai(self, pcm_data: bytes, input_rate: int) -> bytes:
         """
@@ -91,13 +94,13 @@ class AudioConverter:
         # This attenuates 5–12kHz spectral energy by 3–6dB, reducing fold-back
         # artifacts when downsampling 3x to 8kHz. Voice content (0–3.4kHz) loses
         # at most ~2dB. Uses no extra dependencies (audioop is stdlib).
-        pcm_filtered, _ = audioop.ratecv(
+        pcm_filtered, self._prefilter_state = audioop.ratecv(
             pcm_data,
             2,  # 2 bytes per sample (16-bit)
             1,  # mono
             self.OPENAI_RATE,
             self.OPENAI_RATE,
-            None,
+            self._prefilter_state,
             2,  # weightA
             1,  # weightB
         )

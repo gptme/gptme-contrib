@@ -36,16 +36,15 @@ class TestOpenaiToTwilio:
         assert len(result) == 80
 
     def test_silence_stays_silence(self):
-        """Silent input produces silent μ-law output (all bytes = 0xFF or 0x7F)."""
+        """Silent input produces silent μ-law output (all bytes = 0xFF)."""
         converter = AudioConverter()
         pcm = bytes(480)  # 480 zero bytes = silence
         result = converter.openai_to_twilio(pcm)
-        # μ-law silence is 0xFF (positive zero) or 0x7F (negative zero)
+        # All-zero PCM encodes as μ-law positive silence (0xFF only)
         unique = set(result)
-        assert unique <= {
-            0xFF,
-            0x7F,
-        }, f"Non-silent bytes in output: {unique - {0xFF, 0x7F}}"
+        assert unique == {
+            0xFF
+        }, f"Expected only μ-law positive silence (0xFF), got: {unique}"
 
     def test_valid_mulaw_output(self):
         """Output can be decoded back to PCM without error."""
