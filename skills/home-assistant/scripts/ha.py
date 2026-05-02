@@ -29,6 +29,10 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
+class HAError(Exception):
+    pass
+
+
 def _find_env_file() -> Path | None:
     """Walk up from CWD looking for a .env file."""
     p = Path.cwd()
@@ -114,8 +118,7 @@ def ha_request(path: str, method: str = "GET", body: dict | None = None) -> Any:
         hostname = _extract_hostname(HA_HOST)
         if hostname:
             _diagnose_dns(hostname)
-        print(f"\nERROR connecting to {url}: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise HAError(f"ERROR connecting to {url}: {e}") from e
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -215,7 +218,7 @@ def cmd_calendar(args: argparse.Namespace) -> None:
             for e in events:
                 e["_calendar"] = cal_id
             all_events.extend(events)
-        except SystemExit:
+        except HAError:
             pass
 
     all_events.sort(
@@ -282,7 +285,7 @@ def cmd_context(args: argparse.Namespace) -> None:
             start = e.get("start", {})
             dt = start.get("dateTime", start.get("date", "?"))[:16]
             next_event = f"{dt} {e.get('summary', '')}"
-    except SystemExit:
+    except HAError:
         pass
 
     # Recently triggered automations of interest (last 24h)
@@ -413,7 +416,11 @@ def main() -> None:
         "context": cmd_context,
         "cameras": cmd_cameras,
     }
-    cmds[args.cmd](args)
+    try:
+        cmds[args.cmd](args)
+    except HAError as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
