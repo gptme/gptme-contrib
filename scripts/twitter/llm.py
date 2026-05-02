@@ -354,12 +354,30 @@ def create_review_prompt(draft: Dict, config: Dict) -> str:
                     for status, text in example.items():
                         detailed_criteria += f"  • {status.upper()}: {text}\n"
 
-    # Include thread context if available
+    # Include thread context if available.
+    # `context` may be a free-text string for original tweets (no thread); only
+    # reply drafts have the structured `{original_tweet: {thread_context: [...]}}`
+    # shape. Defend against both at every level so a malformed/string context
+    # does not crash review.
     thread_context = ""
-    if draft.get("context", {}).get("original_tweet", {}).get("thread_context"):
-        thread_context = "\nThread Context:\n"
-        for i, tweet in enumerate(draft["context"]["original_tweet"]["thread_context"]):
-            thread_context += f"Tweet {i + 1} - @{tweet['author']}: {tweet['text']}\n"
+    ctx = draft.get("context")
+    if isinstance(ctx, dict):
+        original_tweet = ctx.get("original_tweet")
+        if isinstance(original_tweet, dict):
+            thread = original_tweet.get("thread_context")
+            if isinstance(thread, list):
+                # Build entries first; only emit the header when at least one
+                # well-formed tweet survives so an empty or all-malformed
+                # thread doesn't leave an orphaned "Thread Context:" header.
+                entries: list[str] = []
+                for tweet in thread:
+                    if not isinstance(tweet, dict):
+                        continue
+                    author = tweet.get("author", "?")
+                    text = tweet.get("text", "")
+                    entries.append(f"Tweet {len(entries) + 1} - @{author}: {text}")
+                if entries:
+                    thread_context = "\nThread Context:\n" + "\n".join(entries) + "\n"
 
     return f"""Review this draft tweet.
 
