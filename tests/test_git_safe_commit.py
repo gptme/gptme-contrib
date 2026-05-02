@@ -946,3 +946,92 @@ def test_safe_commit_runs_pre_commit_manually_before_no_verify_commit(git_repo: 
     assert "test: manual pre-commit bridge" in commit_message.stdout
     # prepare-commit-msg still runs under --no-verify; commit-msg is intentionally skipped
     assert "Manual-Hook: yes" in commit_message.stdout
+
+
+def test_safe_commit_real_hook_failure_message_is_actionable(tmp_path: Path):
+    """When prek fails without modifying files, surface the hook output as the
+    primary signal — don't bury it under a misleading 'checking for auto-staging'
+    header that suggests fixes are happening."""
+    subprocess.run(
+        ["git", "init", "-b", "test-branch", str(tmp_path)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    hooks_dir = tmp_path / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks_dir)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (hooks_dir / "pre-commit").unlink(missing_ok=True)
+    (hooks_dir / "pre-commit").symlink_to(PRE_COMMIT_HOOK)
+
+    # Fake prek that fails on `run` without modifying any files (simulates a
+    # validator hook like validate-blog-urls catching a real issue).
+    fake_bin = Path(tempfile.mkdtemp(prefix="fake-prek-fail-"))
+    fake_prek = fake_bin / "prek"
+    fake_prek.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            if [ "$1" = "run" ]; then
+                echo "validate-blog-urls.................Failed"
+                echo "- hook id: validate-blog-urls"
+                echo "- exit code: 1"
+                echo ""
+                echo "Private repo link detected: https://github.com/ErikBjare/bob/..."
+                exit 1
+            fi
+            exit 2
+            """
+        )
+    )
+    fake_prek.chmod(0o755)
+
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n")
+    (tmp_path / "README.md").write_text("init\n")
+    subprocess.run(
+        ["git", "add", "README.md", ".pre-commit-config.yaml"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    init_result = subprocess.run(
+        [str(SAFE_COMMIT), "README.md", ".pre-commit-config.yaml", "-m", "init"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert init_result.returncode != 0, "Expected commit to fail when hook rejects"
+    combined = init_result.stdout + init_result.stderr
+
+    # Real hook output must be visible
+    assert "validate-blog-urls" in combined
+    assert "Private repo link detected" in combined
+
+    # New, accurate failure message must appear
+    assert "no auto-fixable changes" in combined
+    assert "prek run --files" in combined
+
+    # Old misleading header must NOT appear when no files were modified
+    assert "checking for auto-staging" not in combined
