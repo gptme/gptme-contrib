@@ -1338,7 +1338,7 @@ def should_evaluate_tweet(tweet_text: str, min_length: int = 50) -> Tuple[bool, 
     return True, ""
 
 
-def is_reply_restricted(tweet) -> bool:
+def is_reply_restricted(tweet, from_mentions: bool = False) -> bool:
     """Return True if the tweet's author has restricted who can reply.
 
     Twitter's reply_settings field can be one of:
@@ -1352,9 +1352,15 @@ def is_reply_restricted(tweet) -> bool:
     accounts, so any non-"everyone" setting effectively blocks reply attempts
     with a 403 from the API. Detect this upfront to avoid wasting LLM cycles
     drafting replies that cannot be posted.
+
+    When from_mentions=True the tweet came from get_users_mentions, meaning Bob
+    was mentioned and is therefore in the allowed-replier set for "mentionedUsers"
+    tweets — those should NOT be skipped.
     """
     reply_settings = getattr(tweet, "reply_settings", None)
     if reply_settings is None:
+        return False
+    if from_mentions and reply_settings == "mentionedUsers":
         return False
     return bool(reply_settings != "everyone")
 
@@ -1368,6 +1374,7 @@ def process_timeline_tweets(
     dry_run: bool = False,
     max_drafts: int | None = None,
     max_auto_posts: int = 5,
+    from_mentions: bool = False,
 ) -> int:
     """Process tweets from timeline
 
@@ -1447,7 +1454,7 @@ def process_timeline_tweets(
                 continue
 
             # Skip tweets with restricted reply_settings — replying would 403
-            if is_reply_restricted(tweet):
+            if is_reply_restricted(tweet, from_mentions=from_mentions):
                 author_for_skip = user_lookup.get(tweet.author_id)
                 username_for_skip = (
                     author_for_skip.username
@@ -1943,6 +1950,7 @@ def auto(
                     times=max_drafts - total_drafts_generated,
                     dry_run=dry_run,
                     max_drafts=max_drafts - total_drafts_generated,
+                    from_mentions=True,
                 )
 
                 # Update counters

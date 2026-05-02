@@ -321,6 +321,14 @@ def test_is_reply_restricted_mentioned_users(workflow_module: Any) -> None:
     assert workflow_module.is_reply_restricted(tweet) is True
 
 
+def test_is_reply_restricted_mentioned_users_from_mentions(
+    workflow_module: Any,
+) -> None:
+    # When the tweet came from get_users_mentions, Bob was mentioned and can reply
+    tweet = SimpleNamespace(reply_settings="mentionedUsers")
+    assert workflow_module.is_reply_restricted(tweet, from_mentions=True) is False
+
+
 def test_is_reply_restricted_verified(workflow_module: Any) -> None:
     tweet = SimpleNamespace(reply_settings="verified")
     assert workflow_module.is_reply_restricted(tweet) is True
