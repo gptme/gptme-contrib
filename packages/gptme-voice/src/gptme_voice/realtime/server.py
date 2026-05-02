@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -79,7 +80,7 @@ def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8", errors="replace")
-            if resp.status == 200:
+            if 200 <= resp.status < 300:
                 logger.info(
                     "Promoted transcript to gptme server (%d bytes)", len(payload)
                 )
@@ -1135,7 +1136,7 @@ class VoiceServer:
             )
             return
 
-        url = f"{self.gptme_server_url.rstrip('/')}/api/v2/conversations/{caller_id}/transcript"
+        url = f"{self.gptme_server_url.rstrip('/')}/api/v2/conversations/{urllib.parse.quote(caller_id, safe='')}/transcript"
         payload = json.dumps(
             {
                 "turns": turns,
