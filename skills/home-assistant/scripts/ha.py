@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Home Assistant CLI — query Erik's HA instance for presence, sensors, calendar, cameras.
+"""Home Assistant CLI — query your HA instance for presence, sensors, calendar, cameras.
 
 Usage:
     uv run python3 skills/home-assistant/scripts/ha.py status              # Test connectivity
-    uv run python3 skills/home-assistant/scripts/ha.py location            # Erik + Tekla location
-    uv run python3 skills/home-assistant/scripts/ha.py persons             # All person/device_tracker states
+    uv run python3 skills/home-assistant/scripts/ha.py location            # Person/tracker states
+    uv run python3 skills/home-assistant/scripts/ha.py persons             # All person entity states
     uv run python3 skills/home-assistant/scripts/ha.py calendar            # Upcoming calendar events
     uv run python3 skills/home-assistant/scripts/ha.py cameras             # List cameras (+ save snapshots)
     uv run python3 skills/home-assistant/scripts/ha.py states              # All entity states
     uv run python3 skills/home-assistant/scripts/ha.py states --domain sensor   # Filter by domain
     uv run python3 skills/home-assistant/scripts/ha.py state <entity_id>   # Single entity state
-    uv run python3 skills/home-assistant/scripts/ha.py context             # Erik's full real-world context
+    uv run python3 skills/home-assistant/scripts/ha.py context             # Context snapshot
     uv run python3 skills/home-assistant/scripts/ha.py --json <subcommand> # JSON output
 
 Credentials: HA_HOST and HA_API_KEY in a .env file anywhere in the CWD→root walk.
-URL: ha.hasselstugan.bjareholt.com (Nabu Casa cloud relay — publicly resolvable).
 """
 
 import argparse
@@ -91,7 +90,7 @@ def _diagnose_dns(hostname: str) -> None:
     except OSError:
         pass
     print("  ✗ Not found in /etc/hosts either", file=sys.stderr)
-    print("\n  Ask Erik for the HA server IP, then run:", file=sys.stderr)
+    print("\n  Add the HA server IP to /etc/hosts:", file=sys.stderr)
     print(f"    echo '<IP> {hostname}' | sudo tee -a /etc/hosts", file=sys.stderr)
 
 
@@ -160,7 +159,7 @@ def cmd_state(args: argparse.Namespace) -> None:
 
 
 def cmd_location(args: argparse.Namespace) -> None:
-    """Show Erik's and Tekla's location / presence."""
+    """Show person/device_tracker location states."""
     all_states: list[dict] = ha_request("states")
     persons = [s for s in all_states if s["entity_id"].startswith("person.")]
     trackers = [s for s in all_states if s["entity_id"].startswith("device_tracker.")]
@@ -245,50 +244,43 @@ def cmd_calendar(args: argparse.Namespace) -> None:
 
 
 def cmd_context(args: argparse.Namespace) -> None:
-    """Snapshot of Erik's current real-world context — for voice/standup awareness."""
+    """Context snapshot: persons, weather, next calendar event, recent automations."""
     states: list[dict] = ha_request("states")
-    by_id = {s["entity_id"]: s for s in states}
 
-    def get(eid: str, default: str = "?") -> str:
-        s = by_id.get(eid)
-        return s["state"] if s else default
-
-    def attr(eid: str, key: str, default: str = "") -> str:
-        s = by_id.get(eid)
-        if not s:
-            return default
+    def attr(s: dict, key: str, default: str = "") -> str:
         return str(s.get("attributes", {}).get(key, default))
 
-    erik_loc = get("person.erik")
-    tekla_loc = get("person.tekla")
-    co_located = erik_loc == tekla_loc and erik_loc not in ("?", "unknown") and erik_loc
+    # Discover persons dynamically
+    persons = [s for s in states if s["entity_id"].startswith("person.")]
 
-    weather_state = get("weather.forecast_hasselstugan")
-    weather_temp = attr("weather.forecast_hasselstugan", "temperature")
+    # First available weather entity
+    weather_entities = [s for s in states if s["entity_id"].startswith("weather.")]
+    weather_state = weather_entities[0]["state"] if weather_entities else "?"
+    weather_temp = attr(weather_entities[0], "temperature") if weather_entities else ""
 
-    erik_battery = get("sensor.erb_f8_battery_level")
-    erik_battery_state = get("sensor.erb_f8_battery_state")
-    lawn_mower = get("lawn_mower.am310e_nera")
-
-    # Next calendar event (next 4h, main calendar only — fast)
+    # Next calendar event (next 4h, first calendar entity found)
     next_event = None
-    try:
-        now = datetime.now(timezone.utc)
-        end = now + timedelta(hours=4)
-        events = ha_request(
-            "calendars/calendar.main"
-            f"?start={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-            f"&end={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        )
-        if events:
-            e = events[0]
-            start = e.get("start", {})
-            dt = start.get("dateTime", start.get("date", "?"))[:16]
-            next_event = f"{dt} {e.get('summary', '')}"
-    except HAError:
-        pass
+    cal_entities = [
+        s["entity_id"] for s in states if s["entity_id"].startswith("calendar.")
+    ]
+    if cal_entities:
+        try:
+            now = datetime.now(timezone.utc)
+            end = now + timedelta(hours=4)
+            events = ha_request(
+                f"calendars/{cal_entities[0]}"
+                f"?start={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                f"&end={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            )
+            if events:
+                e = events[0]
+                start = e.get("start", {})
+                dt = start.get("dateTime", start.get("date", "?"))[:16]
+                next_event = f"{dt} {e.get('summary', '')}"
+        except HAError:
+            pass
 
-    # Recently triggered automations of interest (last 24h)
+    # Recently triggered automations (last 24h)
     notable_automations = []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     for s in states:
@@ -312,15 +304,25 @@ def cmd_context(args: argparse.Namespace) -> None:
             )
     notable_automations.sort(key=lambda x: x["last_triggered"], reverse=True)
 
+    persons_data = {
+        p["entity_id"]: {
+            "location": p["state"],
+            "friendly_name": p.get("attributes", {}).get(
+                "friendly_name", p["entity_id"]
+            ),
+        }
+        for p in persons
+    }
+
     if args.json:
         print(
             json.dumps(
                 {
-                    "erik": {"location": erik_loc, "phone_battery": erik_battery},
-                    "tekla": {"location": tekla_loc},
-                    "co_located": bool(co_located),
-                    "weather": {"state": weather_state, "temp_c": weather_temp},
-                    "lawn_mower": lawn_mower,
+                    "persons": persons_data,
+                    "weather": {
+                        "state": weather_state,
+                        "temp_c": float(weather_temp) if weather_temp else None,
+                    },
                     "next_event_4h": next_event,
                     "automations_24h": notable_automations[:10],
                 },
@@ -329,12 +331,12 @@ def cmd_context(args: argparse.Namespace) -> None:
         )
         return
 
-    print(f"## Erik's context @ {datetime.now(timezone.utc).strftime('%H:%MZ')}")
-    print(f"- Erik:    {erik_loc}  (phone {erik_battery}% {erik_battery_state})")
-    print(f"- Tekla:   {tekla_loc}{'  (with Erik)' if co_located else ''}")
-    print(f"- Weather: {weather_state}, {weather_temp}°C")
-    if lawn_mower not in ("?", "unknown"):
-        print(f"- Mower:   {lawn_mower}")
+    print(f"## HA context @ {datetime.now(timezone.utc).strftime('%H:%MZ')}")
+    for p in persons:
+        name = p.get("attributes", {}).get("friendly_name", p["entity_id"])
+        print(f"- {name}: {p['state']}")
+    if weather_entities:
+        print(f"- Weather: {weather_state}, {weather_temp}°C")
     print(f"- Next 4h: {next_event or '(nothing scheduled)'}")
     if notable_automations:
         print(f"\n## Automations triggered in last 24h ({len(notable_automations)})")
@@ -390,13 +392,13 @@ def main() -> None:
         "--domain", help="Filter by domain (e.g. sensor, device_tracker)"
     )
     p_state = sub.add_parser("state", help="Get single entity state")
-    p_state.add_argument("entity_id", help="Entity ID (e.g. person.erik)")
+    p_state.add_argument("entity_id", help="Entity ID (e.g. person.alice)")
     sub.add_parser("location", help="Show person/device_tracker states")
     sub.add_parser("persons", help="Show all person entity states")
     sub.add_parser("calendar", help="Show upcoming calendar events (7 days)")
     sub.add_parser(
         "context",
-        help="Erik's current context snapshot (location, weather, next event, recent automations)",
+        help="Context snapshot: persons, weather, next event, recent automations",
     )
     p_cameras = sub.add_parser(
         "cameras", help="List cameras and optionally save snapshots"
