@@ -1338,6 +1338,27 @@ def should_evaluate_tweet(tweet_text: str, min_length: int = 50) -> Tuple[bool, 
     return True, ""
 
 
+def is_reply_restricted(tweet) -> bool:
+    """Return True if the tweet's author has restricted who can reply.
+
+    Twitter's reply_settings field can be one of:
+    - "everyone" (or None): anyone can reply
+    - "mentionedUsers": only mentioned users can reply
+    - "following": only accounts the author follows can reply
+    - "verified": only verified accounts can reply
+    - "subscribers": only paid subscribers can reply
+
+    Bob is rarely in any of the restricted categories for arbitrary timeline
+    accounts, so any non-"everyone" setting effectively blocks reply attempts
+    with a 403 from the API. Detect this upfront to avoid wasting LLM cycles
+    drafting replies that cannot be posted.
+    """
+    reply_settings = getattr(tweet, "reply_settings", None)
+    if reply_settings is None:
+        return False
+    return bool(reply_settings != "everyone")
+
+
 def process_timeline_tweets(
     tweets,
     users,
@@ -1422,6 +1443,21 @@ def process_timeline_tweets(
                     else str(tweet.author_id)
                 )
                 console.print(f"[dim]Skip: {skip_reason} - @{username_for_skip}[/dim]")
+                tweets_skipped_prefilter += 1
+                continue
+
+            # Skip tweets with restricted reply_settings — replying would 403
+            if is_reply_restricted(tweet):
+                author_for_skip = user_lookup.get(tweet.author_id)
+                username_for_skip = (
+                    author_for_skip.username
+                    if author_for_skip
+                    else str(tweet.author_id)
+                )
+                reply_setting = getattr(tweet, "reply_settings", "unknown")
+                console.print(
+                    f"[dim]Skip: reply_settings={reply_setting} - @{username_for_skip}[/dim]"
+                )
                 tweets_skipped_prefilter += 1
                 continue
 
@@ -1739,6 +1775,7 @@ def monitor(
                         "author_id",
                         "public_metrics",
                         "conversation_id",
+                        "reply_settings",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -1752,6 +1789,7 @@ def monitor(
                         "author_id",
                         "public_metrics",
                         "conversation_id",
+                        "reply_settings",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -1933,6 +1971,7 @@ def auto(
                         "author_id",
                         "public_metrics",
                         "conversation_id",
+                        "reply_settings",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -1946,6 +1985,7 @@ def auto(
                         "author_id",
                         "public_metrics",
                         "conversation_id",
+                        "reply_settings",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
