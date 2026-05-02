@@ -1239,7 +1239,7 @@ class TestTranscriptPromotion:
 
         assert len(calls) == 1
         url, payload, key = calls[0]
-        assert url == "https://gptme.ai/api/v2/conversations/+15551234567/transcript"
+        assert url == "https://gptme.ai/api/v2/conversations/%2B15551234567/transcript"
         assert key == "test-key"
 
         body = json.loads(payload)

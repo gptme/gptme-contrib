@@ -1146,13 +1146,14 @@ class VoiceServer:
 
         try:
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(
+            fut = loop.run_in_executor(
                 None,
                 _http_post_sync,
                 url,
                 payload,
                 self.gptme_server_key,
             )
+            fut.add_done_callback(lambda _: None)
         except RuntimeError:
             # No running loop (tests / sync context) — post synchronously
             _http_post_sync(url, payload, self.gptme_server_key)
