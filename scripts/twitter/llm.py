@@ -366,13 +366,18 @@ def create_review_prompt(draft: Dict, config: Dict) -> str:
         if isinstance(original_tweet, dict):
             thread = original_tweet.get("thread_context")
             if isinstance(thread, list):
-                thread_context = "\nThread Context:\n"
-                for i, tweet in enumerate(thread):
+                # Build entries first; only emit the header when at least one
+                # well-formed tweet survives so an empty or all-malformed
+                # thread doesn't leave an orphaned "Thread Context:" header.
+                entries: list[str] = []
+                for tweet in thread:
                     if not isinstance(tweet, dict):
                         continue
                     author = tweet.get("author", "?")
                     text = tweet.get("text", "")
-                    thread_context += f"Tweet {i + 1} - @{author}: {text}\n"
+                    entries.append(f"Tweet {len(entries) + 1} - @{author}: {text}")
+                if entries:
+                    thread_context = "\nThread Context:\n" + "\n".join(entries) + "\n"
 
     return f"""Review this draft tweet.
 
