@@ -51,6 +51,10 @@ counter=0
 failed_starts=0
 max_runs=-1  # -1 means infinite
 COOLDOWN="${AGENT_LOOP_COOLDOWN:-1800}"  # seconds between runs
+if ! [[ "$COOLDOWN" =~ ^[0-9]+$ ]]; then
+    echo "Error: AGENT_LOOP_COOLDOWN must be a non-negative integer (seconds), got: '$COOLDOWN'"
+    exit 1
+fi
 SERVICE_NAME=""
 
 # Parse command line arguments
