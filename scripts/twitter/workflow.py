@@ -1923,6 +1923,7 @@ def auto(
                     "author_id",
                     "public_metrics",
                     "conversation_id",
+                    "reply_settings",
                 ],
                 expansions=["author_id", "referenced_tweets.id"],
                 user_fields=["username", "public_metrics"],
