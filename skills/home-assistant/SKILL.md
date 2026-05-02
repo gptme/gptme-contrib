@@ -130,12 +130,12 @@ Key endpoints:
 - `GET /api/states` — all entity states
 - `GET /api/states/<entity_id>` — single entity
 - `GET /api/config` — HA config (location, timezone)
-- `GET /api/calendar/events?entity_id=<id>&start=<iso>&end=<iso>` — calendar events
+- `GET /api/calendars/<entity_id>?start=<iso-utc>&end=<iso-utc>` — calendar events (note: `Z` suffix required for UTC, not `+00:00`)
 - `GET /api/camera_proxy/<entity_id>` — camera snapshot (binary JPEG)
 
 ## Google Calendar (Already Working)
 
-Erik's main calendar is already shared with `timetobuildbob@gmail.com` (reader access).
+The agent's Google account should be shared as a reader on the owner's main calendar.
 Use `gog` (gogcli) to query it without needing HA:
 
 ```bash
@@ -143,10 +143,10 @@ Use `gog` (gogcli) to query it without needing HA:
 gog calendar calendars --results-only -j
 
 # Upcoming events (Erik's main calendar)
-gog calendar events "erik.bjareholt@gmail.com" --results-only -j
+gog calendar events "<owner-google-account>" --results-only -j
 
 # Compact view
-gog calendar events "erik.bjareholt@gmail.com" --results-only -j | python3 -c "
+gog calendar events "<owner-google-account>" --results-only -j | python3 -c "
 import json, sys
 for e in json.load(sys.stdin):
     start = e.get('start', {}).get('dateTime', e.get('start', {}).get('date', '?'))[:16]
@@ -154,13 +154,13 @@ for e in json.load(sys.stdin):
 "
 ```
 
-Calendar ID: `erik.bjareholt@gmail.com` (alias: "Main", timezone: Europe/Stockholm)
+Calendar ID: owner's Google account email (alias: "Main", timezone: Europe/Stockholm or as configured)
 
-## Giving Alice the Same Capability
+## Giving Another Agent the Same Capability
 
 ### Google Calendar
-1. Ask Erik to share his main calendar with Alice's Google account too
-2. Alice can then use `gog calendar events "erik.bjareholt@gmail.com"` once the share is accepted
+1. Ask the owner to share their main calendar with the agent's Google account (reader)
+2. The other agent can then use `gog calendar events "<owner-google-account>"` once the share is accepted
 
 ### Home Assistant
 1. SSH to Alice's VM: `ssh alice@alice`

@@ -48,7 +48,8 @@ if _env_path:
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
+            _v = _v.strip().strip('"').strip("'")
+            os.environ.setdefault(_k.strip(), _v)
 
 HA_HOST = os.environ.get("HA_HOST", "").rstrip("/")
 HA_API_KEY = os.environ.get("HA_API_KEY", "")
