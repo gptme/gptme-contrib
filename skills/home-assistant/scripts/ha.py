@@ -319,7 +319,10 @@ def cmd_context(args: argparse.Namespace) -> None:
             json.dumps(
                 {
                     "persons": persons_data,
-                    "weather": {"state": weather_state, "temp_c": weather_temp},
+                    "weather": {
+                        "state": weather_state,
+                        "temp_c": float(weather_temp) if weather_temp else None,
+                    },
                     "next_event_4h": next_event,
                     "automations_24h": notable_automations[:10],
                 },
