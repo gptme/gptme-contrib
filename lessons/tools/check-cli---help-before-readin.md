@@ -1,14 +1,14 @@
 ---
 match:
   keywords:
-    - "examine source code to understand CLI"
-    - "planning complex workaround"
-    - "making assumptions about CLI options"
-    - "read the source to find the flag"
     - "doesn't have a flag for"
     - "wrap the command to add"
-    - "reading source to figure out"
     - "before patching the wrapper"
+    - "no built-in option for"
+    - "let me read the source to figure out"
+    - "doesn't seem to support"
+    - "build a wrapper around"
+    - "monkey-patch the CLI"
 status: active
 ---
 
@@ -32,7 +32,7 @@ When encountering a new command-line tool or unfamiliar command, developers ofte
 3. Look specifically for utility flags like --dry-run, --status, --format, --verbose
 4. Only dive into source code after understanding the documented interface
 
-Example: Running `uv run python3 -m ace.curator generate --help` revealed --dry-run option, enabling safe testing without API calls instead of building a complex validation workaround.
+Example: Running `uv run gptodo --help` and `uv run gptodo edit --help` reveals subcommands and flags (`--set`, `--add`, `--state`) that obviate building a wrapper or sed-editing YAML frontmatter directly.
 
 ## Outcome
 - **Time savings**: Discover built-in features vs building workarounds
