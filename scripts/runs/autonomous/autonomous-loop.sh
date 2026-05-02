@@ -4,12 +4,18 @@
 # This script wraps systemd service invocation for repeated autonomous runs.
 # Service name is derived from AGENT_NAME environment variable or config.
 #
+# Quality note: alice#50 / bob#725 data shows back-to-back sessions (<30 min gap)
+# produce significantly lower quality (mean grade 0.546 vs 0.622 for ≥60 min gaps).
+# Default COOLDOWN is 1800s (30 min) to stay out of the low-quality back-to-back regime.
+# Override via AGENT_LOOP_COOLDOWN env var for testing/burst scenarios.
+#
 # Usage:
 #   ./autonomous-loop.sh [-n number_of_runs] [-s service_name]
 #
 # Examples:
 #   AGENT_NAME=myagent ./autonomous-loop.sh -n 5   # Run 5 times using myagent-autonomous.service
 #   ./autonomous-loop.sh -s custom-autonomous      # Run infinitely using custom-autonomous.service
+#   ./autonomous-loop.sh -c 300                    # 5 min cooldown between sessions
 
 set -e
 
@@ -44,7 +50,11 @@ get_service_name() {
 counter=0
 failed_starts=0
 max_runs=-1  # -1 means infinite
-COOLDOWN=10  # seconds between runs
+COOLDOWN="${AGENT_LOOP_COOLDOWN:-1800}"  # seconds between runs
+if ! [[ "$COOLDOWN" =~ ^[0-9]+$ ]]; then
+    echo "Error: AGENT_LOOP_COOLDOWN must be a non-negative integer (seconds), got: '$COOLDOWN'"
+    exit 1
+fi
 SERVICE_NAME=""
 
 # Parse command line arguments
@@ -75,7 +85,7 @@ while getopts "n:s:c:h" opt; do
             echo ""
             echo "Options:"
             echo "  -n: Number of runs (default: infinite)"
-            echo "  -c: Cooldown seconds between runs (default: 10)"
+            echo "  -c: Cooldown seconds between runs (default: 1800, override via AGENT_LOOP_COOLDOWN)"
             echo "  -s: Service name (default: derived from AGENT_NAME or gptme.toml)"
             echo ""
             echo "Service name resolution order:"
