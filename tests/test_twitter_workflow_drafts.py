@@ -292,3 +292,48 @@ def test_find_live_duplicate_reply_ids_returns_empty_without_identity(
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
 
     assert duplicate_ids == []
+
+
+def test_is_reply_restricted_everyone(workflow_module: Any) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone")
+    assert workflow_module.is_reply_restricted(tweet) is False
+
+
+def test_is_reply_restricted_none_treated_as_open(workflow_module: Any) -> None:
+    tweet = SimpleNamespace(reply_settings=None)
+    assert workflow_module.is_reply_restricted(tweet) is False
+
+
+def test_is_reply_restricted_missing_attribute_treated_as_open(
+    workflow_module: Any,
+) -> None:
+    tweet = SimpleNamespace()
+    assert workflow_module.is_reply_restricted(tweet) is False
+
+
+def test_is_reply_restricted_following(workflow_module: Any) -> None:
+    tweet = SimpleNamespace(reply_settings="following")
+    assert workflow_module.is_reply_restricted(tweet) is True
+
+
+def test_is_reply_restricted_mentioned_users(workflow_module: Any) -> None:
+    tweet = SimpleNamespace(reply_settings="mentionedUsers")
+    assert workflow_module.is_reply_restricted(tweet) is True
+
+
+def test_is_reply_restricted_mentioned_users_from_mentions(
+    workflow_module: Any,
+) -> None:
+    # When the tweet came from get_users_mentions, Bob was mentioned and can reply
+    tweet = SimpleNamespace(reply_settings="mentionedUsers")
+    assert workflow_module.is_reply_restricted(tweet, from_mentions=True) is False
+
+
+def test_is_reply_restricted_verified(workflow_module: Any) -> None:
+    tweet = SimpleNamespace(reply_settings="verified")
+    assert workflow_module.is_reply_restricted(tweet) is True
+
+
+def test_is_reply_restricted_subscribers(workflow_module: Any) -> None:
+    tweet = SimpleNamespace(reply_settings="subscribers")
+    assert workflow_module.is_reply_restricted(tweet) is True
