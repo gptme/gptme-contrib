@@ -258,9 +258,9 @@ def cmd_context(args: argparse.Namespace) -> None:
     weather_entities = [
         s for s in states if s["entity_id"].startswith("weather.forecast_")
     ]
-    weather_eid = weather_entities[0] if weather_entities else None
-    weather_state = weather_eid["state"] if weather_eid else "?"
-    weather_temp = attr(weather_eid, "temperature") if weather_eid else ""
+    weather_entity = weather_entities[0] if weather_entities else None
+    weather_state = weather_entity["state"] if weather_entity else "?"
+    weather_temp = attr(weather_entity, "temperature") if weather_entity else ""
 
     # First lawn_mower entity (skip if none)
     mowers = [s for s in states if s["entity_id"].startswith("lawn_mower.")]
