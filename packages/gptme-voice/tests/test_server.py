@@ -1202,3 +1202,103 @@ def test_audio_converter_independent_resample_states() -> None:
     # With per-rate state slots the browser path starts fresh regardless of prior
     # Twilio calls — outputs must be identical.
     assert combined_browser_out == fresh_browser_out
+
+
+# ── transcript promotion (Phase 3 Step 2) ──────────────────────────────────
+
+
+class TestTranscriptPromotion:
+    """Voice Phase 3: transcript → gptme conversation log."""
+
+    def test_promote_transcript_posts_to_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript with turns is POSTed to the gptme server."""
+        calls: list[tuple[str, bytes, str]] = []
+
+        def _fake_post_sync(url: str, payload: bytes, api_key: str) -> None:
+            calls.append((url, payload, api_key))
+
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server._http_post_sync", _fake_post_sync
+        )
+        monkeypatch.setenv("GPTME_VOICE_GPTME_SERVER_URL", "https://gptme.ai")
+        monkeypatch.setenv("GPTME_VOICE_GPTME_SERVER_KEY", "test-key")
+
+        server = VoiceServer()
+        transcript = [
+            TranscriptTurn(role="user", text="Hello"),
+            TranscriptTurn(role="assistant", text="Hi there"),
+        ]
+        metadata = {
+            "call_sid": "CAabc123",
+            "from": "+15551234567",
+        }
+
+        server._promote_transcript_to_gptme("+15551234567", transcript, metadata)
+
+        assert len(calls) == 1
+        url, payload, key = calls[0]
+        assert url == "https://gptme.ai/api/v2/conversations/+15551234567/transcript"
+        assert key == "test-key"
+
+        body = json.loads(payload)
+        assert body["call_metadata"]["call_sid"] == "CAabc123"
+        assert len(body["turns"]) == 2
+        assert body["turns"][0] == {"role": "user", "text": "Hello"}
+        assert body["turns"][1] == {"role": "assistant", "text": "Hi there"}
+
+    def test_promote_skips_when_unconfigured(self) -> None:
+        """When GPTME_VOICE_GPTME_SERVER_URL is empty, promotion is a no-op."""
+        server = VoiceServer()
+        assert server.gptme_server_url == ""
+
+        transcript = [TranscriptTurn(role="user", text="Hello")]
+        metadata = {"call_sid": "CAabc123"}
+
+        # Should not raise — just return silently.
+        server._promote_transcript_to_gptme("+15551234567", transcript, metadata)
+
+    def test_promote_skips_empty_transcript(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript with no non-whitespace turns is skipped."""
+        calls: list[tuple[str, bytes, str]] = []
+
+        def _fake_post_sync(url: str, payload: bytes, api_key: str) -> None:
+            calls.append((url, payload, api_key))
+
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server._http_post_sync", _fake_post_sync
+        )
+        monkeypatch.setenv("GPTME_VOICE_GPTME_SERVER_URL", "https://gptme.ai")
+        monkeypatch.setenv("GPTME_VOICE_GPTME_SERVER_KEY", "test-key")
+
+        server = VoiceServer()
+        transcript = [TranscriptTurn(role="user", text="   ")]
+        metadata = {"call_sid": "CAabc123"}
+
+        server._promote_transcript_to_gptme("+15551234567", transcript, metadata)
+        assert len(calls) == 0
+
+    def test_promote_skips_missing_call_sid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a call_sid in metadata, promotion is skipped."""
+        calls: list[tuple[str, bytes, str]] = []
+
+        def _fake_post_sync(url: str, payload: bytes, api_key: str) -> None:
+            calls.append((url, payload, api_key))
+
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server._http_post_sync", _fake_post_sync
+        )
+        monkeypatch.setenv("GPTME_VOICE_GPTME_SERVER_URL", "https://gptme.ai")
+        monkeypatch.setenv("GPTME_VOICE_GPTME_SERVER_KEY", "test-key")
+
+        server = VoiceServer()
+        transcript = [TranscriptTurn(role="user", text="Hello")]
+        metadata: dict[str, str] = {}  # no call_sid
+
+        server._promote_transcript_to_gptme("+15551234567", transcript, metadata)
+        assert len(calls) == 0

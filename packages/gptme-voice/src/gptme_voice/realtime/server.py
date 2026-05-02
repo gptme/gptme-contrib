@@ -15,6 +15,8 @@ import os
 import shlex
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +58,46 @@ class CallerIdentity:
 _DEFAULT_RESUME_WINDOW_SECONDS = 300
 _DEFAULT_STATE_DIR = "/tmp/gptme-voice-call-state"
 _MAX_RESUME_TRANSCRIPT_CHARS = 2500
+
+
+def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
+    """Fire-and-forget HTTP POST to the gptme server transcript endpoint.
+
+    Runs in a thread-pool executor so it never blocks the event loop.
+    Failures are logged but never raised — transcript promotion is
+    best-effort.
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            if resp.status == 200:
+                logger.info(
+                    "Promoted transcript to gptme server (%d bytes)", len(payload)
+                )
+            else:
+                logger.warning(
+                    "Unexpected %d from transcript endpoint: %s",
+                    resp.status,
+                    body[:200],
+                )
+    except urllib.error.HTTPError as exc:
+        logger.warning(
+            "Transcript promotion HTTP %d: %s",
+            exc.code,
+            exc.read().decode("utf-8", errors="replace")[:200],
+        )
+    except (urllib.error.URLError, OSError) as exc:
+        logger.warning("Transcript promotion failed (network): %s", exc)
+
 
 # Delay before actually closing the WebSocket after the model requests hangup,
 # so the goodbye utterance has time to reach the caller.
@@ -339,6 +381,8 @@ class VoiceServer:
             or self.resume_window_seconds
         )
         self.post_call_command = _get_config_env("GPTME_VOICE_POST_CALL_COMMAND")
+        self.gptme_server_url = _get_config_env("GPTME_VOICE_GPTME_SERVER_URL") or ""
+        self.gptme_server_key = _get_config_env("GPTME_VOICE_GPTME_SERVER_KEY") or ""
         self.state_dir = Path(
             _get_config_env("GPTME_VOICE_STATE_DIR") or _DEFAULT_STATE_DIR
         )
@@ -1053,6 +1097,65 @@ class VoiceServer:
 
         return _on_handoff
 
+    def _promote_transcript_to_gptme(
+        self,
+        caller_id: str,
+        transcript: list[TranscriptTurn],
+        metadata: dict[str, str],
+    ) -> None:
+        """POST the call transcript to the gptme server conversation endpoint.
+
+        Called as a fire-and-forget background task after the archive record
+        is written.  Idempotent: the gptme server deduplicates by *call_sid*,
+        so retries are safe.
+
+        Requires ``GPTME_VOICE_GPTME_SERVER_URL`` and
+        ``GPTME_VOICE_GPTME_SERVER_KEY`` env vars.  Silently skips when
+        either is empty or missing.
+        """
+        if not self.gptme_server_url or not self.gptme_server_key:
+            return
+
+        call_sid = metadata.get("call_sid")
+        if not call_sid:
+            logger.warning(
+                "Skipping transcript promotion for %s: no call_sid in metadata",
+                caller_id,
+            )
+            return
+
+        turns = [
+            {"role": turn.role, "text": turn.text}
+            for turn in transcript
+            if turn.text.strip()
+        ]
+        if not turns:
+            logger.info(
+                "Skipping transcript promotion for %s: empty transcript", caller_id
+            )
+            return
+
+        url = f"{self.gptme_server_url.rstrip('/')}/api/v2/conversations/{caller_id}/transcript"
+        payload = json.dumps(
+            {
+                "turns": turns,
+                "call_metadata": {"call_sid": call_sid},
+            }
+        ).encode("utf-8")
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(
+                None,
+                _http_post_sync,
+                url,
+                payload,
+                self.gptme_server_key,
+            )
+        except RuntimeError:
+            # No running loop (tests / sync context) — post synchronously
+            _http_post_sync(url, payload, self.gptme_server_key)
+
     async def _on_call_end(
         self,
         caller_id: str | None,
@@ -1089,6 +1192,10 @@ class VoiceServer:
         )
         self._save_recent_call(record)
         await self._schedule_post_call(caller_id, deduped_record_paths)
+
+        # Promote transcript to gptme server for persistence in conversation log.
+        # Fire-and-forget — never blocks the call-end teardown.
+        self._promote_transcript_to_gptme(caller_id, transcript, metadata)
 
     def _get_local_caller_id(self, websocket) -> str:
         caller_id = websocket.query_params.get("caller_id")
