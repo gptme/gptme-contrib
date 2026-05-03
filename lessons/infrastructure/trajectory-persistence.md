@@ -125,9 +125,10 @@ delta.
 - Corrective (fires during risk): **negative bias** — fires in higher-harm contexts
 - After-the-fact (fires post-incident): negative — selection on outcome
 
-The `confound_note: cleanup-selection-bias` frontmatter field instructs
-downstream tooling (lesson-confidence, auto-lifecycle) to skip automated
-archival based on this signal.
+The `confound_note: cleanup-selection-bias` frontmatter field is read by
+`lesson_confidence.py` (`load_lesson_confound_note`) to treat this lesson as
+confounded, returning action `"confounded"` instead of `"archive"` even before
+the LOO state file has been populated with a `confounded=true` entry.
 
 ## Related
 - [Pre-Mortem for Risky Actions](../autonomous/pre-mortem-for-risky-actions.md) — run before any deletion logic

@@ -199,6 +199,7 @@ class LessonValidator:
                 "deprecated_date",
                 "archived_reason",
                 "archived_date",
+                "confound_note",
             }
             extra_fields = set(frontmatter.keys()) - allowed_fields
             if extra_fields:
