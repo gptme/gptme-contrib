@@ -107,6 +107,28 @@ Following this rule prevents:
 - **Broken debugging**: Post-hoc analysis becomes impossible without the original trace
 - **Trust violations**: User safety settings (`cleanupPeriodDays: 1000000`) must never be overridden by scripts
 
+## LOO Analysis Note
+
+Leave-one-out (LOO) analysis shows Δ=−0.0841 (p=0.009) against the harm
+target. This is a **selection-bias artifact, not a causal effect**:
+
+This lesson is *corrective*: it fires when the agent is already contemplating
+trajectory deletion — an inherently higher-harm context. The LOO delta
+measures `baseline_harm + lesson_mitigation` vs the uncontaminated baseline
+(sessions where deletion was never discussed). Even if the lesson successfully
+reduces harm within those sessions, the residual harm score after mitigation
+is still higher than the no-deletion-discussion baseline, producing a negative
+delta.
+
+**Lesson type → LOO bias**:
+- Preventive (fires before risk): LOO signal can be positive
+- Corrective (fires during risk): **negative bias** — fires in higher-harm contexts
+- After-the-fact (fires post-incident): negative — selection on outcome
+
+The `confound_note: cleanup-selection-bias` frontmatter field instructs
+downstream tooling (lesson-confidence, auto-lifecycle) to skip automated
+archival based on this signal.
+
 ## Related
 - [Pre-Mortem for Risky Actions](../autonomous/pre-mortem-for-risky-actions.md) — run before any deletion logic
 - [Autonomous Operation Safety](../autonomous/autonomous-operation-safety.md) — boundaries for autonomous actions
