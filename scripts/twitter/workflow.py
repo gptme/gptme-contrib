@@ -1289,6 +1289,19 @@ def post(
 
         if yes or Confirm.ask("Post this tweet?", default=True):
             try:
+                # URL validation: catch 404s before posting
+                if draft.text:
+                    bad_urls = _validate_urls_in_text(draft.text)
+                    if bad_urls:
+                        for url, status in bad_urls:
+                            console.print(f"[red]✗ URL returns {status}: {url}[/red]")
+                        console.print(
+                            "[red]Skipping draft — fix URLs or re-draft with "
+                            "--skip-url-check.[/red]"
+                        )
+                        move_draft(path, "rejected")
+                        continue
+
                 # Post the main tweet
                 response = client.create_tweet(
                     text=draft.text,
