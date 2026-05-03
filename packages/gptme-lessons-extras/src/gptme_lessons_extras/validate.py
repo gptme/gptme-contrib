@@ -165,6 +165,11 @@ class LessonValidator:
           ``notes`` (free-form description of partial automation or caveats).
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
+        - ``confound_note``: Optional string documenting a known confound that causes
+          LOO analysis to misattribute harm (e.g. corrective lessons that fire in
+          inherently higher-risk contexts).  Consumed by agent-workspace tooling
+          (e.g. ``lesson_confidence.py``) to skip automated archival.  Set once
+          and left stable; not recalculated.
 
         Do NOT add auto-computed or frequently-updated scores here (e.g. ``confidence``,
         ``effectiveness``, ``score``).  Such values are recalculated on every analysis
@@ -199,6 +204,7 @@ class LessonValidator:
                 "deprecated_date",
                 "archived_reason",
                 "archived_date",
+                "confound_note",
             }
             extra_fields = set(frontmatter.keys()) - allowed_fields
             if extra_fields:
@@ -222,6 +228,8 @@ class LessonValidator:
                         f"{', '.join(sorted(flat_automation_fields))} are present; "
                         "remove the flat fields in favour of the 'automation' block"
                     )
+            if "confound_note" in frontmatter:
+                self._check_confound_note_field(frontmatter["confound_note"])
 
         except (ValueError, yaml.YAMLError) as e:
             self.errors.append(f"Invalid YAML frontmatter: {e}")
@@ -322,6 +330,23 @@ class LessonValidator:
             self.errors.append(
                 f"automation.enforcement must be 'warning' or 'error', got {enforcement!r}"
             )
+
+    def _check_confound_note_field(self, value: object) -> None:
+        """Validate the optional ``confound_note`` frontmatter field.
+
+        Must be a non-empty string describing the confound.  Boolean values are
+        rejected (YAML ``true``/``false`` are a common accidental substitution).
+        """
+        if isinstance(value, bool):
+            self.errors.append(
+                "confound_note must be a non-empty string, not a boolean"
+            )
+        elif not isinstance(value, str):
+            self.errors.append(
+                f"confound_note must be a non-empty string, got {type(value).__name__}"
+            )
+        elif not value.strip():
+            self.errors.append("confound_note must not be an empty string")
 
     def _validate_two_file_format(self):
         """Validate two-file format (concise primary + companion)."""

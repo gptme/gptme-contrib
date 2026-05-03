@@ -12,6 +12,7 @@ match:
   session_categories: [infrastructure, cleanup]
 target_grade: harm
 status: active
+confound_note: "cleanup-selection-bias — LOO-negative because it fires in inherently higher-harm cleanup contexts, not because it causes harm"
 ---
 
 # Trajectory Persistence
@@ -105,6 +106,31 @@ Following this rule prevents:
 - **Lost learning signal**: Session records are the primary input for LOO analysis and bandit feedback
 - **Broken debugging**: Post-hoc analysis becomes impossible without the original trace
 - **Trust violations**: User safety settings (`cleanupPeriodDays: 1000000`) must never be overridden by scripts
+
+## LOO Analysis Note
+
+Leave-one-out (LOO) analysis shows Δ=−0.0841 (p=0.009) against the harm
+target. This is a **selection-bias artifact, not a causal effect**:
+
+This lesson is *corrective*: it fires when the agent is already contemplating
+trajectory deletion — an inherently higher-harm context. The LOO delta
+measures `baseline_harm + lesson_mitigation` vs the uncontaminated baseline
+(sessions where deletion was never discussed). Even if the lesson successfully
+reduces harm within those sessions, the residual harm score after mitigation
+is still higher than the no-deletion-discussion baseline, producing a negative
+delta.
+
+**Lesson type → LOO bias**:
+- Preventive (fires before risk): LOO signal can be positive
+- Corrective (fires during risk): **negative bias** — fires in higher-harm contexts
+- After-the-fact (fires post-incident): negative — selection on outcome
+
+The `confound_note` frontmatter field is consumed by agent-workspace tooling
+(e.g. `lesson_confidence.py` → `load_lesson_confound_note` in the agent's
+`metaproductivity` package) to treat this lesson as confounded and skip
+automated archival.  The field is not implemented in gptme-contrib itself —
+it is listed in `validate.py`'s `allowed_fields` so the validator accepts it,
+and the consuming implementation lives in the agent's own workspace.
 
 ## Related
 - [Pre-Mortem for Risky Actions](../autonomous/pre-mortem-for-risky-actions.md) — run before any deletion logic
