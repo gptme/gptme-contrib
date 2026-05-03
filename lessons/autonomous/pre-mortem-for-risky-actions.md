@@ -29,7 +29,6 @@ Actions that warrant a pre-mortem:
 - `git push --force`, `git reset --hard`, `rm -rf`
 - Modifying systemd services or cron jobs
 - Changing environment variables or secrets
-- Bulk operations (deleting multiple files, tasks, branches)
 - Database migrations or schema changes
 - Modifying pre-commit hooks or CI config
 
