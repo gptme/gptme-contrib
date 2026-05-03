@@ -165,6 +165,11 @@ class LessonValidator:
           ``notes`` (free-form description of partial automation or caveats).
         - ``deprecated_by`` / ``deprecated_date``: Set once on deprecation.
         - ``archived_reason`` / ``archived_date``: Set once on archival.
+        - ``confound_note``: Optional string documenting a known confound that causes
+          LOO analysis to misattribute harm (e.g. corrective lessons that fire in
+          inherently higher-risk contexts).  Consumed by agent-workspace tooling
+          (e.g. ``lesson_confidence.py``) to skip automated archival.  Set once
+          and left stable; not recalculated.
 
         Do NOT add auto-computed or frequently-updated scores here (e.g. ``confidence``,
         ``effectiveness``, ``score``).  Such values are recalculated on every analysis

@@ -125,10 +125,12 @@ delta.
 - Corrective (fires during risk): **negative bias** — fires in higher-harm contexts
 - After-the-fact (fires post-incident): negative — selection on outcome
 
-The `confound_note: cleanup-selection-bias` frontmatter field is read by
-`lesson_confidence.py` (`load_lesson_confound_note`) to treat this lesson as
-confounded, returning action `"confounded"` instead of `"archive"` even before
-the LOO state file has been populated with a `confounded=true` entry.
+The `confound_note` frontmatter field is consumed by agent-workspace tooling
+(e.g. `lesson_confidence.py` → `load_lesson_confound_note` in the agent's
+`metaproductivity` package) to treat this lesson as confounded and skip
+automated archival.  The field is not implemented in gptme-contrib itself —
+it is listed in `validate.py`'s `allowed_fields` so the validator accepts it,
+and the consuming implementation lives in the agent's own workspace.
 
 ## Related
 - [Pre-Mortem for Risky Actions](../autonomous/pre-mortem-for-risky-actions.md) — run before any deletion logic
