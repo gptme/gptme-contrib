@@ -2,12 +2,10 @@
 match:
   keywords:
   - pre-mortem for risky actions
-  - "about to delete or remove files"
   - "force push or destructive git operation"
   - "modifying production infrastructure"
   - "risk assessment before action"
   - "what could go wrong with this change"
-  - "destructive operation"
   - "irreversible change"
   - "force push"
   - "rm -rf"
@@ -31,7 +29,6 @@ Actions that warrant a pre-mortem:
 - `git push --force`, `git reset --hard`, `rm -rf`
 - Modifying systemd services or cron jobs
 - Changing environment variables or secrets
-- Bulk operations (deleting multiple files, tasks, branches)
 - Database migrations or schema changes
 - Modifying pre-commit hooks or CI config
 
