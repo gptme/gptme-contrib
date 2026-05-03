@@ -12,6 +12,7 @@ match:
   session_categories: [infrastructure, cleanup]
 target_grade: harm
 status: active
+confound_note: "cleanup-selection-bias — LOO-negative because it fires in inherently higher-harm cleanup contexts, not because it causes harm"
 ---
 
 # Trajectory Persistence
