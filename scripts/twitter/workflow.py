@@ -1207,8 +1207,17 @@ def _git_commit_posted(path: Path) -> None:
     type=int,
     help=f"Max tweets to post in one run (default: {MAX_POSTS_PER_CYCLE} when --yes is used, unlimited otherwise)",
 )
+@click.option(
+    "--skip-url-check",
+    is_flag=True,
+    help="Skip HEAD-check of URLs in tweet text (use when URLs are intentionally pre-publish)",
+)
 def post(
-    dry_run: bool, yes: bool, draft_id: str | None = None, max_posts: int | None = None
+    dry_run: bool,
+    yes: bool,
+    draft_id: str | None = None,
+    max_posts: int | None = None,
+    skip_url_check: bool = False,
 ) -> None:
     """Post approved tweets"""
     # Apply rate limit: default to MAX_POSTS_PER_CYCLE when running non-interactively (--yes)
@@ -1286,6 +1295,18 @@ def post(
             console.print("[yellow]Dry run - tweet would be posted")
             console.print(f"[blue]Draft ID: {path.stem}[/blue]")
             continue
+
+        # URL validation: catch 404s before asking for confirmation
+        if not skip_url_check and draft.text:
+            bad_urls = _validate_urls_in_text(draft.text)
+            if bad_urls:
+                for url, status in bad_urls:
+                    console.print(f"[red]✗ URL returns {status}: {url}[/red]")
+                console.print(
+                    "[red]Skipping draft — fix URLs or pass --skip-url-check.[/red]"
+                )
+                move_draft(path, "rejected")
+                continue
 
         if yes or Confirm.ask("Post this tweet?", default=True):
             try:
