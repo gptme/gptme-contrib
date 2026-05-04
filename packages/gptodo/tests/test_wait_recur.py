@@ -1,6 +1,6 @@
 """Tests for wait: and recur: scheduling fields."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -105,15 +105,18 @@ def test_advance_wait_from_none() -> None:
     assert result == date.today() + timedelta(days=7)
 
 
-def test_advance_wait_sub_24h_not_today() -> None:
-    # Sub-24h hour intervals must produce a future date, not today.
-    # Python date + timedelta(hours=12) silently drops sub-day components and
-    # returns today — advance_wait must guard against this.
+def test_advance_wait_sub_24h_returns_datetime() -> None:
+    # Sub-24h intervals must return a *datetime* with exact precision so the task
+    # is hidden for the right number of hours, not just "tomorrow".
     result = advance_wait(None, "12h")
-    assert result > date.today(), "12h recurrence must schedule at least 1 day out"
+    assert isinstance(result, datetime), "12h recurrence must return datetime"
+    assert result > datetime.now(), "12h recurrence must be in the future"
+    assert result < datetime.now() + timedelta(hours=13), "12h recurrence must not overshoot"
 
     result6 = advance_wait(None, "6h")
-    assert result6 > date.today(), "6h recurrence must schedule at least 1 day out"
+    assert isinstance(result6, datetime), "6h recurrence must return datetime"
+    assert result6 > datetime.now(), "6h recurrence must be in the future"
+    assert result6 < datetime.now() + timedelta(hours=7), "6h recurrence must not overshoot"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +245,42 @@ def test_edit_done_with_recur_resets_to_todo(
     assert post.metadata["state"] == "todo"
     next_wait = date.fromisoformat(str(post.metadata["wait"]))
     assert next_wait > date.today()
+
+
+def test_edit_done_with_subday_recur_stores_datetime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completing a task with recur: 12h stores a datetime wait (not a date)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    today = date.today().isoformat()
+    write_task(
+        tasks_dir,
+        "frequent-check",
+        state="todo",
+        created="2026-01-01",
+        wait=today,
+        recur="12h",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "frequent-check", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "frequent-check.md")
+    assert post.metadata["state"] == "todo"
+    wait_val = str(post.metadata["wait"])
+    assert (
+        "T" in wait_val or " " in wait_val
+    ), f"sub-24h recur should store a datetime string with time component, got: {wait_val!r}"
+    # Verify it's actually in the future
+    next_dt = datetime.fromisoformat(wait_val.replace(" ", "T"))
+    assert next_dt > datetime.now(), "next wait must be in the future"
 
 
 def test_edit_done_without_recur_stays_done(

@@ -278,7 +278,7 @@ class TaskInfo:
     issues: List[str]
     metadata: Dict
     # Scheduling fields
-    wait: Optional[date] = (
+    wait: Optional[date | datetime] = (
         None  # Hide from queue until this date (inclusive: task appears on this date)
     )
     recur: Optional[str] = None  # Recurrence interval: 7d, 24h, weekly, monthly, or cron expression
@@ -435,24 +435,45 @@ def format_time_ago(dt: datetime) -> str:
         return dt.strftime("%Y-%m-%d")
 
 
-def parse_wait_date(value: Any) -> date | None:
-    """Parse a wait: field value into a date.
+def parse_wait(value: Any) -> date | datetime | None:
+    """Parse a wait: field value into a date or datetime.
 
     Accepts: date objects, datetime objects, YYYY-MM-DD strings, ISO datetime strings.
+    - YYYY-MM-DD (date-only) → date
+    - YYYY-MM-DDTHH:MM or YYYY-MM-DD HH:MM (with time) → datetime
+    - datetime objects preserved as-is
+    - date objects preserved as-is (date-only = available any time on/after this date)
     Returns None if value is missing or unparseable.
     """
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.date()
+        return value
     if isinstance(value, date):
         return value
     if isinstance(value, str):
         try:
+            # Try full ISO datetime first (has T or time component)
+            if "T" in value or " " in value:
+                cleaned = value.replace(" ", "T")
+                return datetime.fromisoformat(cleaned)
+            # Fall back to date-only
             return date.fromisoformat(value[:10])
-        except ValueError:
+        except (ValueError, TypeError):
             return None
     return None
+
+
+def parse_wait_date(value: Any) -> date | None:
+    """Legacy wrapper — parse a wait: field value into a date.
+
+    For backward compatibility: strips time info, returns only the date.
+    New code should use parse_wait() instead.
+    """
+    result = parse_wait(value)
+    if isinstance(result, datetime):
+        return result.date()
+    return result
 
 
 def parse_recur_interval(recur: str) -> timedelta | None:
@@ -480,28 +501,45 @@ def parse_recur_interval(recur: str) -> timedelta | None:
     return None  # cron or unrecognised — caller decides
 
 
-def advance_wait(current_wait: date | None, recur: str) -> date:
-    """Compute the next wait: date after completing a recurring task.
+def advance_wait(current_wait: date | datetime | None, recur: str) -> date | datetime:
+    """Compute the next wait: value after completing a recurring task.
 
-    If current_wait is in the past (or None), uses today as the base so that
-    a lapsed recurring task re-schedules from now, not from the stale date.
+    Behaviour depends on the wait type and recur interval:
+    - Sub-day intervals (e.g. "12h", "6h"): always return a datetime with exact
+      precision, regardless of current_wait type. date-only can't represent sub-day.
+    - Day+ intervals with a datetime current_wait: return datetime, preserving precision.
+    - Day+ intervals with a date or None current_wait: return date (simpler, no TZ issues).
+    - Lapsed tasks (current_wait in the past) re-schedule from now, not the stale date.
     """
     interval = parse_recur_interval(recur)
-    base = max(current_wait or date.today(), date.today())
+    now = datetime.now()
+
+    if isinstance(current_wait, datetime):
+        # DateTime precision: use the current datetime as base if lapsed
+        base = now if current_wait < now else current_wait
+        return (now + timedelta(days=7)) if interval is None else (base + interval)
+
+    # Date-only or None path
+    today = date.today()
     if interval is None:
-        # Fallback for unrecognised intervals: schedule 7 days from today
-        return date.today() + timedelta(days=7)
-    # Python's date arithmetic silently drops sub-day components
-    # (date + timedelta(hours=12) == date + timedelta(days=0) == same day).
-    # Round up to at least 1 day so "12h" doesn't schedule the task immediately.
-    days = interval.days if interval.days > 0 else 1
-    return base + timedelta(days=days)
+        return today + timedelta(days=7)
+    # Sub-day interval: date arithmetic silently drops hours; return datetime instead
+    if interval.days == 0:
+        return now + interval
+    date_base = max(current_wait or today, today)
+    return date_base + timedelta(days=interval.days)
 
 
 def task_is_waiting_for_date(task: "TaskInfo") -> bool:
-    """Return True when a task has a wait: date that hasn't arrived yet."""
+    """Return True when a task has a wait: value that hasn't arrived yet.
+
+    Compares datetime waits against the current datetime (sub-day precision),
+    date-only waits against today's date.
+    """
     if task.wait is None:
         return False
+    if isinstance(task.wait, datetime):
+        return task.wait > datetime.now()
     return task.wait > date.today()
 
 
@@ -691,11 +729,11 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     if "discovered-from" in metadata and not isinstance(metadata["discovered-from"], list):
         issues.append("Discovered-from must be a list")
 
-    # Validate wait: field (must be a parseable date)
+    # Validate wait: field (must be a parseable date or datetime)
     if "wait" in metadata:
         wait_val = metadata["wait"]
-        if parse_wait_date(wait_val) is None:
-            issues.append("wait must be a date (YYYY-MM-DD) or datetime")
+        if parse_wait(wait_val) is None:
+            issues.append("wait must be a date (YYYY-MM-DD) or datetime (YYYY-MM-DDTHH:MM)")
 
     return issues
 
@@ -868,7 +906,7 @@ def load_tasks(
                 issues=issues,
                 metadata=metadata,
                 # Scheduling fields
-                wait=parse_wait_date(metadata.get("wait")),
+                wait=parse_wait(metadata.get("wait")),
                 recur=metadata.get("recur"),
                 # Multi-agent coordination fields (Phase 2)
                 parallelizable=bool(metadata.get("parallelizable", False)),

@@ -1480,21 +1480,23 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
                 return
         elif field_spec["type"] == "date":
-            from datetime import date as _date
-
-            # wait: stores as date-only (YYYY-MM-DD); other date fields store full ISO datetime
+            # wait: accepts YYYY-MM-DD or YYYY-MM-DDTHH:MM; other date fields store full ISO datetime
             if field == "wait":
-                try:
-                    _date.fromisoformat(value[:10])
-                    value = value[:10]  # normalise to YYYY-MM-DD
-                except ValueError:
-                    console.print(f"[red]Invalid {field} date format. Use YYYY-MM-DD[/]")
+                from gptodo.utils import parse_wait
+
+                parsed = parse_wait(value)
+                if parsed is None:
+                    console.print(
+                        f"[red]Invalid {field} format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM[/]"
+                    )
                     return
+                if isinstance(parsed, datetime):
+                    value = parsed.isoformat()
+                else:
+                    value = parsed.isoformat()
             else:
                 try:
-                    # Parse and validate the date format
                     created_dt = datetime.fromisoformat(value)
-                    # Convert to string format for storage
                     value = created_dt.isoformat()
                 except ValueError:
                     console.print(
@@ -1669,9 +1671,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 # Handle recur: reset task to todo and advance wait: date
                 recur = post.metadata.get("recur")
                 if recur:
-                    from gptodo.utils import advance_wait, parse_wait_date
+                    from gptodo.utils import advance_wait, parse_wait
 
-                    current_wait = parse_wait_date(post.metadata.get("wait"))
+                    current_wait = parse_wait(post.metadata.get("wait"))
                     next_wait = advance_wait(current_wait, recur)
                     post.metadata["state"] = "todo"
                     post.metadata["wait"] = next_wait.isoformat()
