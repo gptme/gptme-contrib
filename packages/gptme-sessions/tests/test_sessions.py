@@ -7164,7 +7164,7 @@ def test_grade_signals_category_aware_triage():
 
 
 def test_grade_signals_category_aware_no_interaction():
-    """Non-commit category with 0 gh_interactions still floors at 0.25 (active but empty)."""
+    """Non-commit category with 0 gh_interactions but clean execution gets neutral grade."""
     sigs = {
         "git_commits": [],
         "file_writes": [],
@@ -7175,8 +7175,10 @@ def test_grade_signals_category_aware_no_interaction():
         "prs_submitted": [],
         "issues_closed": 0,
     }
-    # Category hint does not help when there's nothing to show for the session
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+    # Monitoring sessions that ran tools without errors but found no work are
+    # "correctly empty" rather than failed. They get a neutral 0.35 instead
+    # of the 0.25 floor to avoid systematic bias in bandit updates.
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.35)
 
 
 def test_grade_signals_category_does_not_affect_commit_tiers():
