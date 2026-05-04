@@ -501,6 +501,25 @@ def parse_recur_interval(recur: str) -> timedelta | None:
     return None  # cron or unrecognised — caller decides
 
 
+def is_cron_recur_expression(recur: str) -> bool:
+    """Return True for cron-like recur: strings we accept but do not yet compute.
+
+    We intentionally keep this permissive: any 5- or 6-field whitespace-separated
+    spec counts as cron-like so validation matches the documented contract.
+    """
+    if not recur:
+        return False
+    parts = recur.strip().split()
+    return len(parts) in (5, 6) and all(parts)
+
+
+def is_valid_recur_value(recur: str) -> bool:
+    """Return True when recur: is either directly supported or cron-like."""
+    if not recur:
+        return False
+    return parse_recur_interval(recur) is not None or is_cron_recur_expression(recur)
+
+
 def advance_wait(current_wait: date | datetime | None, recur: str) -> date | datetime:
     """Compute the next wait: value after completing a recurring task.
 
@@ -739,9 +758,10 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     # Validate recur: field (must be a parseable interval if set)
     if "recur" in metadata:
         recur_val = metadata.get("recur")
-        if recur_val and parse_recur_interval(str(recur_val)) is None:
+        if recur_val and not is_valid_recur_value(str(recur_val)):
             issues.append(
-                f"recur must be a valid interval (e.g. 7d, 24h, weekly, monthly), got: {recur_val!r}"
+                "recur must be a valid interval (e.g. 7d, 24h, weekly, monthly) "
+                f"or a cron expression, got: {recur_val!r}"
             )
 
     return issues

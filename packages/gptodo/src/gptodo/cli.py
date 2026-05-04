@@ -1504,8 +1504,16 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     )
                     return
         elif field_spec["type"] == "string":
+            if field == "recur":
+                from gptodo.utils import is_valid_recur_value
+
+                if not is_valid_recur_value(value):
+                    console.print(
+                        "[red]Invalid recur format. Use 7d, 24h, weekly, monthly, "
+                        "or a cron expression like '0 9 * * 1'[/]"
+                    )
+                    return
             # Arbitrary string value - no validation needed
-            pass
 
         changes.append(("set", field, value))
 

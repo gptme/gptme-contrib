@@ -10,6 +10,7 @@ from gptodo.cli import cli
 from gptodo.utils import (
     advance_wait,
     is_task_ready,
+    is_valid_recur_value,
     load_tasks,
     parse_recur_interval,
     parse_wait_date,
@@ -80,6 +81,14 @@ def test_parse_recur_monthly() -> None:
 def test_parse_recur_cron_returns_none() -> None:
     # cron expressions are accepted but not yet computed to a timedelta
     assert parse_recur_interval("0 9 * * 1") is None
+
+
+def test_is_valid_recur_value_accepts_cron() -> None:
+    assert is_valid_recur_value("0 9 * * 1") is True
+
+
+def test_is_valid_recur_value_rejects_garbage() -> None:
+    assert is_valid_recur_value("weakly") is False
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +310,75 @@ def test_edit_done_without_recur_stays_done(
 
     post = fm.load(tasks_dir / "one-off.md")
     assert post.metadata["state"] == "done"
+
+
+def test_load_tasks_allows_cron_recur_without_validation_issue(tmp_path: Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "cron-review",
+        state="todo",
+        created="2026-01-01",
+        recur="0 9 * * 1",
+    )
+
+    task = next(t for t in load_tasks(tasks_dir) if t.name == "cron-review")
+    assert not any("recur must be a valid interval" in issue for issue in task.issues)
+
+
+def test_load_tasks_rejects_invalid_recur_with_issue(tmp_path: Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "bad-recur",
+        state="todo",
+        created="2026-01-01",
+        recur="weakly",
+    )
+
+    task = next(t for t in load_tasks(tasks_dir) if t.name == "bad-recur")
+    assert any("recur must be a valid interval" in issue for issue in task.issues)
+
+
+def test_edit_set_recur_accepts_cron_expression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "cron-task", state="todo", created="2026-01-01")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "cron-task", "--set", "recur", "0 9 * * 1"])
+
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "cron-task.md")
+    assert post.metadata["recur"] == "0 9 * * 1"
+
+
+def test_edit_set_recur_rejects_invalid_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "bad-task", state="todo", created="2026-01-01")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "bad-task", "--set", "recur", "weakly"])
+
+    assert result.exit_code == 0
+    assert "Invalid recur format" in result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "bad-task.md")
+    assert "recur" not in post.metadata
 
 
 def test_task_is_waiting_timezone_aware(tmp_path: Path) -> None:
