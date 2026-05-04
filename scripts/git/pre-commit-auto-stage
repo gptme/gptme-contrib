@@ -122,14 +122,19 @@ if [ $PRECOMMIT_EXIT -eq 0 ]; then
   exit 0
 else
   echo "$PRECOMMIT_OUTPUT"
-  echo -e "${YELLOW}Pre-commit modified files, checking for auto-staging...${NC}"
 
-  # Check if any files were actually modified
+  # Check if any files were actually modified by formatters before announcing
+  # auto-staging. If nothing was modified, this is a real hook failure and the
+  # output above is the remediation surface — don't bury it under a misleading
+  # "checking for auto-staging" header.
   if git diff --quiet; then
-    echo -e "${RED}✗ Pre-commit failed but no files were modified${NC}"
-    echo -e "${RED}This indicates a real failure, not auto-fixing${NC}"
+    echo -e "${RED}✗ Pre-commit hook failed (no auto-fixable changes)${NC}" >&2
+    echo -e "${RED}  See the hook output above for the specific failure and fix.${NC}" >&2
+    echo -e "${RED}  To re-run a single hook directly: prek run --files <path>${NC}" >&2
     exit 1
   fi
+
+  echo -e "${YELLOW}Pre-commit modified files, auto-staging formatter fixes...${NC}"
 
   while IFS= read -r file; do
     for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
