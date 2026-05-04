@@ -736,6 +736,14 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
         if parse_wait(wait_val) is None:
             issues.append("wait must be a date (YYYY-MM-DD) or datetime (YYYY-MM-DDTHH:MM)")
 
+    # Validate recur: field (must be a parseable interval if set)
+    if "recur" in metadata:
+        recur_val = metadata.get("recur")
+        if recur_val and parse_recur_interval(str(recur_val)) is None:
+            issues.append(
+                f"recur must be a valid interval (e.g. 7d, 24h, weekly, monthly), got: {recur_val!r}"
+            )
+
     return issues
 
 
