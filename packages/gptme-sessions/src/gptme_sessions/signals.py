@@ -368,9 +368,14 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
         signals: Raw signal dict from extract_signals* functions.
         category: Optional session category hint. When the category is one
             where commits are not the primary output (monitoring, research,
-            triage, social, self-review), the threshold for the 0.55 reward
-            tier is lowered from 3 effective writes to 1, preventing
-            productive review/triage sessions from being floor-graded.
+            triage, social, self-review), two adjustments apply:
+            1. The threshold for the 0.55 reward tier is lowered from 3
+               effective writes to 1, preventing productive review/triage
+               sessions from being floor-graded.
+            2. Tool-active sessions with no writes or interactions get a
+               neutral 0.35 floor instead of 0.25, treating "correctly found
+               no work" scans as non-failures even when errors > 0 (e.g. gh
+               CLI returning non-zero for "no results found").
     """
     commits = len(signals["git_commits"])
     # Use unique writes for tier placement — repeated edits to the same file

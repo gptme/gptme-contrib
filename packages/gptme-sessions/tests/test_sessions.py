@@ -7212,7 +7212,12 @@ def test_grade_signals_category_aware_no_interaction():
 
 
 def test_grade_signals_category_aware_no_interaction_with_errors():
-    """Non-commit category with errors still gets the active-but-empty 0.25 floor."""
+    """Non-commit category at the error-rate boundary gets the raised 0.35 floor.
+
+    error_rate = 1/20 = 0.05, which is NOT > 0.05, so no error penalty applies.
+    The PR that removed the `errors == 0` gate means non-commit categories now
+    get 0.35 regardless of error count (penalty still applies for >5% error rate).
+    """
     sigs = {
         "git_commits": [],
         "file_writes": [],
@@ -7225,7 +7230,7 @@ def test_grade_signals_category_aware_no_interaction_with_errors():
         "prs_submitted": [],
         "issues_closed": 0,
     }
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.35)
 
 
 def test_grade_signals_category_does_not_affect_commit_tiers():
