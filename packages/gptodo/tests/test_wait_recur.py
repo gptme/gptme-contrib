@@ -105,6 +105,17 @@ def test_advance_wait_from_none() -> None:
     assert result == date.today() + timedelta(days=7)
 
 
+def test_advance_wait_sub_24h_not_today() -> None:
+    # Sub-24h hour intervals must produce a future date, not today.
+    # Python date + timedelta(hours=12) silently drops sub-day components and
+    # returns today — advance_wait must guard against this.
+    result = advance_wait(None, "12h")
+    assert result > date.today(), "12h recurrence must schedule at least 1 day out"
+
+    result6 = advance_wait(None, "6h")
+    assert result6 > date.today(), "6h recurrence must schedule at least 1 day out"
+
+
 # ---------------------------------------------------------------------------
 # task_is_waiting_for_date
 # ---------------------------------------------------------------------------

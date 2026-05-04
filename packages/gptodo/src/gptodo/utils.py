@@ -491,7 +491,11 @@ def advance_wait(current_wait: date | None, recur: str) -> date:
     if interval is None:
         # Fallback for unrecognised intervals: schedule 7 days from today
         return date.today() + timedelta(days=7)
-    return base + interval
+    # Python's date arithmetic silently drops sub-day components
+    # (date + timedelta(hours=12) == date + timedelta(days=0) == same day).
+    # Round up to at least 1 day so "12h" doesn't schedule the task immediately.
+    days = interval.days if interval.days > 0 else 1
+    return base + timedelta(days=days)
 
 
 def task_is_waiting_for_date(task: "TaskInfo") -> bool:
