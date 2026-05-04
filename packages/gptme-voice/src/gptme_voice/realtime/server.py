@@ -275,7 +275,7 @@ def _build_standup_instructions_guidance() -> str:
         "not mentioned, a task status change since the brief was prepared, or "
         "something the brief is genuinely silent on.\n"
         "- Queue state (pending tweets, deferred tasks) in the brief may have "
-        "changed since generation. Frame pending items as 'as of this morning' "
+        "changed since generation. Frame pending items as 'as of ~30 minutes ago' "
         "rather than definitely pending. Do NOT volunteer stale queue state that "
         "is not mentioned in the brief.\n"
     )
@@ -326,7 +326,7 @@ def _build_standup_call_instructions(brief_text: str) -> str:
         "brief rather than reaching for a subagent.\n\n"
         "6. **Stale content awareness** — the brief is generated ~30 minutes before "
         "the call. Queue state (pending tweets, deferred tasks) may have changed. "
-        "If the brief mentions pending items, frame them as 'as of a few minutes "
+        "If the brief mentions pending items, frame them as 'as of ~30 minutes "
         "ago' rather than asserting they're still pending. Do NOT volunteer stale "
         "queue state that is not in the brief even if your session knowledge "
         "suggests those items once existed.\n\n"
