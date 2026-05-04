@@ -1475,6 +1475,36 @@ def test_grade_signals_noop():
     assert grade_signals(sigs) == 0.25
 
 
+def test_grade_signals_monitoring_no_work_with_errors():
+    """Monitoring sessions that correctly find no work get neutral 0.35
+    even when they have minor errors (e.g. gh CLI returning non-zero
+    for 'no results'). Without this, low-error monitoring scans get
+    penalized at 0.25 or 0.15, suppressing the monitoring category in
+    Thompson sampling."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 2,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 8},
+    }
+    # Without category hint: regular floor 0.25, minus error-rate penalty
+    # error_rate = 2/8 = 0.25 > 0.15 → -0.10 → 0.25 - 0.10 = 0.15
+    assert grade_signals(sigs) == pytest.approx(0.15)
+    # With monitoring category: neutral 0.35 floor, same error penalty
+    # 0.35 - 0.10 = 0.25 — improved from 0.15 without the fix
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+    # For monitoring with very low errors (<5%): full neutral 0.35
+    sigs_low_err = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 8},
+    }
+    assert grade_signals(sigs_low_err, category="monitoring") == pytest.approx(0.35)
+
+
 def test_grade_signals_productive():
     """Grade is higher when commits are present."""
     msgs = _make_cc_msgs(commits=2)
@@ -7182,7 +7212,12 @@ def test_grade_signals_category_aware_no_interaction():
 
 
 def test_grade_signals_category_aware_no_interaction_with_errors():
-    """Non-commit category with errors still gets the active-but-empty 0.25 floor."""
+    """Non-commit category at the error-rate boundary gets the raised 0.35 floor.
+
+    error_rate = 1/20 = 0.05, which is NOT > 0.05, so no error penalty applies.
+    The PR that removed the `errors == 0` gate means non-commit categories now
+    get 0.35 regardless of error count (penalty still applies for >5% error rate).
+    """
     sigs = {
         "git_commits": [],
         "file_writes": [],
@@ -7195,7 +7230,7 @@ def test_grade_signals_category_aware_no_interaction_with_errors():
         "prs_submitted": [],
         "issues_closed": 0,
     }
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.35)
 
 
 def test_grade_signals_category_does_not_affect_commit_tiers():
