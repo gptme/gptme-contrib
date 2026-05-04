@@ -411,7 +411,16 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
 
     if effective_units == 0 and writes == 0 and gh_interactions == 0:
         # Distinguish dead sessions (zero tool calls) from active-but-unproductive ones
-        reward = 0.10 if total_tools == 0 else 0.25
+        if total_tools == 0:
+            reward = 0.10
+        elif is_non_commit_category and errors == 0:
+            # Non-commit categories (monitoring, triage, etc.) that ran tools
+            # without errors but produced no writes/interactions are likely
+            # "correctly found no work" sessions, not failures. Give a neutral
+            # grade instead of the 0.25 floor.
+            reward = 0.35
+        else:
+            reward = 0.25
     elif effective_units == 0:
         effective_writes = writes + gh_interactions
         # Non-commit categories: any interaction clears the 0.55 tier floor.
