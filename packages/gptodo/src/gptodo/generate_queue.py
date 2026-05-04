@@ -24,6 +24,8 @@ import os
 import subprocess
 import sys
 from datetime import date, datetime, timezone
+
+from gptodo.utils import parse_wait
 from pathlib import Path
 from typing import List
 
@@ -195,18 +197,19 @@ class QueueGenerator:
 
                 # Filter by state (new or active only)
                 state = post.metadata.get("state", "new")
-                if state not in ("new", "active", "todo", "backlog"):
+                if state not in ("new", "active", "todo"):
                     continue
 
-                # Skip tasks whose wait: date hasn't arrived yet
+                # Skip tasks whose wait: date/time hasn't arrived yet
                 wait_val = post.metadata.get("wait")
                 if wait_val:
-                    try:
-                        wait_date = date.fromisoformat(str(wait_val)[:10])
-                        if wait_date > date.today():
+                    parsed = parse_wait(wait_val)
+                    if parsed is not None:
+                        if isinstance(parsed, datetime):
+                            if parsed > datetime.now():
+                                continue
+                        elif parsed > date.today():
                             continue
-                    except ValueError:
-                        pass
 
                 # Filter by assigned_to if --user is specified
                 if self.user:
@@ -415,15 +418,16 @@ class QueueGenerator:
                     post = frontmatter.load(task_file)
                     if post.metadata.get("state") == "waiting" or post.metadata.get("waiting_for"):
                         continue
-                    # Skip tasks whose wait: date hasn't arrived yet
+                    # Skip tasks whose wait: date/time hasn't arrived yet
                     wait_val = post.metadata.get("wait")
                     if wait_val:
-                        try:
-                            wait_date = date.fromisoformat(str(wait_val)[:10])
-                            if wait_date > date.today():
+                        parsed = parse_wait(wait_val)
+                        if parsed is not None:
+                            if isinstance(parsed, datetime):
+                                if parsed > datetime.now():
+                                    continue
+                            elif parsed > date.today():
                                 continue
-                        except ValueError:
-                            pass
                 except Exception:
                     pass
 
