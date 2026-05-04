@@ -206,7 +206,7 @@ class QueueGenerator:
                     parsed = parse_wait(wait_val)
                     if parsed is not None:
                         if isinstance(parsed, datetime):
-                            if parsed > datetime.now():
+                            if parsed > datetime.now(tz=parsed.tzinfo):
                                 continue
                         elif parsed > date.today():
                             continue

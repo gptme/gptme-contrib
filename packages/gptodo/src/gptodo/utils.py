@@ -512,14 +512,15 @@ def advance_wait(current_wait: date | datetime | None, recur: str) -> date | dat
     - Lapsed tasks (current_wait in the past) re-schedule from now, not the stale date.
     """
     interval = parse_recur_interval(recur)
-    now = datetime.now()
 
     if isinstance(current_wait, datetime):
-        # DateTime precision: use the current datetime as base if lapsed
+        # Match tz-awareness to avoid TypeError when current_wait is tz-aware
+        now = datetime.now(tz=current_wait.tzinfo)
         base = now if current_wait < now else current_wait
         return (now + timedelta(days=7)) if interval is None else (base + interval)
 
     # Date-only or None path
+    now = datetime.now()
     today = date.today()
     if interval is None:
         return today + timedelta(days=7)
@@ -539,7 +540,7 @@ def task_is_waiting_for_date(task: "TaskInfo") -> bool:
     if task.wait is None:
         return False
     if isinstance(task.wait, datetime):
-        return task.wait > datetime.now()
+        return task.wait > datetime.now(tz=task.wait.tzinfo)
     return task.wait > date.today()
 
 

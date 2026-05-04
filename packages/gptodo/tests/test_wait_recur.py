@@ -301,3 +301,35 @@ def test_edit_done_without_recur_stays_done(
 
     post = fm.load(tasks_dir / "one-off.md")
     assert post.metadata["state"] == "done"
+
+
+def test_task_is_waiting_timezone_aware(tmp_path: Path) -> None:
+    """PyYAML parses 'wait: 2099-01-01T00:00:00+00:00' as a tz-aware datetime.
+    Comparing against naive datetime.now() raises TypeError; use now(tz=...) instead."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # PyYAML auto-parses this as a tz-aware datetime object
+    write_task(
+        tasks_dir, "tz-future", state="todo", created="2026-01-01", wait="2099-01-01T00:00:00+00:00"
+    )
+    write_task(
+        tasks_dir, "tz-past", state="todo", created="2026-01-01", wait="2000-01-01T00:00:00+00:00"
+    )
+
+    tasks = {t.name: t for t in load_tasks(tasks_dir)}
+    # Must not raise TypeError on comparison
+    assert task_is_waiting_for_date(tasks["tz-future"]) is True
+    assert task_is_waiting_for_date(tasks["tz-past"]) is False
+
+
+def test_advance_wait_timezone_aware() -> None:
+    """advance_wait must not raise TypeError when current_wait is tz-aware."""
+    from datetime import timezone
+
+    aware = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    result = advance_wait(aware, "7d")
+    # Result should be tz-aware and in the future
+    assert isinstance(result, datetime)
+    assert result.tzinfo is not None
+    assert result > datetime.now(tz=timezone.utc)
