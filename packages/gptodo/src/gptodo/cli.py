@@ -1425,9 +1425,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         # Keep "none" as the explicit clear value; otherwise accept any string.
         "assigned_to": {"type": "string"},
         "waiting_since": {"type": "date"},
+        "wait": {"type": "date"},  # Hide from queue until this date
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},
         "waiting_for": {"type": "string"},
+        "recur": {"type": "string"},  # Recurrence interval (7d, 24h, weekly, monthly)
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
@@ -1478,16 +1480,27 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
                 return
         elif field_spec["type"] == "date":
-            try:
-                # Parse and validate the date format
-                created_dt = datetime.fromisoformat(value)
-                # Convert to string format for storage
-                value = created_dt.isoformat()
-            except ValueError:
-                console.print(
-                    f"[red]Invalid {field} date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]"
-                )
-                return
+            from datetime import date as _date
+
+            # wait: stores as date-only (YYYY-MM-DD); other date fields store full ISO datetime
+            if field == "wait":
+                try:
+                    _date.fromisoformat(value[:10])
+                    value = value[:10]  # normalise to YYYY-MM-DD
+                except ValueError:
+                    console.print(f"[red]Invalid {field} date format. Use YYYY-MM-DD[/]")
+                    return
+            else:
+                try:
+                    # Parse and validate the date format
+                    created_dt = datetime.fromisoformat(value)
+                    # Convert to string format for storage
+                    value = created_dt.isoformat()
+                except ValueError:
+                    console.print(
+                        f"[red]Invalid {field} date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]"
+                    )
+                    return
         elif field_spec["type"] == "string":
             # Arbitrary string value - no validation needed
             pass
@@ -1653,6 +1666,22 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             # Re-load task to get updated metadata
             post = frontmatter.load(task.path)
             if post.metadata.get("state") == "done":
+                # Handle recur: reset task to todo and advance wait: date
+                recur = post.metadata.get("recur")
+                if recur:
+                    from gptodo.utils import advance_wait, parse_wait_date
+
+                    current_wait = parse_wait_date(post.metadata.get("wait"))
+                    next_wait = advance_wait(current_wait, recur)
+                    post.metadata["state"] = "todo"
+                    post.metadata["wait"] = next_wait.isoformat()
+                    with open(task.path, "w") as f:
+                        f.write(frontmatter.dumps(post))
+                    console.print(
+                        f"[cyan]↩ {task.name} recurring — reset to todo, next wait: {next_wait}[/]"
+                    )
+                    continue  # skip done-completion logic for recurring tasks
+
                 completed_task_ids.append(task.id)
 
                 # Run task completion hook if configured via env var

@@ -24,6 +24,7 @@ from typing import (
     Dict,
     List,
     NamedTuple,
+    Optional,
     Tuple,
 )
 
@@ -276,6 +277,11 @@ class TaskInfo:
     subtasks: SubtaskCount
     issues: List[str]
     metadata: Dict
+    # Scheduling fields
+    wait: Optional[date] = (
+        None  # Hide from queue until this date (inclusive: task appears on this date)
+    )
+    recur: Optional[str] = None  # Recurrence interval: 7d, 24h, weekly, monthly, or cron expression
     # Multi-agent coordination fields (Phase 2)
     parallelizable: bool = False  # Can run concurrently with other work
     isolation: str | None = None  # none, worktree, container
@@ -427,6 +433,72 @@ def format_time_ago(dt: datetime) -> str:
         return f"{days}d ago"
     else:
         return dt.strftime("%Y-%m-%d")
+
+
+def parse_wait_date(value: Any) -> date | None:
+    """Parse a wait: field value into a date.
+
+    Accepts: date objects, datetime objects, YYYY-MM-DD strings, ISO datetime strings.
+    Returns None if value is missing or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def parse_recur_interval(recur: str) -> timedelta | None:
+    """Parse a recur: field value into a timedelta (or None for unsupported formats).
+
+    Supported formats:
+    - "Nd"  / "Nh" — N days / N hours
+    - "weekly" — 7 days
+    - "monthly" — 30 days (calendar-approximate)
+    - cron expressions are accepted as a string but return None (not yet computed here)
+    """
+    if not recur:
+        return None
+    recur = recur.strip()
+    if recur == "weekly":
+        return timedelta(days=7)
+    if recur == "monthly":
+        return timedelta(days=30)
+    m = re.fullmatch(r"(\d+)d", recur)
+    if m:
+        return timedelta(days=int(m.group(1)))
+    m = re.fullmatch(r"(\d+)h", recur)
+    if m:
+        return timedelta(hours=int(m.group(1)))
+    return None  # cron or unrecognised — caller decides
+
+
+def advance_wait(current_wait: date | None, recur: str) -> date:
+    """Compute the next wait: date after completing a recurring task.
+
+    If current_wait is in the past (or None), uses today as the base so that
+    a lapsed recurring task re-schedules from now, not from the stale date.
+    """
+    interval = parse_recur_interval(recur)
+    base = max(current_wait or date.today(), date.today())
+    if interval is None:
+        # Fallback for unrecognised intervals: schedule 7 days from today
+        return date.today() + timedelta(days=7)
+    return base + interval
+
+
+def task_is_waiting_for_date(task: "TaskInfo") -> bool:
+    """Return True when a task has a wait: date that hasn't arrived yet."""
+    if task.wait is None:
+        return False
+    return task.wait > date.today()
 
 
 def has_new_activity(updated_at: str | None, waiting_since: str | date | None) -> bool:
@@ -615,6 +687,12 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     if "discovered-from" in metadata and not isinstance(metadata["discovered-from"], list):
         issues.append("Discovered-from must be a list")
 
+    # Validate wait: field (must be a parseable date)
+    if "wait" in metadata:
+        wait_val = metadata["wait"]
+        if parse_wait_date(wait_val) is None and not isinstance(wait_val, (date, datetime)):
+            issues.append("wait must be a date (YYYY-MM-DD) or datetime")
+
     return issues
 
 
@@ -785,6 +863,9 @@ def load_tasks(
                 subtasks=subtasks,
                 issues=issues,
                 metadata=metadata,
+                # Scheduling fields
+                wait=parse_wait_date(metadata.get("wait")),
+                recur=metadata.get("recur"),
                 # Multi-agent coordination fields (Phase 2)
                 parallelizable=bool(metadata.get("parallelizable", False)),
                 isolation=metadata.get("isolation"),
@@ -846,6 +927,9 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
             "total": task.subtasks.total,
         },
         "has_issues": task.has_issues,
+        # Scheduling fields
+        "wait": task.wait.isoformat() if task.wait else None,
+        "recur": task.recur,
         # Multi-agent coordination fields
         "parallelizable": task.parallelizable,
         "isolation": task.isolation,
@@ -883,6 +967,10 @@ def is_task_ready(
         True if task is ready, False if blocked
     """
     if task_has_waiting_blocker(task):
+        return False
+
+    # Skip tasks whose wait: date hasn't arrived yet
+    if task_is_waiting_for_date(task):
         return False
 
     # Use requires (canonical field, includes deprecated depends/blocks)
