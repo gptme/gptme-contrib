@@ -7181,6 +7181,23 @@ def test_grade_signals_category_aware_no_interaction():
     assert grade_signals(sigs, category="monitoring") == pytest.approx(0.35)
 
 
+def test_grade_signals_category_aware_no_interaction_with_errors():
+    """Non-commit category with errors still gets the active-but-empty 0.25 floor."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 1,
+        "retry_count": 0,
+        # Keep error_rate at 0.05 so this test isolates the pre-penalty branch
+        # selection instead of the downstream error-rate penalty.
+        "tool_calls": {"Bash": 20},
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+
+
 def test_grade_signals_category_does_not_affect_commit_tiers():
     """Category hint does not change grading when commits are present."""
     sigs = {
