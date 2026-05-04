@@ -694,7 +694,7 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     # Validate wait: field (must be a parseable date)
     if "wait" in metadata:
         wait_val = metadata["wait"]
-        if parse_wait_date(wait_val) is None and not isinstance(wait_val, (date, datetime)):
+        if parse_wait_date(wait_val) is None:
             issues.append("wait must be a date (YYYY-MM-DD) or datetime")
 
     return issues
