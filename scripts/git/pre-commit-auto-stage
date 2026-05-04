@@ -130,7 +130,7 @@ else
   if git diff --quiet; then
     echo -e "${RED}✗ Pre-commit hook failed (no auto-fixable changes)${NC}" >&2
     echo -e "${RED}  See the hook output above for the specific failure and fix.${NC}" >&2
-    echo -e "${RED}  To re-run a single hook directly: prek run --files <path>${NC}" >&2
+    echo -e "${RED}  To re-run a single hook directly: ${PRECOMMIT_CMD} run --files <path>${NC}" >&2
     exit 1
   fi
 
