@@ -245,11 +245,58 @@ def _build_fresh_call_greeting_instructions(
     )
 
 
+def _build_standup_instructions_guidance() -> str:
+    """Return a guidance block prepended to the main instructions for standup calls.
+
+    Unlike ``_build_standup_call_instructions`` (which only controls the model's
+    first-turn initial response), this block lives in the permanent ``instructions``
+    field and guides the model for the ENTIRE conversation. It is the main fix for
+    two UX regressions:
+
+    1. **Subagent deference on brief-answerable questions**: The generic subagent
+       instructions say "use the subagent tool" for recent-activity queries. During
+       a standup call the brief already contains that data — the model should answer
+       from context first, not reach for a live lookup.
+
+    2. **Stale queue references**: The model's session knowledge may include tweet
+       drafts or deferred tasks that have already been resolved between brief
+       generation and the call.
+    """
+    return (
+        "STANDUP CALL GUIDANCE:\n"
+        "- A pre-generated standup brief is loaded in your instructions below. "
+        "The brief contains the latest blockers, active work, and recent highlights "
+        "as of ~30 minutes before the call.\n"
+        "- When Erik asks follow-up questions about items in the brief (including "
+        "'what else happened?', 'tell me more about X', or 'what's blocking Y'), "
+        "answer from the brief content first. Do NOT use the subagent tool for "
+        "routine recap or elaboration on items already covered by the brief.\n"
+        "- The subagent tool is for genuinely novel questions only: a specific PR "
+        "not mentioned, a task status change since the brief was prepared, or "
+        "something the brief is genuinely silent on.\n"
+        "- Queue state (pending tweets, deferred tasks) in the brief may have "
+        "changed since generation. Frame pending items as 'as of ~30 minutes ago' "
+        "rather than definitely pending. Do NOT volunteer stale queue state that "
+        "is not mentioned in the brief.\n"
+    )
+
+
 def _build_standup_call_instructions(brief_text: str) -> str:
     """Build initial response instructions for a standup call with a pre-generated brief.
 
     Guides the voice model to deliver an outbound standup call that sounds
     deliberate, prepared, and confident — not like a pre-recorded message.
+
+    Critical design constraints:
+    - The brief is pre-generated and loaded into context as part of ``instructions``.
+      After delivery, follow-up questions should be answered from the brief content
+      first, NOT by spawning a subagent. This avoids the failure mode where the
+      model says "let me check that" for a routine recap that's already in its own
+      context window.
+    - Stale queue state (pending tweets, deferred tasks) must not be volunteered
+      unless the brief explicitly mentions them. The model should supplement the
+      brief with its own session knowledge only when the brief is silent on a topic
+      AND the knowledge is clearly current.
     """
     return (
         "This is an outbound daily standup call you initiated to Erik. "
@@ -265,7 +312,25 @@ def _build_standup_call_instructions(brief_text: str) -> str:
         "You prepared this brief for a reason; deliver it like you mean it. "
         "If something is blocking progress, say so plainly. "
         "If something went well, acknowledge it.\n\n"
-        "4. **Hand off** — after the brief, say something like "
+        "4. **Handle follow-up questions from the brief** — when Erik asks a "
+        "follow-up like 'what else happened?' or asks for more detail on something "
+        "in the brief, answer from the brief content already loaded in your "
+        "instructions. The brief bullets (blockers, active_tasks, recent_highlights) "
+        "are available. DO NOT use the subagent tool for routine recap or "
+        "elaboration on items already covered by the brief.\n\n"
+        "5. **Subagent is for genuinely novel questions only** — use the subagent "
+        "tool ONLY when Erik asks about something clearly outside the brief: a "
+        "specific PR that was not mentioned, a task status change since the brief "
+        "was prepared, or a question that the brief is genuinely silent on. For "
+        "routine 'tell me more about X' where X is in the brief, answer from the "
+        "brief rather than reaching for a subagent.\n\n"
+        "6. **Stale content awareness** — the brief is generated ~30 minutes before "
+        "the call. Queue state (pending tweets, deferred tasks) may have changed. "
+        "If the brief mentions pending items, frame them as 'as of ~30 minutes "
+        "ago' rather than asserting they're still pending. Do NOT volunteer stale "
+        "queue state that is not in the brief even if your session knowledge "
+        "suggests those items once existed.\n\n"
+        "7. **Hand off** — after the brief, say something like "
         "'That's what I've got — what do you think?' or 'Over to you — any questions?' "
         "Then stop and wait for Erik to respond.\n\n"
         f"--- Standup brief ---\n\n{brief_text}"
@@ -735,7 +800,13 @@ class VoiceServer:
         # standup should always deliver the brief, not silently resume a prior session.
         if standup_brief:
             return SessionBootstrap(
-                instructions=f"{standup_brief}\n\n{instructions}",
+                instructions=(
+                    _build_standup_instructions_guidance()
+                    + "\n\n"
+                    + standup_brief
+                    + "\n\n"
+                    + instructions
+                ),
                 should_greet_first=True,
                 initial_response_instructions=_build_standup_call_instructions(
                     standup_brief
