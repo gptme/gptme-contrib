@@ -59,10 +59,28 @@ claude mcp add codegraph -- gptme-codegraph-mcp
 ### Python API
 
 ```python
-from gptme_codegraph import build_index, impact_radius
+from gptme_codegraph import (
+    build_call_graph,
+    build_cross_file_call_graph,
+    build_index,
+    extract_symbols,
+    impact_radius,
+)
+from pathlib import Path
 
+# Single-file: extract symbols and build call graph
+symbols = extract_symbols(Path("src/my_module.py"))
+_callees_graph, callers_graph = build_call_graph(symbols)
+
+# Compute impact radius: what breaks if you change this symbol?
+radius = impact_radius("my_function", callers_graph, max_depth=5)
+print(radius)  # {"depth_0": {…}, "depth_1": {…}, …}
+
+# Cross-file: build an index over a whole directory
 index = build_index(Path("src/"))
-callers, callees = impact_radius("my_module::MyClass.my_method", index)
+_callees_graph, callers_graph = build_cross_file_call_graph(index, Path("src/"))
+radius = impact_radius("my_module::MyClass.my_method", callers_graph, max_depth=5)
+print(radius)  # {"depth_0": {…}, "depth_1": {…}, …}
 ```
 
 ## Status

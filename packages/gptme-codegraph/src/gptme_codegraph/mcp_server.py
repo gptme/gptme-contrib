@@ -502,11 +502,12 @@ def codegraph_blast(
         if not directory:
             return json.dumps({"error": "Either filepath or directory is required"})
         index = _get_or_build_index(directory)
-        if not index.has(name):
-            return json.dumps({"error": f"Symbol '{name}' not found in index"})
         dir_path = Path(directory)
         callees_graph, _callers_graph = build_cross_file_call_graph(index, dir_path)
-        if name not in callees_graph:
+        resolved = _resolve_graph_key(name, callees_graph)
+        if resolved is None:
+            if not index.has(name):
+                return json.dumps({"error": f"Symbol '{name}' not found in index"})
             files = {e.file for e in index.lookup(name)}
             return json.dumps(
                 {
@@ -518,7 +519,7 @@ def codegraph_blast(
                 },
                 indent=2,
             )
-        radius = blast_radius(name, callees_graph, max_depth=max_depth)
+        radius = blast_radius(resolved, callees_graph, max_depth=max_depth)
         total = sum(len(names) for names in radius.values())
         files = {e.file for e in index.lookup(name)}
         return json.dumps(
@@ -599,11 +600,12 @@ def codegraph_impact(
         if not directory:
             return json.dumps({"error": "Either filepath or directory is required"})
         index = _get_or_build_index(directory)
-        if not index.has(name):
-            return json.dumps({"error": f"Symbol '{name}' not found in index"})
         dir_path = Path(directory)
         _callees_graph, callers_graph = build_cross_file_call_graph(index, dir_path)
-        if name not in callers_graph:
+        resolved = _resolve_graph_key(name, callers_graph)
+        if resolved is None:
+            if not index.has(name):
+                return json.dumps({"error": f"Symbol '{name}' not found in index"})
             files = {e.file for e in index.lookup(name)}
             return json.dumps(
                 {
@@ -615,7 +617,7 @@ def codegraph_impact(
                 },
                 indent=2,
             )
-        radius = impact_radius(name, callers_graph, max_depth=max_depth)
+        radius = impact_radius(resolved, callers_graph, max_depth=max_depth)
         total = sum(len(names) for names in radius.values())
         files = {e.file for e in index.lookup(name)}
         return json.dumps(
