@@ -19,14 +19,20 @@ def main():
     pass
 
 
-def _backend_option(f):
+def _backend_option(f=None, *, default: str = "gptme", note: str | None = None):
     """Shared --backend option for all commands."""
-    return click.option(
+    backends = list_backends()
+    help_text = f"Execution backend (available: {', '.join(backends)})"
+    if note:
+        help_text = f"{help_text}. {note}"
+
+    option = click.option(
         "--backend",
-        default="gptme",
-        type=click.Choice(list_backends()),
-        help=f"Execution backend (available: {', '.join(list_backends())})",
-    )(f)
+        default=default,
+        type=click.Choice(backends),
+        help=help_text,
+    )
+    return option(f) if f is not None else option
 
 
 @main.command()
@@ -175,15 +181,12 @@ def team(
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
-@click.option(
-    "--backend",
+@_backend_option(
     default="claude-code",
-    type=click.Choice(list_backends()),
-    help=(
-        "Execution backend. Monitoring defaults to claude-code because "
-        "gptme+slow-models is 100% NOOP on monitoring (82/82 sessions "
-        "over 3 days — produces analysis but zero concrete actions). "
-        f"Available: {', '.join(list_backends())}"
+    note=(
+        "Monitoring defaults to claude-code because gptme+slow-models is "
+        "100% NOOP on monitoring (82/82 sessions over 3 days — produces "
+        "analysis but zero concrete actions)"
     ),
 )
 def monitoring(
