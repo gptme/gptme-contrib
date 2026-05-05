@@ -74,7 +74,7 @@ class TestComputeRebalanceHoldSeconds:
 class TestRebalanceStatePersistence:
     def test_save_and_load_roundtrip(self, tmp_path: Path) -> None:
         state_path = tmp_path / "rebalance.json"
-        decision = {
+        decision: dict[str, object] = {
             "switched_to": "alice",
             "switched_from": "bob",
             "reason": "weekly exhausted",

@@ -20,6 +20,7 @@ from gptme_subscription.observation import (
     DEFAULT_REBALANCE_TARGET_UTILIZATION,
     DEFAULT_SOON_TO_EXPIRE_THRESHOLD,
     DEFAULT_UNKNOWN_FALLBACK_PRESSURE,
+    SubscriptionObservation,
     load_sub_observations,
     pressure_from_observation,
     remaining_until_observed_reset,
@@ -132,7 +133,9 @@ def load_rebalance_state(
         raw = state_path.read_text()
         if not raw.strip():
             return None
-        return json.loads(raw)
+        result = json.loads(raw)
+        assert isinstance(result, dict)
+        return result
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -171,7 +174,7 @@ def capacity_aware_fallback_order(
     unknown_pressure: float = DEFAULT_UNKNOWN_FALLBACK_PRESSURE,
     soon_to_expire_threshold: float = DEFAULT_SOON_TO_EXPIRE_THRESHOLD,
     expiring_capacity_credit: float = DEFAULT_EXPIRING_CAPACITY_CREDIT,
-    observations: dict[str, object] | None = None,
+    observations: dict[str, SubscriptionObservation] | None = None,
 ) -> list[str]:
     """Return ``fallback_order`` sorted by pressure, then expiring capacity.
 
