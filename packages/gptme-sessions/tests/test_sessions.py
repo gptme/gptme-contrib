@@ -1493,7 +1493,7 @@ def test_grade_signals_monitoring_no_work_with_errors():
     assert grade_signals(sigs) == pytest.approx(0.15)
     # With monitoring category: neutral 0.35 floor, same error penalty
     # 0.35 - 0.10 = 0.25 — improved from 0.15 without the fix
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.25)
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.25)
     # For monitoring with very low errors (<5%): full neutral 0.35
     sigs_low_err = {
         "git_commits": [],
@@ -1502,7 +1502,7 @@ def test_grade_signals_monitoring_no_work_with_errors():
         "retry_count": 0,
         "tool_calls": {"Bash": 8},
     }
-    assert grade_signals(sigs_low_err, category="monitoring") == pytest.approx(0.35)
+    assert grade_signals(sigs_low_err, category="pm-react") == pytest.approx(0.35)
 
 
 def test_grade_signals_productive():
@@ -7174,7 +7174,7 @@ def test_grade_signals_category_aware_monitoring():
     # Without category: effective_writes=2 < 3 → floor at 0.40
     assert grade_signals(sigs) == pytest.approx(0.40)
     # With monitoring category: any interaction clears 0.55 tier
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.55)
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.55)
 
 
 def test_grade_signals_category_aware_triage():
@@ -7208,7 +7208,7 @@ def test_grade_signals_category_aware_no_interaction():
     # Monitoring sessions that ran tools without errors but found no work are
     # "correctly empty" rather than failed. They get a neutral 0.35 instead
     # of the 0.25 floor to avoid systematic bias in bandit updates.
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.35)
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.35)
 
 
 def test_grade_signals_category_aware_no_interaction_with_errors():
@@ -7230,7 +7230,7 @@ def test_grade_signals_category_aware_no_interaction_with_errors():
         "prs_submitted": [],
         "issues_closed": 0,
     }
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.35)
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.35)
 
 
 def test_grade_signals_category_does_not_affect_commit_tiers():
@@ -7247,7 +7247,7 @@ def test_grade_signals_category_does_not_affect_commit_tiers():
     }
     # effective_units=1 < 1.5 → 0.60 regardless of category
     assert grade_signals(sigs) == pytest.approx(0.60)
-    assert grade_signals(sigs, category="monitoring") == pytest.approx(0.60)
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.60)
 
 
 def test_grade_signals_backward_compat():
@@ -7273,7 +7273,7 @@ def test_infer_category_monitoring_fallback():
         "file_writes": [],
         "gh_interactions": 3,
     }
-    assert infer_category(sigs) == "monitoring"
+    assert infer_category(sigs) == "pm-react"
 
 
 def test_infer_category_monitoring_not_triggered_with_commits():
@@ -7312,9 +7312,9 @@ def test_grade_signals_monitoring_via_infer_category():
     }
     # Without wiring: category=None → effective_writes=2 < 3 → 0.40
     assert grade_signals(sigs, category=None) == pytest.approx(0.40)
-    # With infer_category providing "monitoring" → relaxed threshold → 0.55
+    # With infer_category providing "pm-react" → relaxed threshold → 0.55
     category = infer_category(sigs)
-    assert category == "monitoring"
+    assert category == "pm-react"
     assert grade_signals(sigs, category=category) == pytest.approx(0.55)
 
 

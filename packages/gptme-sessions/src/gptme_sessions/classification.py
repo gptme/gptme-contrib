@@ -345,9 +345,10 @@ DEFAULT_CATEGORIES: list[Category] = [
         ],
     ),
     Category(
-        name="monitoring",
-        description="PR monitoring, notification handling, CI checks",
+        name="pm-react",
+        description="Project-monitoring / notification reaction (was 'monitoring')",
         title_keywords=[
+            "pm-react",
             "monitoring",
             "notification",
             "pr review",
@@ -359,12 +360,14 @@ DEFAULT_CATEGORIES: list[Category] = [
             "prs reviewed",
             "ci checked",
             "monitoring complete",
+            "pm-react",
         ],
         execution_keywords=[
             "checked notifications",
             "reviewed pr",
             "ci status",
             "monitoring run",
+            "pm-react",
         ],
         deliverable_keywords=[
             "review comment",

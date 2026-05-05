@@ -411,7 +411,7 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
     # Categories where gh_interactions and file_writes are the PRIMARY output,
     # not commits. For these, a single useful interaction is sufficient for the
     # 0.55 "active" tier — don't floor-grade productive review/triage sessions.
-    _NON_COMMIT_CATS = {"monitoring", "research", "triage", "social", "self-review"}
+    _NON_COMMIT_CATS = {"pm-react", "research", "triage", "social", "self-review"}
     is_non_commit_category = category in _NON_COMMIT_CATS
 
     if effective_units == 0 and writes == 0 and gh_interactions == 0:
@@ -1542,7 +1542,7 @@ def infer_category(signals: dict) -> str | None:
     # that post one incidental comment while doing something else.
     # Checked before vote count so commit-free review sessions aren't left uncategorised.
     if signals.get("gh_interactions", 0) >= 2 and not commits and not file_writes:
-        return "monitoring"
+        return "pm-react"
 
     if not votes:
         return None

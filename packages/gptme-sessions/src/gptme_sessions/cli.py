@@ -2102,10 +2102,10 @@ def classify_stats(
         if len(recent_cats) >= 3 and len(set(recent_cats[-3:])) == 1:
             alerts.append(f"3+ consecutive '{recent_cats[-1]}' sessions — consider diversifying")
 
-        non_code = sum(1 for c in recent_cats if c in ("triage", "monitoring"))
+        non_code = sum(1 for c in recent_cats if c in ("triage", "pm-react"))
         if non_code >= 3:
             alerts.append(
-                f"{non_code}/{diversity_window} sessions were triage/monitoring — pivot to code or ideas"
+                f"{non_code}/{diversity_window} sessions were triage/pm-react — pivot to code or ideas"
             )
 
         code_sessions = sum(1 for c in recent_cats if c == "code")
