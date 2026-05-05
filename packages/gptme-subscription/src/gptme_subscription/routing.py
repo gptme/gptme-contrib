@@ -10,17 +10,16 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from gptme_subscription.observation import (
-    DEFAULT_REBALANCE_MIN_HOLD,
-    DEFAULT_REBALANCE_MAX_HOLD,
-    DEFAULT_REBALANCE_TARGET_UTILIZATION,
-    DEFAULT_UNKNOWN_FALLBACK_PRESSURE,
-    DEFAULT_SOON_TO_EXPIRE_THRESHOLD,
-    DEFAULT_EXPIRING_CAPACITY_CREDIT,
-    DEFAULT_CAPACITY_REBALANCE_MIN_PRESSURE,
     DEFAULT_CAPACITY_REBALANCE_MARGIN,
+    DEFAULT_CAPACITY_REBALANCE_MIN_PRESSURE,
+    DEFAULT_EXPIRING_CAPACITY_CREDIT,
+    DEFAULT_REBALANCE_MAX_HOLD,
+    DEFAULT_REBALANCE_MIN_HOLD,
+    DEFAULT_REBALANCE_TARGET_UTILIZATION,
+    DEFAULT_SOON_TO_EXPIRE_THRESHOLD,
+    DEFAULT_UNKNOWN_FALLBACK_PRESSURE,
     load_sub_observations,
     pressure_from_observation,
     remaining_until_observed_reset,
@@ -93,6 +92,7 @@ def compute_rebalance_hold_seconds(
     min_hold: int = DEFAULT_REBALANCE_MIN_HOLD,
     max_hold: int = DEFAULT_REBALANCE_MAX_HOLD,
     target_utilization: float = DEFAULT_REBALANCE_TARGET_UTILIZATION,
+    window_seconds: int = 7 * 24 * 3600,
 ) -> int:
     """Estimate how long to rest a subscription until pacing catches up.
 
@@ -101,16 +101,14 @@ def compute_rebalance_hold_seconds(
         min_hold: Minimum hold time in seconds.
         max_hold: Maximum hold time in seconds.
         target_utilization: Target utilization fraction.
+        window_seconds: Duration of the quota window (default 7 days).
 
     Returns:
         Hold duration in seconds, clamped to ``[min_hold, max_hold]``.
     """
     if pace_overage <= 0:
         return min_hold
-    weekly_window_seconds = 7 * 24 * 3600
-    catch_up_seconds = int(
-        pace_overage * weekly_window_seconds / target_utilization
-    )
+    catch_up_seconds = int(pace_overage * window_seconds / target_utilization)
     return max(min_hold, min(max_hold, catch_up_seconds))
 
 
@@ -173,6 +171,7 @@ def capacity_aware_fallback_order(
     unknown_pressure: float = DEFAULT_UNKNOWN_FALLBACK_PRESSURE,
     soon_to_expire_threshold: float = DEFAULT_SOON_TO_EXPIRE_THRESHOLD,
     expiring_capacity_credit: float = DEFAULT_EXPIRING_CAPACITY_CREDIT,
+    observations: dict[str, object] | None = None,
 ) -> list[str]:
     """Return ``fallback_order`` sorted by pressure, then expiring capacity.
 
@@ -188,12 +187,14 @@ def capacity_aware_fallback_order(
         unknown_pressure: Pressure score assigned when no observation exists.
         soon_to_expire_threshold: Seconds remaining for expiry credit to apply.
         expiring_capacity_credit: Max credit applied to expiring capacity.
+        observations: Pre-loaded observations dict. If None, loads from obs_dir.
 
     Returns:
         Reordered fallback list (ascending pressure, then expiring capacity).
     """
     current_time = now or datetime.now(timezone.utc)
-    observations = load_sub_observations(obs_dir)
+    if observations is None:
+        observations = load_sub_observations(obs_dir)
 
     def score(sub: str) -> tuple[float, float]:
         entry = observations.get(sub)
@@ -251,7 +252,7 @@ def best_lower_pressure_fallback(
     observations = load_sub_observations(obs_dir)
     best: tuple[str, float] | None = None
     for sub in capacity_aware_fallback_order(
-        fallback_order, obs_dir, now=current_time
+        fallback_order, obs_dir, now=current_time, observations=observations
     ):
         if sub == active:
             continue

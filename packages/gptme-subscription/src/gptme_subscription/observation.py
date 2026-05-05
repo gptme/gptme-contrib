@@ -10,7 +10,6 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -157,6 +156,10 @@ def remaining_until_observed_reset(
         return None
     try:
         reset_time = datetime.fromisoformat(reset_str)
+        # Normalize naive timestamps to UTC to avoid TypeError when
+        # subtracting from timezone-aware current_time
+        if reset_time.tzinfo is None:
+            reset_time = reset_time.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
     next_reset = reset_time + timedelta(seconds=window_seconds)
@@ -229,18 +232,18 @@ def subscription_pressure_from_usage(
     """
     components: list[float] = []
     weekly = usage.get("seven_day", {}).get("utilization")
-    if isinstance(weekly, (int, float)):
+    if isinstance(weekly, int | float):
         components.append(float(weekly))
 
     sonnet_weekly = usage.get("seven_day_sonnet", {}).get("utilization")
-    if isinstance(sonnet_weekly, (int, float)):
+    if isinstance(sonnet_weekly, int | float):
         components.append(float(sonnet_weekly))
 
     five_hour = usage.get("five_hour", {}).get("utilization")
     five_hour_resets = usage.get("five_hour", {}).get("resets_in_seconds", 0)
     if (
-        isinstance(five_hour, (int, float))
-        and isinstance(five_hour_resets, (int, float))
+        isinstance(five_hour, int | float)
+        and isinstance(five_hour_resets, int | float)
         and five_hour_resets > short_reset_window
     ):
         components.append(float(five_hour))

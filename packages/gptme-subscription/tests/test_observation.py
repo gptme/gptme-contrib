@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from gptme_subscription.observation import (
     format_duration,
     is_subscription_blocked,
@@ -19,8 +17,8 @@ class TestFormatDuration:
         assert format_duration(-100) == "0m"
 
     def test_minutes_only(self) -> None:
-        assert format_duration(1800) == "30m"   # 30 * 60
-        assert format_duration(3540) == "59m"   # 59 * 60
+        assert format_duration(1800) == "30m"  # 30 * 60
+        assert format_duration(3540) == "59m"  # 59 * 60
 
     def test_hours_only(self) -> None:
         assert format_duration(3600) == "1h"

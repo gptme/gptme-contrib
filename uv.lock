@@ -42,8 +42,6 @@ members = [
     "gptme-wrapped",
     "gptme-youtube",
     "gptodo",
-    "subscription-management",
-    "subscription-manager",
 ]
 
 [[package]]
@@ -4669,42 +4667,6 @@ name = "strict-rfc3339"
 version = "0.7"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/56/e4/879ef1dbd6ddea1c77c0078cd59b503368b0456bcca7d063a870ca2119d3/strict-rfc3339-0.7.tar.gz", hash = "sha256:5cad17bedfc3af57b399db0fed32771f18fc54bbd917e85546088607ac5e1277", size = 17552, upload-time = "2016-04-24T04:24:04.403Z" }
-
-[[package]]
-name = "subscription-management"
-version = "0.1.0"
-source = { editable = "packages/subscription-management" }
-
-[package.optional-dependencies]
-test = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
-]
-provides-extras = ["test"]
-
-[[package]]
-name = "subscription-manager"
-version = "0.1.0"
-source = { editable = "packages/subscription-manager" }
-
-[package.optional-dependencies]
-test = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
-]
-provides-extras = ["test"]
 
 [[package]]
 name = "sympy"

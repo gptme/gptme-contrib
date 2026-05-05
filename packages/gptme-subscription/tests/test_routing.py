@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from gptme_subscription.routing import (
-    compute_window_pacing,
+    clear_rebalance_state,
     compute_rebalance_hold_seconds,
+    compute_window_pacing,
     load_rebalance_state,
     save_rebalance_state,
-    clear_rebalance_state,
 )
-
 
 WEEK = 7 * 24 * 3600
 
