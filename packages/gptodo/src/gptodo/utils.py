@@ -349,7 +349,16 @@ def task_has_waiting_blocker(task: TaskInfo) -> bool:
     state = normalize_state(task.state or "", warn=False) if task.state else ""
     if state == "waiting":
         return True
-    return bool(task.metadata.get("waiting_for"))
+    if task.metadata.get("waiting_for"):
+        return True
+    # Simple wait_until: "YYYY-MM-DD" or ISO timestamp — blocks until that time passes
+    wait_until = task.metadata.get("wait_until")
+    if wait_until:
+        from gptodo.waiting import check_time
+
+        resolved, _ = check_time(str(wait_until))
+        return not resolved
+    return False
 
 
 def find_repo_root(start_path: Path) -> Path:
@@ -1166,6 +1175,9 @@ def get_blocking_reasons(
         return []
 
     if task_has_waiting_blocker(task):
+        wait_until = task.metadata.get("wait_until")
+        if wait_until:
+            return [f"Wait until: {wait_until}"]
         waiting_for = task.metadata.get("waiting_for")
         if waiting_for:
             return [f"Waiting on: {waiting_for}"]
@@ -1275,6 +1287,15 @@ class StateChecker:
             elif not task.state:
                 results["untracked"].append(task)
             else:
+                # Route wait_until tasks to "waiting" bucket (hides from --compact)
+                wait_until = task.metadata.get("wait_until")
+                if wait_until and "waiting" in results:
+                    from gptodo.waiting import check_time
+
+                    resolved, _ = check_time(str(wait_until))
+                    if not resolved:
+                        results["waiting"].append(task)
+                        continue
                 results[task.state].append(task)
 
         return results
