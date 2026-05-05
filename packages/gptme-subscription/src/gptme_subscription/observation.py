@@ -92,9 +92,12 @@ def record_sub_reset_time(
     obs_file = obs_dir / f"{sub}.json"
     entry: dict[str, dict[str, str]] = {}
     if obs_file.exists():
-        raw = obs_file.read_text()
-        if raw.strip():
-            entry = json.loads(raw)
+        try:
+            raw = obs_file.read_text()
+            if raw.strip():
+                entry = json.loads(raw)
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt file — start fresh
     entry.setdefault("track_resets", {})[metric_key] = (
         timestamp or datetime.now(timezone.utc).isoformat()
     )
@@ -220,6 +223,7 @@ def subscription_pressure_from_usage(
     usage: dict,
     weekly_exhausted: float = DEFAULT_WEEKLY_EXHAUSTED,
     five_hour_threshold: float = DEFAULT_FIVE_HOUR_EXHAUSTED,
+    sonnet_weekly_exhausted: float = DEFAULT_SONNET_WEEKLY_EXHAUSTED,
     short_reset_window: int = 7200,
 ) -> float | None:
     """Return a compact pressure score for a subscription usage snapshot.
@@ -233,6 +237,9 @@ def subscription_pressure_from_usage(
         usage: Usage snapshot dict, typically from ``check-quota`` API.
         weekly_exhausted: Utilization level treated as exhausted (0-1).
         five_hour_threshold: 5h utilization level treated as exhausted (0-1).
+        sonnet_weekly_exhausted: Sonnet-weekly utilization level treated as
+            exhausted (0-1). Separate from ``weekly_exhausted`` because Sonnet
+            has a lower per-project cap (default 0.85 vs 0.95).
         short_reset_window: Min resets_in_seconds for 5h to count (avoids
             short spikes driving multi-day routing).
 
@@ -246,7 +253,9 @@ def subscription_pressure_from_usage(
 
     sonnet_weekly = usage.get("seven_day_sonnet", {}).get("utilization")
     if isinstance(sonnet_weekly, int | float):
-        components.append(_pressure_component(float(sonnet_weekly), weekly_exhausted))
+        components.append(
+            _pressure_component(float(sonnet_weekly), sonnet_weekly_exhausted)
+        )
 
     five_hour = usage.get("five_hour", {}).get("utilization")
     five_hour_resets = usage.get("five_hour", {}).get("resets_in_seconds", 0)

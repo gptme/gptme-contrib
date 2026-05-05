@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from gptme_subscription.observation import (
     format_duration,
     is_subscription_blocked,
+    record_sub_reset_time,
     subscription_pressure_from_usage,
 )
 
@@ -149,3 +152,33 @@ class TestSubscriptionPressureFromUsage:
         usage: dict = {}
         score = subscription_pressure_from_usage(usage)
         assert score is None
+
+    def test_sonnet_weekly_uses_separate_threshold(self) -> None:
+        # Sonnet at 90% — above sonnet_weekly_exhausted (0.85) but below weekly_exhausted (0.95).
+        # Should report pressure=1.0, not 0.9 (regression: was using wrong threshold).
+        usage = {"seven_day_sonnet": {"utilization": 0.90}}
+        score = subscription_pressure_from_usage(usage)
+        assert score == 1.0
+
+    def test_sonnet_weekly_threshold_override(self) -> None:
+        usage = {"seven_day_sonnet": {"utilization": 0.75}}
+        score = subscription_pressure_from_usage(usage, sonnet_weekly_exhausted=0.75)
+        assert score == 1.0
+
+
+class TestRecordSubResetTime:
+    def test_writes_observation(self, tmp_path: Path) -> None:
+        record_sub_reset_time(tmp_path, "bob", "seven_day", "2026-01-01T00:00:00+00:00")
+        data = (tmp_path / "bob.json").read_text()
+        assert "seven_day" in data
+
+    def test_corrupt_file_does_not_raise(self, tmp_path: Path) -> None:
+        obs_file = tmp_path / "bob.json"
+        obs_file.write_text("CORRUPT {{{")
+        # Should not raise — corrupt file is silently reset
+        record_sub_reset_time(tmp_path, "bob", "seven_day")
+        import json
+
+        data = json.loads(obs_file.read_text())
+        assert "track_resets" in data
+        assert "seven_day" in data["track_resets"]
