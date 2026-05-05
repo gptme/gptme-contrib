@@ -132,6 +132,19 @@ class TestSubscriptionPressureFromUsage:
         assert score is not None
         assert score == 0.9  # max of 0.3 and 0.9
 
+    def test_weekly_threshold_override_treats_value_as_exhausted(self) -> None:
+        usage = {"seven_day": {"utilization": 0.8}}
+        score = subscription_pressure_from_usage(usage, weekly_exhausted=0.8)
+        assert score == 1.0
+
+    def test_5h_threshold_override_treats_value_as_exhausted(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.1},
+            "five_hour": {"utilization": 0.7, "resets_in_seconds": 7201},
+        }
+        score = subscription_pressure_from_usage(usage, five_hour_threshold=0.7)
+        assert score == 1.0
+
     def test_no_usage_data_returns_none(self) -> None:
         usage: dict = {}
         score = subscription_pressure_from_usage(usage)

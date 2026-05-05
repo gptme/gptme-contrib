@@ -7,6 +7,7 @@ and how to manage persistent rebalance state.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,22 +134,23 @@ def load_rebalance_state(
         raw = state_path.read_text()
         if not raw.strip():
             return None
-        result = json.loads(raw)
-        assert isinstance(result, dict)
-        return result
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        return {str(key): value for key, value in data.items()}
     except (json.JSONDecodeError, OSError):
         return None
 
 
 def save_rebalance_state(
     state_path: Path,
-    decision: dict[str, object],
+    decision: Mapping[str, object],
 ) -> None:
     """Persist a rebalance decision to a JSON file.
 
     Args:
         state_path: Path to write the state JSON file.
-        decision: Dict with rebalance decision fields.
+        decision: Mapping with rebalance decision fields.
     """
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(decision, indent=2) + "\n")
@@ -174,7 +176,7 @@ def capacity_aware_fallback_order(
     unknown_pressure: float = DEFAULT_UNKNOWN_FALLBACK_PRESSURE,
     soon_to_expire_threshold: float = DEFAULT_SOON_TO_EXPIRE_THRESHOLD,
     expiring_capacity_credit: float = DEFAULT_EXPIRING_CAPACITY_CREDIT,
-    observations: dict[str, SubscriptionObservation] | None = None,
+    observations: Mapping[str, SubscriptionObservation] | None = None,
 ) -> list[str]:
     """Return ``fallback_order`` sorted by pressure, then expiring capacity.
 

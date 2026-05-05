@@ -207,10 +207,19 @@ def pressure_from_observation(
 # --- Pressure scoring ---
 
 
+def _pressure_component(utilization: float, exhausted_threshold: float) -> float:
+    """Return a 0-1 pressure component, treating threshold-crossing as exhausted."""
+    value = max(0.0, min(1.0, utilization))
+    threshold = max(0.0, min(1.0, exhausted_threshold))
+    if threshold <= 0 or value >= threshold:
+        return 1.0
+    return value
+
+
 def subscription_pressure_from_usage(
     usage: dict,
     weekly_exhausted: float = DEFAULT_WEEKLY_EXHAUSTED,
-    five_hour_threshold: float = 0.95,
+    five_hour_threshold: float = DEFAULT_FIVE_HOUR_EXHAUSTED,
     short_reset_window: int = 7200,
 ) -> float | None:
     """Return a compact pressure score for a subscription usage snapshot.
@@ -223,7 +232,7 @@ def subscription_pressure_from_usage(
     Args:
         usage: Usage snapshot dict, typically from ``check-quota`` API.
         weekly_exhausted: Utilization level treated as exhausted (0-1).
-        five_hour_threshold: Max utilization for 5h to count toward pressure.
+        five_hour_threshold: 5h utilization level treated as exhausted (0-1).
         short_reset_window: Min resets_in_seconds for 5h to count (avoids
             short spikes driving multi-day routing).
 
@@ -233,11 +242,11 @@ def subscription_pressure_from_usage(
     components: list[float] = []
     weekly = usage.get("seven_day", {}).get("utilization")
     if isinstance(weekly, int | float):
-        components.append(float(weekly))
+        components.append(_pressure_component(float(weekly), weekly_exhausted))
 
     sonnet_weekly = usage.get("seven_day_sonnet", {}).get("utilization")
     if isinstance(sonnet_weekly, int | float):
-        components.append(float(sonnet_weekly))
+        components.append(_pressure_component(float(sonnet_weekly), weekly_exhausted))
 
     five_hour = usage.get("five_hour", {}).get("utilization")
     five_hour_resets = usage.get("five_hour", {}).get("resets_in_seconds", 0)
@@ -246,7 +255,7 @@ def subscription_pressure_from_usage(
         and isinstance(five_hour_resets, int | float)
         and five_hour_resets > short_reset_window
     ):
-        components.append(float(five_hour))
+        components.append(_pressure_component(float(five_hour), five_hour_threshold))
 
     if not components:
         return None
