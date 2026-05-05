@@ -33,6 +33,7 @@ members = [
     "gptme-retrieval",
     "gptme-runloops",
     "gptme-sessions",
+    "gptme-subscription",
     "gptme-tts",
     "gptme-user-memories",
     "gptme-voice",
@@ -1761,6 +1762,24 @@ requires-dist = [
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.0" },
 ]
 provides-extras = ["dev", "test"]
+
+[[package]]
+name = "gptme-subscription"
+version = "0.1.0"
+source = { editable = "packages/gptme-subscription" }
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "gptme-tts"
