@@ -1,0 +1,140 @@
+"""Tests for gptme_subscription.observation."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from gptme_subscription.observation import (
+    format_duration,
+    is_subscription_blocked,
+    subscription_pressure_from_usage,
+)
+
+
+class TestFormatDuration:
+    def test_zero(self) -> None:
+        assert format_duration(0) == "0m"
+
+    def test_negative(self) -> None:
+        assert format_duration(-100) == "0m"
+
+    def test_minutes_only(self) -> None:
+        assert format_duration(1800) == "30m"   # 30 * 60
+        assert format_duration(3540) == "59m"   # 59 * 60
+
+    def test_hours_only(self) -> None:
+        assert format_duration(3600) == "1h"
+        assert format_duration(7200) == "2h"
+
+    def test_hours_and_minutes(self) -> None:
+        assert format_duration(3661) == "1h01m"
+        assert format_duration(7260) == "2h01m"
+
+
+class TestIsSubscriptionBlocked:
+    def test_healthy_not_blocked(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.3},
+            "five_hour": {"utilization": 0.1},
+            "seven_day_sonnet": {"utilization": 0.2},
+        }
+        blocked, reason = is_subscription_blocked(usage)
+        assert not blocked
+        assert "healthy" in reason
+
+    def test_opus_exhausted_blocked(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.99},
+            "five_hour": {"utilization": 0.99},
+            "seven_day_sonnet": {"utilization": 0.2},
+        }
+        blocked, reason = is_subscription_blocked(usage)
+        assert blocked
+        assert "Opus" in reason
+
+    def test_weekly_high_5h_low_not_opus_blocked(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.99},
+            "five_hour": {"utilization": 0.3},
+            "seven_day_sonnet": {"utilization": 0.2},
+        }
+        blocked, _reason = is_subscription_blocked(usage)
+        assert not blocked
+
+    def test_sonnet_exhausted_blocked(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.3},
+            "five_hour": {"utilization": 0.1},
+            "seven_day_sonnet": {"utilization": 0.99},
+        }
+        blocked, reason = is_subscription_blocked(usage)
+        assert blocked
+        assert "Sonnet" in reason
+
+    def test_sonnet_missing_weekly_high_conservative_block(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.99},
+            "five_hour": {"utilization": 0.99},
+        }
+        blocked, reason = is_subscription_blocked(usage)
+        assert blocked
+        assert "Sonnet data missing" in reason
+
+    def test_sonnet_missing_weekly_low_not_blocked(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.3},
+            "five_hour": {"utilization": 0.1},
+        }
+        blocked, _reason = is_subscription_blocked(usage)
+        assert not blocked
+
+    def test_both_opus_and_sonnet_exhausted(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.99},
+            "five_hour": {"utilization": 0.99},
+            "seven_day_sonnet": {"utilization": 0.99},
+        }
+        blocked, reason = is_subscription_blocked(usage)
+        assert blocked
+        assert "Opus" in reason
+        assert "Sonnet" in reason
+
+
+class TestSubscriptionPressureFromUsage:
+    def test_weekly_only(self) -> None:
+        usage = {"seven_day": {"utilization": 0.75}}
+        score = subscription_pressure_from_usage(usage)
+        assert score is not None
+        assert score == 0.75
+
+    def test_weekly_and_sonnet(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.6},
+            "seven_day_sonnet": {"utilization": 0.8},
+        }
+        score = subscription_pressure_from_usage(usage)
+        assert score is not None
+        assert score == 0.8  # max of components
+
+    def test_5h_within_short_reset_window_excluded(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.3},
+            "five_hour": {"utilization": 0.9, "resets_in_seconds": 600},
+        }
+        score = subscription_pressure_from_usage(usage)
+        assert score is not None
+        assert score == 0.3  # 5h excluded, only weekly counts
+
+    def test_5h_past_short_reset_window_included(self) -> None:
+        usage = {
+            "seven_day": {"utilization": 0.3},
+            "five_hour": {"utilization": 0.9, "resets_in_seconds": 7201},
+        }
+        score = subscription_pressure_from_usage(usage)
+        assert score is not None
+        assert score == 0.9  # max of 0.3 and 0.9
+
+    def test_no_usage_data_returns_none(self) -> None:
+        usage: dict = {}
+        score = subscription_pressure_from_usage(usage)
+        assert score is None
