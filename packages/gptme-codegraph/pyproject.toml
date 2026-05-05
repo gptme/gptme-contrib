@@ -1,0 +1,34 @@
+[project]
+name = "gptme-codegraph"
+version = "0.1.0"
+description = "Structural code retrieval for gptme via tree-sitter (callers, callees, blast radius)"
+readme = "README.md"
+authors = [
+    { name = "Erik Bjäreholt", email = "erik@bjareho.lt" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+treesitter = [
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+dev = [
+    "mypy>=1.0.0",
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+gptme-codegraph = "gptme_codegraph.core:main"
+gptme-codegraph-mcp = "gptme_codegraph.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_codegraph"]
