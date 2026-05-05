@@ -85,6 +85,30 @@ class TestCLIIntegration:
         assert result.returncode == 0
         assert "monitoring" in result.stdout.lower()
 
+    def test_cli_backend_defaults(self):
+        """Test command-specific backend defaults."""
+        from gptme_runloops.cli import autonomous, email, monitoring, team
+
+        commands = {
+            "autonomous": autonomous,
+            "email": email,
+            "team": team,
+            "monitoring": monitoring,
+        }
+        defaults = {
+            name: next(
+                param.default for param in command.params if param.name == "backend"
+            )
+            for name, command in commands.items()
+        }
+
+        assert defaults == {
+            "autonomous": "gptme",
+            "email": "gptme",
+            "team": "gptme",
+            "monitoring": "claude-code",
+        }
+
     def test_email_run_direct_instantiation(self, test_workspace: Path):
         """Test EmailRun class can be instantiated and configured."""
         from gptme_runloops.email import EmailRun

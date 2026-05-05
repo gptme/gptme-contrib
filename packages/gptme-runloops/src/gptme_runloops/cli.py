@@ -19,14 +19,20 @@ def main():
     pass
 
 
-def _backend_option(f):
+def _backend_option(f=None, *, default: str = "gptme", note: str | None = None):
     """Shared --backend option for all commands."""
-    return click.option(
+    backends = list_backends()
+    help_text = f"Execution backend (available: {', '.join(backends)})"
+    if note:
+        help_text = f"{help_text}. {note}"
+
+    option = click.option(
         "--backend",
-        default="gptme",
-        type=click.Choice(list_backends()),
-        help=f"Execution backend (available: {', '.join(list_backends())})",
-    )(f)
+        default=default,
+        type=click.Choice(backends),
+        help=help_text,
+    )
+    return option(f) if f is not None else option
 
 
 @main.command()
@@ -175,7 +181,14 @@ def team(
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
-@_backend_option
+@_backend_option(
+    default="claude-code",
+    note=(
+        "Monitoring defaults to claude-code because gptme+slow-models is "
+        "100% NOOP on monitoring (82/82 sessions over 3 days — produces "
+        "analysis but zero concrete actions)"
+    ),
+)
 def monitoring(
     workspace: Path,
     orgs: tuple[str, ...],
@@ -186,7 +199,14 @@ def monitoring(
     tool_format: str | None,
     backend: str,
 ):
-    """Run project monitoring loop."""
+    """Run project monitoring loop.
+
+    Monitoring defaults to claude-code (not gptme) because the gptme
+    harness with slower/larger models historically produced 100% NOOP
+    sessions — verbose analysis output with zero commits or tool actions.
+    gptme remains available as an explicit --backend gptme override for
+    testing or quota-diversion scenarios.
+    """
     executor = get_executor(backend)
     run = ProjectMonitoringRun(
         workspace,
