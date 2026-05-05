@@ -13,8 +13,9 @@ remain the primary dispatch path (see project-monitoring-upstream-overhaul).
 from __future__ import annotations
 
 import json
+import logging
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +37,8 @@ DEFAULT_SLOT_CAP = 3
 
 # Default number of fast-lane burst slots above cap
 DEFAULT_FAST_BURST_ALLOWANCE = 1
+
+logger = logging.getLogger(__name__)
 
 
 # --- Data classes ---
@@ -131,7 +134,7 @@ _ISSUE_REF_RE = re.compile(r"^[^/]+/[^#]+#\d+$")
 def derive_slot_key(repo: str, number: int | None, types: list[str]) -> str:
     """Derive a slot key from a work item.
 
-    Matches the bash `derive_slot_key()` logic:
+    Matches the bash ``derive_slot_key()`` logic:
       - master_ci_failure types → ``{repo}#master-ci``
       - others → ``{repo}#{number}``
     """
@@ -208,9 +211,10 @@ class DispatchLedger:
             self.path.unlink()
 
 
-# --- SlotManager ---
+# --- LaneDispatcher ---
 
 
+@dataclass
 class SlotManager:
     """Manages concurrent slot capacity and fast-lane burst allowances.
 
@@ -333,3 +337,142 @@ def _default_slot_is_busy(unit: str) -> bool:
     )
     state = result.stdout.strip()
     return state in {"active", "activating", "reloading", "deactivating"}
+
+
+# ---------------------------------------------------------------------------
+# Orchestration: dispatch_grouped_items
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DispatchResult:
+    """Summary of one dispatch_grouped_items() cycle."""
+
+    launched: int = 0
+    skipped_active: int = 0
+    skipped_cap: int = 0
+    failed: int = 0
+    fallback_items: list[SlotItem] = field(default_factory=list)
+
+
+def _sanitize_unit_name(key: str) -> str:
+    """Translate a slot key into a systemd-safe unit name fragment."""
+    return key.translate(str.maketrans("/#:", "---")).replace(" ", "-")
+
+
+def dispatch_grouped_items(
+    items: list[SlotItem],
+    unit_prefix: str = "bob-pm",
+    slot_cap: int = DEFAULT_SLOT_CAP,
+    fast_burst_allowance: int = DEFAULT_FAST_BURST_ALLOWANCE,
+    ledger: DispatchLedger | None = None,
+) -> DispatchResult:
+    """Orchestrate slot dispatch for a list of grouped work items.
+
+    This is the pure-Python equivalent of the bash ``dispatch_items()``
+    function.  Instead of launching systemd transient units, it simulates
+    the whole dispatch cycle in-process by checking a mock ``SlotManager``
+    that reads from an in-memory registry.  Callers can use the result to
+    decide which items should be dispatched externally, fall back to inline
+    processing, or just log the plan.
+
+    Parameters
+    ----------
+    items
+        Grouped ``SlotItem`` instances to dispatch.
+    unit_prefix
+        Prefix for generated unit names.
+    slot_cap
+        Maximum concurrent dispatch slots.
+    fast_burst_allowance
+        Extra slots above *slot_cap* reserved for fast-lane items when no
+        fast worker is active.
+    ledger
+        Optional ``DispatchLedger`` for telemetry recording.
+
+    Returns
+    -------
+    DispatchResult
+        Summary of what was launched, skipped, or set aside as fallback.
+    """
+    # In-memory slot tracker for this dispatch cycle.
+    _active: dict[str, str] = {}  # slot_key -> unit_name
+
+    def _is_busy(key: str) -> bool:
+        return key in _active
+
+    def _count_running() -> int:
+        return len(_active)
+
+    def _count_running_lane(lane: str) -> int:
+        # The in-memory tracker doesn't track lane by default, but we can
+        # approximate by checking if any fast items are still active.
+        # For accurate lane tracking the caller should inject real callbacks.
+        return 0  # conservative: assume no fast items running
+
+    mgr = SlotManager(
+        slot_cap=slot_cap,
+        fast_burst_allowance=fast_burst_allowance,
+        count_running=_count_running,
+        count_running_lane=_count_running_lane,
+        is_busy=_is_busy,
+    )
+
+    fast, slow = partition_items(items)
+    result = DispatchResult()
+
+    for lane, lane_items in [("fast", fast), ("slow", slow)]:
+        for item in lane_items:
+            key = derive_slot_key(item.repo, item.number, item.types)
+
+            if _is_busy(key):
+                result.skipped_active += 1
+                if ledger:
+                    ledger.append(
+                        LedgerEntry.now(
+                            phase="skipped_active",
+                            lane=lane,
+                            dispatch_id=key,
+                            unit_name=f"{unit_prefix}-{_sanitize_unit_name(key)}",
+                            item_refs=[key],
+                            note=f"slot_already_active key={key}",
+                        )
+                    )
+                continue
+
+            if not mgr.slot_is_available(lane):
+                result.skipped_cap += 1
+                result.fallback_items.append(item)
+                if ledger:
+                    ledger.append(
+                        LedgerEntry.now(
+                            phase="skipped_cap",
+                            lane=lane,
+                            dispatch_id=key,
+                            unit_name=f"{unit_prefix}-{_sanitize_unit_name(key)}",
+                            item_refs=[key],
+                            running_units=_count_running(),
+                            cap=slot_cap,
+                            note=f"global_slot_cap_reached key={key}",
+                        )
+                    )
+                continue
+
+            # Slot available — register and record
+            _active[key] = f"{unit_prefix}-{_sanitize_unit_name(key)}"
+            result.launched += 1
+            if ledger:
+                ledger.append(
+                    LedgerEntry.now(
+                        phase="launched",
+                        lane=lane,
+                        dispatch_id=key,
+                        unit_name=_active[key],
+                        item_refs=[key],
+                        running_units=_count_running(),
+                        cap=slot_cap,
+                        note=f"transient_launch key={key}",
+                    )
+                )
+
+    return result
