@@ -19,7 +19,8 @@
     "packages/gptme-contrib-lib/**",
     "packages/lib/src/lib/**",
     "packages/gptodo/src/gptodo/**",
-    "scripts/communication_utils/**"
+    "scripts/communication_utils/**",
+    "packages/gptme-codegraph/**"
   ],
   "minTokens": 50,
   "minLines": 5,
