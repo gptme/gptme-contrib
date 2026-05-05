@@ -5,6 +5,7 @@ from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.email import EmailRun
 from gptme_runloops.pm_dispatch import (
     DispatchLedger,
+    LaneDispatcher,
     LedgerEntry,
     SlotItem,
     SlotManager,
@@ -35,6 +36,7 @@ __all__ = [
     "list_backends",
     # pm_dispatch
     "DispatchLedger",
+    "LaneDispatcher",
     "LedgerEntry",
     "SlotItem",
     "SlotManager",

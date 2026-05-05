@@ -11,6 +11,7 @@ from gptme_runloops.pm_dispatch import (
     DEFAULT_SLOT_CAP,
     SLOW_LANE_TYPES,
     DispatchLedger,
+    LaneDispatcher,
     LedgerEntry,
     SlotItem,
     SlotManager,
@@ -459,3 +460,204 @@ class TestDispatchGroupedItems:
         # Composite type is slow (has ci_failure component)
         assert result.launched == 1
         assert result.skipped_active == 0
+
+
+# --- LaneDispatcher tests ---
+
+
+class TestLaneDispatcher:
+    def test_init_defaults(self):
+        ld = LaneDispatcher()
+        assert ld.slot_manager is not None
+        assert ld.slot_manager.slot_cap == DEFAULT_SLOT_CAP
+        assert ld.slot_timeout_sec == 2400
+
+    def test_init_custom_slot_manager(self):
+        sm = SlotManager(slot_cap=5)
+        ld = LaneDispatcher(slot_manager=sm)
+        assert ld.slot_manager.slot_cap == 5
+
+    @pytest.fixture
+    def ld_no_slots(self) -> LaneDispatcher:
+        """LaneDispatcher with all slots available."""
+        sm = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        return LaneDispatcher(slot_manager=sm)
+
+    def test_dispatch_empty(self, ld_no_slots):
+        launched, deferred = ld_no_slots.dispatch([])
+        assert launched == 0
+        assert deferred == 0
+
+    def test_dispatch_all_via_callback(self, ld_no_slots):
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+
+        items = [
+            make_item(repo="a/b", number=1, types=["assigned_issue"]),
+            make_item(repo="a/b", number=2, types=["pr_update"]),
+        ]
+        launched, deferred = ld.dispatch(items, backend="claude-code")
+        assert launched == 2
+        assert deferred == 0
+        assert len(callback_calls) == 2
+
+        # Fast lane first
+        assert callback_calls[0]["lane"] == "fast"
+        assert callback_calls[0]["slot_key"] == "a/b#1"
+        # Slow lane second
+        assert callback_calls[1]["lane"] == "slow"
+        assert callback_calls[1]["slot_key"] == "a/b#2"
+
+    def test_dispatch_respects_cap(self, ld_no_slots):
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        sm = SlotManager(
+            slot_cap=1,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
+
+        items = [
+            make_item(types=["assigned_issue"]),  # fast
+            make_item(types=["pr_update"]),  # slow
+        ]
+        launched, deferred = ld.dispatch(items)
+        # Fast launches (cap=1, below), slow deferred
+        assert launched == 1
+        assert deferred == 1
+        assert callback_calls[0]["lane"] == "fast"
+
+    def test_dispatch_skips_active_slot(self, ld_no_slots):
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        # is_busy always returns True
+        sm = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: True,
+        )
+        ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
+
+        items = [make_item(types=["assigned_issue"])]
+        launched, deferred = ld.dispatch(items)
+        assert launched == 0
+        assert deferred == 1
+        assert len(callback_calls) == 0
+
+    def test_dispatch_fast_burst(self, ld_no_slots):
+        """Fast lane can burst when cap reached and no fast slots running."""
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        # 2 slots running, cap=2, burst_allowance=1, no fast running
+        sm = SlotManager(
+            slot_cap=2,
+            fast_burst_allowance=1,
+            count_running=lambda: 2,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
+
+        items = [
+            make_item(types=["assigned_issue"]),  # fast
+        ]
+        launched, deferred = ld.dispatch(items)
+        # Fast should burst
+        assert launched == 1
+        assert deferred == 0
+
+    def test_dispatch_no_fast_burst_when_exhausted(self, ld_no_slots):
+        """No burst when fast lanes already running."""
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        # 2 slots running (at cap), fast already running 1, burst=1
+        sm = SlotManager(
+            slot_cap=2,
+            fast_burst_allowance=1,
+            count_running=lambda: 2,
+            count_running_lane=lambda lane: 1 if lane == "fast" else 1,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
+
+        items = [make_item(types=["assigned_issue"])]
+        launched, deferred = ld.dispatch(items)
+        # Fast burst exhausted
+        assert launched == 0
+        assert deferred == 1
+
+    def test_dispatch_lane_ordering(self, ld_no_slots):
+        """Fast items dispatch before slow items regardless of input order."""
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+
+        # Input order: slow, fast, slow, fast
+        items = [
+            make_item(number=1, types=["pr_update"]),
+            make_item(number=2, types=["assigned_issue"]),
+            make_item(number=3, types=["ci_failure"]),
+            make_item(number=4, types=["mention"]),
+        ]
+        launched, deferred = ld.dispatch(items)
+        assert launched == 4
+        lanes = [c["lane"] for c in callback_calls]
+        assert lanes == ["fast", "fast", "slow", "slow"]
+
+    def test_dispatch_master_ci_slot_key(self, ld_no_slots):
+        """Master CI failures get special slot keys."""
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+
+        items = [
+            make_item(repo="gptme/gptme", number=None, types=["master_ci_failure"]),
+        ]
+        ld.dispatch(items)
+        assert callback_calls[0]["slot_key"] == "gptme/gptme#master-ci"

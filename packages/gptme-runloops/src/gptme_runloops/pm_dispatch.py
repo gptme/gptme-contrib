@@ -215,7 +215,245 @@ class DispatchLedger:
 
 
 @dataclass
+class LaneDispatcher:
+    """Orchestrates lane-aware slot dispatch for project monitoring items.
+
+    Partitions items into fast/slow lanes, then iterates through each lane
+    launching transient systemd units while respecting the global slot cap
+    and fast-lane burst allowance.
+
+    This is the Python-equivalent of the bash ``dispatch_items()`` function.
+    The bash path is still the primary runtime; this class provides the
+    testable design spec and foundation for future Python-native dispatch.
+
+    Attributes:
+        slot_manager: SlotManager for capacity checks
+        dispatch_callback: Callable for launching units (injectable for tests).
+            Receives (slot_unit, slot_key, lane, item, backend, model, script_path).
+            Must return a bool (True = launched).
+    """
+
+    slot_manager: SlotManager = field(default_factory=lambda: SlotManager())
+    dispatch_callback: Callable | None = None
+    slot_timeout_sec: int = 2400
+    memory_max: str = "8G"
+    cpu_quota: str = "80%"
+
+    def dispatch(
+        self,
+        items: list[SlotItem],
+        backend: str = "claude-code",
+        model: str | None = None,
+        script_path: str | None = None,
+    ) -> tuple[int, int]:
+        """Dispatch items via transient systemd units.
+
+        Iterates through fast lane first, then slow lane. For each item:
+        - derives a slot key and unit name
+        - skips if the slot is already busy
+        - checks slot availability (cap + burst)
+        - launches via ``dispatch_callback`` or default systemd-run
+
+        Returns:
+            (launched_count, deferred_count)
+        """
+        fast_items, slow_items = partition_items(items)
+
+        launched = 0
+        deferred = 0
+        running = self.slot_manager.running_slots
+        running_fast = self.slot_manager.running_lane_slots("fast")
+        cap = self.slot_manager.slot_cap
+        burst = self.slot_manager.fast_burst_allowance
+
+        def _slot_available(lane: str) -> bool:
+            """Check local slot availability (using updated counters)."""
+            if running < cap:
+                return True
+            if lane == "fast" and running_fast < burst:
+                return True
+            return False
+
+        for lane, lane_items in [("fast", fast_items), ("slow", slow_items)]:
+            for item in lane_items:
+                slot_key = derive_slot_key(item.repo, item.number, item.types)
+                unit_name = _derive_unit_name(slot_key, lane)
+                legacy_name = _derive_legacy_unit_name(slot_key)
+
+                # Dedupe: skip if slot is already busy for this key
+                if self.slot_manager._is_busy(unit_name) or self.slot_manager._is_busy(
+                    legacy_name
+                ):
+                    deferred += 1
+                    continue
+
+                # Check slot availability (using local counters for incremental accuracy)
+                if not _slot_available(lane):
+                    deferred += 1
+                    continue
+
+                # Launch
+                success = self._launch_unit(
+                    unit_name=unit_name,
+                    legacy_name=legacy_name,
+                    slot_key=slot_key,
+                    lane=lane,
+                    item=item,
+                    backend=backend,
+                    model=model,
+                    script_path=script_path,
+                )
+
+                if success:
+                    launched += 1
+                    running += 1
+                    if lane == "fast":
+                        running_fast += 1
+                else:
+                    deferred += 1
+
+        return launched, deferred
+
+    def _launch_unit(
+        self,
+        unit_name: str,
+        legacy_name: str,
+        slot_key: str,
+        lane: str,
+        item: SlotItem,
+        backend: str,
+        model: str | None = None,
+        script_path: str | None = None,
+    ) -> bool:
+        """Launch a transient systemd unit for a single dispatch slot.
+
+        If ``dispatch_callback`` is set, delegates to it. Otherwise,
+        builds and executes a ``systemd-run --user`` command.
+        """
+        if self.dispatch_callback is not None:
+            return bool(
+                self.dispatch_callback(
+                    slot_unit=unit_name,
+                    slot_key=slot_key,
+                    lane=lane,
+                    item=item,
+                    backend=backend,
+                    model=model,
+                    script_path=script_path,
+                )
+            )
+
+        # Default: systemd-run
+        if not script_path:
+            logger.error("No script_path provided for slot dispatch")
+            return False
+
+        import subprocess
+        import tempfile
+
+        # Write item to temp file for detached unit
+        slot_file = Path(tempfile.mktemp(suffix=".jsonl", prefix="pm-slot-"))
+        slot_file.write_text(
+            json.dumps(
+                {
+                    "repo": item.repo,
+                    "number": item.number,
+                    "types": item.types,
+                    "title": item.title,
+                }
+            )
+            + "\n"
+        )
+
+        cmd = [
+            "systemd-run",
+            "--user",
+            "--collect",
+            "--no-block",
+            f"--unit={unit_name}",
+            f"--description=Project monitoring slot {slot_key}",
+            f"--property=TimeoutSec={self.slot_timeout_sec}",
+            f"--property=MemoryMax={self.memory_max}",
+            f"--property=CPUQuota={self.cpu_quota}",
+            "--setenv=PM_DETACHED=1",
+            "--setenv=PM_GROUPED_WORK=1",
+            f"--setenv=PM_LANE={lane}",
+            f"--setenv=PM_SLOT_KEY={slot_key}",
+            f"--setenv=PM_DISPATCH_ID={unit_name}",
+            f"--setenv=PM_WORK_FILE={slot_file}",
+            f"--setenv=BOB_BACKEND={backend}",
+        ]
+        if model:
+            cmd.append(f"--setenv=BOB_SELECTED_MODEL={model}")
+        cmd.extend(["--", "bash", script_path])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return True
+
+            # Check for stale-unit error and retry once
+            if "already loaded or has a fragment file" in (result.stderr or ""):
+                logger.info(
+                    "Stale unit %s blocking launch — resetting and retrying", unit_name
+                )
+                self._reset_stale_unit(unit_name)
+                self._reset_stale_unit(legacy_name)
+                result2 = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=10
+                )
+                return result2.returncode == 0
+
+            return False
+        except (subprocess.TimeoutExpired, OSError):
+            logger.exception("Failed to launch unit %s", unit_name)
+            return False
+
+    @staticmethod
+    def _reset_stale_unit(unit_name: str) -> bool:
+        """Stop and reset-failed a stale transient unit."""
+        import subprocess
+
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "stop", unit_name],
+                capture_output=True,
+                timeout=5,
+            )
+            subprocess.run(
+                ["systemctl", "--user", "reset-failed", unit_name],
+                capture_output=True,
+                timeout=5,
+            )
+            return True
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("Failed to reset stale unit %s", unit_name)
+            return False
+
+
+def _derive_unit_name(slot_key: str, lane: str, prefix: str = "bob-pm") -> str:
+    """Convert slot key to safe systemd unit name."""
+    safe = slot_key.translate(str.maketrans("/#:", "---"))
+    return f"{prefix}-{lane}-slot-{safe}"
+
+
+def _derive_legacy_unit_name(slot_key: str, prefix: str = "bob-pm") -> str:
+    """Generate the legacy (pre-lane) unit name for backward compat."""
+    safe = slot_key.translate(str.maketrans("/#:", "---"))
+    return f"{prefix}-slot-{safe}"
+
+
+# --- SlotManager ---
+
+
+@dataclass
 class SlotManager:
+    """Manages concurrent slot capacity and fast-lane burst allowances.
+
+    In production this wraps ``systemctl`` calls; in tests it uses a
+    provided ``count_running`` callback.
+    """
+
     """Manages concurrent slot capacity and fast-lane burst allowances.
 
     In production this wraps ``systemctl`` calls; in tests it uses a
