@@ -180,6 +180,17 @@ class TestLoadSubObservations:
 
 
 class TestRecordSubResetTime:
+    def test_non_dict_json_is_replaced(self, tmp_path: Path) -> None:
+        obs_file = tmp_path / "bob.json"
+        obs_file.write_text("[1, 2, 3]")  # valid JSON, not a dict
+        # Should not raise — non-dict content is treated as corrupt/reset
+        record_sub_reset_time(tmp_path, "bob", "seven_day")
+        import json
+
+        data = json.loads(obs_file.read_text())
+        assert isinstance(data, dict)
+        assert "seven_day" in data["track_resets"]
+
     def test_writes_observation(self, tmp_path: Path) -> None:
         record_sub_reset_time(tmp_path, "bob", "seven_day", "2026-01-01T00:00:00+00:00")
         data = (tmp_path / "bob.json").read_text()

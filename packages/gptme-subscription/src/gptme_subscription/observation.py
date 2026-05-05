@@ -95,7 +95,9 @@ def record_sub_reset_time(
         try:
             raw = obs_file.read_text()
             if raw.strip():
-                entry = json.loads(raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    entry = parsed
         except (json.JSONDecodeError, OSError):
             pass  # corrupt file — start fresh
     entry.setdefault("track_resets", {})[metric_key] = (
