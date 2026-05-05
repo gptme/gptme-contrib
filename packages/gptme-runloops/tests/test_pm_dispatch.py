@@ -217,6 +217,36 @@ class TestDispatchLedger:
         assert "running_units" not in d
         assert "note" not in d
 
+    def test_ledger_entry_to_dict_preserves_empty_unit_name(self):
+        entry = LedgerEntry(
+            timestamp="2026-01-01T00:00:00Z",
+            phase="launch",
+            lane="fast",
+            dispatch_id="test",
+            unit_name="",
+            item_refs=[],
+        )
+        assert entry.to_dict()["unit_name"] == ""
+
+    def test_read_skips_malformed_schema_lines(self, ledger_path: Path):
+        valid = LedgerEntry.now(
+            phase="launch", lane="fast", dispatch_id="ok", unit_name="u1"
+        )
+        ledger_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"timestamp": "2026-01-01T00:00:00Z"}),
+                    json.dumps(valid.to_dict() | {"future_field": "ignored"}),
+                    json.dumps(valid.to_dict()),
+                ]
+            )
+            + "\n"
+        )
+
+        assert [entry.dispatch_id for entry in DispatchLedger(ledger_path).read()] == [
+            "ok"
+        ]
+
 
 # --- SlotManager ---
 
@@ -288,6 +318,9 @@ class TestSlotManager:
         sm = SlotManager(count_running_lane=lambda lane: 2 if lane == "fast" else 5)
         assert sm.running_lane_slots("fast") == 2
         assert sm.running_lane_slots("slow") == 5
+
+    def test_slot_manager_instances_compare_by_identity(self):
+        assert SlotManager(slot_cap=1) != SlotManager(slot_cap=99)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +403,15 @@ class TestDispatchGroupedItems:
         # running slots are at cap (which happens only if the tracker is
         # pre-populated via external registration).
         pass
+
+    def test_fast_burst_allowance_counts_tracked_fast_slots(self):
+        items = [
+            make_item(repo="a/x", number=i, types=["notification"]) for i in range(5)
+        ]
+        result = dispatch_grouped_items(items, slot_cap=1, fast_burst_allowance=1)
+        assert result.launched == 1
+        assert result.skipped_cap == 4
+        assert len(result.fallback_items) == 4
 
     def test_ledger_recording(self, ledger_path: Path):
         ledger = DispatchLedger(ledger_path)

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,8 +106,7 @@ class LedgerEntry:
             "lane": self.lane,
             "dispatch_id": self.dispatch_id,
         }
-        if self.unit_name:
-            result["unit_name"] = self.unit_name
+        result["unit_name"] = self.unit_name
         if self.item_refs is not None:
             result["item_refs"] = self.item_refs
         if self.running_units is not None:
@@ -127,8 +125,6 @@ class LedgerEntry:
 
 
 # --- Slot key derivation ---
-
-_ISSUE_REF_RE = re.compile(r"^[^/]+/[^#]+#\d+$")
 
 
 def derive_slot_key(repo: str, number: int | None, types: list[str]) -> str:
@@ -200,9 +196,9 @@ class DispatchLedger:
                     continue
                 try:
                     data = json.loads(line)
-                except json.JSONDecodeError:
+                    entries.append(LedgerEntry(**data))
+                except (json.JSONDecodeError, TypeError):
                     continue
-                entries.append(LedgerEntry(**data))
         return entries
 
     def clear(self) -> None:
@@ -351,19 +347,21 @@ class LaneDispatcher:
         import subprocess
         import tempfile
 
-        # Write item to temp file for detached unit
-        slot_file = Path(tempfile.mktemp(suffix=".jsonl", prefix="pm-slot-"))
-        slot_file.write_text(
-            json.dumps(
-                {
-                    "repo": item.repo,
-                    "number": item.number,
-                    "types": item.types,
-                    "title": item.title,
-                }
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", suffix=".jsonl", prefix="pm-slot-", delete=False
+        ) as tmp:
+            slot_file = Path(tmp.name)
+            tmp.write(
+                json.dumps(
+                    {
+                        "repo": item.repo,
+                        "number": item.number,
+                        "types": item.types,
+                        "title": item.title,
+                    }
+                )
+                + "\n"
             )
-            + "\n"
-        )
 
         cmd = [
             "systemd-run",
@@ -446,14 +444,8 @@ def _derive_legacy_unit_name(slot_key: str, prefix: str = "bob-pm") -> str:
 # --- SlotManager ---
 
 
-@dataclass
+@dataclass(eq=False)
 class SlotManager:
-    """Manages concurrent slot capacity and fast-lane burst allowances.
-
-    In production this wraps ``systemctl`` calls; in tests it uses a
-    provided ``count_running`` callback.
-    """
-
     """Manages concurrent slot capacity and fast-lane burst allowances.
 
     In production this wraps ``systemctl`` calls; in tests it uses a
@@ -473,9 +465,7 @@ class SlotManager:
 
         # Injected callbacks for testability. Default to systemctl probes.
         self._count_running = count_running or _default_count_running
-        self._count_running_lane = count_running_lane or (
-            lambda lane: _default_count_running_lane(lane)
-        )
+        self._count_running_lane = count_running_lane or _default_count_running_lane
         self._is_busy = is_busy or _default_slot_is_busy
 
     @property
@@ -635,6 +625,7 @@ def dispatch_grouped_items(
     """
     # In-memory slot tracker for this dispatch cycle.
     _active: dict[str, str] = {}  # slot_key -> unit_name
+    _active_lanes: dict[str, str] = {}  # slot_key -> lane
 
     def _is_busy(key: str) -> bool:
         return key in _active
@@ -643,10 +634,7 @@ def dispatch_grouped_items(
         return len(_active)
 
     def _count_running_lane(lane: str) -> int:
-        # The in-memory tracker doesn't track lane by default, but we can
-        # approximate by checking if any fast items are still active.
-        # For accurate lane tracking the caller should inject real callbacks.
-        return 0  # conservative: assume no fast items running
+        return sum(1 for active_lane in _active_lanes.values() if active_lane == lane)
 
     mgr = SlotManager(
         slot_cap=slot_cap,
@@ -698,6 +686,7 @@ def dispatch_grouped_items(
 
             # Slot available — register and record
             _active[key] = f"{unit_prefix}-{_sanitize_unit_name(key)}"
+            _active_lanes[key] = lane
             result.launched += 1
             if ledger:
                 ledger.append(
