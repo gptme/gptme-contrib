@@ -175,7 +175,17 @@ def team(
     type=click.Choice(["markdown", "xml", "tool"]),
     help="Tool format override",
 )
-@_backend_option
+@click.option(
+    "--backend",
+    default="claude-code",
+    type=click.Choice(list_backends()),
+    help=(
+        "Execution backend. Monitoring defaults to claude-code because "
+        "gptme+slow-models is 100% NOOP on monitoring (82/82 sessions "
+        "over 3 days — produces analysis but zero concrete actions). "
+        f"Available: {', '.join(list_backends())}"
+    ),
+)
 def monitoring(
     workspace: Path,
     orgs: tuple[str, ...],
@@ -186,7 +196,14 @@ def monitoring(
     tool_format: str | None,
     backend: str,
 ):
-    """Run project monitoring loop."""
+    """Run project monitoring loop.
+
+    Monitoring defaults to claude-code (not gptme) because the gptme
+    harness with slower/larger models historically produced 100% NOOP
+    sessions — verbose analysis output with zero commits or tool actions.
+    gptme remains available as an explicit --backend gptme override for
+    testing or quota-diversion scenarios.
+    """
     executor = get_executor(backend)
     run = ProjectMonitoringRun(
         workspace,
