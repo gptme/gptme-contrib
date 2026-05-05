@@ -344,7 +344,46 @@ class TaskInfo:
 # =============================================================================
 
 
-def task_has_waiting_blocker(task: TaskInfo) -> bool:
+def parse_recur_interval(recur: str) -> timedelta | None:
+    """Parse a recur duration string into a timedelta.
+
+    Formats:
+        Nd        → N days (e.g. "7d", "14d", "30d")
+        weekly    → 7 days
+        monthly   → 30 days
+
+    Returns None if the format is not recognised.
+    """
+    recur = recur.strip().lower()
+    _ALIASES: dict[str, timedelta] = {
+        "weekly": timedelta(days=7),
+        "monthly": timedelta(days=30),
+    }
+    if recur in _ALIASES:
+        return _ALIASES[recur]
+    m = re.match(r"^(\d+)d$", recur)
+    if m:
+        return timedelta(days=int(m.group(1)))
+    return None
+
+
+def task_is_recur_blocked(task: "TaskInfo") -> bool:
+    """Return True if a recurring task has been completed and is not yet due again."""
+    recur = task.metadata.get("recur")
+    last_completed = task.metadata.get("last_completed")
+    if not recur or not last_completed:
+        return False
+    interval = parse_recur_interval(str(recur))
+    if interval is None:
+        return False
+    try:
+        last_dt = datetime.fromisoformat(str(last_completed))
+        return datetime.now() < last_dt + interval
+    except ValueError:
+        return False
+
+
+def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
     if state == "waiting":
@@ -358,6 +397,9 @@ def task_has_waiting_blocker(task: TaskInfo) -> bool:
 
         resolved, _ = check_time(str(wait_until))
         return not resolved
+    # recur: block if last_completed + interval is in the future
+    if task_is_recur_blocked(task):
+        return True
     return False
 
 
@@ -1287,7 +1329,7 @@ class StateChecker:
             elif not task.state:
                 results["untracked"].append(task)
             else:
-                # Route wait_until tasks to "waiting" bucket (hides from --compact)
+                # Route wait_until / recur-blocked tasks to "waiting" bucket (hides from --compact)
                 wait_until = task.metadata.get("wait_until")
                 if wait_until and "waiting" in results:
                     from gptodo.waiting import check_time
@@ -1296,6 +1338,9 @@ class StateChecker:
                     if not resolved:
                         results["waiting"].append(task)
                         continue
+                if task_is_recur_blocked(task) and "waiting" in results:
+                    results["waiting"].append(task)
+                    continue
                 results[task.state].append(task)
 
         return results
