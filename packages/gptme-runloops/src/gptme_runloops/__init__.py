@@ -3,6 +3,15 @@
 from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.email import EmailRun
+from gptme_runloops.pm_dispatch import (
+    DispatchLedger,
+    LedgerEntry,
+    SlotItem,
+    SlotManager,
+    classify_lane,
+    derive_slot_key,
+    partition_items,
+)
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.team import TeamRun
 from gptme_runloops.utils.executor import (
@@ -24,4 +33,12 @@ __all__ = [
     "ClaudeCodeExecutor",
     "get_executor",
     "list_backends",
+    # pm_dispatch
+    "DispatchLedger",
+    "LedgerEntry",
+    "SlotItem",
+    "SlotManager",
+    "classify_lane",
+    "derive_slot_key",
+    "partition_items",
 ]
