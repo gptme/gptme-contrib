@@ -471,11 +471,6 @@ def _tree_sitter_parse(code: bytes, lang_name: str = "python"):
         return None, None
 
 
-def _get_parser(lang_name: str):
-    """Return a tree-sitter Parser instance for the given language."""
-    _tree_sitter_parse(b"", lang_name)
-
-
 def _text(node) -> str:
     """Get the text of a tree-sitter node."""
     try:

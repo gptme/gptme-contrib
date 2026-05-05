@@ -54,11 +54,25 @@ _index_cache: dict[str, tuple[SymbolIndex, SqliteIndexCache | None]] = {}
 
 
 def _get_or_build_index(directory: str) -> SymbolIndex:
-    """Get a cached index (SQLite-backed, falling through to in-memory)."""
+    """Get a cached index (SQLite-backed, falling through to in-memory).
+
+    When SQLite is available, freshness is re-checked on every call so file
+    edits between calls are detected automatically.  Without SQLite backing
+    (i.e. the ``[treesitter]`` extra is not installed) the in-memory snapshot
+    is returned unconditionally — restart the server to pick up changes.
+    """
     dir_path = str(Path(directory).resolve())
 
     if dir_path in _index_cache:
-        return _index_cache[dir_path][0]
+        cached_index, cached_sqlite = _index_cache[dir_path]
+        if cached_sqlite is None:
+            # No freshness oracle available — return the snapshot as-is.
+            return cached_index
+        # Re-check SQLite freshness; returns None when any indexed file changed.
+        if cached_sqlite.load() is not None:
+            return cached_index
+        # Stale — drop and fall through to rebuild.
+        del _index_cache[dir_path]
 
     # Try SQLite first
     sqlite_cache: SqliteIndexCache | None = None
@@ -154,16 +168,16 @@ def codegraph_index(directory: str) -> str:
     index = _get_or_build_index(directory)
     all_names = index.all_names()
 
-    # Summarize: top N most-referenced symbols and file count
+    # Summarize: first N symbols (alphabetical) and file count
     file_count = len({e.file for entries in index.entries.values() for e in entries})
-    top_names = all_names[:20] if len(all_names) > 20 else all_names
+    sample_names = all_names[:20] if len(all_names) > 20 else all_names
 
     return json.dumps(
         {
             "directory": str(dir_path.resolve()),
             "files_indexed": file_count,
             "unique_symbols": len(all_names),
-            "top_symbols": top_names,
+            "symbols_sample": sample_names,
         },
         indent=2,
     )
@@ -362,55 +376,6 @@ def codegraph_callers(
             ]
 
     return json.dumps(result, indent=2)
-
-
-def _cross_file_callers(name: str, directory: str) -> str:
-    """Cross-file caller search — scan all files in the index for callers."""
-    import ast
-
-    dir_path = Path(directory)
-    callers: list[dict] = []
-
-    def _name_matches(node: ast.AST, target: str) -> bool:
-        if isinstance(node, ast.Name) and node.id == target:
-            return True
-        if isinstance(node, ast.Attribute) and node.attr == target:
-            return True
-        return False
-
-    for fp in sorted(dir_path.rglob("*.py")):
-        try:
-            tree = ast.parse(fp.read_bytes())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call):
-                    func = node.func
-                    if isinstance(func, ast.Name) and func.id == name:
-                        callers.append(
-                            {
-                                "file": str(fp),
-                                "line": node.lineno,
-                                "caller": "module-level",
-                            }
-                        )
-                    elif isinstance(func, ast.Attribute) and func.attr == name:
-                        callers.append(
-                            {
-                                "file": str(fp),
-                                "line": node.lineno,
-                                "caller": "module-level",
-                            }
-                        )
-        except SyntaxError:
-            continue
-
-    return json.dumps(
-        {
-            "symbol": name,
-            "cross_file_callers": callers,
-            "total": len(callers),
-        },
-        indent=2,
-    )
 
 
 # ---------------------------------------------------------------------------
