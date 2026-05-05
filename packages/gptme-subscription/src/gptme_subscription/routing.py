@@ -284,6 +284,7 @@ def soonest_resetting_fallback(
     fallback_order: list[str],
     obs_dir: Path,
     window_seconds: int = 7 * 24 * 3600,
+    metric_key: str = "seven_day",
     now: datetime | None = None,
 ) -> str | None:
     """Find the fallback with the soonest scheduled reset.
@@ -295,7 +296,11 @@ def soonest_resetting_fallback(
         active: Skip this subscription (current active).
         fallback_order: Ordered list to search.
         obs_dir: Observation directory.
-        window_seconds: Window duration for reset calculation.
+        window_seconds: Window duration for reset calculation. Must match the
+            window duration implied by ``metric_key`` (e.g. 7*24*3600 for
+            ``"seven_day"``).
+        metric_key: Which metric key to look up in observation state.
+            Must correspond to the same window as ``window_seconds``.
         now: Current time.
 
     Returns:
@@ -311,7 +316,7 @@ def soonest_resetting_fallback(
         if entry is None:
             continue
         remaining = remaining_until_observed_reset(
-            entry, "seven_day", window_seconds, now=current_time
+            entry, metric_key, window_seconds, now=current_time
         )
         if remaining is None:
             continue

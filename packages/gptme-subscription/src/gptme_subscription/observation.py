@@ -126,6 +126,8 @@ def load_sub_observations(
             if not raw.strip():
                 continue
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                continue
             sub = f.stem
             observations[sub] = SubscriptionObservation(
                 track_resets=data.get("track_resets", {}),

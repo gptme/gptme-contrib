@@ -7,6 +7,7 @@ from pathlib import Path
 from gptme_subscription.observation import (
     format_duration,
     is_subscription_blocked,
+    load_sub_observations,
     record_sub_reset_time,
     subscription_pressure_from_usage,
 )
@@ -164,6 +165,18 @@ class TestSubscriptionPressureFromUsage:
         usage = {"seven_day_sonnet": {"utilization": 0.75}}
         score = subscription_pressure_from_usage(usage, sonnet_weekly_exhausted=0.75)
         assert score == 1.0
+
+
+class TestLoadSubObservations:
+    def test_skips_non_dict_json(self, tmp_path: Path) -> None:
+        # A valid JSON array is not a dict — should be skipped, not crash
+        (tmp_path / "bob.json").write_text("[1, 2, 3]")
+        (tmp_path / "alice.json").write_text(
+            '{"track_resets": {"seven_day": "2026-01-01T00:00:00+00:00"}}'
+        )
+        result = load_sub_observations(tmp_path)
+        assert "bob" not in result  # skipped
+        assert "alice" in result  # valid dict still loaded
 
 
 class TestRecordSubResetTime:
