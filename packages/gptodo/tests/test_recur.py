@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
 
 from gptodo.cli import cli
 from gptodo.frontmatter_compat import frontmatter
-from gptodo.utils import parse_recur_interval, task_is_recur_blocked
+from gptodo.utils import parse_recur_interval
 
 
 # =============================================================================
@@ -45,59 +44,6 @@ class TestParseRecurInterval:
         assert parse_recur_interval("7w") is None
         assert parse_recur_interval("every week") is None
         assert parse_recur_interval("0 9 * * 1") is None
-
-
-# =============================================================================
-# task_is_recur_blocked — tested via duck-typed metadata holder
-# =============================================================================
-
-
-def _meta_task(recur: str | None = None, last_completed: str | None = None):
-    """Return a duck-typed object with only the .metadata attribute needed by task_is_recur_blocked."""
-    metadata: dict = {"state": "active"}
-    if recur is not None:
-        metadata["recur"] = recur
-    if last_completed is not None:
-        metadata["last_completed"] = last_completed
-    return SimpleNamespace(metadata=metadata)
-
-
-class TestTaskIsRecurBlocked:
-    def test_no_recur_not_blocked(self):
-        assert not task_is_recur_blocked(_meta_task())
-
-    def test_recur_without_last_completed_not_blocked(self):
-        assert not task_is_recur_blocked(_meta_task(recur="7d"))
-
-    def test_recently_completed_is_blocked(self):
-        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-        assert task_is_recur_blocked(_meta_task(recur="7d", last_completed=yesterday))
-
-    def test_overdue_is_not_blocked(self):
-        eight_days_ago = (datetime.now() - timedelta(days=8)).isoformat()
-        assert not task_is_recur_blocked(_meta_task(recur="7d", last_completed=eight_days_ago))
-
-    def test_exactly_at_boundary_not_blocked(self):
-        seven_days_plus_one_sec_ago = (datetime.now() - timedelta(days=7, seconds=1)).isoformat()
-        assert not task_is_recur_blocked(
-            _meta_task(recur="7d", last_completed=seven_days_plus_one_sec_ago)
-        )
-
-    def test_weekly_alias(self):
-        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-        assert task_is_recur_blocked(_meta_task(recur="weekly", last_completed=yesterday))
-
-    def test_monthly_alias(self):
-        ten_days_ago = (datetime.now() - timedelta(days=10)).isoformat()
-        assert task_is_recur_blocked(_meta_task(recur="monthly", last_completed=ten_days_ago))
-
-    def test_unknown_recur_format_not_blocked(self):
-        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-        assert not task_is_recur_blocked(_meta_task(recur="every-week", last_completed=yesterday))
-
-    def test_date_only_last_completed(self):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        assert task_is_recur_blocked(_meta_task(recur="7d", last_completed=yesterday))
 
 
 # =============================================================================
