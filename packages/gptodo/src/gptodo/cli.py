@@ -1662,22 +1662,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     # Normalize deprecated states at write time (defense in depth)
                     if field == "state":
                         value = normalize_state(value, warn=False)
-                        # Recurring tasks: reset to active instead of marking done
-                        if value == "done" and post.metadata.get("recur"):
-                            from datetime import date
 
-                            from gptodo.utils import parse_recur_interval
-
-                            recur_str = str(post.metadata["recur"])
-                            if parse_recur_interval(recur_str) is not None:
-                                post.metadata["last_completed"] = date.today().isoformat()
-                                value = "active"
-                                console.print(
-                                    f"[cyan]↻ Recurring task reset (recur={recur_str},"
-                                    f" last_completed={post.metadata['last_completed']})[/]"
-                                )
                     post.metadata[field] = value
-
         # Save changes
         with open(task.path, "w") as f:
             f.write(frontmatter.dumps(post))
@@ -1693,6 +1679,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 # Handle recur: reset task to todo and advance wait: date
                 recur = post.metadata.get("recur")
                 if recur:
+                    from gptodo.utils import parse_recur_interval
+
+                    if parse_recur_interval(str(recur)) is None:
+                        completed_task_ids.append(task.id)
+                        continue
                     from gptodo.utils import advance_wait, parse_wait
 
                     current_wait = parse_wait(post.metadata.get("wait"))

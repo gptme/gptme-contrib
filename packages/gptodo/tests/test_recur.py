@@ -131,24 +131,28 @@ def write_task(workspace: Path, name: str, **metadata: object) -> Path:
 
 
 class TestRecurCliReset:
-    def test_done_resets_recurring_task_to_active(self, workspace: Path):
+    def test_done_resets_recurring_task_to_todo(self, workspace: Path):
         write_task(workspace, "weekly-review", state="active", recur="7d")
         runner = CliRunner()
         result = runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
         assert result.exit_code == 0, result.output
-        assert "Recurring task reset" in result.output
+        assert "reset to todo" in result.output
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        assert post.metadata["state"] == "active"
-        assert post.metadata["last_completed"] == date.today().isoformat()
+        assert post.metadata["state"] == "todo"
+        assert "last_completed" not in post.metadata
+        assert "wait" in post.metadata
 
-    def test_done_sets_last_completed_to_today(self, workspace: Path):
+    def test_done_sets_wait_to_future_for_recurring(self, workspace: Path):
         write_task(workspace, "weekly-review", state="active", recur="weekly")
         runner = CliRunner()
         runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        assert post.metadata["last_completed"] == date.today().isoformat()
+        assert post.metadata["state"] == "todo"
+        assert "wait" in post.metadata
+        tomorrow = date.today() + timedelta(days=1)
+        assert date.fromisoformat(str(post.metadata["wait"])) >= tomorrow
 
     def test_done_non_recurring_task_stays_done(self, workspace: Path):
         write_task(workspace, "one-off-task", state="active")
@@ -160,14 +164,16 @@ class TestRecurCliReset:
         assert post.metadata["state"] == "done"
         assert "last_completed" not in post.metadata
 
-    def test_recurring_task_blocked_after_reset(self, workspace: Path):
+    def test_recurring_task_gets_wait_after_done(self, workspace: Path):
         write_task(workspace, "weekly-review", state="active", recur="7d")
         runner = CliRunner()
         runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        task_meta = SimpleNamespace(metadata=dict(post.metadata))
-        assert task_is_recur_blocked(task_meta)
+        assert post.metadata["state"] == "todo"
+        assert "wait" in post.metadata
+        future = date.fromisoformat(str(post.metadata["wait"]))
+        assert future > date.today()
 
     def test_unknown_recur_format_marks_done_normally(self, workspace: Path):
         write_task(workspace, "mystery-task", state="active", recur="every-week")

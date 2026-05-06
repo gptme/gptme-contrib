@@ -344,29 +344,6 @@ class TaskInfo:
 # =============================================================================
 
 
-def parse_recur_interval(recur: str) -> timedelta | None:
-    """Parse a recur duration string into a timedelta.
-
-    Formats:
-        Nd        → N days (e.g. "7d", "14d", "30d")
-        weekly    → 7 days
-        monthly   → 30 days
-
-    Returns None if the format is not recognised.
-    """
-    recur = recur.strip().lower()
-    _ALIASES: dict[str, timedelta] = {
-        "weekly": timedelta(days=7),
-        "monthly": timedelta(days=30),
-    }
-    if recur in _ALIASES:
-        return _ALIASES[recur]
-    m = re.match(r"^(\d+)d$", recur)
-    if m:
-        return timedelta(days=int(m.group(1)))
-    return None
-
-
 def task_is_recur_blocked(task: "TaskInfo") -> bool:
     """Return True if a recurring task has been completed and is not yet due again."""
     recur = task.metadata.get("recur")
@@ -538,7 +515,7 @@ def parse_recur_interval(recur: str) -> timedelta | None:
     """
     if not recur:
         return None
-    recur = recur.strip()
+    recur = recur.strip().lower()
     if recur == "weekly":
         return timedelta(days=7)
     if recur == "monthly":
