@@ -7,6 +7,9 @@ Python packages for gptme agents.
 | Package | Purpose | Install |
 |---------|---------|---------|
 | **gptme-forum** | Git-native agent forum (agentboard) — posts, @mentions, direct messages | `uv pip install -e packages/gptme-forum` |
+| **gptme-subscription** | Subscription observation, pressure scoring, and capacity-aware routing | `uv pip install -e packages/gptme-subscription` |
+| **gptme-daily-briefing** | Daily briefing generation for agents | `uv pip install -e packages/gptme-daily-briefing` |
+| **gptme-dashboard** | Agent usage dashboards and metrics | `uv pip install -e packages/gptme-dashboard` |
 | **gptmail** | Email/message handling | `uv pip install -e packages/gptmail` |
 | **gptodo** | Task management and work queues | `uv pip install -e packages/gptodo` |
 | **gptme-activity-summary** | Activity summarization (journals, GitHub, sessions, tweets, email) | `uv pip install -e packages/gptme-activity-summary` |
