@@ -227,6 +227,9 @@ def test_post_session_persists_usage_fields(tmp_path: Path):
             "cache_creation_tokens": 30,
             "cache_read_tokens": 600,
             "total_tokens": 795,
+            "sys_prompt_tokens": 150,
+            "context_peak_tokens": 750,
+            "context_window": 200000,
         },
     }
     with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
@@ -243,12 +246,18 @@ def test_post_session_persists_usage_fields(tmp_path: Path):
     assert result.record.output_tokens == 45
     assert result.record.cache_creation_tokens == 30
     assert result.record.cache_read_tokens == 600
+    assert result.record.sys_prompt_tokens == 150
+    assert result.record.context_peak_tokens == 750
+    assert result.record.context_window == 200000
 
     records = store.load_all()
     assert records[0].input_tokens == 120
     assert records[0].output_tokens == 45
     assert records[0].cache_creation_tokens == 30
     assert records[0].cache_read_tokens == 600
+    assert records[0].sys_prompt_tokens == 150
+    assert records[0].context_peak_tokens == 750
+    assert records[0].context_window == 200000
 
 
 def test_post_session_partial_usage_fields_stored_as_none(tmp_path: Path):

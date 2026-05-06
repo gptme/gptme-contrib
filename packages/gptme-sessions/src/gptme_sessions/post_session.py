@@ -97,6 +97,9 @@ class PostSessionResult:
         output_tokens:         Output tokens from usage breakdown, or ``None`` if not present.
         cache_creation_tokens: Cache-write tokens, or ``None`` if not present.
         cache_read_tokens:     Cache-read tokens, or ``None`` if not present.
+        sys_prompt_tokens:     First-turn input context size, or ``None`` if not present.
+        context_peak_tokens:   Largest per-turn input context size, or ``None`` if not present.
+        context_window:        Model context window size, or ``None`` if not present.
     """
 
     record: SessionRecord
@@ -107,6 +110,9 @@ class PostSessionResult:
     output_tokens: int | None = None
     cache_creation_tokens: int | None = None
     cache_read_tokens: int | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+    context_window: int | None = None
 
 
 def post_session(
@@ -224,6 +230,9 @@ def post_session(
     output_tokens: int | None = None
     cache_creation_tokens: int | None = None
     cache_read_tokens: int | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+    context_window: int | None = None
     traj_productive: bool | None = None
 
     # --- Extract signals from trajectory ---
@@ -239,10 +248,16 @@ def post_session(
                 _out = usage.get("output_tokens")
                 _cc = usage.get("cache_creation_tokens")
                 _cr = usage.get("cache_read_tokens")
+                _sys = usage.get("sys_prompt_tokens")
+                _peak = usage.get("context_peak_tokens")
+                _window = usage.get("context_window")
                 input_tokens = int(_in) if _in is not None else None
                 output_tokens = int(_out) if _out is not None else None
                 cache_creation_tokens = int(_cc) if _cc is not None else None
                 cache_read_tokens = int(_cr) if _cr is not None else None
+                sys_prompt_tokens = int(_sys) if _sys is not None else None
+                context_peak_tokens = int(_peak) if _peak is not None else None
+                context_window = int(_window) if _window is not None else None
             if isinstance(usage, dict) and "total_tokens" in usage:
                 total = usage.get("total_tokens")
                 if total is not None:
@@ -371,6 +386,12 @@ def post_session(
         record_kwargs["cache_creation_tokens"] = cache_creation_tokens
     if cache_read_tokens is not None:
         record_kwargs["cache_read_tokens"] = cache_read_tokens
+    if sys_prompt_tokens is not None:
+        record_kwargs["sys_prompt_tokens"] = sys_prompt_tokens
+    if context_peak_tokens is not None:
+        record_kwargs["context_peak_tokens"] = context_peak_tokens
+    if context_window is not None:
+        record_kwargs["context_window"] = context_window
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
@@ -411,4 +432,7 @@ def post_session(
         output_tokens=output_tokens,
         cache_creation_tokens=cache_creation_tokens,
         cache_read_tokens=cache_read_tokens,
+        sys_prompt_tokens=sys_prompt_tokens,
+        context_peak_tokens=context_peak_tokens,
+        context_window=context_window,
     )
