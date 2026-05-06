@@ -100,6 +100,10 @@ class PostSessionResult:
         sys_prompt_tokens:     First-turn input context size, or ``None`` if not present.
         context_peak_tokens:   Largest per-turn input context size, or ``None`` if not present.
         context_window:        Model context window size, or ``None`` if not present.
+        sys_prompt_bytes:      System messages before first user message (UTF-8 bytes).
+        first_turn_bytes:      All messages before first assistant message (UTF-8 bytes).
+        context_peak_bytes:    Max per-turn context bytes before assistant.
+        session_total_bytes:   Total bytes of all message content.
     """
 
     record: SessionRecord
@@ -113,6 +117,10 @@ class PostSessionResult:
     sys_prompt_tokens: int | None = None
     context_peak_tokens: int | None = None
     context_window: int | None = None
+    sys_prompt_bytes: int | None = None
+    first_turn_bytes: int | None = None
+    context_peak_bytes: int | None = None
+    session_total_bytes: int | None = None
 
 
 def post_session(
@@ -233,6 +241,10 @@ def post_session(
     sys_prompt_tokens: int | None = None
     context_peak_tokens: int | None = None
     context_window: int | None = None
+    sys_prompt_bytes: int | None = None
+    first_turn_bytes: int | None = None
+    context_peak_bytes: int | None = None
+    session_total_bytes: int | None = None
     traj_productive: bool | None = None
 
     # --- Extract signals from trajectory ---
@@ -258,6 +270,15 @@ def post_session(
                 sys_prompt_tokens = int(_sys) if _sys is not None else None
                 context_peak_tokens = int(_peak) if _peak is not None else None
                 context_window = int(_window) if _window is not None else None
+                # Byte-level metrics (model-independent; ErikBjare/bob#738)
+                _sys_b = usage.get("sys_prompt_bytes")
+                _first_b = usage.get("first_turn_bytes")
+                _peak_b = usage.get("context_peak_bytes")
+                _total_b = usage.get("session_total_bytes")
+                sys_prompt_bytes = int(_sys_b) if _sys_b is not None else None
+                first_turn_bytes = int(_first_b) if _first_b is not None else None
+                context_peak_bytes = int(_peak_b) if _peak_b is not None else None
+                session_total_bytes = int(_total_b) if _total_b is not None else None
             if isinstance(usage, dict) and "total_tokens" in usage:
                 total = usage.get("total_tokens")
                 if total is not None:
@@ -392,6 +413,14 @@ def post_session(
         record_kwargs["context_peak_tokens"] = context_peak_tokens
     if context_window is not None:
         record_kwargs["context_window"] = context_window
+    if sys_prompt_bytes is not None:
+        record_kwargs["sys_prompt_bytes"] = sys_prompt_bytes
+    if first_turn_bytes is not None:
+        record_kwargs["first_turn_bytes"] = first_turn_bytes
+    if context_peak_bytes is not None:
+        record_kwargs["context_peak_bytes"] = context_peak_bytes
+    if session_total_bytes is not None:
+        record_kwargs["session_total_bytes"] = session_total_bytes
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
@@ -435,4 +464,8 @@ def post_session(
         sys_prompt_tokens=sys_prompt_tokens,
         context_peak_tokens=context_peak_tokens,
         context_window=context_window,
+        sys_prompt_bytes=sys_prompt_bytes,
+        first_turn_bytes=first_turn_bytes,
+        context_peak_bytes=context_peak_bytes,
+        session_total_bytes=session_total_bytes,
     )
