@@ -980,7 +980,7 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         if not _first_user_seen:
             if role == "user":
                 _first_user_seen = True
-            else:
+            elif role == "system":
                 _sys_b += _cb
         if not _first_assistant_seen:
             if role == "assistant":
