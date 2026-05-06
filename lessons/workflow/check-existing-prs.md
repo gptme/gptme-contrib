@@ -30,6 +30,9 @@ Check before creating:
 gh pr list --state open --search "605 in:body"
 gh pr list --state open --search "mcp config"
 
+# Also check via API for issue-linked PRs (more reliable than text search)
+gh api "repos/OWNER/REPO/issues/605" --jq '.pull_request'
+
 # If found: Review and coordinate
 # If not found: Proceed with new PR
 git checkout -b fix-issue-605
