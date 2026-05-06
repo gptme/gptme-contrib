@@ -1417,7 +1417,7 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         if output_tokens is not None:
             result["output_tokens"] = output_tokens
         if cached_input_tokens is not None:
-            result["cached_input_tokens"] = cached_input_tokens
+            result["cache_read_tokens"] = cached_input_tokens
         if total_tokens is not None:
             result["total_tokens"] = total_tokens
     if sys_prompt_tokens is not None:

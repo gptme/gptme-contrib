@@ -3765,7 +3765,7 @@ def test_extract_usage_codex():
     assert usage["context_peak_tokens"] == 12000
     assert usage["context_window"] == 200000
     assert usage["input_tokens"] == 12000
-    assert usage["cached_input_tokens"] == 9000
+    assert usage["cache_read_tokens"] == 9000
     assert usage["output_tokens"] == 100
     assert usage["total_tokens"] == 12100
 
