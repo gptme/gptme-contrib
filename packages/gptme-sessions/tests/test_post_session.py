@@ -324,3 +324,36 @@ def test_post_session_preserves_zero_token_usage(tmp_path: Path):
 
     records = store.load_all()
     assert records[0].token_count == 0
+
+
+def test_post_session_category_none_when_no_signals(tmp_path: Path):
+    """Category defaults to None when no explicit category and no trajectory."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        duration_seconds=120,
+        run_type="operator",
+    )
+    assert result.record.category is None
+
+    records = store.load_all()
+    assert records[0].category is None
+
+
+def test_post_session_explicit_category(tmp_path: Path):
+    """Explicit category is stored when passed (operator fix regression test)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        duration_seconds=120,
+        run_type="operator",
+        category="monitoring",
+    )
+    assert result.record.category == "monitoring"
+
+    records = store.load_all()
+    assert records[0].category == "monitoring"
