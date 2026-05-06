@@ -1659,6 +1659,8 @@ def test_extract_usage_cc_basic():
     assert usage["cache_read_tokens"] == 500
     assert usage["total_tokens"] == 880
     assert usage["model"] == "claude-sonnet-4-6"
+    assert usage["sys_prompt_tokens"] == 300
+    assert usage["context_peak_tokens"] == 510
 
 
 def test_extract_usage_cc_empty():
@@ -1699,6 +1701,8 @@ def test_extract_usage_cc_no_usage_field():
     assert usage["input_tokens"] == 5
     assert usage["output_tokens"] == 3
     assert usage["total_tokens"] == 8
+    assert usage["sys_prompt_tokens"] == 5
+    assert usage["context_peak_tokens"] == 5
 
 
 def test_detect_format_cc_with_preamble():
@@ -2416,6 +2420,8 @@ def test_extract_usage_gptme_metadata():
     assert usage["total_tokens"] == 380
     assert abs(usage["cost"] - 0.008) < 1e-9
     assert usage["model"] == "anthropic/claude-sonnet-4-6"
+    assert usage["sys_prompt_tokens"] == 100
+    assert usage["context_peak_tokens"] == 200
 
 
 def test_extract_usage_gptme_empty():
@@ -2433,6 +2439,51 @@ def test_extract_usage_gptme_no_metadata():
         }
     ]
     assert extract_usage_gptme(msgs) == {}
+
+
+def test_extract_usage_gptme_metadata_no_token_data():
+    """Metadata present but without token data should not lock sys_prompt_tokens at 0.
+
+    Regression test for Greptile finding on PR #845: the gptme extractor must not
+    set sys_prompt_tokens unconditionally on the first metadata-bearing turn when
+    no real token data is present. A later turn with actual data should still be
+    captured as sys_prompt.
+    """
+    msgs = [
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+        {
+            "role": "assistant",
+            "content": "First response",
+            "metadata": {"model": "test-model"},
+            # metadata without any token fields
+        },
+        {
+            "role": "user",
+            "content": "Do something",
+        },
+        {
+            "role": "assistant",
+            "content": "Second response",
+            "metadata": {
+                "model": "test-model",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cost": 0.002,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage, "Should return non-empty dict when token data exists"
+    assert usage["sys_prompt_tokens"] == 100, (
+        "sys_prompt_tokens should be the first turn WITH real token data, "
+        "not the first metadata-bearing turn"
+    )
+    assert usage["context_peak_tokens"] == 100
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
 
 
 def test_extract_usage_gptme_non_assistant_ignored():
@@ -2527,6 +2578,8 @@ def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
     assert result["usage"]["input_tokens"] == 500
     assert result["usage"]["output_tokens"] == 100
     assert result["usage"]["model"] == "anthropic/claude-sonnet-4-6"
+    assert result["usage"]["sys_prompt_tokens"] == 500
+    assert result["usage"]["context_peak_tokens"] == 500
 
 
 def test_extract_usage_gptme_cache_tokens():
@@ -2842,6 +2895,8 @@ def test_post_session_token_count_from_trajectory(tmp_path: Path):
     )
     assert result.token_count == 1800  # 1000+500+200+100
     assert result.record.token_count == 1800
+    assert result.record.sys_prompt_tokens == 1300
+    assert result.record.context_peak_tokens == 1300
 
 
 def test_post_session_missing_trajectory(tmp_path: Path):
@@ -3671,7 +3726,7 @@ def test_extract_signals_codex_commit_in_long_output():
 
 
 def test_extract_usage_codex():
-    """Extract model and rate-limit info from Codex trajectory."""
+    """Extract model, token, and rate-limit info from Codex trajectory."""
     msgs = [
         {
             "type": "turn_context",
@@ -3681,6 +3736,19 @@ def test_extract_usage_codex():
             "type": "event_msg",
             "payload": {
                 "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 12000,
+                        "output_tokens": 100,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 12000,
+                        "cached_input_tokens": 9000,
+                        "output_tokens": 100,
+                        "total_tokens": 12100,
+                    },
+                    "model_context_window": 200000,
+                },
                 "rate_limits": {
                     "limit_id": "codex",
                     "primary": {"used_percent": 8.0, "window_minutes": 300},
@@ -3693,12 +3761,51 @@ def test_extract_usage_codex():
     assert usage["model"] == "gpt-5.3-codex"
     assert usage["rate_limit_primary_pct"] == 8.0
     assert usage["rate_limit_secondary_pct"] == 2.0
+    assert usage["sys_prompt_tokens"] == 12000
+    assert usage["context_peak_tokens"] == 12000
+    assert usage["context_window"] == 200000
+    assert usage["input_tokens"] == 12000
+    assert usage["cached_input_tokens"] == 9000
+    assert usage["output_tokens"] == 100
+    assert usage["total_tokens"] == 12100
 
 
 def test_extract_usage_codex_empty():
     """Empty dict when no model/usage data."""
     assert extract_usage_codex([]) == {}
     assert extract_usage_codex([{"type": "session_meta", "payload": {}}]) == {}
+
+
+def test_extract_usage_codex_without_model_omits_model_key():
+    """Usage-only Codex records should not emit a ``model: None`` placeholder."""
+    msgs = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 4000,
+                        "output_tokens": 50,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 4000,
+                        "output_tokens": 50,
+                        "total_tokens": 4050,
+                    },
+                },
+            },
+        }
+    ]
+
+    usage = extract_usage_codex(msgs)
+
+    assert "model" not in usage
+    assert usage["sys_prompt_tokens"] == 4000
+    assert usage["context_peak_tokens"] == 4000
+    assert usage["input_tokens"] == 4000
+    assert usage["output_tokens"] == 50
+    assert usage["total_tokens"] == 4050
 
 
 # ============================================================

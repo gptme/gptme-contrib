@@ -70,6 +70,18 @@ _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 # can appear in test files, file-read results, and other non-merge contexts.
 _GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
 
+
+def _as_int(value: object) -> int | None:
+    """Return integer token counters without accepting bools or lossy floats."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 # Regex to extract `--repo OWNER/REPO` from a `gh` command string.
 # Used to learn the target repo for `gh pr merge`/`gh pr view` so we can
 # resolve the server-side merge-commit SHA after a squash merge.
@@ -932,6 +944,8 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     cache_creation_tokens = 0
     cost = 0.0
     model: str | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
 
     for msg in msgs:
         if msg.get("role") != "assistant":
@@ -949,10 +963,21 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         # Support both nested format (usage sub-dict) and legacy flat format
         # Select source dict once per message to avoid per-field falsy fallback issues
         usage = metadata.get("usage") or metadata
-        input_tokens += usage.get("input_tokens", 0)
-        output_tokens += usage.get("output_tokens", 0)
-        cache_read_tokens += usage.get("cache_read_tokens", 0)
-        cache_creation_tokens += usage.get("cache_creation_tokens", 0)
+        turn_input = _as_int(usage.get("input_tokens")) or 0
+        turn_output = _as_int(usage.get("output_tokens")) or 0
+        turn_cache_read = _as_int(usage.get("cache_read_tokens")) or 0
+        turn_cache_create = _as_int(usage.get("cache_creation_tokens")) or 0
+        turn_context = turn_input + turn_cache_read + turn_cache_create
+
+        input_tokens += turn_input
+        output_tokens += turn_output
+        cache_read_tokens += turn_cache_read
+        cache_creation_tokens += turn_cache_create
+        if sys_prompt_tokens is None and turn_context > 0:
+            sys_prompt_tokens = turn_context
+        context_peak_tokens = (
+            turn_context if context_peak_tokens is None else max(context_peak_tokens, turn_context)
+        )
         cost += metadata.get("cost", 0.0)
 
     total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
@@ -966,6 +991,8 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         "cache_creation_tokens": cache_creation_tokens,
         "cost": cost,
         "total_tokens": total_tokens,
+        "sys_prompt_tokens": sys_prompt_tokens,
+        "context_peak_tokens": context_peak_tokens,
     }
 
 
@@ -991,16 +1018,32 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     cache_creation_tokens = 0
     cache_read_tokens = 0
     model: str | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
 
     for record in msgs:
         if record.get("type") != "assistant":
             continue
         msg = record.get("message", {})
         usage = msg.get("usage") or {}
-        input_tokens += usage.get("input_tokens", 0)
-        output_tokens += usage.get("output_tokens", 0)
-        cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
-        cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+        turn_input = _as_int(usage.get("input_tokens")) or 0
+        turn_output = _as_int(usage.get("output_tokens")) or 0
+        turn_cache_create = _as_int(usage.get("cache_creation_input_tokens")) or 0
+        turn_cache_read = _as_int(usage.get("cache_read_input_tokens")) or 0
+        turn_context = turn_input + turn_cache_create + turn_cache_read
+
+        input_tokens += turn_input
+        output_tokens += turn_output
+        cache_creation_tokens += turn_cache_create
+        cache_read_tokens += turn_cache_read
+        if usage and sys_prompt_tokens is None:
+            sys_prompt_tokens = turn_context
+        if usage:
+            context_peak_tokens = (
+                turn_context
+                if context_peak_tokens is None
+                else max(context_peak_tokens, turn_context)
+            )
         if msg.get("model"):
             model = msg["model"]
 
@@ -1015,6 +1058,8 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
         "cache_creation_tokens": cache_creation_tokens,
         "cache_read_tokens": cache_read_tokens,
         "total_tokens": total_tokens,
+        "sys_prompt_tokens": sys_prompt_tokens,
+        "context_peak_tokens": context_peak_tokens,
     }
 
 
@@ -1296,16 +1341,19 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
 
 
 def extract_usage_codex(msgs: list[dict]) -> dict:
-    """Extract model and rate-limit info from Codex CLI trajectories.
-
-    Codex only provides rate-limit percentages (not absolute token counts).
-    We extract the model name and last-seen rate limit usage for reference.
+    """Extract model, token, and rate-limit info from Codex CLI trajectories.
 
     Returns an empty dict if no model/usage data is found.
+    Omits the ``model`` key when usage data exists but the model was never
+    surfaced in a ``turn_context`` record.
     """
     model: str | None = None
     rate_limit_primary: float | None = None
     rate_limit_secondary: float | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+    context_window: int | None = None
+    final_total: dict | None = None
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -1318,6 +1366,24 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         elif rec_type == "event_msg":
             payload = record.get("payload") or {}
             if payload.get("type") == "token_count":
+                info = payload.get("info") or {}
+                if isinstance(info, dict):
+                    last = info.get("last_token_usage")
+                    if isinstance(last, dict):
+                        turn_input = _as_int(last.get("input_tokens"))
+                        if turn_input is not None:
+                            if sys_prompt_tokens is None:
+                                sys_prompt_tokens = turn_input
+                            context_peak_tokens = (
+                                turn_input
+                                if context_peak_tokens is None
+                                else max(context_peak_tokens, turn_input)
+                            )
+                    total = info.get("total_token_usage")
+                    if isinstance(total, dict):
+                        final_total = total
+                    context_window = _as_int(info.get("model_context_window")) or context_window
+
                 rl = payload.get("rate_limits") or {}
                 primary = rl.get("primary") or {}
                 secondary = rl.get("secondary") or {}
@@ -1326,13 +1392,40 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
                 if secondary.get("used_percent") is not None:
                     rate_limit_secondary = secondary["used_percent"]
 
-    if model is None:
+    if (
+        model is None
+        and rate_limit_primary is None
+        and rate_limit_secondary is None
+        and final_total is None
+        and context_peak_tokens is None
+    ):
         return {}
-    result: dict = {"model": model}
+    result: dict = {}
+    if model is not None:
+        result["model"] = model
     if rate_limit_primary is not None:
         result["rate_limit_primary_pct"] = rate_limit_primary
     if rate_limit_secondary is not None:
         result["rate_limit_secondary_pct"] = rate_limit_secondary
+    if final_total is not None:
+        input_tokens = _as_int(final_total.get("input_tokens"))
+        output_tokens = _as_int(final_total.get("output_tokens"))
+        cached_input_tokens = _as_int(final_total.get("cached_input_tokens"))
+        total_tokens = _as_int(final_total.get("total_tokens"))
+        if input_tokens is not None:
+            result["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            result["output_tokens"] = output_tokens
+        if cached_input_tokens is not None:
+            result["cached_input_tokens"] = cached_input_tokens
+        if total_tokens is not None:
+            result["total_tokens"] = total_tokens
+    if sys_prompt_tokens is not None:
+        result["sys_prompt_tokens"] = sys_prompt_tokens
+    if context_peak_tokens is not None:
+        result["context_peak_tokens"] = context_peak_tokens
+    if context_window is not None:
+        result["context_window"] = context_window
     return result
 
 
