@@ -1344,6 +1344,8 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
     """Extract model, token, and rate-limit info from Codex CLI trajectories.
 
     Returns an empty dict if no model/usage data is found.
+    Omits the ``model`` key when usage data exists but the model was never
+    surfaced in a ``turn_context`` record.
     """
     model: str | None = None
     rate_limit_primary: float | None = None
@@ -1398,7 +1400,9 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         and context_peak_tokens is None
     ):
         return {}
-    result: dict = {"model": model}
+    result: dict = {}
+    if model is not None:
+        result["model"] = model
     if rate_limit_primary is not None:
         result["rate_limit_primary_pct"] = rate_limit_primary
     if rate_limit_secondary is not None:

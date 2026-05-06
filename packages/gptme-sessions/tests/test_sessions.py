@@ -3776,6 +3776,38 @@ def test_extract_usage_codex_empty():
     assert extract_usage_codex([{"type": "session_meta", "payload": {}}]) == {}
 
 
+def test_extract_usage_codex_without_model_omits_model_key():
+    """Usage-only Codex records should not emit a ``model: None`` placeholder."""
+    msgs = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 4000,
+                        "output_tokens": 50,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 4000,
+                        "output_tokens": 50,
+                        "total_tokens": 4050,
+                    },
+                },
+            },
+        }
+    ]
+
+    usage = extract_usage_codex(msgs)
+
+    assert "model" not in usage
+    assert usage["sys_prompt_tokens"] == 4000
+    assert usage["context_peak_tokens"] == 4000
+    assert usage["input_tokens"] == 4000
+    assert usage["output_tokens"] == 50
+    assert usage["total_tokens"] == 4050
+
+
 # ============================================================
 # Copilot CLI format tests
 # ============================================================
