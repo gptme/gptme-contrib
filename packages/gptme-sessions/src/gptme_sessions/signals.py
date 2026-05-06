@@ -973,7 +973,7 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         output_tokens += turn_output
         cache_read_tokens += turn_cache_read
         cache_creation_tokens += turn_cache_create
-        if sys_prompt_tokens is None:
+        if sys_prompt_tokens is None and turn_context > 0:
             sys_prompt_tokens = turn_context
         context_peak_tokens = (
             turn_context if context_peak_tokens is None else max(context_peak_tokens, turn_context)

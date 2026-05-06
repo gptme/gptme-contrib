@@ -2441,6 +2441,51 @@ def test_extract_usage_gptme_no_metadata():
     assert extract_usage_gptme(msgs) == {}
 
 
+def test_extract_usage_gptme_metadata_no_token_data():
+    """Metadata present but without token data should not lock sys_prompt_tokens at 0.
+
+    Regression test for Greptile finding on PR #845: the gptme extractor must not
+    set sys_prompt_tokens unconditionally on the first metadata-bearing turn when
+    no real token data is present. A later turn with actual data should still be
+    captured as sys_prompt.
+    """
+    msgs = [
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+        {
+            "role": "assistant",
+            "content": "First response",
+            "metadata": {"model": "test-model"},
+            # metadata without any token fields
+        },
+        {
+            "role": "user",
+            "content": "Do something",
+        },
+        {
+            "role": "assistant",
+            "content": "Second response",
+            "metadata": {
+                "model": "test-model",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cost": 0.002,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage, "Should return non-empty dict when token data exists"
+    assert usage["sys_prompt_tokens"] == 100, (
+        "sys_prompt_tokens should be the first turn WITH real token data, "
+        "not the first metadata-bearing turn"
+    )
+    assert usage["context_peak_tokens"] == 100
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+
+
 def test_extract_usage_gptme_non_assistant_ignored():
     """Token data on user/system messages must not be accumulated."""
     msgs = [
