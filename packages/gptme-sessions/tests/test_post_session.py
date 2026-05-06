@@ -324,3 +324,89 @@ def test_post_session_preserves_zero_token_usage(tmp_path: Path):
 
     records = store.load_all()
     assert records[0].token_count == 0
+
+
+def test_post_session_category_none_when_no_signals(tmp_path: Path):
+    """Category defaults to None when no explicit category and no trajectory."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        duration_seconds=120,
+        run_type="operator",
+    )
+    assert result.record.category is None
+
+    records = store.load_all()
+    assert records[0].category is None
+
+
+def test_post_session_explicit_category(tmp_path: Path):
+    """Explicit category is stored when passed (operator fix regression test)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        duration_seconds=120,
+        run_type="operator",
+        category="monitoring",
+    )
+    assert result.record.category == "monitoring"
+
+    records = store.load_all()
+    assert records[0].category == "monitoring"
+
+
+def test_post_session_inferred_category_from_signals(tmp_path: Path):
+    """Category falls back to inferred_category from trajectory signals when no explicit category."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 120,
+        "productive": True,
+        "deliverables": ["fix: thing (abc1234)"],
+        "inferred_category": "infrastructure",
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+        )
+    assert result.record.category == "infrastructure"
+
+    records = store.load_all()
+    assert records[0].category == "infrastructure"
+
+
+def test_post_session_explicit_category_overrides_inferred(tmp_path: Path):
+    """Explicit category takes priority over inferred_category from signals."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 120,
+        "productive": True,
+        "deliverables": ["fix: thing (abc1234)"],
+        "inferred_category": "infrastructure",
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+            category="code",
+        )
+    assert result.record.category == "code"
+
+    records = store.load_all()
+    assert records[0].category == "code"
