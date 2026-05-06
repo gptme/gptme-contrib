@@ -977,15 +977,16 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         _cb = _message_content_bytes(msg)
         _total_b += _cb
         _cumulative_b += _cb
-        if not _first_user_seen and role != "system":
+        if not _first_user_seen:
             if role == "user":
                 _first_user_seen = True
             else:
                 _sys_b += _cb
         if not _first_assistant_seen:
-            _first_turn_b += _cb
             if role == "assistant":
                 _first_assistant_seen = True
+            else:
+                _first_turn_b += _cb
         if role == "assistant":
             context_before = _cumulative_b - _cb
             if context_before > _peak_b:
@@ -1034,7 +1035,11 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         cost += metadata.get("cost", 0.0)
 
     total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
-    if total_tokens == 0 and cost == 0.0:
+    has_byte_metrics = any(
+        v is not None
+        for v in (sys_prompt_bytes, first_turn_bytes, context_peak_bytes, session_total_bytes)
+    )
+    if total_tokens == 0 and cost == 0.0 and not has_byte_metrics:
         return {}
     return {
         "model": model,

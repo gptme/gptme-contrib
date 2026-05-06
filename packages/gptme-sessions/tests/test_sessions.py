@@ -2430,7 +2430,7 @@ def test_extract_usage_gptme_empty():
 
 
 def test_extract_usage_gptme_no_metadata():
-    """Messages without metadata are skipped."""
+    """Messages without metadata still produce byte metrics; token fields are zero."""
     msgs = [
         {
             "role": "assistant",
@@ -2438,7 +2438,42 @@ def test_extract_usage_gptme_no_metadata():
             # no metadata field
         }
     ]
-    assert extract_usage_gptme(msgs) == {}
+    result = extract_usage_gptme(msgs)
+    # Byte metrics are computed even without token metadata
+    assert result["session_total_bytes"] == len("test")
+    # Token fields are absent/zero
+    assert result["total_tokens"] == 0
+    assert result["cost"] == 0.0
+
+
+def test_extract_usage_gptme_byte_metrics_without_token_data():
+    """Byte metrics are returned for token-less gptme sessions (the primary target use case).
+
+    Regression test for Greptile finding on PR #846: the early-return guard
+    `if total_tokens == 0 and cost == 0.0: return {}` must not discard byte
+    metrics for gptme sessions that have no token metadata.
+    """
+    sys_content = "You are a helpful assistant."
+    user_content = "Hello, world!"
+    asst_content = "Hi there!"
+    msgs = [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": asst_content},  # no metadata → no tokens
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result, "Should return non-empty dict even with no token metadata"
+    # sys_prompt_bytes: bytes before first user turn (system message only)
+    assert result["sys_prompt_bytes"] == len(sys_content)
+    # first_turn_bytes: bytes before first assistant (system + user, not including assistant)
+    assert result["first_turn_bytes"] == len(sys_content) + len(user_content)
+    # session_total_bytes: all messages
+    assert result["session_total_bytes"] == len(sys_content) + len(user_content) + len(asst_content)
+    # context_peak_bytes: bytes before first (and only) assistant turn
+    assert result["context_peak_bytes"] == len(sys_content) + len(user_content)
+    # Token fields are zero since no metadata
+    assert result["total_tokens"] == 0
+    assert result["cost"] == 0.0
 
 
 def test_extract_usage_gptme_metadata_no_token_data():
