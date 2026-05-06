@@ -344,12 +344,40 @@ class TaskInfo:
 # =============================================================================
 
 
-def task_has_waiting_blocker(task: TaskInfo) -> bool:
+def task_is_recur_blocked(task: "TaskInfo") -> bool:
+    """Return True if a recurring task has been completed and is not yet due again."""
+    recur = task.metadata.get("recur")
+    last_completed = task.metadata.get("last_completed")
+    if not recur or not last_completed:
+        return False
+    interval = parse_recur_interval(str(recur))
+    if interval is None:
+        return False
+    try:
+        last_dt = datetime.fromisoformat(str(last_completed))
+        return datetime.now() < last_dt + interval
+    except ValueError:
+        return False
+
+
+def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
     if state == "waiting":
         return True
-    return bool(task.metadata.get("waiting_for"))
+    if task.metadata.get("waiting_for"):
+        return True
+    # Simple wait_until: "YYYY-MM-DD" or ISO timestamp — blocks until that time passes
+    wait_until = task.metadata.get("wait_until")
+    if wait_until:
+        from gptodo.waiting import check_time
+
+        resolved, _ = check_time(str(wait_until))
+        return not resolved
+    # recur: block if last_completed + interval is in the future
+    if task_is_recur_blocked(task):
+        return True
+    return False
 
 
 def find_repo_root(start_path: Path) -> Path:
@@ -487,7 +515,7 @@ def parse_recur_interval(recur: str) -> timedelta | None:
     """
     if not recur:
         return None
-    recur = recur.strip()
+    recur = recur.strip().lower()
     if recur == "weekly":
         return timedelta(days=7)
     if recur == "monthly":
@@ -1166,6 +1194,9 @@ def get_blocking_reasons(
         return []
 
     if task_has_waiting_blocker(task):
+        wait_until = task.metadata.get("wait_until")
+        if wait_until:
+            return [f"Wait until: {wait_until}"]
         waiting_for = task.metadata.get("waiting_for")
         if waiting_for:
             return [f"Waiting on: {waiting_for}"]
@@ -1275,6 +1306,18 @@ class StateChecker:
             elif not task.state:
                 results["untracked"].append(task)
             else:
+                # Route wait_until / recur-blocked tasks to "waiting" bucket (hides from --compact)
+                wait_until = task.metadata.get("wait_until")
+                if wait_until and "waiting" in results:
+                    from gptodo.waiting import check_time
+
+                    resolved, _ = check_time(str(wait_until))
+                    if not resolved:
+                        results["waiting"].append(task)
+                        continue
+                if task_is_recur_blocked(task) and "waiting" in results:
+                    results["waiting"].append(task)
+                    continue
                 results[task.state].append(task)
 
         return results
