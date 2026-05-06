@@ -4,6 +4,7 @@ match:
   - gh pr create
   - git checkout -b fix-
   - gh pr list --search
+  - gh api graphql
   session_categories: [cross-repo, code, triage]
 status: active
 ---
@@ -30,8 +31,23 @@ Check before creating:
 gh pr list --state open --search "605 in:body"
 gh pr list --state open --search "mcp config"
 
-# Also check via API for issue-linked PRs (more reliable than text search)
-gh api "repos/OWNER/REPO/issues/605" --jq '.pull_request'
+# Also check GitHub's issue -> closing PR metadata
+gh api graphql \
+  -f owner=OWNER \
+  -f repo=REPO \
+  -F issue=605 \
+  -f query='query($owner:String!, $repo:String!, $issue:Int!) {
+    repository(owner:$owner, name:$repo) {
+      issue(number:$issue) {
+        closedByPullRequestsReferences(first:10) {
+          nodes { number title url state }
+        }
+      }
+    }
+  }' \
+  --jq '.data.repository.issue.closedByPullRequestsReferences.nodes[]'
+
+# Do not use /issues/605 --jq '.pull_request'; that only says whether 605 is itself a PR.
 
 # If found: Review and coordinate
 # If not found: Proceed with new PR
