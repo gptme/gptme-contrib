@@ -927,6 +927,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     }
 
 
+def _message_content_bytes(msg: dict) -> int:
+    """Count UTF-8 bytes of message content (model-independent)."""
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        return sum(len(json.dumps(block, ensure_ascii=False).encode("utf-8")) for block in content)
+    if isinstance(content, str):
+        return len(content.encode("utf-8"))
+    return len(str(content).encode("utf-8"))
+
+
 def extract_usage_gptme(msgs: list[dict]) -> dict:
     """Extract cumulative token usage from a gptme conversation.jsonl trajectory.
 
@@ -946,6 +956,50 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     model: str | None = None
     sys_prompt_tokens: int | None = None
     context_peak_tokens: int | None = None
+
+    # --- Byte-level metrics (model-independent; ErikBjare/bob#738) ---
+    sys_prompt_bytes: int | None = None
+    first_turn_bytes: int | None = None
+    context_peak_bytes: int | None = None
+    session_total_bytes: int | None = None
+
+    _sys_b = 0
+    _first_turn_b = 0
+    _peak_b = 0
+    _cumulative_b = 0
+    _total_b = 0
+    _first_assistant_seen = False
+    _first_user_seen = False
+    for msg in msgs:
+        role = msg.get("role")
+        if role is None:
+            continue
+        _cb = _message_content_bytes(msg)
+        _total_b += _cb
+        _cumulative_b += _cb
+        if not _first_user_seen:
+            if role == "user":
+                _first_user_seen = True
+            elif role == "system":
+                _sys_b += _cb
+        if not _first_assistant_seen:
+            if role == "assistant":
+                _first_assistant_seen = True
+            else:
+                _first_turn_b += _cb
+        if role == "assistant":
+            context_before = _cumulative_b - _cb
+            if context_before > _peak_b:
+                _peak_b = context_before
+
+    if _sys_b > 0:
+        sys_prompt_bytes = _sys_b
+    if _first_turn_b > 0:
+        first_turn_bytes = _first_turn_b
+    if _peak_b > 0:
+        context_peak_bytes = _peak_b
+    if _total_b > 0:
+        session_total_bytes = _total_b
 
     for msg in msgs:
         if msg.get("role") != "assistant":
@@ -981,7 +1035,11 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         cost += metadata.get("cost", 0.0)
 
     total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
-    if total_tokens == 0 and cost == 0.0:
+    has_byte_metrics = any(
+        v is not None
+        for v in (sys_prompt_bytes, first_turn_bytes, context_peak_bytes, session_total_bytes)
+    )
+    if total_tokens == 0 and cost == 0.0 and not has_byte_metrics:
         return {}
     return {
         "model": model,
@@ -993,6 +1051,10 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         "total_tokens": total_tokens,
         "sys_prompt_tokens": sys_prompt_tokens,
         "context_peak_tokens": context_peak_tokens,
+        "sys_prompt_bytes": sys_prompt_bytes,
+        "first_turn_bytes": first_turn_bytes,
+        "context_peak_bytes": context_peak_bytes,
+        "session_total_bytes": session_total_bytes,
     }
 
 

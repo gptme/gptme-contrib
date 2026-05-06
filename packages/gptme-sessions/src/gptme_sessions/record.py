@@ -208,6 +208,12 @@ class SessionRecord:
     context_peak_tokens: int | None = None
     context_window: int | None = None
 
+    # Byte-level context metrics (model-independent; #738)
+    sys_prompt_bytes: int | None = None  # system messages before first user msg
+    first_turn_bytes: int | None = None  # all messages before first assistant msg
+    context_peak_bytes: int | None = None  # max per-turn context bytes before assistant
+    session_total_bytes: int | None = None  # total bytes of all message content
+
     # Artifacts
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
     trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)

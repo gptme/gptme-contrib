@@ -2430,7 +2430,7 @@ def test_extract_usage_gptme_empty():
 
 
 def test_extract_usage_gptme_no_metadata():
-    """Messages without metadata are skipped."""
+    """Messages without metadata still return byte metrics (token-less gptme sessions)."""
     msgs = [
         {
             "role": "assistant",
@@ -2438,7 +2438,104 @@ def test_extract_usage_gptme_no_metadata():
             # no metadata field
         }
     ]
-    assert extract_usage_gptme(msgs) == {}
+    result = extract_usage_gptme(msgs)
+    # Byte metrics are returned even without token metadata (the primary gptme use case)
+    assert result["session_total_bytes"] == len("test".encode())
+    assert result["total_tokens"] == 0
+    assert result["cost"] == 0.0
+
+
+def test_extract_usage_gptme_truly_empty():
+    """Truly empty message list (no content, no tokens) returns {}."""
+    assert extract_usage_gptme([]) == {}
+
+
+def test_extract_usage_gptme_byte_metrics_without_token_data():
+    """Byte metrics are returned for token-less gptme sessions (the primary target use case).
+
+    Regression test for Greptile finding on PR #846: the early-return guard
+    `if total_tokens == 0 and cost == 0.0: return {}` must not discard byte
+    metrics for gptme sessions that have no token metadata.
+    """
+    sys_content = "You are a helpful assistant."
+    user_content = "Hello, world!"
+    asst_content = "Hi there!"
+    msgs = [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": asst_content},  # no metadata → no tokens
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result, "Should return non-empty dict even with no token metadata"
+    # sys_prompt_bytes: bytes before first user turn (system message only)
+    assert result["sys_prompt_bytes"] == len(sys_content.encode())
+    # first_turn_bytes: bytes before first assistant (system + user, not including assistant)
+    assert result["first_turn_bytes"] == len(sys_content.encode()) + len(user_content.encode())
+    # session_total_bytes: all messages
+    assert result["session_total_bytes"] == (
+        len(sys_content.encode()) + len(user_content.encode()) + len(asst_content.encode())
+    )
+    # context_peak_bytes: bytes before first (and only) assistant turn
+    assert result["context_peak_bytes"] == len(sys_content.encode()) + len(user_content.encode())
+    # Token fields are zero since no metadata
+    assert result["total_tokens"] == 0
+    assert result["cost"] == 0.0
+
+
+def test_extract_usage_gptme_sys_prompt_bytes_from_system_role():
+    """Regression: system-role messages must be counted in sys_prompt_bytes.
+
+    Bug: the original condition `role != 'system'` skipped actual system messages,
+    so sys_prompt_bytes was always 0 for the system prompt.
+    """
+    sys_text = "You are a helpful assistant."
+    msgs = [
+        {"role": "system", "content": sys_text},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result["sys_prompt_bytes"] == len(sys_text.encode())
+
+
+def test_extract_usage_gptme_first_turn_bytes_excludes_assistant():
+    """Regression: first_turn_bytes must NOT include the first assistant message.
+
+    Bug: bytes were added before checking role=='assistant', so the first
+    assistant message was included in first_turn_bytes.
+    """
+    user_text = "Hello"
+    assistant_text = "Hi there, how can I help?"
+    msgs = [
+        {"role": "user", "content": user_text},
+        {"role": "assistant", "content": assistant_text},
+        {"role": "user", "content": "Another question"},
+    ]
+    result = extract_usage_gptme(msgs)
+    # first_turn_bytes = only the user message before first assistant reply
+    assert result["first_turn_bytes"] == len(user_text.encode())
+    assert result["session_total_bytes"] == len(
+        (user_text + assistant_text + "Another question").encode()
+    )
+
+
+def test_extract_usage_gptme_token_less_returns_bytes():
+    """Regression: token-less gptme sessions must not be silently dropped.
+
+    Bug: `if total_tokens == 0 and cost == 0.0: return {}` fired before
+    byte fields were included, discarding all byte data for gptme sessions
+    that have no token metadata — exactly the population this feature targets.
+    """
+    msgs = [
+        {"role": "system", "content": "System prompt here"},
+        {"role": "user", "content": "Query"},
+        {"role": "assistant", "content": "Response without token metadata"},
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result != {}, "token-less gptme sessions must return byte metrics"
+    assert result["session_total_bytes"] is not None
+    assert result["sys_prompt_bytes"] == len("System prompt here".encode())
+    assert result["total_tokens"] == 0
 
 
 def test_extract_usage_gptme_metadata_no_token_data():
