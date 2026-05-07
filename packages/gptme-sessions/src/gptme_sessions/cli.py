@@ -200,7 +200,7 @@ def _discover_all(
                     "project": extract_project("codex", p),
                 }
             )
-    if harness_filter in (None, "copilot"):
+    if harness_filter in (None, "copilot-cli"):
         for p in discover_copilot_sessions(start, today):
             discovered.append(
                 {
@@ -907,7 +907,7 @@ def discover(
                 }
             )
 
-    if harness in (None, "copilot"):
+    if harness in (None, "copilot-cli"):
         for p in discover_copilot_sessions(start, today):
             discovered.append(
                 {
