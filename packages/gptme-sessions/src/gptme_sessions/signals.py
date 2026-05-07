@@ -937,6 +937,68 @@ def _message_content_bytes(msg: dict) -> int:
     return len(str(content).encode("utf-8"))
 
 
+def _content_bytes(value: object) -> int:
+    """Count UTF-8 bytes for arbitrary event payload content."""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, list):
+        return sum(_content_bytes(item) for item in value)
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _summarize_message_bytes(
+    messages: list[dict[str, object]],
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """Summarize byte-level context growth from normalized message entries."""
+    if not messages:
+        return None, None, None, None
+
+    sys_prompt_bytes = 0
+    for msg in messages:
+        role = msg.get("role")
+        msg_bytes = msg.get("bytes")
+        if not isinstance(msg_bytes, int):
+            continue
+        if role == "user":
+            break
+        if role == "system":
+            sys_prompt_bytes += msg_bytes
+
+    first_turn_bytes = 0
+    for msg in messages:
+        msg_bytes = msg.get("bytes")
+        if not isinstance(msg_bytes, int):
+            continue
+        if msg.get("role") == "assistant":
+            break
+        first_turn_bytes += msg_bytes
+
+    context_peak_bytes = 0
+    cumulative = 0
+    for msg in messages:
+        msg_bytes = msg.get("bytes")
+        if not isinstance(msg_bytes, int):
+            continue
+        cumulative += msg_bytes
+        if msg.get("role") == "assistant":
+            context_before = cumulative - msg_bytes
+            if context_before > context_peak_bytes:
+                context_peak_bytes = context_before
+
+    session_total_bytes = sum(
+        msg_bytes for msg in messages if isinstance((msg_bytes := msg.get("bytes")), int)
+    )
+
+    return (
+        sys_prompt_bytes if sys_prompt_bytes > 0 else None,
+        first_turn_bytes if first_turn_bytes > 0 else None,
+        context_peak_bytes if context_peak_bytes > 0 else None,
+        session_total_bytes if session_total_bytes > 0 else None,
+    )
+
+
 def extract_usage_gptme(msgs: list[dict]) -> dict:
     """Extract cumulative token usage from a gptme conversation.jsonl trajectory.
 
@@ -1710,33 +1772,84 @@ def infer_category(signals: dict) -> str | None:
 
 
 def extract_usage_copilot(msgs: list[dict]) -> dict:
-    """Extract model info from Copilot CLI events.jsonl trajectories.
+    """Extract model info and byte-level context metrics from Copilot trajectories.
 
     Copilot events do not include per-turn token counts or cost data.
     We extract the model name from ``session.model_change`` events (or
     from ``session.start`` context if available) so callers always get a
-    consistent ``{"model": ...}`` dict across all harnesses.
+    consistent usage dict across all harnesses.
 
-    Returns an empty dict if no model information is found.
+    Tool requests live on assistant messages and tool outputs live on
+    ``tool.execution_complete`` events, so both are counted in the byte-level
+    message flow to avoid underestimating context growth.
+
+    Returns an empty dict only when neither model info nor byte metrics are found.
     """
     model: str | None = None
+    messages: list[dict[str, object]] = []
 
     for record in msgs:
         rec_type = record.get("type", "")
+        data = record.get("data") or {}
+        if not isinstance(data, dict):
+            continue
         if rec_type == "session.model_change":
-            m = (record.get("data") or {}).get("newModel")
+            m = data.get("newModel")
             if m:
                 model = m
         elif rec_type == "session.start" and model is None:
             # Some versions may include model in start context
-            data = record.get("data") or {}
             m = data.get("selectedModel")
             if m:
                 model = m
 
-    if model is None:
+        if rec_type == "system.message":
+            messages.append({"role": "system", "bytes": _content_bytes(data.get("content"))})
+        elif rec_type == "user.message":
+            content = data.get("content")
+            if content is None:
+                content = data.get("text")
+            messages.append({"role": "user", "bytes": _content_bytes(content)})
+        elif rec_type == "assistant.message":
+            content = data.get("content")
+            if content is None:
+                content = data.get("text")
+            messages.append(
+                {
+                    "role": "assistant",
+                    "bytes": _content_bytes(content) + _content_bytes(data.get("toolRequests")),
+                }
+            )
+        elif rec_type == "tool.execution_complete":
+            payload = data.get("result")
+            if payload is None:
+                payload = data.get("error")
+            messages.append({"role": "tool", "bytes": _content_bytes(payload)})
+
+    sys_prompt_bytes, first_turn_bytes, context_peak_bytes, session_total_bytes = (
+        _summarize_message_bytes(messages)
+    )
+    if (
+        model is None
+        and sys_prompt_bytes is None
+        and first_turn_bytes is None
+        and context_peak_bytes is None
+        and session_total_bytes is None
+    ):
         return {}
-    return {"model": model}
+
+    usage: dict[str, object] = {}
+    if model is not None:
+        usage["model"] = model
+    if sys_prompt_bytes is not None:
+        usage["sys_prompt_bytes"] = sys_prompt_bytes
+    if first_turn_bytes is not None:
+        usage["first_turn_bytes"] = first_turn_bytes
+    if context_peak_bytes is not None:
+        usage["context_peak_bytes"] = context_peak_bytes
+    if session_total_bytes is not None:
+        usage["session_total_bytes"] = session_total_bytes
+    return usage
 
 
 def extract_from_path(jsonl_path: Path) -> dict:
