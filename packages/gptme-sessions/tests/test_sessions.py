@@ -4336,6 +4336,50 @@ def test_extract_usage_copilot_includes_byte_metrics():
     assert usage["session_total_bytes"] > usage["first_turn_bytes"]
 
 
+def test_extract_usage_copilot_output_tokens():
+    """extract_usage_copilot sums outputTokens from assistant.message events."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent", "selectedModel": "gpt-5.4"},
+        },
+        {"type": "system.message", "data": {"content": "SYS"}},
+        {"type": "user.message", "data": {"content": "hi"}},
+        {
+            "type": "assistant.message",
+            "data": {"content": "hello", "outputTokens": 300},
+        },
+        {"type": "user.message", "data": {"content": "continue"}},
+        {
+            "type": "assistant.message",
+            "data": {"content": "world", "outputTokens": 150},
+        },
+    ]
+
+    usage = extract_usage_copilot(msgs)
+
+    assert usage["output_tokens"] == 450
+    assert usage["model"] == "gpt-5.4"
+
+
+def test_extract_usage_copilot_no_output_tokens():
+    """extract_usage_copilot omits output_tokens when no outputTokens present."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent", "selectedModel": "gpt-5.4"},
+        },
+        {"type": "assistant.message", "data": {"content": "hello"}},
+    ]
+
+    usage = extract_usage_copilot(msgs)
+    assert "output_tokens" not in usage
+
+
 def test_extract_from_path_copilot_with_model(tmp_path: Path):
     """extract_from_path includes usage with model when model_change is present."""
     trajectory_file = tmp_path / "events.jsonl"
