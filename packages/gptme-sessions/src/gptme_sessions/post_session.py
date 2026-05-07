@@ -135,6 +135,7 @@ def post_session(
     trigger: str | None = None,
     category: str | None = None,
     recommended_category: str | None = None,
+    cascade_intent: dict | None = None,
     exit_code: int = 0,
     duration_seconds: int = 0,
     trajectory_path: Path | None = None,
@@ -383,6 +384,8 @@ def post_session(
         record_kwargs["category"] = actual_category
     if recommended_category is not None:
         record_kwargs["recommended_category"] = recommended_category
+    if cascade_intent is not None:
+        record_kwargs["cascade_intent"] = cascade_intent
     if trajectory_path is not None:
         record_kwargs["trajectory_path"] = str(trajectory_path)
     # Fallback: if caller didn't provide journal_path, use the first
