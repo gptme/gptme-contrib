@@ -106,3 +106,25 @@ def test_lock_pid_written():
         assert str(os.getpid()) in content
 
         lock.release()
+
+
+def test_lock_file_truncated_on_release():
+    """Test that lockfile is truncated on release so stale PIDs don't persist.
+
+    Regression test for ErikBjare/bob#755: after a process exits cleanly, the
+    lockfile should not retain its PID — otherwise diagnostic readers see a
+    stale PID and can't tell whether the lock is actually held.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock = RunLoopLock(Path(tmpdir), "test")
+
+        lock.acquire()
+        assert str(os.getpid()) in lock.lock_file.read_text()
+
+        lock.release()
+
+        # After release, lockfile content should be empty (or absent).
+        # The kernel-level flock is what controls mutual exclusion; the file
+        # contents are purely informational, so empty == "lock not held".
+        if lock.lock_file.exists():
+            assert lock.lock_file.read_text().strip() == ""
