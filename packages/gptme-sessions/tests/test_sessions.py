@@ -5941,6 +5941,23 @@ def test_sync_captures_gptme_model_from_config(tmp_path: Path, capsys, monkeypat
     assert records[0].model_normalized == "sonnet"
 
 
+def test_assign_if_missing_no_false_positive_on_zero():
+    """_assign_if_missing must not return True when current == value == 0."""
+    from gptme_sessions import SessionRecord
+    from gptme_sessions.cli import _assign_if_missing
+
+    record = SessionRecord(harness="copilot-cli", trajectory_path="/tmp/x.jsonl")
+    record.duration_seconds = 0
+    changed = _assign_if_missing(record, "duration_seconds", 0)
+    assert not changed, "zero == zero should not be treated as a change"
+    assert record.duration_seconds == 0
+
+    # Sanity-check: a real new value must still trigger a change.
+    changed = _assign_if_missing(record, "duration_seconds", 42)
+    assert changed
+    assert record.duration_seconds == 42
+
+
 def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeypatch):
     """sync --signals updates existing records that have outcome=unknown."""
     import sys

@@ -43,7 +43,24 @@ from .store import (
 
 logger = logging.getLogger(__name__)
 
-HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
+HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot-cli"]
+
+# Maps usage dict keys (from extract_from_path) to SessionRecord field names.
+_USAGE_FIELD_MAP: dict[str, str] = {
+    "model": "model",
+    "total_tokens": "token_count",
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "cache_creation_tokens": "cache_creation_tokens",
+    "cache_read_tokens": "cache_read_tokens",
+    "sys_prompt_tokens": "sys_prompt_tokens",
+    "context_peak_tokens": "context_peak_tokens",
+    "context_window": "context_window",
+    "sys_prompt_bytes": "sys_prompt_bytes",
+    "first_turn_bytes": "first_turn_bytes",
+    "context_peak_bytes": "context_peak_bytes",
+    "session_total_bytes": "session_total_bytes",
+}
 
 
 def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool:
@@ -59,6 +76,8 @@ def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool
             return True
         return False
     if current not in (None, "", 0, "unknown"):
+        return False
+    if current == value:
         return False
     setattr(record, field, value)
     return True
@@ -79,22 +98,7 @@ def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool
 
     usage = result.get("usage")
     if isinstance(usage, dict):
-        field_map = {
-            "model": "model",
-            "total_tokens": "token_count",
-            "input_tokens": "input_tokens",
-            "output_tokens": "output_tokens",
-            "cache_creation_tokens": "cache_creation_tokens",
-            "cache_read_tokens": "cache_read_tokens",
-            "sys_prompt_tokens": "sys_prompt_tokens",
-            "context_peak_tokens": "context_peak_tokens",
-            "context_window": "context_window",
-            "sys_prompt_bytes": "sys_prompt_bytes",
-            "first_turn_bytes": "first_turn_bytes",
-            "context_peak_bytes": "context_peak_bytes",
-            "session_total_bytes": "session_total_bytes",
-        }
-        for usage_key, record_key in field_map.items():
+        for usage_key, record_key in _USAGE_FIELD_MAP.items():
             changed |= _assign_if_missing(record, record_key, usage.get(usage_key))
 
     return changed
@@ -112,22 +116,7 @@ def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
     if not isinstance(usage, dict):
         return
 
-    field_map = {
-        "model": "model",
-        "total_tokens": "token_count",
-        "input_tokens": "input_tokens",
-        "output_tokens": "output_tokens",
-        "cache_creation_tokens": "cache_creation_tokens",
-        "cache_read_tokens": "cache_read_tokens",
-        "sys_prompt_tokens": "sys_prompt_tokens",
-        "context_peak_tokens": "context_peak_tokens",
-        "context_window": "context_window",
-        "sys_prompt_bytes": "sys_prompt_bytes",
-        "first_turn_bytes": "first_turn_bytes",
-        "context_peak_bytes": "context_peak_bytes",
-        "session_total_bytes": "session_total_bytes",
-    }
-    for usage_key, record_key in field_map.items():
+    for usage_key, record_key in _USAGE_FIELD_MAP.items():
         value = usage.get(usage_key)
         if value is not None:
             record_kwargs[record_key] = value
