@@ -4203,7 +4203,9 @@ def test_extract_from_path_copilot(tmp_path: Path):
     assert result["format"] == "copilot"
     assert result["tool_calls"]["bash"] == 1
     # Model extracted from session.start.selectedModel
-    assert result["usage"] == {"model": "claude-opus-4.6"}
+    assert result["usage"]["model"] == "claude-opus-4.6"
+    assert "sys_prompt_bytes" not in result["usage"]
+    assert "first_turn_bytes" not in result["usage"]
 
 
 def test_extract_usage_copilot_model_change():
@@ -4228,7 +4230,7 @@ def test_extract_usage_copilot_model_change():
         },
     ]
     usage = extract_usage_copilot(msgs)
-    assert usage == {"model": "claude-sonnet-4.6"}
+    assert usage["model"] == "claude-sonnet-4.6"
 
 
 def test_extract_usage_copilot_session_start_selected_model():
@@ -4250,11 +4252,11 @@ def test_extract_usage_copilot_session_start_selected_model():
         },
     ]
     usage = extract_usage_copilot(msgs)
-    assert usage == {"model": "claude-opus-4.6"}
+    assert usage["model"] == "claude-opus-4.6"
 
 
 def test_extract_usage_copilot_no_model():
-    """extract_usage_copilot returns empty dict when no model info available."""
+    """extract_usage_copilot can still return byte metrics when model info is absent."""
     from gptme_sessions.signals import extract_usage_copilot
 
     msgs = [
@@ -4263,12 +4265,19 @@ def test_extract_usage_copilot_no_model():
             "data": {"sessionId": "test", "producer": "copilot-agent"},
         },
         {
+            "type": "user.message",
+            "data": {"content": "hello"},
+        },
+        {
             "type": "assistant.message",
-            "data": {"toolRequests": []},
+            "data": {"content": "hi", "toolRequests": []},
         },
     ]
     usage = extract_usage_copilot(msgs)
-    assert usage == {}
+    assert "model" not in usage
+    assert usage["first_turn_bytes"] == len("hello".encode())
+    assert usage["context_peak_bytes"] == len("hello".encode())
+    assert usage["session_total_bytes"] == len("hellohi".encode())
 
 
 def test_extract_usage_copilot_multiple_model_changes():
@@ -4286,7 +4295,45 @@ def test_extract_usage_copilot_multiple_model_changes():
         },
     ]
     usage = extract_usage_copilot(msgs)
-    assert usage == {"model": "gpt-5.4"}
+    assert usage["model"] == "gpt-5.4"
+
+
+def test_extract_usage_copilot_includes_byte_metrics():
+    """extract_usage_copilot includes byte-level context metrics for Copilot sessions."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    system_text = "SYS"
+    user_text = "USER"
+    assistant_text = "ASSIST"
+    tool_requests = [{"name": "bash", "arguments": {"command": "echo hi"}}]
+    tool_result = {"content": "OUT"}
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "gpt-5.4",
+            },
+        },
+        {"type": "system.message", "data": {"content": system_text}},
+        {"type": "user.message", "data": {"content": user_text}},
+        {
+            "type": "assistant.message",
+            "data": {"content": assistant_text, "toolRequests": tool_requests},
+        },
+        {"type": "tool.execution_complete", "data": {"result": tool_result, "success": True}},
+    ]
+
+    usage = extract_usage_copilot(msgs)
+
+    assert usage["model"] == "gpt-5.4"
+    assert usage["sys_prompt_bytes"] == len(system_text.encode())
+    assert usage["first_turn_bytes"] == len(system_text.encode()) + len(user_text.encode())
+    assert usage["context_peak_bytes"] == len(system_text.encode()) + len(user_text.encode())
+    assert usage["session_total_bytes"] > usage["context_peak_bytes"]
+    assert usage["session_total_bytes"] > usage["first_turn_bytes"]
 
 
 def test_extract_from_path_copilot_with_model(tmp_path: Path):
@@ -5949,6 +5996,128 @@ def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeyp
     assert records[0].outcome == "productive"
     assert records[0].duration_seconds == 300
     assert records[0].category == "code"
+
+
+def test_sync_signals_import_persists_usage_fields(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals persists extracted usage/context fields on new records."""
+    import sys
+
+    from gptme_sessions import SessionStore
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [fake_file]
+    )
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 45,
+            "deliverables": [],
+            "inferred_category": "monitoring",
+            "usage": {
+                "model": "gpt-5.4",
+                "sys_prompt_bytes": 100,
+                "first_turn_bytes": 200,
+                "context_peak_bytes": 200,
+                "session_total_bytes": 350,
+            },
+        },
+    )
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Imported 1" in captured.out
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].harness == "copilot-cli"
+    assert records[0].model == "gpt-5.4"
+    assert records[0].sys_prompt_bytes == 100
+    assert records[0].first_turn_bytes == 200
+    assert records[0].context_peak_bytes == 200
+    assert records[0].session_total_bytes == 350
+
+
+def test_sync_signals_backfills_usage_for_existing_known_record(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """sync --signals backfills missing usage/context fields even when outcome is known."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [fake_file]
+    )
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 90,
+            "deliverables": [],
+            "inferred_category": "monitoring",
+            "usage": {
+                "model": "gpt-5.4",
+                "sys_prompt_bytes": 120,
+                "first_turn_bytes": 260,
+                "context_peak_bytes": 260,
+                "session_total_bytes": 400,
+            },
+        },
+    )
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            harness="copilot-cli",
+            trajectory_path=str(fake_file),
+            outcome="productive",
+            duration_seconds=12,
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "updated 1" in captured.out
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "productive"
+    assert records[0].duration_seconds == 12
+    assert records[0].model == "gpt-5.4"
+    assert records[0].sys_prompt_bytes == 120
+    assert records[0].first_turn_bytes == 260
+    assert records[0].context_peak_bytes == 260
+    assert records[0].session_total_bytes == 400
 
 
 def test_sync_signals_does_not_overwrite_existing_deliverables(tmp_path: Path, capsys, monkeypatch):

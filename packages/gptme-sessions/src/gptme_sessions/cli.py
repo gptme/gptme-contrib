@@ -46,6 +46,93 @@ logger = logging.getLogger(__name__)
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot"]
 
 
+def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool:
+    """Set ``record.field`` when it is empty/unknown and ``value`` is usable."""
+    if value is None:
+        return False
+    current = getattr(record, field)
+    if isinstance(current, list):
+        if current:
+            return False
+        if isinstance(value, list):
+            setattr(record, field, value)
+            return True
+        return False
+    if current not in (None, "", 0, "unknown"):
+        return False
+    setattr(record, field, value)
+    return True
+
+
+def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool:
+    """Backfill missing fields on an existing record from ``extract_from_path`` output."""
+    changed = False
+
+    if record.outcome == "unknown":
+        record.outcome = "productive" if result.get("productive") else "noop"
+        changed = True
+    changed |= _assign_if_missing(
+        record, "duration_seconds", int(result.get("session_duration_s") or 0)
+    )
+    changed |= _assign_if_missing(record, "deliverables", result.get("deliverables", []))
+    changed |= _assign_if_missing(record, "category", result.get("inferred_category"))
+
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        field_map = {
+            "model": "model",
+            "total_tokens": "token_count",
+            "input_tokens": "input_tokens",
+            "output_tokens": "output_tokens",
+            "cache_creation_tokens": "cache_creation_tokens",
+            "cache_read_tokens": "cache_read_tokens",
+            "sys_prompt_tokens": "sys_prompt_tokens",
+            "context_peak_tokens": "context_peak_tokens",
+            "context_window": "context_window",
+            "sys_prompt_bytes": "sys_prompt_bytes",
+            "first_turn_bytes": "first_turn_bytes",
+            "context_peak_bytes": "context_peak_bytes",
+            "session_total_bytes": "session_total_bytes",
+        }
+        for usage_key, record_key in field_map.items():
+            changed |= _assign_if_missing(record, record_key, usage.get(usage_key))
+
+    return changed
+
+
+def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
+    """Populate new-record kwargs from ``extract_from_path`` output."""
+    record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
+    record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
+    record_kwargs["deliverables"] = result.get("deliverables", [])
+    if result.get("inferred_category"):
+        record_kwargs["category"] = result["inferred_category"]
+
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return
+
+    field_map = {
+        "model": "model",
+        "total_tokens": "token_count",
+        "input_tokens": "input_tokens",
+        "output_tokens": "output_tokens",
+        "cache_creation_tokens": "cache_creation_tokens",
+        "cache_read_tokens": "cache_read_tokens",
+        "sys_prompt_tokens": "sys_prompt_tokens",
+        "context_peak_tokens": "context_peak_tokens",
+        "context_window": "context_window",
+        "sys_prompt_bytes": "sys_prompt_bytes",
+        "first_turn_bytes": "first_turn_bytes",
+        "context_peak_bytes": "context_peak_bytes",
+        "session_total_bytes": "session_total_bytes",
+    }
+    for usage_key, record_key in field_map.items():
+        value = usage.get(usage_key)
+        if value is not None:
+            record_kwargs[record_key] = value
+
+
 def _judge_fields(
     score: float | None,
     reason: str | None,
@@ -128,7 +215,7 @@ def _discover_all(
         for p in discover_copilot_sessions(start, today):
             discovered.append(
                 {
-                    "harness": "copilot",
+                    "harness": "copilot-cli",
                     "path": p,
                     "session_date": session_date_from_path("copilot", p),
                     "session_name": extract_session_name("copilot", p),
@@ -835,7 +922,7 @@ def discover(
         for p in discover_copilot_sessions(start, today):
             discovered.append(
                 {
-                    "harness": "copilot",
+                    "harness": "copilot-cli",
                     "path": str(p),
                     "session_date": session_date_from_path("copilot", p),
                 }
@@ -1319,18 +1406,33 @@ def sync(
                 existing.project = entry["project"]
                 needs_update = True
 
-            # With --signals, backfill records that have no outcome yet.
-            if with_signals and existing.outcome == "unknown" and traj_path.is_file():
+            usage_backfill_needed = any(
+                getattr(existing, field) is None
+                for field in (
+                    "token_count",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_tokens",
+                    "cache_read_tokens",
+                    "sys_prompt_tokens",
+                    "context_peak_tokens",
+                    "context_window",
+                    "sys_prompt_bytes",
+                    "first_turn_bytes",
+                    "context_peak_bytes",
+                    "session_total_bytes",
+                )
+            )
+
+            if (
+                with_signals
+                and traj_path.is_file()
+                and (existing.outcome == "unknown" or usage_backfill_needed)
+            ):
                 if not dry_run:
                     try:
                         result = extract_from_path(traj_path)
-                        existing.outcome = "productive" if result.get("productive") else "noop"
-                        existing.duration_seconds = int(result.get("session_duration_s") or 0)
-                        if not existing.deliverables:
-                            existing.deliverables = result.get("deliverables", [])
-                        if result.get("inferred_category") and not existing.category:
-                            existing.category = result["inferred_category"]
-                        needs_update = True
+                        needs_update |= _apply_extract_result_to_record(existing, result)
                     except Exception as exc:
                         click.echo(
                             f"  warning: signals extraction failed for {path_str}: {exc}",
@@ -1340,7 +1442,11 @@ def sync(
                             skipped += 1
                 else:
                     needs_update = True  # mark for dry-run reporting
-            elif with_signals and existing.outcome == "unknown" and not traj_path.is_file():
+            elif (
+                with_signals
+                and not traj_path.is_file()
+                and (existing.outcome == "unknown" or usage_backfill_needed)
+            ):
                 click.echo(
                     f"  warning: trajectory not found, cannot backfill signals for {path_str}",
                     err=True,
@@ -1396,11 +1502,7 @@ def sync(
         if with_signals and traj_path.is_file() and not dry_run:
             try:
                 result = extract_from_path(traj_path)
-                record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
-                record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
-                record_kwargs["deliverables"] = result.get("deliverables", [])
-                if result.get("inferred_category"):
-                    record_kwargs["category"] = result["inferred_category"]
+                _apply_extract_result_to_kwargs(record_kwargs, result)
             except Exception as exc:
                 click.echo(
                     f"  warning: signals extraction failed for {path_str}: {exc}",
