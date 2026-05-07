@@ -107,6 +107,31 @@ def test_ab_group_tier_version_none_roundtrip():
     assert r2.tier_version is None
 
 
+def test_cascade_intent_roundtrip():
+    """cascade_intent survives to_dict/from_dict and JSON round-trip."""
+    cascade_intent = {
+        "reasons": ["high-priority task", "recent failure"],
+        "constraints": ["avoid project monitoring", "prefer code"],
+    }
+
+    r = SessionRecord(
+        harness="claude-code",
+        model="opus",
+        cascade_intent=cascade_intent,
+        outcome="productive",
+    )
+    d = r.to_dict()
+    assert d["cascade_intent"] == cascade_intent
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.cascade_intent == cascade_intent
+
+    parsed = json.loads(r.to_json())
+    assert parsed["cascade_intent"] == cascade_intent
+    r3 = SessionRecord.from_dict(parsed)
+    assert r3.cascade_intent == cascade_intent
+
+
 # -- project and session_name fields -----------------------------------------
 
 
