@@ -1395,9 +1395,19 @@ def sync(
                 existing.project = entry["project"]
                 needs_update = True
 
-            usage_backfill_needed = any(
-                getattr(existing, field) is None
-                for field in (
+            # Copilot trajectories never contain token-count fields — only byte
+            # metrics and model name are extractable. Checking token fields for
+            # copilot-cli sessions would keep usage_backfill_needed=True forever.
+            if existing.harness == "copilot-cli":
+                _backfill_fields: tuple[str, ...] = (
+                    "model",
+                    "sys_prompt_bytes",
+                    "first_turn_bytes",
+                    "context_peak_bytes",
+                    "session_total_bytes",
+                )
+            else:
+                _backfill_fields = (
                     "token_count",
                     "input_tokens",
                     "output_tokens",
@@ -1411,6 +1421,8 @@ def sync(
                     "context_peak_bytes",
                     "session_total_bytes",
                 )
+            usage_backfill_needed = any(
+                getattr(existing, field) is None for field in _backfill_fields
             )
 
             if (

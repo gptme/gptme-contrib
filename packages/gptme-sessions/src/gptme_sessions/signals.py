@@ -1791,6 +1791,8 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
     for record in msgs:
         rec_type = record.get("type", "")
         data = record.get("data") or {}
+        if not isinstance(data, dict):
+            continue
         if rec_type == "session.model_change":
             m = data.get("newModel")
             if m:
@@ -1800,8 +1802,6 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
             m = data.get("selectedModel")
             if m:
                 model = m
-        elif not isinstance(data, dict):
-            continue
 
         if rec_type == "system.message":
             messages.append({"role": "system", "bytes": _content_bytes(data.get("content"))})
