@@ -1,9 +1,12 @@
 """File-based locking for run loops to prevent concurrent execution."""
 
 import fcntl
+import logging
 import os
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class RunLoopLock:
@@ -140,8 +143,8 @@ class RunLoopLock:
             # prevents wiping a successor's PID. See ErikBjare/bob#755.
             try:
                 os.ftruncate(self.lock_fd, 0)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.warning("Could not truncate lockfile %s: %s", self.lock_file, e)
 
             # Release lock and close file descriptor
             fcntl.flock(self.lock_fd, fcntl.LOCK_UN)

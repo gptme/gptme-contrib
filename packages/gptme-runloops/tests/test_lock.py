@@ -123,8 +123,8 @@ def test_lock_file_truncated_on_release():
 
         lock.release()
 
-        # After release, lockfile content should be empty (or absent).
-        # The kernel-level flock is what controls mutual exclusion; the file
-        # contents are purely informational, so empty == "lock not held".
-        if lock.lock_file.exists():
-            assert lock.lock_file.read_text().strip() == ""
+        # After release, lockfile should exist but be empty. The kernel-level
+        # flock is what controls mutual exclusion; the file contents are purely
+        # informational, so empty == "lock not held".
+        assert lock.lock_file.exists()
+        assert lock.lock_file.read_text().strip() == ""
