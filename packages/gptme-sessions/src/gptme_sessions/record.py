@@ -194,6 +194,7 @@ class SessionRecord:
     category: str | None = None  # inferred from commits/files (what actually happened)
     recommended_category: str | None = None  # from Thompson sampling / CASCADE (what was intended)
     selector_mode: str | None = None  # e.g. scored, llm-context
+    cascade_intent: dict[str, Any] | None = None  # structured CASCADE reasons + constraints dict
 
     # Outcome
     outcome: str = "unknown"  # productive, noop, failed

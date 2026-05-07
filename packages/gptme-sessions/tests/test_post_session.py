@@ -419,3 +419,26 @@ def test_post_session_explicit_category_overrides_inferred(tmp_path: Path):
 
     records = store.load_all()
     assert records[0].category == "code"
+
+
+def test_post_session_cascade_intent(tmp_path: Path):
+    """cascade_intent is stored in the SessionRecord when passed to post_session."""
+    store = SessionStore(sessions_dir=tmp_path)
+    cascade_intent = {
+        "reasons": ["recent CI failure", "priority score"],
+        "constraints": ["avoid social work"],
+    }
+
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        cascade_intent=cascade_intent,
+        duration_seconds=120,
+    )
+    assert result.record.cascade_intent == cascade_intent
+
+    store2 = SessionStore(sessions_dir=tmp_path)
+    records = store2.load_all()
+    assert len(records) == 1
+    assert records[0].cascade_intent == cascade_intent
