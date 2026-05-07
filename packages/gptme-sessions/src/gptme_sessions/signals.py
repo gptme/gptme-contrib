@@ -1772,13 +1772,14 @@ def infer_category(signals: dict) -> str | None:
 
 
 def extract_usage_copilot(msgs: list[dict]) -> dict:
-    """Extract model info and byte-level context metrics from Copilot trajectories.
+    """Extract model info, byte-level context metrics, and output tokens from Copilot trajectories.
 
-    Copilot events do not include per-turn token counts or cost data.
-    We extract the model name from ``session.model_change`` events (or
-    from ``session.start`` context if available) so callers always get a
-    consistent usage dict across all harnesses.
+    Copilot events expose ``outputTokens`` per assistant turn but not input tokens,
+    so ``sys_prompt_tokens`` / ``context_peak_tokens`` remain unavailable; callers
+    should fall back to byte-level estimates for those.  We sum ``outputTokens``
+    across all assistant messages to populate ``output_tokens``.
 
+    Model is extracted from ``session.model_change`` events (or ``session.start``).
     Tool requests live on assistant messages and tool outputs live on
     ``tool.execution_complete`` events, so both are counted in the byte-level
     message flow to avoid underestimating context growth.
@@ -1787,6 +1788,7 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
     """
     model: str | None = None
     messages: list[dict[str, object]] = []
+    total_output_tokens = 0
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -1820,6 +1822,9 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
                     "bytes": _content_bytes(content) + _content_bytes(data.get("toolRequests")),
                 }
             )
+            tok = data.get("outputTokens")
+            if isinstance(tok, int) and tok > 0:
+                total_output_tokens += tok
         elif rec_type == "tool.execution_complete":
             payload = data.get("result")
             if payload is None:
@@ -1835,6 +1840,7 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
         and first_turn_bytes is None
         and context_peak_bytes is None
         and session_total_bytes is None
+        and total_output_tokens == 0
     ):
         return {}
 
@@ -1849,6 +1855,8 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
         usage["context_peak_bytes"] = context_peak_bytes
     if session_total_bytes is not None:
         usage["session_total_bytes"] = session_total_bytes
+    if total_output_tokens > 0:
+        usage["output_tokens"] = total_output_tokens
     return usage
 
 
