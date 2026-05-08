@@ -125,6 +125,123 @@ class LedgerEntry:
         return result
 
 
+# --- Bash-compatible full ledger entry ---
+#
+# The bash ``append_dispatch_ledger()`` function writes a richer schema than
+# ``LedgerEntry.to_dict()``: it preserves a ``unit`` field name, plus
+# ``item_count``, ``types`` (deduped sorted), and ``items`` (capped at 20)
+# derived from the dispatched work file. ``build_full_ledger_entry()`` is the
+# canonical Python reimplementation so the bash heredoc can be replaced with
+# a thin module call without changing the on-disk JSONL schema.
+
+
+def _maybe_int(value: str | int | None) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_full_ledger_entry(
+    *,
+    phase: str,
+    lane: str = "mixed",
+    dispatch_id: str | None = None,
+    unit_name: str | None = None,
+    work_file: str | Path | None = None,
+    running_units: str | int | None = None,
+    cap: str | int | None = None,
+    note: str | None = None,
+    successes: str | int | None = None,
+    failures: str | int | None = None,
+    duration_seconds: str | int | None = None,
+    timestamp: str | None = None,
+    max_items: int = 20,
+) -> dict[str, Any]:
+    """Build the full bash-compatible dispatch ledger entry.
+
+    Mirrors the on-disk schema produced by the bash
+    ``append_dispatch_ledger()`` function:
+    ``timestamp/phase/lane/dispatch_id/unit/item_count/item_refs/types/items``
+    plus optional ``running_units/cap/note/successes/failures/duration_seconds``.
+
+    The ``items`` list is capped at *max_items* entries (default 20). Items
+    are read from *work_file* (a JSONL of grouped items) when provided.
+    """
+    items: list[dict[str, Any]] = []
+    type_set: set[str] = set()
+    item_refs: list[str] = []
+
+    if work_file:
+        path = Path(work_file)
+        if path.is_file():
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    item = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                repo = str(item.get("repo", "") or "")
+                number = item.get("number")
+                item_types = item.get("types")
+                if not isinstance(item_types, list) or not item_types:
+                    single_type = item.get("type")
+                    item_types = [single_type] if isinstance(single_type, str) else []
+                normalized_types = [t for t in item_types if isinstance(t, str) and t]
+                type_set.update(normalized_types)
+                item_refs.append(f"{repo}#{number}")
+                items.append(
+                    {
+                        "repo": repo,
+                        "number": number,
+                        "types": normalized_types,
+                        "title": item.get("title"),
+                    }
+                )
+
+    return {
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "phase": phase,
+        "lane": lane,
+        "dispatch_id": dispatch_id or None,
+        "unit": unit_name or None,
+        "item_count": len(items),
+        "item_refs": list(dict.fromkeys(item_refs)),
+        "types": sorted(type_set),
+        "items": items[:max_items],
+        "running_units": _maybe_int(running_units),
+        "cap": _maybe_int(cap),
+        "note": note or None,
+        "successes": _maybe_int(successes),
+        "failures": _maybe_int(failures),
+        "duration_seconds": _maybe_int(duration_seconds),
+    }
+
+
+def append_full_ledger_entry(
+    ledger_path: str | Path,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build a full ledger entry and append it to *ledger_path* (JSONL).
+
+    Returns the entry dict that was written. ``kwargs`` are forwarded to
+    :func:`build_full_ledger_entry`.
+    """
+    entry = build_full_ledger_entry(**kwargs)
+    path = Path(ledger_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry
+
+
 # --- Slot key derivation ---
 
 
@@ -753,23 +870,77 @@ def dispatch_grouped_items(
     return result
 
 
-def main() -> None:
-    """CLI entry point: partition grouped JSONL items from stdin into fast/slow lane files.
+def _append_ledger_main(argv: list[str]) -> int:
+    """CLI handler for the ``append-ledger`` subcommand."""
+    import argparse
 
-    Usage:
-        cat grouped_items.jsonl | python3 -m gptme_runloops.pm_dispatch /tmp/fast.jsonl /tmp/slow.jsonl
+    parser = argparse.ArgumentParser(
+        prog="pm_dispatch append-ledger",
+        description="Append a dispatch telemetry entry to a JSONL ledger.",
+    )
+    parser.add_argument("--ledger-path", required=True)
+    parser.add_argument("--phase", required=True)
+    parser.add_argument("--lane", default="mixed")
+    parser.add_argument("--dispatch-id", default="")
+    parser.add_argument("--unit", default="")
+    parser.add_argument("--work-file", default="")
+    parser.add_argument("--running-units", default="")
+    parser.add_argument("--cap", default="")
+    parser.add_argument("--note", default="")
+    parser.add_argument("--successes", default="")
+    parser.add_argument("--failures", default="")
+    parser.add_argument("--duration-seconds", default="")
+    args = parser.parse_args(argv)
+
+    append_full_ledger_entry(
+        args.ledger_path,
+        phase=args.phase,
+        lane=args.lane,
+        dispatch_id=args.dispatch_id or None,
+        unit_name=args.unit or None,
+        work_file=args.work_file or None,
+        running_units=args.running_units,
+        cap=args.cap,
+        note=args.note or None,
+        successes=args.successes,
+        failures=args.failures,
+        duration_seconds=args.duration_seconds,
+    )
+    return 0
+
+
+def main() -> None:
+    """CLI entry point.
+
+    Subcommands:
+
+      partition <fast_out> <slow_out>      (legacy default — also no subcmd)
+        Read grouped JSONL items from stdin, write fast/slow lane files.
+
+      append-ledger --ledger-path P --phase X ...
+        Append a dispatch telemetry entry to a JSONL ledger.
     """
     import sys as _sys
 
-    if len(_sys.argv) < 3:
+    argv = _sys.argv[1:]
+
+    # Subcommand dispatch
+    if argv and argv[0] == "append-ledger":
+        _sys.exit(_append_ledger_main(argv[1:]))
+    if argv and argv[0] == "partition":
+        argv = argv[1:]
+
+    if len(argv) < 2:
         print(
-            "Usage: python3 -m gptme_runloops.pm_dispatch <fast_out> <slow_out>",
+            "Usage:\n"
+            "  python3 -m gptme_runloops.pm_dispatch [partition] <fast_out> <slow_out>\n"
+            "  python3 -m gptme_runloops.pm_dispatch append-ledger --ledger-path P --phase X [...]",
             file=_sys.stderr,
         )
         _sys.exit(1)
 
-    fast_path = Path(_sys.argv[1])
-    slow_path = Path(_sys.argv[2])
+    fast_path = Path(argv[0])
+    slow_path = Path(argv[1])
     _partition_jsonl_io(fast_path, slow_path)
     fast_count = (
         len(fast_path.read_text().splitlines()) if fast_path.stat().st_size else 0
