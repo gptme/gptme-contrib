@@ -10,19 +10,8 @@ match:
     - "greptile found issues in PR"
     - "greptile score"
     - "trigger greptile"
-    - "retrigger a re-review"
-    - "retrigger greptile"
     - "pushed fixes after the earlier Greptile"
     - "after the earlier Greptile review"
-    - "retrigger automated review"
-    - "bot re-review after fixes"
-    - "new commits after bot review"
-    - "request another bot review"
-    - "make the bot take another look"
-    - "bot take another look"
-    - "addressed the automated reviewer"
-    - "automated reviewer's feedback"
-    - "how do I retrigger greptile"
   session_categories: [cross-repo, code]
 status: active
 ---
