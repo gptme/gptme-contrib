@@ -5146,24 +5146,14 @@ def test_discover_date_shown_in_output(tmp_path: Path, capsys, monkeypatch):
             {"git_commits": ["feat(monitoring): add factory-ingest health check (abc1234)"]},
             "monitoring",
         ),
-        # self-review scope → self-review category (2 commits to meet threshold)
+        # self-review scope → self-review category (×2 scope weight → 1 commit suffices)
         (
-            {
-                "git_commits": [
-                    "docs(self-review): write weekly review (abc1234)",
-                    "docs(self-review): add goals section (def5678)",
-                ]
-            },
+            {"git_commits": ["docs(self-review): write weekly review (abc1234)"]},
             "self-review",
         ),
-        # social scope → social category (2 commits to meet threshold)
+        # social scope → social category (×2 scope weight → 1 commit suffices)
         (
-            {
-                "git_commits": [
-                    "docs(social): update reply threads (abc1234)",
-                    "docs(social): draft friend replies (def5678)",
-                ]
-            },
+            {"git_commits": ["docs(social): update reply threads (abc1234)"]},
             "social",
         ),
     ],

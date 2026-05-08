@@ -1643,6 +1643,30 @@ def _extract_committed_files(git_commits: list[str]) -> list[str]:
     return files
 
 
+# Canonical CASCADE categories — used in infer_category for scope→self fallback.
+# Any commit scope matching one of these values self-maps to that category (×2 weight).
+_CASCADE_CATEGORIES = frozenset(
+    {
+        "code",
+        "infrastructure",
+        "content",
+        "triage",
+        "cross-repo",
+        "self-review",
+        "strategic",
+        "research",
+        "monitoring",
+        "social",
+        "news",
+        "cleanup",
+        "pm-react",
+        "knowledge",
+        "coordination",
+        "novelty",
+    }
+)
+
+
 def infer_category(signals: dict) -> str | None:
     """Infer work category from commit messages, committed files, and file writes.
 
@@ -1727,29 +1751,6 @@ def infer_category(signals: dict) -> str | None:
         "style": "code",
     }
 
-    # Scope overrides: certain scopes imply category regardless of prefix
-    # Canonical CASCADE categories — used for scope→self fallback below
-    CASCADE_CATEGORIES = frozenset(
-        {
-            "code",
-            "infrastructure",
-            "content",
-            "triage",
-            "cross-repo",
-            "self-review",
-            "strategic",
-            "research",
-            "monitoring",
-            "social",
-            "news",
-            "cleanup",
-            "pm-react",
-            "knowledge",
-            "coordination",
-            "novelty",
-        }
-    )
-
     scope_to_category = {
         "lessons": "knowledge",
         "lesson": "knowledge",
@@ -1772,7 +1773,7 @@ def infer_category(signals: dict) -> str | None:
         if cat:
             # Scope signals are stronger than prefix alone
             votes[cat] = votes.get(cat, 0) + count * 2
-        elif scope in CASCADE_CATEGORIES:
+        elif scope in _CASCADE_CATEGORIES:
             # Unknown scopes that match a valid CASCADE category → self-map
             # This catches strategic/research/monitoring/social/news/self-review
             # scopes that would otherwise fall through to the prefix vote only.
