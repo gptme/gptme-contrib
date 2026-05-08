@@ -196,7 +196,8 @@ def build_full_ledger_entry(
                     item_types = [single_type] if isinstance(single_type, str) else []
                 normalized_types = [t for t in item_types if isinstance(t, str) and t]
                 type_set.update(normalized_types)
-                item_refs.append(f"{repo}#{number}")
+                if number is not None:
+                    item_refs.append(f"{repo}#{number}")
                 items.append(
                     {
                         "repo": repo,
