@@ -1,6 +1,6 @@
 ---
 match:
-  keywords: ["create branch", "git checkout -b", "new feature branch"]
+  keywords: ["create branch", "git checkout -b"]
   session_categories: [code, cross-repo, infrastructure]
 status: active
 ---

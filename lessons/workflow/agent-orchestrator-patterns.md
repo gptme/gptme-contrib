@@ -2,9 +2,7 @@
 status: active
 match:
   keywords:
-    - "orchestrating multiple agents"
     - "standup report"
-    - "inference spend"
 ---
 
 # Agent Orchestrator Patterns
