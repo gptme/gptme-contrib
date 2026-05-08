@@ -399,6 +399,26 @@ class TestBuildFullLedgerEntry:
         assert entry["item_count"] == 0
         assert entry["items"] == []
 
+    def test_item_without_number_omitted_from_refs(self, tmp_path):
+        """Items missing a 'number' field must not produce 'repo#None' refs."""
+        work = tmp_path / "work.jsonl"
+        work.write_text(
+            "\n".join(
+                [
+                    json.dumps({"repo": "a/b", "number": 1, "types": ["t1"]}),
+                    json.dumps({"repo": "a/b", "types": ["t2"]}),  # no number key
+                    json.dumps(
+                        {"repo": "a/b", "number": None, "types": ["t3"]}
+                    ),  # explicit None
+                ]
+            )
+            + "\n"
+        )
+        entry = build_full_ledger_entry(phase="x", work_file=work)
+        assert entry["item_count"] == 3
+        assert entry["item_refs"] == ["a/b#1"]
+        assert all("#None" not in ref for ref in entry["item_refs"])
+
 
 class TestAppendFullLedgerEntry:
     def test_appends_jsonl_line(self, tmp_path):
