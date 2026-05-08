@@ -1728,6 +1728,28 @@ def infer_category(signals: dict) -> str | None:
     }
 
     # Scope overrides: certain scopes imply category regardless of prefix
+    # Canonical CASCADE categories — used for scope→self fallback below
+    CASCADE_CATEGORIES = frozenset(
+        {
+            "code",
+            "infrastructure",
+            "content",
+            "triage",
+            "cross-repo",
+            "self-review",
+            "strategic",
+            "research",
+            "monitoring",
+            "social",
+            "news",
+            "cleanup",
+            "pm-react",
+            "knowledge",
+            "coordination",
+            "novelty",
+        }
+    )
+
     scope_to_category = {
         "lessons": "knowledge",
         "lesson": "knowledge",
@@ -1750,6 +1772,11 @@ def infer_category(signals: dict) -> str | None:
         if cat:
             # Scope signals are stronger than prefix alone
             votes[cat] = votes.get(cat, 0) + count * 2
+        elif scope in CASCADE_CATEGORIES:
+            # Unknown scopes that match a valid CASCADE category → self-map
+            # This catches strategic/research/monitoring/social/news/self-review
+            # scopes that would otherwise fall through to the prefix vote only.
+            votes[scope] = votes.get(scope, 0) + count * 2
     for cat, count in path_signals.items():
         votes[cat] = votes.get(cat, 0) + count
 

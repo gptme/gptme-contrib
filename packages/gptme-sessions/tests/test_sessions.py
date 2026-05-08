@@ -5126,6 +5126,46 @@ def test_discover_date_shown_in_output(tmp_path: Path, capsys, monkeypatch):
             },
             None,
         ),
+        # strategic scope → strategic category (×2 scope weight so only 1 scope commit needed)
+        (
+            {"git_commits": ["docs(strategic): update idea backlog priorities (abc1234)"]},
+            "strategic",
+        ),
+        # research scope → research category
+        (
+            {"git_commits": ["feat(research): peer research on trycua (abc1234)"]},
+            "research",
+        ),
+        # cross-repo scope → cross-repo category
+        (
+            {"git_commits": ["fix(cross-repo): update gptme-contrib pins (abc1234)"]},
+            "cross-repo",
+        ),
+        # monitoring scope → monitoring category
+        (
+            {"git_commits": ["feat(monitoring): add factory-ingest health check (abc1234)"]},
+            "monitoring",
+        ),
+        # self-review scope → self-review category (2 commits to meet threshold)
+        (
+            {
+                "git_commits": [
+                    "docs(self-review): write weekly review (abc1234)",
+                    "docs(self-review): add goals section (def5678)",
+                ]
+            },
+            "self-review",
+        ),
+        # social scope → social category (2 commits to meet threshold)
+        (
+            {
+                "git_commits": [
+                    "docs(social): update reply threads (abc1234)",
+                    "docs(social): draft friend replies (def5678)",
+                ]
+            },
+            "social",
+        ),
     ],
 )
 def test_infer_category(signals, expected):
