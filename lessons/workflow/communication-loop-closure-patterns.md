@@ -7,7 +7,6 @@ match:
   - close the communication loop
   - respond in the original thread
   - confirm the fix in the issue
-  session_categories: [triage, cross-repo]
 status: active
 ---
 
