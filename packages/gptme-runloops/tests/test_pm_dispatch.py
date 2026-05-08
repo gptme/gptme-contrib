@@ -1067,7 +1067,7 @@ class TestRecordsAggregateMain:
         assert sorted(out, key=lambda r: r["k"]) == [{"k": 1}, {"k": 2}]
 
     def test_aggregate_skips_unparseable(self, tmp_path, capsys):
-        """Files that fail to parse are silently skipped, matching prior bash behavior."""
+        """Files with invalid JSON are silently skipped; OS errors propagate."""
         from gptme_runloops.pm_dispatch import _records_aggregate_main
 
         (tmp_path / "good.json").write_text(json.dumps({"ok": True}))

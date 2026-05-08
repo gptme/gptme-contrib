@@ -914,8 +914,8 @@ def _records_aggregate_main(argv: list[str]) -> int:
     """CLI handler for the ``records-aggregate`` subcommand.
 
     Reads all ``*.json`` files from a directory, parses each, and emits a
-    single JSON array on stdout. Files that fail to parse are skipped
-    silently, matching the inline bash-script heredoc behavior.
+    single JSON array on stdout. Files with invalid JSON or encoding errors are
+    skipped silently; OS-level errors propagate.
     """
     import argparse
     import sys as _sys
@@ -937,7 +937,7 @@ def _records_aggregate_main(argv: list[str]) -> int:
         for path in sorted(records_dir.glob("*.json")):
             try:
                 records.append(json.loads(path.read_text()))
-            except Exception:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
     print(json.dumps(records, ensure_ascii=False), file=_sys.stdout)
     return 0
