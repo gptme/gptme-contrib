@@ -87,6 +87,36 @@ def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
     asyncio.run(_exercise())
 
 
+def test_connect_includes_output_speed_when_configured() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(
+                    instructions="You are Bob.",
+                    output_speed=1.15,
+                ),
+            )
+            await client.connect()
+            await asyncio.sleep(0)
+            await client.disconnect()
+
+        session_update = fake_ws.sent[0]
+        assert session_update["type"] == "session.update"
+        assert session_update["session"]["output"] == {"speed": 1.15}
+        assert fake_ws.closed is True
+
+    asyncio.run(_exercise())
+
+
 def test_load_project_instructions_includes_post_call_follow_up_guard(
     tmp_path: Path,
 ) -> None:

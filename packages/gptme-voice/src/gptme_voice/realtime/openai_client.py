@@ -199,6 +199,7 @@ class SessionConfig:
 
     model: str = "gpt-realtime-2"
     voice: str = "echo"
+    output_speed: float | None = None
     instructions: str = ""
     initial_response_instructions: str = ""
     input_format: str = "pcm16"
@@ -461,6 +462,8 @@ class OpenAIRealtimeClient:
                 },
             ],
         }
+        if self.session_config.output_speed is not None:
+            session_params["output"] = {"speed": self.session_config.output_speed}
         transcription = self._get_transcription_config()
         if transcription is not None:
             session_params["input_audio_transcription"] = transcription
