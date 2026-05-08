@@ -17,6 +17,8 @@ from gptme_runloops.pm_dispatch import (
     SlotItem,
     SlotManager,
     _partition_jsonl_io,
+    append_full_ledger_entry,
+    build_full_ledger_entry,
     classify_lane,
     derive_slot_key,
     dispatch_grouped_items,
@@ -248,6 +250,186 @@ class TestDispatchLedger:
         assert [entry.dispatch_id for entry in DispatchLedger(ledger_path).read()] == [
             "ok"
         ]
+
+
+# --- Bash-compatible full ledger entry ---
+
+
+class TestBuildFullLedgerEntry:
+    """Schema-parity tests for the bash-compatible ledger builder."""
+
+    EXPECTED_KEYS = {
+        "timestamp",
+        "phase",
+        "lane",
+        "dispatch_id",
+        "unit",
+        "item_count",
+        "item_refs",
+        "types",
+        "items",
+        "running_units",
+        "cap",
+        "note",
+        "successes",
+        "failures",
+        "duration_seconds",
+    }
+
+    def test_schema_keys_match_bash(self):
+        entry = build_full_ledger_entry(phase="planned")
+        assert set(entry.keys()) == self.EXPECTED_KEYS
+
+    def test_minimal_entry(self):
+        entry = build_full_ledger_entry(phase="planned", lane="fast")
+        assert entry["phase"] == "planned"
+        assert entry["lane"] == "fast"
+        assert entry["dispatch_id"] is None
+        assert entry["unit"] is None
+        assert entry["item_count"] == 0
+        assert entry["item_refs"] == []
+        assert entry["types"] == []
+        assert entry["items"] == []
+        assert entry["timestamp"]  # auto-populated
+
+    def test_uses_unit_field_not_unit_name(self):
+        """Bash schema names the field 'unit', not 'unit_name'."""
+        entry = build_full_ledger_entry(phase="planned", unit_name="bob-pm-foo")
+        assert entry["unit"] == "bob-pm-foo"
+        assert "unit_name" not in entry
+
+    def test_derives_items_from_work_file(self, tmp_path):
+        work = tmp_path / "work.jsonl"
+        work.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "repo": "x/y",
+                            "number": 1,
+                            "types": ["assigned_issue"],
+                            "title": "first",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "repo": "x/y",
+                            "number": 2,
+                            "type": "pr_update",
+                            "title": "two",
+                        }
+                    ),
+                    "",  # blank line
+                    "not-json",  # silently skipped
+                ]
+            )
+            + "\n"
+        )
+        entry = build_full_ledger_entry(phase="dispatched", work_file=work)
+        assert entry["item_count"] == 2
+        assert entry["item_refs"] == ["x/y#1", "x/y#2"]
+        assert entry["types"] == ["assigned_issue", "pr_update"]
+        assert entry["items"][0]["title"] == "first"
+        assert entry["items"][1]["types"] == ["pr_update"]
+
+    def test_caps_items_at_max(self, tmp_path):
+        work = tmp_path / "work.jsonl"
+        lines = [
+            json.dumps({"repo": "a/b", "number": i, "types": ["assigned_issue"]})
+            for i in range(50)
+        ]
+        work.write_text("\n".join(lines) + "\n")
+        entry = build_full_ledger_entry(phase="x", work_file=work)
+        assert entry["item_count"] == 50  # full count preserved
+        assert len(entry["items"]) == 20  # but list capped at 20
+        assert len(entry["item_refs"]) == 50
+
+    def test_dedupes_item_refs_preserving_order(self, tmp_path):
+        work = tmp_path / "work.jsonl"
+        work.write_text(
+            "\n".join(
+                [
+                    json.dumps({"repo": "a/b", "number": 1, "types": ["t1"]}),
+                    json.dumps({"repo": "a/b", "number": 1, "types": ["t1"]}),
+                    json.dumps({"repo": "a/b", "number": 2, "types": ["t1"]}),
+                ]
+            )
+            + "\n"
+        )
+        entry = build_full_ledger_entry(phase="x", work_file=work)
+        assert entry["item_refs"] == ["a/b#1", "a/b#2"]
+        assert entry["item_count"] == 3  # raw count, before dedup
+
+    def test_coerces_int_strings(self):
+        entry = build_full_ledger_entry(
+            phase="x",
+            running_units="2",
+            cap="3",
+            successes="0",
+            failures="1",
+            duration_seconds="42",
+        )
+        assert entry["running_units"] == 2
+        assert entry["cap"] == 3
+        assert entry["successes"] == 0
+        assert entry["failures"] == 1
+        assert entry["duration_seconds"] == 42
+
+    def test_invalid_int_strings_become_none(self):
+        entry = build_full_ledger_entry(phase="x", running_units="not-a-number")
+        assert entry["running_units"] is None
+
+    def test_empty_strings_become_none(self):
+        entry = build_full_ledger_entry(
+            phase="x", dispatch_id="", note="", running_units=""
+        )
+        assert entry["dispatch_id"] is None
+        assert entry["note"] is None
+        assert entry["running_units"] is None
+
+    def test_explicit_timestamp_preserved(self):
+        ts = "2026-05-08T18:00:00+00:00"
+        entry = build_full_ledger_entry(phase="x", timestamp=ts)
+        assert entry["timestamp"] == ts
+
+    def test_missing_work_file_silently_ignored(self, tmp_path):
+        entry = build_full_ledger_entry(
+            phase="x", work_file=tmp_path / "does-not-exist.jsonl"
+        )
+        assert entry["item_count"] == 0
+        assert entry["items"] == []
+
+
+class TestAppendFullLedgerEntry:
+    def test_appends_jsonl_line(self, tmp_path):
+        ledger = tmp_path / "ledger.jsonl"
+        entry = append_full_ledger_entry(
+            ledger,
+            phase="planned",
+            lane="fast",
+            dispatch_id="d1",
+            unit_name="bob-pm-d1",
+        )
+        lines = ledger.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        loaded = json.loads(lines[0])
+        assert loaded["dispatch_id"] == "d1"
+        assert loaded["unit"] == "bob-pm-d1"
+        assert loaded == entry
+
+    def test_creates_parent_dir(self, tmp_path):
+        ledger = tmp_path / "nested" / "deeper" / "ledger.jsonl"
+        append_full_ledger_entry(ledger, phase="planned")
+        assert ledger.exists()
+
+    def test_appends_multiple_entries(self, tmp_path):
+        ledger = tmp_path / "ledger.jsonl"
+        for i in range(3):
+            append_full_ledger_entry(ledger, phase="planned", dispatch_id=f"d{i}")
+        lines = ledger.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 3
+        ids = [json.loads(line)["dispatch_id"] for line in lines]
+        assert ids == ["d0", "d1", "d2"]
 
 
 # --- SlotManager ---
