@@ -2,9 +2,7 @@
 status: active
 match:
   keywords:
-    - event watch
     - watch task
-    - settlement watch
     - upcoming event
 ---
 

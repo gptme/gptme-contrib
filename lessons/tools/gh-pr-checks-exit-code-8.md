@@ -2,7 +2,6 @@
 match:
   keywords:
     - "exit code 8"
-    - "checks still pending"
 status: active
 generated_from:
   sessions: 538

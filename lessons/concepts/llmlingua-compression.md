@@ -2,7 +2,6 @@
 match:
   keywords:
     - llmlingua
-    - text compression
     - compression
 status: active
 ---
