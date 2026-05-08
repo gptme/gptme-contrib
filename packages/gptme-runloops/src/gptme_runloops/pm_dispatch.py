@@ -910,6 +910,39 @@ def _append_ledger_main(argv: list[str]) -> int:
     return 0
 
 
+def _records_aggregate_main(argv: list[str]) -> int:
+    """CLI handler for the ``records-aggregate`` subcommand.
+
+    Reads all ``*.json`` files from a directory, parses each, and emits a
+    single JSON array on stdout. Files that fail to parse are skipped
+    silently, matching the inline bash-script heredoc behavior.
+    """
+    import argparse
+    import sys as _sys
+
+    parser = argparse.ArgumentParser(
+        prog="pm_dispatch records-aggregate",
+        description="Aggregate per-item monitoring records into a single JSON array.",
+    )
+    parser.add_argument(
+        "--records-dir",
+        required=True,
+        help="Directory containing per-item JSON record files",
+    )
+    args = parser.parse_args(argv)
+
+    records: list[Any] = []
+    records_dir = Path(args.records_dir)
+    if records_dir.is_dir():
+        for path in sorted(records_dir.glob("*.json")):
+            try:
+                records.append(json.loads(path.read_text()))
+            except Exception:
+                continue
+    print(json.dumps(records, ensure_ascii=False), file=_sys.stdout)
+    return 0
+
+
 def main() -> None:
     """CLI entry point.
 
@@ -920,6 +953,9 @@ def main() -> None:
 
       append-ledger --ledger-path P --phase X ...
         Append a dispatch telemetry entry to a JSONL ledger.
+
+      records-aggregate --records-dir DIR
+        Aggregate per-item JSON records into a single JSON array on stdout.
     """
     import sys as _sys
 
@@ -928,6 +964,8 @@ def main() -> None:
     # Subcommand dispatch
     if argv and argv[0] == "append-ledger":
         _sys.exit(_append_ledger_main(argv[1:]))
+    if argv and argv[0] == "records-aggregate":
+        _sys.exit(_records_aggregate_main(argv[1:]))
     if argv and argv[0] == "partition":
         argv = argv[1:]
 
@@ -935,7 +973,8 @@ def main() -> None:
         print(
             "Usage:\n"
             "  python3 -m gptme_runloops.pm_dispatch [partition] <fast_out> <slow_out>\n"
-            "  python3 -m gptme_runloops.pm_dispatch append-ledger --ledger-path P --phase X [...]",
+            "  python3 -m gptme_runloops.pm_dispatch append-ledger --ledger-path P --phase X [...]\n"
+            "  python3 -m gptme_runloops.pm_dispatch records-aggregate --records-dir DIR",
             file=_sys.stderr,
         )
         _sys.exit(1)

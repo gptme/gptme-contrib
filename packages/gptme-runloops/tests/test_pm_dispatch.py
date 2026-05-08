@@ -1049,3 +1049,39 @@ class TestPartitionJsonlIO:
 
         slow_lines = [line for line in slow_path.read_text().splitlines() if line]
         assert len(slow_lines) == 1, "pr_update with string type should land in slow"
+
+
+class TestRecordsAggregateMain:
+    """Tests for the records-aggregate CLI subcommand."""
+
+    def test_aggregate_returns_array(self, tmp_path, capsys):
+        """All readable JSON files in the directory are merged into one array."""
+        from gptme_runloops.pm_dispatch import _records_aggregate_main
+
+        (tmp_path / "a.json").write_text(json.dumps({"k": 1}))
+        (tmp_path / "b.json").write_text(json.dumps({"k": 2}))
+
+        rc = _records_aggregate_main(["--records-dir", str(tmp_path)])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert sorted(out, key=lambda r: r["k"]) == [{"k": 1}, {"k": 2}]
+
+    def test_aggregate_skips_unparseable(self, tmp_path, capsys):
+        """Files that fail to parse are silently skipped, matching prior bash behavior."""
+        from gptme_runloops.pm_dispatch import _records_aggregate_main
+
+        (tmp_path / "good.json").write_text(json.dumps({"ok": True}))
+        (tmp_path / "bad.json").write_text("not-json")
+
+        rc = _records_aggregate_main(["--records-dir", str(tmp_path)])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out == [{"ok": True}]
+
+    def test_aggregate_missing_dir_returns_empty(self, tmp_path, capsys):
+        """A non-existent directory yields an empty array (mirrors bash heredoc)."""
+        from gptme_runloops.pm_dispatch import _records_aggregate_main
+
+        rc = _records_aggregate_main(["--records-dir", str(tmp_path / "nope")])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == []
