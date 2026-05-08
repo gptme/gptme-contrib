@@ -601,7 +601,9 @@ def _partition_jsonl_io(
     fast_path.touch()
     slow_path.touch()
     if items is None:
-        # Read JSONL from stdin (bash bridge path)
+        # Read JSONL from stdin (bash bridge path); collect then write to open each file once
+        fast_lines: list[str] = []
+        slow_lines: list[str] = []
         for raw in sys.stdin:
             raw = raw.strip()
             if not raw:
@@ -616,18 +618,24 @@ def _partition_jsonl_io(
                 t = data.get("type")
                 item_types = [t] if isinstance(t, str) else []
             lane = classify_lane(item_types)
-            target_path = slow_path if lane == "slow" else fast_path
-            with target_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(data, ensure_ascii=False) + "\n")
+            encoded = json.dumps(data, ensure_ascii=False) + "\n"
+            if lane == "slow":
+                slow_lines.append(encoded)
+            else:
+                fast_lines.append(encoded)
+        with fast_path.open("a", encoding="utf-8") as fh:
+            fh.writelines(fast_lines)
+        with slow_path.open("a", encoding="utf-8") as fh:
+            fh.writelines(slow_lines)
         return
 
     # Direct SlotItem path (Python-to-Python)
     fast, slow = partition_items(items)
-    for f_item in fast:
-        with fast_path.open("a", encoding="utf-8") as fh:
+    with fast_path.open("a", encoding="utf-8") as fh:
+        for f_item in fast:
             fh.write(json.dumps(f_item.__dict__, ensure_ascii=False) + "\n")
-    for s_item in slow:
-        with slow_path.open("a", encoding="utf-8") as fh:
+    with slow_path.open("a", encoding="utf-8") as fh:
+        for s_item in slow:
             fh.write(json.dumps(s_item.__dict__, ensure_ascii=False) + "\n")
 
 
@@ -759,17 +767,15 @@ def main() -> None:
     Usage:
         cat grouped_items.jsonl | python3 -m gptme_runloops.pm_dispatch /tmp/fast.jsonl /tmp/slow.jsonl
     """
-    import sys as _sys
-
-    if len(_sys.argv) < 3:
+    if len(sys.argv) < 3:
         print(
             "Usage: python3 -m gptme_runloops.pm_dispatch <fast_out> <slow_out>",
-            file=_sys.stderr,
+            file=sys.stderr,
         )
-        _sys.exit(1)
+        sys.exit(1)
 
-    fast_path = Path(_sys.argv[1])
-    slow_path = Path(_sys.argv[2])
+    fast_path = Path(sys.argv[1])
+    slow_path = Path(sys.argv[2])
     _partition_jsonl_io(fast_path, slow_path)
     fast_count = (
         len(fast_path.read_text().splitlines()) if fast_path.stat().st_size else 0
@@ -779,7 +785,7 @@ def main() -> None:
     )
     print(
         f"Dispatched: {fast_count} fast + {slow_count} slow = {fast_count + slow_count} total",
-        file=_sys.stderr,
+        file=sys.stderr,
     )
 
 
