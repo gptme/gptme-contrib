@@ -425,12 +425,16 @@ class VoiceServer:
         workspace: str | None = None,
         provider: str = _PROVIDER_OPENAI,
         model: str | None = None,
+        voice: str | None = None,
+        output_speed: float | None = None,
         enable_browser_transport: bool = False,
     ):
         self.host = host
         self.port = port
         self.provider = provider
         self.model = model
+        self.voice = voice
+        self.output_speed = output_speed
         self.enable_browser_transport = enable_browser_transport
         if provider == _PROVIDER_GROK:
             self._api_key = _get_xai_api_key()
@@ -1554,7 +1558,7 @@ class VoiceServer:
         instructions: str,
         initial_response_instructions: str = "",
     ) -> SessionConfig:
-        """Build a SessionConfig with optional model override."""
+        """Build a SessionConfig with optional runtime overrides."""
         kwargs: dict = dict(
             instructions=instructions,
             initial_response_instructions=initial_response_instructions,
@@ -1562,6 +1566,10 @@ class VoiceServer:
         )
         if self.model:
             kwargs["model"] = self.model
+        if self.voice:
+            kwargs["voice"] = self.voice
+        if self.output_speed is not None:
+            kwargs["output_speed"] = self.output_speed
         return SessionConfig(**kwargs)
 
     def _make_client(
@@ -1879,6 +1887,23 @@ class VoiceServer:
     ),
 )
 @click.option(
+    "--voice",
+    default=None,
+    help=(
+        "Override the provider voice. For OpenAI Realtime, current voices include "
+        "echo, alloy, ash, ballad, coral, sage, shimmer, verse, marin, and cedar."
+    ),
+)
+@click.option(
+    "--output-speed",
+    default=None,
+    type=click.FloatRange(0.25, 1.5),
+    help=(
+        "Override spoken output speed. Currently passed through only for OpenAI "
+        "Realtime, which supports 0.25 to 1.5."
+    ),
+)
+@click.option(
     "--enable-browser-transport",
     is_flag=True,
     help="Expose /voice WebSocket for browser PCM transport.",
@@ -1890,6 +1915,8 @@ def main(
     workspace: str | None,
     provider: str,
     model: str | None,
+    voice: str | None,
+    output_speed: float | None,
     enable_browser_transport: bool,
     debug: bool,
 ):
@@ -1908,6 +1935,8 @@ def main(
         workspace=workspace,
         provider=provider,
         model=model,
+        voice=voice,
+        output_speed=output_speed,
         enable_browser_transport=enable_browser_transport,
     )
 
