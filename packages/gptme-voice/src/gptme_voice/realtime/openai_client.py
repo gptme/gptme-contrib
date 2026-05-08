@@ -197,7 +197,7 @@ def _load_project_instructions(workspace: str | None = None) -> str:
 class SessionConfig:
     """Configuration for OpenAI Realtime API session."""
 
-    model: str = "gpt-4o-realtime-preview-2024-12-17"
+    model: str = "gpt-realtime-2025-08-28"
     voice: str = "echo"
     instructions: str = ""
     initial_response_instructions: str = ""
