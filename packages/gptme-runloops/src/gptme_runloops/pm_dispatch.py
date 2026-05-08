@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -583,6 +584,53 @@ class DispatchResult:
     fallback_items: list[SlotItem] = field(default_factory=list)
 
 
+def _partition_jsonl_io(
+    fast_path: Path,
+    slow_path: Path,
+    items: list[SlotItem] | None = None,
+) -> None:
+    """Partition grouped items JSONL from stdin or *items* into fast/slow lane files.
+
+    Reads JSONL from *stdin* when *items* is ``None`` (the primary bash-bridge path).
+    Each JSONL line is parsed, lane-classified, and appended to the corresponding file.
+    Silently skips blank lines.
+    Ensures both output files exist on return even when no items are written.
+    """
+    fast_path.parent.mkdir(parents=True, exist_ok=True)
+    slow_path.parent.mkdir(parents=True, exist_ok=True)
+    fast_path.touch()
+    slow_path.touch()
+    if items is None:
+        # Read JSONL from stdin (bash bridge path)
+        for raw in sys.stdin:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("skipping unparseable JSONL line: %.80s", raw)
+                continue
+            item_types = data.get("types") or []
+            if not isinstance(item_types, list) or not item_types:
+                t = data.get("type")
+                item_types = [t] if isinstance(t, str) else []
+            lane = classify_lane(item_types)
+            target_path = slow_path if lane == "slow" else fast_path
+            with target_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(data, ensure_ascii=False) + "\n")
+        return
+
+    # Direct SlotItem path (Python-to-Python)
+    fast, slow = partition_items(items)
+    for f_item in fast:
+        with fast_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(f_item.__dict__, ensure_ascii=False) + "\n")
+    for s_item in slow:
+        with slow_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(s_item.__dict__, ensure_ascii=False) + "\n")
+
+
 def _sanitize_unit_name(key: str) -> str:
     """Translate a slot key into a systemd-safe unit name fragment."""
     return key.translate(str.maketrans("/#:", "---")).replace(" ", "-")
@@ -703,3 +751,37 @@ def dispatch_grouped_items(
                 )
 
     return result
+
+
+def main() -> None:
+    """CLI entry point: partition grouped JSONL items from stdin into fast/slow lane files.
+
+    Usage:
+        cat grouped_items.jsonl | python3 -m gptme_runloops.pm_dispatch /tmp/fast.jsonl /tmp/slow.jsonl
+    """
+    import sys as _sys
+
+    if len(_sys.argv) < 3:
+        print(
+            "Usage: python3 -m gptme_runloops.pm_dispatch <fast_out> <slow_out>",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+
+    fast_path = Path(_sys.argv[1])
+    slow_path = Path(_sys.argv[2])
+    _partition_jsonl_io(fast_path, slow_path)
+    fast_count = (
+        len(fast_path.read_text().splitlines()) if fast_path.stat().st_size else 0
+    )
+    slow_count = (
+        len(slow_path.read_text().splitlines()) if slow_path.stat().st_size else 0
+    )
+    print(
+        f"Dispatched: {fast_count} fast + {slow_count} slow = {fast_count + slow_count} total",
+        file=_sys.stderr,
+    )
+
+
+if __name__ == "__main__":
+    main()

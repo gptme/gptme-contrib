@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from gptme_runloops.pm_dispatch import (
     LedgerEntry,
     SlotItem,
     SlotManager,
+    _partition_jsonl_io,
     classify_lane,
     derive_slot_key,
     dispatch_grouped_items,
@@ -703,3 +705,145 @@ class TestLaneDispatcher:
         ]
         ld.dispatch(items)
         assert callback_calls[0]["slot_key"] == "gptme/gptme#master-ci"
+
+
+class TestPartitionJsonlIO:
+    """Tests for _partition_jsonl_io — the Python bridge for bash lane-partitioning."""
+
+    def test_partition_by_stdin(self, tmp_path, monkeypatch):
+        """Partition mixed items via stdin, verifying each row lands in the correct lane file."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        stdin_lines = (
+            json.dumps({"repo": "foo/bar", "number": 1, "types": ["assigned_issue"]})
+            + "\n"
+            + json.dumps({"repo": "foo/bar", "number": 2, "types": ["pr_update"]})
+            + "\n"
+            + json.dumps({"repo": "foo/bar", "number": 3, "types": ["ci_failure"]})
+            + "\n"
+            + json.dumps({"repo": "foo/bar", "number": 4, "types": ["mention"]})
+            + "\n"
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_lines))
+
+        _partition_jsonl_io(fast_path, slow_path)
+
+        results = {
+            "fast": [
+                json.loads(line) for line in fast_path.read_text().splitlines() if line
+            ],
+            "slow": [
+                json.loads(line) for line in slow_path.read_text().splitlines() if line
+            ],
+        }
+
+        # Fast: assigned_issue, mention
+        assert len(results["fast"]) == 2, f"expected 2 fast, got {len(results['fast'])}"
+        # Slow: pr_update, ci_failure
+        assert len(results["slow"]) == 2, f"expected 2 slow, got {len(results['slow'])}"
+        assert results["fast"][0]["number"] == 1
+        assert results["slow"][0]["number"] == 2
+        assert results["slow"][1]["number"] == 3
+        assert results["fast"][1]["number"] == 4
+
+    def test_partition_by_items(self, tmp_path):
+        """Partition SlotItem list directly (Python-to-Python path)."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        items = [
+            SlotItem(repo="a/b", number=1, types=["assigned_issue"], title="a"),
+            SlotItem(repo="a/b", number=2, types=["pr_update"], title="b"),
+            SlotItem(repo="a/b", number=3, types=["merge_conflict"], title="c"),
+            SlotItem(repo="a/b", number=4, types=["twitter_mention"], title="d"),
+        ]
+        _partition_jsonl_io(fast_path, slow_path, items=items)
+
+        fast_lines = [line for line in fast_path.read_text().splitlines() if line]
+        slow_lines = [line for line in slow_path.read_text().splitlines() if line]
+
+        assert len(fast_lines) == 2  # a, d
+        assert len(slow_lines) == 2  # b, c
+
+    def test_partition_handles_blank_lines(self, tmp_path, monkeypatch):
+        """Blank lines in stdin are silently skipped."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        stdin_lines = (
+            "\n"
+            + "\n"
+            + json.dumps({"repo": "a/b", "number": 1, "types": ["assigned_issue"]})
+            + "\n"
+            + "\n"
+            + "\n"
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_lines))
+
+        _partition_jsonl_io(fast_path, slow_path)
+
+        fast_lines = [line for line in fast_path.read_text().splitlines() if line]
+        slow_lines = [line for line in slow_path.read_text().splitlines() if line]
+        assert len(fast_lines) == 1
+        assert len(slow_lines) == 0
+
+    def test_partition_empty_input(self, tmp_path, monkeypatch):
+        """Empty stdin produces empty files."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(""))
+        _partition_jsonl_io(fast_path, slow_path)
+
+        fast_lines = [line for line in fast_path.read_text().splitlines() if line]
+        slow_lines = [line for line in slow_path.read_text().splitlines() if line]
+        assert len(fast_lines) == 0
+        assert len(slow_lines) == 0
+
+    def test_partition_handles_missing_types(self, tmp_path, monkeypatch):
+        """Items missing 'types' or 'type' should still work, defaulting to fast."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        stdin_lines = json.dumps({"repo": "a/b", "number": 1}) + "\n"
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_lines))
+
+        _partition_jsonl_io(fast_path, slow_path)
+
+        fast_lines = [line for line in fast_path.read_text().splitlines() if line]
+        assert len(fast_lines) == 1
+
+    def test_partition_handles_unparseable(self, tmp_path, monkeypatch, caplog):
+        """Malformed JSONL is logged but does not crash."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        stdin_lines = (
+            "not-json\n"
+            + json.dumps({"repo": "a/b", "number": 2, "types": ["assigned_issue"]})
+            + "\n"
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_lines))
+
+        _partition_jsonl_io(fast_path, slow_path)
+
+        fast_lines = [line for line in fast_path.read_text().splitlines() if line]
+        assert len(fast_lines) == 1
+        assert "unparseable" in caplog.text
+
+    def test_partition_handles_string_type(self, tmp_path, monkeypatch):
+        """Single string 'type' (not list) is wrapped into a list."""
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        stdin_lines = json.dumps(
+            {"repo": "a/b", "number": 1, "type": "pr_update", "types": []}
+        )
+        stdin_lines += "\n"
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_lines))
+
+        _partition_jsonl_io(fast_path, slow_path)
+
+        slow_lines = [line for line in slow_path.read_text().splitlines() if line]
+        assert len(slow_lines) == 1, "pr_update with string type should land in slow"
