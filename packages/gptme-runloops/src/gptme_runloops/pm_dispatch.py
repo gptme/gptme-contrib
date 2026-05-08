@@ -918,7 +918,6 @@ def _records_aggregate_main(argv: list[str]) -> int:
     skipped silently; OS-level errors propagate.
     """
     import argparse
-    import sys as _sys
 
     parser = argparse.ArgumentParser(
         prog="pm_dispatch records-aggregate",
@@ -939,7 +938,7 @@ def _records_aggregate_main(argv: list[str]) -> int:
                 records.append(json.loads(path.read_text()))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-    print(json.dumps(records, ensure_ascii=False), file=_sys.stdout)
+    print(json.dumps(records, ensure_ascii=False))
     return 0
 
 
