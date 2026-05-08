@@ -1,10 +1,39 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
 import yaml  # type: ignore[import-untyped]
+
+
+def _datetime_representer(dumper: yaml.SafeDumper, data: datetime) -> yaml.ScalarNode:
+    """Serialize datetime with ISO 8601 'T' separator instead of PyYAML's default space.
+
+    PyYAML's default timestamp serialization uses a space between the date and time,
+    producing values like '2026-05-01 09:31:00+00:00' that the workspace task validator
+    rejects. This representer preserves the strict ISO 8601 form.
+    """
+    return dumper.represent_scalar("tag:yaml.org,2002:timestamp", data.isoformat())
+
+
+def _date_representer(dumper: yaml.SafeDumper, data: date) -> yaml.ScalarNode:
+    """Serialize date as plain ISO 8601 (YYYY-MM-DD)."""
+    return dumper.represent_scalar("tag:yaml.org,2002:timestamp", data.isoformat())
+
+
+# Register on every SafeDumper variant we might encounter:
+#   - yaml.SafeDumper (pure-Python, used by the compat shim)
+#   - yaml.CSafeDumper (C-accelerated, used by python-frontmatter when libyaml
+#     is available — different class, separate representer table)
+_DUMPERS: list[Any] = [yaml.SafeDumper]
+_csafe = getattr(yaml, "CSafeDumper", None)
+if _csafe is not None:
+    _DUMPERS.append(_csafe)
+for _dumper in _DUMPERS:
+    _dumper.add_representer(datetime, _datetime_representer)
+    _dumper.add_representer(date, _date_representer)
 
 
 class Post(dict[str, Any]):
