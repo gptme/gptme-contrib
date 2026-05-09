@@ -26,7 +26,7 @@ import click
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import FileResponse, PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
@@ -513,6 +513,7 @@ class VoiceServer:
         ]
         if self.enable_browser_transport:
             routes.append(WebSocketRoute("/voice", self.handle_browser_websocket))
+            routes.append(Route("/browser", self.serve_browser_client, methods=["GET"]))
 
         self.app = Starlette(routes=routes)
 
@@ -1293,6 +1294,11 @@ class VoiceServer:
         """Health check endpoint."""
         return PlainTextResponse("OK")
 
+    async def serve_browser_client(self, request: Request) -> FileResponse:
+        """Serve the browser WebSocket client HTML."""
+        static_dir = Path(__file__).parent.parent / "static"
+        return FileResponse(static_dir / "index.html", media_type="text/html")
+
     async def handle_incoming_call(self, request: Request) -> PlainTextResponse:
         """
         Handle incoming Twilio call — return TwiML to connect to Media Stream.
@@ -1967,7 +1973,8 @@ def main(
     )
     logger.info(f"Local test endpoint: ws://{host}:{port}/local")
     if enable_browser_transport:
-        logger.info(f"Browser test endpoint: ws://{host}:{port}/voice")
+        logger.info(f"Browser WebSocket endpoint: ws://{host}:{port}/voice")
+        logger.info(f"Browser client UI: http://{host}:{port}/browser")
 
     server.run()
 
