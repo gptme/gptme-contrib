@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -142,7 +143,28 @@ class SymbolIndex:
 
 
 def _iter_python_files(directory: Path) -> list[Path]:
-    """Return Python source files under ``directory``, skipping junk dirs."""
+    """Return Python source files under ``directory``, skipping junk dirs.
+
+    Uses ``git ls-files`` when the directory is a git repository, falling
+    back to ``rglob`` for non-git directories or when git is unavailable.
+    """
+    # When directory is a git repo, use git ls-files — faster and avoids
+    # vendored deps (node_modules, .venv, etc.) and generated files.
+    git_dir = directory / ".git"
+    if git_dir.exists() and git_dir.is_dir():
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "*.py"],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return [directory / p for p in result.stdout.strip().split("\n") if p]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
     files: list[Path] = []
     for fp in sorted(directory.rglob("*.py")):
         parts = fp.relative_to(directory).parts
