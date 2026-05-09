@@ -1310,3 +1310,34 @@ class TestTranscriptPromotion:
 
         server._promote_transcript_to_gptme("+15551234567", transcript, metadata)
         assert len(calls) == 0
+
+
+def test_server_g711_passthrough_off_by_default() -> None:
+    server = VoiceServer()
+    assert server.openai_g711_passthrough is False
+
+
+def test_server_g711_passthrough_enabled_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GPTME_VOICE_OPENAI_G711_PASSTHROUGH", "1")
+    server = VoiceServer()
+    assert server.openai_g711_passthrough is True
+
+    session_config = server._build_session_config("You are Bob.")
+    assert session_config.g711_passthrough is True
+    assert session_config.input_format == "g711_ulaw"
+    assert session_config.output_format == "g711_ulaw"
+
+
+def test_server_g711_passthrough_ignored_for_grok_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GPTME_VOICE_OPENAI_G711_PASSTHROUGH", "1")
+    server = VoiceServer(provider="grok")
+    # Grok requires PCM; the env flag must not bleed into a Grok session.
+    assert server.openai_g711_passthrough is False
+
+    session_config = server._build_session_config("You are Bob.")
+    assert session_config.g711_passthrough is False
+    assert session_config.input_format == "pcm16"

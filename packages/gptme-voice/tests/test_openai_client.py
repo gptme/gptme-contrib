@@ -717,3 +717,49 @@ def test_activate_session_before_session_ready_sends_greeting_on_ready() -> None
             await client.disconnect()
 
     asyncio.run(_exercise())
+
+
+def test_session_config_g711_passthrough_sets_format_and_rates() -> None:
+    cfg = SessionConfig(g711_passthrough=True)
+    assert cfg.input_format == "g711_ulaw"
+    assert cfg.output_format == "g711_ulaw"
+    assert cfg.input_sample_rate == 8000
+    assert cfg.output_sample_rate == 8000
+
+
+def test_session_config_g711_passthrough_default_off_keeps_pcm16() -> None:
+    cfg = SessionConfig()
+    assert cfg.g711_passthrough is False
+    assert cfg.input_format == "pcm16"
+    assert cfg.output_format == "pcm16"
+    assert cfg.input_sample_rate == 24000
+    assert cfg.output_sample_rate == 24000
+
+
+def test_connect_emits_g711_ulaw_audio_format_when_passthrough_enabled() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(
+                    instructions="You are Bob.",
+                    g711_passthrough=True,
+                ),
+            )
+            await client.connect()
+            await asyncio.sleep(0)
+            await client.disconnect()
+
+        session_update = fake_ws.sent[0]
+        assert session_update["type"] == "session.update"
+        session = session_update["session"]
+        assert session["input_audio_format"] == "g711_ulaw"
+        assert session["output_audio_format"] == "g711_ulaw"
