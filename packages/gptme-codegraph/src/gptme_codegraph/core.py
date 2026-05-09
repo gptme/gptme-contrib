@@ -696,6 +696,7 @@ def build_index(directory: Path) -> SymbolIndex:
     creates an ``IndexEntry`` for each symbol and ``ImportInfo`` for each import.
     """
     index = SymbolIndex()
+    directory = Path(directory)
     dir_str = str(directory)
     for fp in sorted(directory.rglob("*.py")):
         # Skip common non-source directories
