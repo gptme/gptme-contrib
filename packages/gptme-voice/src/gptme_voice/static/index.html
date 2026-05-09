@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>gptme Voice</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #0d1117;
+      color: #c9d1d9;
+    }
+    h1 { color: #58a6ff; margin-bottom: 4px; }
+    .subtitle { color: #8b949e; font-size: 0.9em; margin-bottom: 24px; }
+    button {
+      padding: 10px 24px;
+      border-radius: 6px;
+      border: none;
+      font-size: 1em;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #connectBtn { background: #238636; color: #fff; }
+    #connectBtn.disconnect { background: #b62324; }
+    #status {
+      margin: 16px 0;
+      padding: 10px 14px;
+      border-radius: 6px;
+      background: #161b22;
+      font-size: 0.9em;
+      color: #8b949e;
+    }
+    #status.connected { color: #3fb950; }
+    #status.error { color: #f85149; }
+    #vumeter {
+      height: 6px;
+      background: #21262d;
+      border-radius: 3px;
+      margin: 8px 0;
+      overflow: hidden;
+    }
+    #vubar {
+      height: 100%;
+      width: 0%;
+      background: #3fb950;
+      transition: width 0.05s;
+    }
+    #transcript {
+      margin-top: 20px;
+      padding: 14px;
+      background: #161b22;
+      border-radius: 6px;
+      min-height: 120px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-size: 0.9em;
+      line-height: 1.6;
+    }
+    .turn { margin-bottom: 10px; }
+    .turn-user { color: #79c0ff; }
+    .turn-user::before { content: "You: "; font-weight: bold; }
+    .turn-assistant { color: #c9d1d9; }
+    .turn-assistant::before { content: "Assistant: "; font-weight: bold; color: #58a6ff; }
+    .turn-system { color: #8b949e; font-style: italic; font-size: 0.85em; }
+    #playingIndicator {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #3fb950;
+      margin-left: 8px;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: 0.3; }
+    }
+    #playingIndicator.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>gptme Voice <span id="playingIndicator" class="hidden"></span></h1>
+  <div class="subtitle">Browser client — WebSocket transport to gptme-voice-server</div>
+
+  <button id="connectBtn">Connect</button>
+  <div id="status">Not connected. Start gptme-voice-server --enable-browser-transport, then click Connect.</div>
+  <div id="vumeter"><div id="vubar"></div></div>
+  <div id="transcript"></div>
+
+  <script>
+    // --- Config ---
+    const MIC_RATE = 16000;    // must match AudioConverter.BROWSER_RATE
+    const OUT_RATE = 24000;    // must match AudioConverter.OPENAI_RATE
+
+    // Try same host/port first; allow override via URL param ?port=8080
+    const params = new URLSearchParams(location.search);
+    const wsPort = params.get('port') || location.port || '8080';
+    const wsHost = params.get('host') || location.hostname || 'localhost';
+    const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const WS_URL = `${wsScheme}://${wsHost}:${wsPort}/voice`;
+
+    // --- State ---
+    let ws = null;
+    let audioCtx = null;
+    let micStream = null;
+    let workletNode = null;
+    let outputQueue = [];
+    let isPlaying = false;
+    let playbackScheduledUntil = 0;
+    let vuRafId = null;
+
+    const connectBtn = document.getElementById('connectBtn');
+    const statusEl = document.getElementById('status');
+    const transcriptEl = document.getElementById('transcript');
+    const vubar = document.getElementById('vubar');
+    const playingIndicator = document.getElementById('playingIndicator');
+
+    function setStatus(msg, cls = '') {
+      statusEl.textContent = msg;
+      statusEl.className = cls;
+    }
+
+    function addTranscript(text, role) {
+      const div = document.createElement('div');
+      div.className = `turn turn-${role}`;
+      div.textContent = text;
+      transcriptEl.appendChild(div);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    // AudioWorklet source (inlined as Blob URL)
+    const WORKLET_CODE = `
+class PCM16CaptureProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buffer = new Float32Array(0);
+  }
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (!ch) return true;
+    const int16 = new Int16Array(ch.length);
+    for (let i = 0; i < ch.length; i++) {
+      const s = Math.max(-1, Math.min(1, ch[i]));
+      int16[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+    this.port.postMessage(int16.buffer, [int16.buffer]);
+    return true;
+  }
+}
+registerProcessor('pcm16-capture', PCM16CaptureProcessor);
+`;
+
+    async function startMic() {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: MIC_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+      });
+      audioCtx = new AudioContext({ sampleRate: MIC_RATE });
+      const workletBlob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+      const workletUrl = URL.createObjectURL(workletBlob);
+      await audioCtx.audioWorklet.addModule(workletUrl);
+      URL.revokeObjectURL(workletUrl);
+
+      const source = audioCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(audioCtx, 'pcm16-capture');
+
+      // VU meter via analyser
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      source.connect(workletNode);
+      workletNode.connect(audioCtx.destination); // silent passthrough
+
+      workletNode.port.onmessage = (e) => {
+        if (!isPlaying && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(e.data);
+        }
+      };
+
+      // Update VU meter
+      const vuData = new Uint8Array(analyser.frequencyBinCount);
+      function updateVU() {
+        analyser.getByteTimeDomainData(vuData);
+        let max = 0;
+        for (const v of vuData) max = Math.max(max, Math.abs(v - 128));
+        vubar.style.width = `${Math.min(100, (max / 128) * 300)}%`;
+        vuRafId = requestAnimationFrame(updateVU);
+      }
+      updateVU();
+    }
+
+    function stopMic() {
+      if (vuRafId !== null) { cancelAnimationFrame(vuRafId); vuRafId = null; }
+      micStream?.getTracks().forEach(t => t.stop());
+      workletNode?.disconnect();
+      audioCtx?.close();
+      micStream = null; workletNode = null; audioCtx = null;
+      vubar.style.width = '0%';
+    }
+
+    // PCM16 int16 playback via AudioContext at OUT_RATE
+    let playCtx = null;
+    function ensurePlayCtx() {
+      if (!playCtx || playCtx.state === 'closed') {
+        playCtx = new AudioContext({ sampleRate: OUT_RATE });
+        playbackScheduledUntil = playCtx.currentTime;
+      }
+    }
+
+    function enqueueAudio(arrayBuffer) {
+      ensurePlayCtx();
+      const int16 = new Int16Array(arrayBuffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+      const buf = playCtx.createBuffer(1, float32.length, OUT_RATE);
+      buf.getChannelData(0).set(float32);
+      const src = playCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(playCtx.destination);
+
+      const startAt = Math.max(playCtx.currentTime + 0.02, playbackScheduledUntil);
+      src.start(startAt);
+      playbackScheduledUntil = startAt + buf.duration;
+
+      isPlaying = true;
+      playingIndicator.classList.remove('hidden');
+    }
+
+    function onAudioEnd() {
+      // Give a small grace period for the last buffer to finish
+      const remaining = (playbackScheduledUntil - (playCtx?.currentTime ?? 0)) * 1000;
+      setTimeout(() => {
+        isPlaying = false;
+        playingIndicator.classList.add('hidden');
+        // Commit any buffered audio after playback completes
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'commit' }));
+        }
+      }, Math.max(0, remaining) + 200);
+    }
+
+    // --- WebSocket ---
+    function connect() {
+      setStatus(`Connecting to ${WS_URL}…`);
+      ws = new WebSocket(WS_URL);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        setStatus('Connected — waiting for server ready…');
+      };
+
+      ws.onmessage = async (evt) => {
+        if (evt.data instanceof ArrayBuffer) {
+          enqueueAudio(evt.data);
+          return;
+        }
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'ready') {
+            setStatus('Connected — speak freely.', 'connected');
+            try {
+              await startMic();
+            } catch (err) {
+              setStatus(`Mic error: ${err.message}`, 'error');
+            }
+          } else if (msg.type === 'audio_end') {
+            onAudioEnd();
+          } else if (msg.type === 'transcript') {
+            addTranscript(msg.text, msg.role ?? 'assistant');
+          } else if (msg.type === 'hangup' || msg.type === 'disconnect') {
+            addTranscript('Call ended.', 'system');
+            disconnect();
+          }
+        } catch { /* binary frame handled above */ }
+      };
+
+      ws.onerror = () => setStatus('WebSocket error. Is the server running with --enable-browser-transport?', 'error');
+      ws.onclose = () => {
+        if (connectBtn.classList.contains('disconnect')) {
+          setStatus('Disconnected.');
+          connectBtn.textContent = 'Connect';
+          connectBtn.classList.remove('disconnect');
+          stopMic();
+        }
+      };
+
+      connectBtn.textContent = 'Disconnect';
+      connectBtn.classList.add('disconnect');
+    }
+
+    function disconnect() {
+      ws?.close();
+      stopMic();
+      isPlaying = false;
+      playingIndicator.classList.add('hidden');
+      playCtx?.close().catch(() => {});
+      playCtx = null;
+    }
+
+    connectBtn.addEventListener('click', () => {
+      if (connectBtn.classList.contains('disconnect')) {
+        disconnect();
+      } else {
+        transcriptEl.innerHTML = '';
+        connect();
+      }
+    });
+  </script>
+</body>
+</html>
