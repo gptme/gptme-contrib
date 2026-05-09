@@ -439,6 +439,12 @@ class VoiceServer:
         self.voice = voice
         self.output_speed = output_speed
         self.enable_browser_transport = enable_browser_transport
+        # G.711 μ-law passthrough on the OpenAI Twilio path. Only takes effect
+        # for provider=openai; Grok is unaffected because its API requires PCM.
+        self.openai_g711_passthrough = (
+            (_get_config_env("GPTME_VOICE_OPENAI_G711_PASSTHROUGH") or "").lower()
+            in ("1", "true", "yes")
+        ) and provider == _PROVIDER_OPENAI
         if provider == _PROVIDER_GROK:
             self._api_key = _get_xai_api_key()
         else:
@@ -1387,6 +1393,7 @@ class VoiceServer:
         transcript: list[TranscriptTurn] = []
         metadata: dict[str, str] = {}
         handoff_id: str | None = None
+        g711_passthrough = self.openai_g711_passthrough
 
         try:
             async for message in websocket.iter_text():
@@ -1428,11 +1435,12 @@ class VoiceServer:
                     # is detected and awaited by _call_callback.
                     def _make_on_audio(_stream_sid: str):
                         async def _on_audio(audio: bytes) -> None:
-                            await self._send_to_twilio(
-                                websocket,
-                                _stream_sid,
-                                audio_converter.openai_to_twilio(audio),
+                            payload = (
+                                audio
+                                if g711_passthrough
+                                else audio_converter.openai_to_twilio(audio)
                             )
+                            await self._send_to_twilio(websocket, _stream_sid, payload)
 
                         return _on_audio
 
@@ -1518,10 +1526,15 @@ class VoiceServer:
                         media = data.get("media", {})
                         mulaw_b64 = media.get("payload", "")
                         if mulaw_b64:
-                            # Convert to PCM and send to realtime API
                             mulaw_data = base64.b64decode(mulaw_b64)
-                            pcm_data = audio_converter.twilio_to_openai(mulaw_data)
-                            await realtime_client.send_audio(pcm_data)
+                            if g711_passthrough:
+                                # OpenAI session is configured for g711_ulaw —
+                                # forward Twilio's μ-law payload as-is.
+                                await realtime_client.send_audio(mulaw_data)
+                            else:
+                                # Convert to PCM 24kHz and send to realtime API
+                                pcm_data = audio_converter.twilio_to_openai(mulaw_data)
+                                await realtime_client.send_audio(pcm_data)
 
                 elif event == "stop":
                     # Call ended
@@ -1581,6 +1594,8 @@ class VoiceServer:
             kwargs["voice"] = self.voice
         if self.output_speed is not None:
             kwargs["output_speed"] = self.output_speed
+        if self.openai_g711_passthrough:
+            kwargs["g711_passthrough"] = True
         return SessionConfig(**kwargs)
 
     def _make_client(

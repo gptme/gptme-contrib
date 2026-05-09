@@ -214,6 +214,18 @@ class SessionConfig:
     available_agents: list[str] = field(
         default_factory=lambda: ["alice", "gordon", "sven"]
     )
+    # When True, configure the OpenAI session to send/receive G.711 μ-law at
+    # 8kHz directly. The Twilio bridge uses this to skip an otherwise-required
+    # PCM16 ↔ μ-law and 8k ↔ 24k resampling round on the OpenAI branch.
+    # Has no effect on the xAI/Grok client (Grok requires PCM).
+    g711_passthrough: bool = False
+
+    def __post_init__(self) -> None:
+        if self.g711_passthrough:
+            self.input_format = "g711_ulaw"
+            self.output_format = "g711_ulaw"
+            self.input_sample_rate = 8000
+            self.output_sample_rate = 8000
 
 
 class OpenAIRealtimeClient:
