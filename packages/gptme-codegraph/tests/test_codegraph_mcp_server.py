@@ -319,7 +319,7 @@ def test_cross_file_impact(sample_dir):
     assert d["symbol"] == "add"
     assert d["total_affected"] >= 1
     assert "depth_0" in d["depth_breakdown"]
-    assert "add" in d["depth_breakdown"]["depth_0"]
+    assert "a::add" in d["depth_breakdown"]["depth_0"]
 
 
 def test_cross_file_impact_missing_symbol(sample_dir):
