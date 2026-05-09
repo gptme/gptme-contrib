@@ -689,13 +689,14 @@ def extract_symbols(filepath: Path) -> list[Symbol]:
     return parse_file(filepath).symbols
 
 
-def build_index(directory: Path) -> SymbolIndex:
+def build_index(directory: str | Path) -> SymbolIndex:
     """Build a cross-file symbol index for all Python files in a directory.
 
     Scans all ``.py`` files recursively, extracts symbols and imports, and
     creates an ``IndexEntry`` for each symbol and ``ImportInfo`` for each import.
     """
     index = SymbolIndex()
+    directory = Path(directory)
     dir_str = str(directory)
     for fp in sorted(directory.rglob("*.py")):
         # Skip common non-source directories
