@@ -163,6 +163,14 @@ def test_send_to_twilio_uses_stream_sid_field_name() -> None:
     }
 
 
+def test_build_session_config_passes_reasoning_effort_override() -> None:
+    server = VoiceServer(reasoning_effort="minimal")
+
+    session_config = server._build_session_config("You are Bob.")
+
+    assert session_config.reasoning_effort == "minimal"
+
+
 def test_voice_route_disabled_by_default() -> None:
     server = VoiceServer()
 

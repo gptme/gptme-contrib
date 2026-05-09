@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import websockets  # type: ignore
 from gptme.config import get_config, get_project_config
@@ -198,6 +198,7 @@ class SessionConfig:
     """Configuration for OpenAI Realtime API session."""
 
     model: str = "gpt-realtime-2"
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     voice: str = "echo"
     output_speed: float | None = None
     instructions: str = ""
@@ -277,14 +278,18 @@ class OpenAIRealtimeClient:
 
     def _get_ws_headers(self) -> dict[str, str]:
         """Auth headers for this provider (override in subclasses)."""
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        return {"Authorization": f"Bearer {self.api_key}"}
 
     def _get_transcription_config(self) -> dict | None:
         """Transcription config for session.update (override to None to omit)."""
         return {"model": "whisper-1"}
+
+    def _get_reasoning_config(self) -> dict[str, str] | None:
+        """Reasoning config for session.update (override to omit or customize)."""
+        effort = self.session_config.reasoning_effort
+        if effort is None:
+            return None
+        return {"effort": effort}
 
     async def connect(self) -> None:
         """Connect to OpenAI Realtime API."""
@@ -464,6 +469,9 @@ class OpenAIRealtimeClient:
         }
         if self.session_config.output_speed is not None:
             session_params["output"] = {"speed": self.session_config.output_speed}
+        reasoning = self._get_reasoning_config()
+        if reasoning is not None:
+            session_params["reasoning"] = reasoning
         transcription = self._get_transcription_config()
         if transcription is not None:
             session_params["input_audio_transcription"] = transcription

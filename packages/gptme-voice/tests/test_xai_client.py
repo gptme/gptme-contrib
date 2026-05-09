@@ -99,3 +99,31 @@ def test_xai_client_treats_session_updated_as_ready_signal() -> None:
             assert fake_ws.closed is True
 
     asyncio.run(_exercise())
+
+
+def test_xai_client_ignores_openai_reasoning_config() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = XAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(
+                    instructions="You are Bob.",
+                    reasoning_effort="low",
+                ),
+            )
+            await client.connect()
+            await asyncio.sleep(0)
+            await client.disconnect()
+
+        session_update = fake_ws.sent[0]
+        assert "reasoning" not in session_update["session"]
+
+    asyncio.run(_exercise())

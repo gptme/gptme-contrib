@@ -403,6 +403,7 @@ def _build_resume_instructions(
 _PROVIDER_OPENAI = "openai"
 _PROVIDER_GROK = "grok"
 _VALID_PROVIDERS = (_PROVIDER_OPENAI, _PROVIDER_GROK)
+_VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 
 def _get_twilio_field(payload: dict, camel_name: str, snake_name: str) -> str | None:
@@ -425,6 +426,7 @@ class VoiceServer:
         workspace: str | None = None,
         provider: str = _PROVIDER_OPENAI,
         model: str | None = None,
+        reasoning_effort: str | None = "low",
         voice: str | None = None,
         output_speed: float | None = None,
         enable_browser_transport: bool = False,
@@ -433,6 +435,7 @@ class VoiceServer:
         self.port = port
         self.provider = provider
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.voice = voice
         self.output_speed = output_speed
         self.enable_browser_transport = enable_browser_transport
@@ -1566,6 +1569,8 @@ class VoiceServer:
         )
         if self.model:
             kwargs["model"] = self.model
+        if self.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         if self.voice:
             kwargs["voice"] = self.voice
         if self.output_speed is not None:
@@ -1887,6 +1892,16 @@ class VoiceServer:
     ),
 )
 @click.option(
+    "--reasoning-effort",
+    default="low",
+    type=click.Choice(_VALID_REASONING_EFFORTS),
+    show_default=True,
+    help=(
+        "OpenAI Realtime reasoning effort. Ignored for xAI. OpenAI recommends "
+        "starting gpt-realtime-2 at low for production voice agents."
+    ),
+)
+@click.option(
     "--voice",
     default=None,
     help=(
@@ -1915,6 +1930,7 @@ def main(
     workspace: str | None,
     provider: str,
     model: str | None,
+    reasoning_effort: str,
     voice: str | None,
     output_speed: float | None,
     enable_browser_transport: bool,
@@ -1935,12 +1951,20 @@ def main(
         workspace=workspace,
         provider=provider,
         model=model,
+        reasoning_effort=reasoning_effort,
         voice=voice,
         output_speed=output_speed,
         enable_browser_transport=enable_browser_transport,
     )
 
-    logger.info(f"Starting voice server on {host}:{port} (provider={provider})")
+    logger.info(
+        "Starting voice server on %s:%s (provider=%s, model=%s, reasoning_effort=%s)",
+        host,
+        port,
+        provider,
+        model or "<default>",
+        reasoning_effort if provider == _PROVIDER_OPENAI else "<ignored>",
+    )
     logger.info(f"Local test endpoint: ws://{host}:{port}/local")
     if enable_browser_transport:
         logger.info(f"Browser test endpoint: ws://{host}:{port}/voice")

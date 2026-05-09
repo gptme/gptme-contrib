@@ -109,6 +109,39 @@ def test_connect_omits_output_key_when_speed_not_configured() -> None:
         session_update = fake_ws.sent[0]
         assert session_update["type"] == "session.update"
         assert "output" not in session_update["session"]
+        assert "reasoning" not in session_update["session"]
+
+    asyncio.run(_exercise())
+
+
+def test_connect_uses_current_openai_headers_and_reasoning_effort() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        captured_headers: dict[str, str] = {}
+
+        async def _fake_connect(*_args, **_kwargs):
+            captured_headers.update(_kwargs["additional_headers"])
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(
+                    instructions="You are Bob.",
+                    reasoning_effort="low",
+                ),
+            )
+            await client.connect()
+            await asyncio.sleep(0)
+            await client.disconnect()
+
+        session_update = fake_ws.sent[0]
+        assert captured_headers == {"Authorization": "Bearer test-key"}
+        assert "OpenAI-Beta" not in captured_headers
+        assert session_update["session"]["reasoning"] == {"effort": "low"}
 
     asyncio.run(_exercise())
 
