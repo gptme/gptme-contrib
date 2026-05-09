@@ -6,6 +6,7 @@ import json
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from gptme_codegraph.core import (
@@ -19,9 +20,11 @@ from gptme_codegraph.core import (
     build_call_graph,
     build_cross_file_call_graph,
     build_index,
+    build_repo_map,
     dependency_closure,
     extract_symbols,
     format_json,
+    format_repo_map,
     format_symbols,
     impact_radius,
     parse_file,
@@ -403,6 +406,38 @@ def test_format_json_basic():
     result = format_json(data)
     parsed = json.loads(result)
     assert parsed == data
+
+
+def test_build_repo_map_groups_class_methods(multi_file_project: Path):
+    """Repo-map output should group methods under their parent class."""
+    repo_map = build_repo_map(multi_file_project, max_files=10, max_symbols_per_file=10)
+    assert repo_map["files_scanned"] == 3
+    assert repo_map["files_with_symbols"] == 3
+
+    files = cast(list[dict[str, object]], repo_map["files"])
+    models_row = next(row for row in files if row["path"] == "models.py")
+    class_entry = next(
+        entry
+        for entry in cast(list[dict[str, object]], models_row["outline"])
+        if entry["kind"] == "class"
+    )
+    assert class_entry["name"] == "User"
+    method_names = {
+        method["name"]
+        for method in cast(list[dict[str, object]], class_entry["methods"])
+    }
+    assert "__init__" in method_names
+    assert "greet" in method_names
+
+
+def test_format_repo_map_human_readable(multi_file_project: Path):
+    """Repo-map formatter should emit a compact outline."""
+    repo_map = build_repo_map(multi_file_project, max_files=2, max_symbols_per_file=2)
+    output = format_repo_map(repo_map)
+    assert "Repo map:" in output
+    assert "models.py" in output
+    assert "class User" in output
+    assert "def __init__(...)" in output or "def greet(...)" in output
 
 
 # ---------------------------------------------------------------------------

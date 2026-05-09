@@ -4,11 +4,12 @@ Structural code retrieval for gptme via [tree-sitter](https://tree-sitter.github
 
 ## Features
 
-- **5 MCP tools**: `codegraph_callers`, `codegraph_callees`, `codegraph_impact`, `codegraph_blast`, `codegraph_def`
+- **9 MCP tools**: `codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`, `codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_blast`, `codegraph_impact`
 - **Cross-file import resolution** (including `import X as Y`, `from X import Y as Z`, wildcard imports)
 - **Qualified symbol IDs** (`module::Class.method`) for unambiguous cross-file references
 - **SQLite index cache** — optional persistent cache for large codebases
 - **Blast/impact semantics split**: `blast` = dependency closure (what X needs), `impact` = what breaks if you change X
+- **Repo map / symbol skeletons** for token-cheap default codebase context
 
 ## Install
 
@@ -41,6 +42,9 @@ gptme-codegraph path/to/file.py impact my_function
 
 # Where is a symbol defined?
 gptme-codegraph path/to/file.py def my_function
+
+# Show a repo-map style symbol skeleton for a directory
+gptme-codegraph path/to/repo map
 ```
 
 ### MCP Server
