@@ -16,5 +16,5 @@ def pytest_collection_modifyitems(config, items):
             reason="tree-sitter not installed — run: uv sync --all-extras"
         )
         for item in items:
-            if "gptme_codegraph" in str(item.fspath) or "codegraph" in str(item.fspath):
+            if "codegraph" in str(item.path):
                 item.add_marker(skip_mark)
