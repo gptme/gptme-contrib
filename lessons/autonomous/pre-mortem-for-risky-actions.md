@@ -49,6 +49,15 @@ Actions that warrant a pre-mortem:
 # 5. Target: only task/job-* pattern → verify pattern
 ```
 
+## Procedure
+When this rule fires, follow these steps in order:
+
+1. **Name the target and blast radius** — state exactly what will change and what the failure would break.
+2. **Choose a verification surface before acting** — identify a dry-run, target listing, or equivalent read-only command that shows whether you are aimed at the right thing.
+3. **Choose a rollback path before acting** — name the concrete undo path (`git reflog`, backup restore, service restart, config revert) before the risky command runs.
+4. **Run the verification surface and inspect it** — if the dry-run or listing does not match intent, stop instead of proceeding anyway.
+5. **Execute only after the checks pass** — perform the risky action, then immediately verify post-action state and use the rollback path if the result is wrong.
+
 ## Outcome
 Following this pattern leads to:
 - **Prevented disasters**: Catches mistakes before they happen
