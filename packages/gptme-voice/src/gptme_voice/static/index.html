@@ -109,6 +109,7 @@
     let outputQueue = [];
     let isPlaying = false;
     let playbackScheduledUntil = 0;
+    let audioEndTimer = null;
     let vuRafId = null;
 
     const connectBtn = document.getElementById('connectBtn');
@@ -229,9 +230,15 @@ registerProcessor('pcm16-capture', PCM16CaptureProcessor);
     }
 
     function onAudioEnd() {
-      // Give a small grace period for the last buffer to finish
+      // Cancel the previous timer so only the last audio_end controls isPlaying.
+      // Without this, consecutive audio responses (e.g. tool-call + reply) cause
+      // the first timer to fire while the second stream is still playing.
+      if (audioEndTimer !== null) {
+        clearTimeout(audioEndTimer);
+      }
       const remaining = (playbackScheduledUntil - (playCtx?.currentTime ?? 0)) * 1000;
-      setTimeout(() => {
+      audioEndTimer = setTimeout(() => {
+        audioEndTimer = null;
         isPlaying = false;
         playingIndicator.classList.add('hidden');
         // Commit any buffered audio after playback completes
@@ -293,6 +300,10 @@ registerProcessor('pcm16-capture', PCM16CaptureProcessor);
     function disconnect() {
       ws?.close();
       stopMic();
+      if (audioEndTimer !== null) {
+        clearTimeout(audioEndTimer);
+        audioEndTimer = null;
+      }
       isPlaying = false;
       playingIndicator.classList.add('hidden');
       playCtx?.close().catch(() => {});
