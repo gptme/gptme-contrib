@@ -64,7 +64,7 @@
     .turn-user { color: #79c0ff; }
     .turn-user::before { content: "You: "; font-weight: bold; }
     .turn-assistant { color: #c9d1d9; }
-    .turn-assistant::before { content: "Bob: "; font-weight: bold; color: #58a6ff; }
+    .turn-assistant::before { content: "Assistant: "; font-weight: bold; color: #58a6ff; }
     .turn-system { color: #8b949e; font-style: italic; font-size: 0.85em; }
     #playingIndicator {
       display: inline-block;
@@ -98,7 +98,8 @@
     const params = new URLSearchParams(location.search);
     const wsPort = params.get('port') || location.port || '8080';
     const wsHost = params.get('host') || location.hostname || 'localhost';
-    const WS_URL = `ws://${wsHost}:${wsPort}/voice`;
+    const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const WS_URL = `${wsScheme}://${wsHost}:${wsPort}/voice`;
 
     // --- State ---
     let ws = null;
@@ -108,6 +109,7 @@
     let outputQueue = [];
     let isPlaying = false;
     let playbackScheduledUntil = 0;
+    let vuRafId = null;
 
     const connectBtn = document.getElementById('connectBtn');
     const statusEl = document.getElementById('status');
@@ -183,12 +185,13 @@ registerProcessor('pcm16-capture', PCM16CaptureProcessor);
         let max = 0;
         for (const v of vuData) max = Math.max(max, Math.abs(v - 128));
         vubar.style.width = `${Math.min(100, (max / 128) * 300)}%`;
-        requestAnimationFrame(updateVU);
+        vuRafId = requestAnimationFrame(updateVU);
       }
       updateVU();
     }
 
     function stopMic() {
+      if (vuRafId !== null) { cancelAnimationFrame(vuRafId); vuRafId = null; }
       micStream?.getTracks().forEach(t => t.stop());
       workletNode?.disconnect();
       audioCtx?.close();
