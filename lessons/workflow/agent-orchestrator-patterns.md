@@ -2,7 +2,15 @@
 status: active
 match:
   keywords:
-    - "standup report"
+    - "agent standup"
+    - "orchestrator"
+    - "multi-agent"
+    - "agent health"
+    - "peripheral agent"
+    - "standup missing"
+    - "agent coordination"
+    - "inference utilization"
+  session_categories: [monitoring, cross-repo]
 ---
 
 # Agent Orchestrator Patterns
