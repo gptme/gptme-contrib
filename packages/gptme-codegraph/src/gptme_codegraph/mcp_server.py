@@ -14,6 +14,7 @@ Usage:
 Tools exposed:
     codegraph_parse                — Extract symbols from a single file
     codegraph_index                — Build cross-file symbol index for a directory
+    codegraph_map                  — Emit a token-cheap repo skeleton
     codegraph_def                  — Find where a symbol is defined
     codegraph_callers              — Find callers of a symbol
     codegraph_callees              — Find callees of a symbol
@@ -40,6 +41,7 @@ from gptme_codegraph.core import (
     build_call_graph,
     build_cross_file_call_graph,
     build_index,
+    build_repo_map,
     extract_symbols,
     impact_radius,
 )
@@ -179,6 +181,27 @@ def codegraph_index(directory: str) -> str:
             "unique_symbols": len(all_names),
             "symbols_sample": sample_names,
         },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def codegraph_map(
+    directory: str,
+    max_files: int = 20,
+    max_symbols_per_file: int = 12,
+) -> str:
+    """Emit a token-cheap repo map grouped by file and class."""
+    dir_path = Path(directory)
+    if not dir_path.is_dir():
+        return json.dumps({"error": f"Directory not found: {directory}"})
+
+    return json.dumps(
+        build_repo_map(
+            dir_path,
+            max_files=max_files,
+            max_symbols_per_file=max_symbols_per_file,
+        ),
         indent=2,
     )
 

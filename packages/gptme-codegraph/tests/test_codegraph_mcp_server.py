@@ -82,7 +82,7 @@ def sample_file(sample_dir) -> str:
 
 
 def test_tools_registered():
-    """Verify the 8 expected MCP tools are registered.
+    """Verify the expected MCP tools are registered.
     Cross-file tools collapsed into optional filepath parameter."""
 
     async def _check():
@@ -93,6 +93,7 @@ def test_tools_registered():
     expected = {
         "codegraph_parse",
         "codegraph_index",
+        "codegraph_map",
         "codegraph_def",
         "codegraph_callers",
         "codegraph_callees",
@@ -132,6 +133,24 @@ def test_index(sample_dir):
     assert "error" not in d
     assert d.get("files_indexed", 0) >= 3
     assert d.get("unique_symbols", 0) >= 4
+
+
+def test_map(sample_dir):
+    """Test codegraph_map emits a grouped repo skeleton."""
+
+    async def _check():
+        r = await _MOD.mcp.call_tool(
+            "codegraph_map",
+            {"directory": sample_dir, "max_files": 2, "max_symbols_per_file": 2},
+        )
+        return json.loads(_content(r))
+
+    d = _run(_check())
+    assert "error" not in d
+    assert d["files_scanned"] >= 3
+    assert d["files_shown"] == 2
+    assert d["symbols_shown"] <= 4
+    assert all("outline" in file_info for file_info in d["files"])
 
 
 def test_def(sample_file):

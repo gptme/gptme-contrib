@@ -9,8 +9,10 @@ from gptme_codegraph.core import (
     build_call_graph,
     build_cross_file_call_graph,
     build_index,
+    build_repo_map,
     dependency_closure,
     extract_symbols,
+    format_repo_map,
     impact_radius,
     parse_file,
 )
@@ -24,8 +26,10 @@ __all__ = [
     "build_call_graph",
     "build_cross_file_call_graph",
     "build_index",
+    "build_repo_map",
     "dependency_closure",
     "extract_symbols",
+    "format_repo_map",
     "impact_radius",
     "parse_file",
 ]

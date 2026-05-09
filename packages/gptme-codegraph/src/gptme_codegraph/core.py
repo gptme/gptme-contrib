@@ -16,6 +16,7 @@ Usage:
     python3 scripts/codegraph.py <file.py> blast <name>    # [deprecated] alias for deps
     python3 scripts/codegraph.py <file.py> def <name>      # Where is X defined?
     python3 scripts/codegraph.py <file.py> refs <name>     # Where is X referenced?
+    gptme-codegraph <repo-or-file> map                      # Token-cheap repo skeleton
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 
 def _module_path(filepath: str, directory: str | None = None) -> str:
@@ -137,6 +139,20 @@ class SymbolIndex:
     def file_imports(self, filepath: str) -> list[ImportInfo]:
         """Return all imports in the given file."""
         return self.imports.get(filepath, [])
+
+
+def _iter_python_files(directory: Path) -> list[Path]:
+    """Return Python source files under ``directory``, skipping junk dirs."""
+    files: list[Path] = []
+    for fp in sorted(directory.rglob("*.py")):
+        parts = fp.relative_to(directory).parts
+        if any(
+            p.startswith(".") or p in ("__pycache__", "node_modules", ".git")
+            for p in parts
+        ):
+            continue
+        files.append(fp)
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -457,8 +473,11 @@ def _tree_sitter_parse(code: bytes, lang_name: str = "python"):
     is unavailable. Returns (root_node, parser) on success.
     """
     try:
-        import tree_sitter_python as tspython  # type: ignore[import-not-found]
-        from tree_sitter import Language, Parser  # type: ignore[import-untyped]
+        import tree_sitter_python as tspython  # type: ignore[import-not-found,unused-ignore]
+        from tree_sitter import (  # type: ignore[import-untyped,unused-ignore]
+            Language,
+            Parser,
+        )
 
         parser = Parser()
         language = Language(tspython.language())
@@ -698,14 +717,7 @@ def build_index(directory: str | Path) -> SymbolIndex:
     index = SymbolIndex()
     directory = Path(directory)
     dir_str = str(directory)
-    for fp in sorted(directory.rglob("*.py")):
-        # Skip common non-source directories
-        parts = fp.relative_to(directory).parts
-        if any(
-            p.startswith(".") or p in ("__pycache__", "node_modules", ".git")
-            for p in parts
-        ):
-            continue
+    for fp in _iter_python_files(directory):
         result = parse_file(fp)
         mp = _module_path(str(fp), dir_str)
         for sym in result.symbols:
@@ -975,6 +987,158 @@ def impact_radius(
 blast_radius = dependency_closure
 
 
+def _outline_symbol_count(outline: list[dict[str, object]]) -> int:
+    """Count top-level outline entries plus nested class methods."""
+    count = 0
+    for entry in outline:
+        count += 1
+        methods = entry.get("methods")
+        if isinstance(methods, list):
+            count += len(methods)
+    return count
+
+
+def _build_file_outline(symbols: list[Symbol]) -> list[dict[str, object]]:
+    """Group class methods under their parent class for repo-map output."""
+    outline: list[dict[str, object]] = []
+    classes: dict[str, dict[str, object]] = {}
+
+    for sym in symbols:
+        if sym.kind == "class":
+            item: dict[str, object] = {
+                "kind": "class",
+                "name": sym.name,
+                "methods": [],
+            }
+            outline.append(item)
+            classes[sym.name] = item
+            continue
+
+        if sym.kind == "method" and sym.parent_class and sym.parent_class in classes:
+            methods = classes[sym.parent_class]["methods"]
+            if isinstance(methods, list):
+                methods.append({"kind": "method", "name": sym.name})
+            continue
+
+        item = {"kind": sym.kind, "name": sym.name}
+        if sym.parent_class:
+            item["parent_class"] = sym.parent_class
+        outline.append(item)
+
+    return outline
+
+
+def _clip_outline(
+    outline: list[dict[str, object]],
+    max_symbols_per_file: int,
+) -> tuple[list[dict[str, object]], int]:
+    """Trim an outline to the requested symbol budget."""
+    if max_symbols_per_file <= 0:
+        return [], 0
+
+    remaining = max_symbols_per_file
+    clipped: list[dict[str, object]] = []
+    shown = 0
+
+    for entry in outline:
+        if remaining <= 0:
+            break
+
+        if entry.get("kind") == "class":
+            methods_list: list[dict[str, object]] = []
+            class_item = {
+                "kind": "class",
+                "name": entry["name"],
+                "methods": methods_list,
+            }
+            clipped.append(class_item)
+            remaining -= 1
+            shown += 1
+
+            methods = entry.get("methods", [])
+            if isinstance(methods, list):
+                for method in methods:
+                    if remaining <= 0:
+                        break
+                    methods_list.append(dict(method))
+                    remaining -= 1
+                    shown += 1
+            continue
+
+        clipped.append(dict(entry))
+        remaining -= 1
+        shown += 1
+
+    return clipped, shown
+
+
+def build_repo_map(
+    directory: str | Path,
+    *,
+    max_files: int = 20,
+    max_symbols_per_file: int = 12,
+) -> dict[str, object]:
+    """Build a token-cheap repo skeleton grouped by file and class."""
+    root = Path(directory)
+    files = _iter_python_files(root)
+    file_rows: list[dict[str, object]] = []
+    total_symbols = 0
+
+    for fp in files:
+        result = parse_file(fp)
+        if not result.symbols:
+            continue
+
+        outline = _build_file_outline(result.symbols)
+        symbol_count = _outline_symbol_count(outline)
+        total_symbols += symbol_count
+        file_rows.append(
+            {
+                "path": fp.relative_to(root).as_posix(),
+                "symbol_count": symbol_count,
+                "outline": outline,
+            }
+        )
+
+    file_rows.sort(
+        key=lambda row: (-cast(int, row["symbol_count"]), str(row["path"])),
+    )
+
+    shown_rows = file_rows[: max(0, max_files)]
+    files_payload: list[dict[str, object]] = []
+    shown_symbols = 0
+
+    for row in shown_rows:
+        symbol_count = cast(int, row["symbol_count"])
+        outline = cast(list[dict[str, object]], row["outline"])
+        clipped_outline, displayed = _clip_outline(
+            outline,
+            max_symbols_per_file,
+        )
+        shown_symbols += displayed
+        files_payload.append(
+            {
+                "path": row["path"],
+                "symbol_count": symbol_count,
+                "displayed_symbol_count": displayed,
+                "truncated": displayed < symbol_count,
+                "outline": clipped_outline,
+            }
+        )
+
+    return {
+        "directory": str(root.resolve()),
+        "files_scanned": len(files),
+        "files_with_symbols": len(file_rows),
+        "files_shown": len(files_payload),
+        "symbols_total": total_symbols,
+        "symbols_shown": shown_symbols,
+        "max_files": max_files,
+        "max_symbols_per_file": max_symbols_per_file,
+        "files": files_payload,
+    }
+
+
 def format_json(data) -> str:
     """Format data as pretty-printed JSON."""
     return json.dumps(data, indent=2, default=str)
@@ -1002,6 +1166,62 @@ def format_symbols(symbols: list[Symbol]) -> str:
             lines.append(f"  {s.docstring[:200]}")
         if s.calls:
             lines.append(f"  calls: {', '.join(sorted(s.calls))}")
+    return "\n".join(lines)
+
+
+def format_repo_map(repo_map: dict[str, object]) -> str:
+    """Format a repo-map payload as a compact human-readable outline."""
+    lines = [
+        f"Repo map: {repo_map['directory']}",
+        (
+            "Files shown: "
+            f"{repo_map['files_shown']}/{repo_map['files_with_symbols']}  "
+            f"Symbols shown: {repo_map['symbols_shown']}/{repo_map['symbols_total']}"
+        ),
+    ]
+
+    files = repo_map.get("files")
+    if not isinstance(files, list):
+        return "\n".join(lines)
+
+    for file_info_obj in files:
+        if not isinstance(file_info_obj, dict):
+            continue
+        file_info = cast(dict[str, object], file_info_obj)
+        total = cast(int, file_info.get("symbol_count", 0))
+        displayed = cast(int, file_info.get("displayed_symbol_count", total))
+        suffix = (
+            f" [{displayed}/{total} symbols]"
+            if file_info.get("truncated")
+            else f" [{total} symbols]"
+        )
+        lines.append("")
+        lines.append(f"{file_info['path']}{suffix}")
+        outline = file_info.get("outline", [])
+        if not isinstance(outline, list):
+            continue
+        for entry in outline:
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get("kind", "symbol"))
+            name = str(entry.get("name", "?"))
+            if kind == "class":
+                lines.append(f"  class {name}")
+                methods = entry.get("methods", [])
+                if isinstance(methods, list):
+                    for method in methods:
+                        if isinstance(method, dict):
+                            lines.append(f"    def {method.get('name', '?')}(...)")
+            elif kind == "function":
+                lines.append(f"  def {name}(...)")
+            elif kind == "method":
+                parent = entry.get("parent_class")
+                label = f"{parent}.{name}" if parent else name
+                lines.append(f"  def {label}(...)")
+            else:
+                lines.append(f"  {kind} {name}")
+        if file_info.get("truncated"):
+            lines.append("  ...")
     return "\n".join(lines)
 
 
@@ -1065,11 +1285,51 @@ def main():
     p_refs.add_argument("name", help="Symbol name")
     p_refs.add_argument("--json", action="store_true", help="Output as JSON")
 
+    p_map = sub.add_parser(
+        "map",
+        help="Emit a token-cheap repo map / symbol skeleton",
+    )
+    p_map.add_argument("--json", action="store_true", help="Output as JSON")
+    p_map.add_argument(
+        "--max-files",
+        type=int,
+        default=20,
+        help="Maximum files to show (default: 20)",
+    )
+    p_map.add_argument(
+        "--max-symbols",
+        type=int,
+        default=12,
+        help="Maximum symbols per file (default: 12)",
+    )
+
     args = parser.parse_args()
     filepath = Path(args.file)
 
     if not filepath.exists():
         sys.exit(f"File not found: {filepath}")
+
+    if args.command == "map":
+        map_dir = (
+            Path(args.directory)
+            if args.directory
+            else (filepath if filepath.is_dir() else filepath.parent)
+        )
+        if not map_dir.is_dir():
+            sys.exit(f"Directory not found: {map_dir}")
+        repo_map = build_repo_map(
+            map_dir,
+            max_files=args.max_files,
+            max_symbols_per_file=args.max_symbols,
+        )
+        if args.json:
+            print(format_json(repo_map))
+        else:
+            print(format_repo_map(repo_map))
+        return
+
+    if not filepath.is_file():
+        sys.exit(f"Not a file: {filepath}")
 
     symbols = extract_symbols(filepath)
     if not symbols:
