@@ -292,6 +292,7 @@ class TaskInfo:
     spawned_from: str | None = None  # Parent task that spawned this
     spawned_tasks: List[str] = field(default_factory=list)  # Child tasks
     coordination_mode: str | None = None  # sequential, parallel, fan-out-fan-in
+    success_criterion: str | None = None  # Verifiable "done" gate (Outcomes-style)
 
     @property
     def id(self) -> str:
@@ -947,6 +948,7 @@ def load_tasks(
                 spawned_from=metadata.get("spawned_from"),
                 spawned_tasks=metadata.get("spawned_tasks", []),
                 coordination_mode=metadata.get("coordination_mode"),
+                success_criterion=metadata.get("success_criterion"),
             )
             tasks.append(task)
 

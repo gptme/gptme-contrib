@@ -239,6 +239,8 @@ def show(task_id):
         table.add_row("Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed")
     if task.issues:
         table.add_row("Issues", ", ".join(task.issues))
+    if task.success_criterion:
+        table.add_row("Success Criterion", task.success_criterion)
 
     # Print metadata table
     console.print("\n[bold]Task Metadata:[/]")
@@ -1431,6 +1433,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         "waiting_for": {"type": "string"},
         "recur": {"type": "string"},  # Recurrence interval (7d, 24h, weekly, monthly)
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
+        "success_criterion": {"type": "string"},  # Verifiable "done" gate
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
         "depends": {"type": "list"},  # Deprecated, use requires instead
