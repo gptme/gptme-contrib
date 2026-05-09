@@ -1,21 +1,18 @@
 ---
 match:
   keywords:
-  - "github issue"
-  - "open issue"
-  - "create issue"
-  - "close issue"
   - "about to create new issue"
   - "duplicate issue prevention"
   - "search existing issues first"
   - "check for similar issues"
   - "update issue after work"
-  - "gh issue"
   - "check own previous comments"
   - "agent created duplicate issues"
   - "duplicate comment prevention"
   - "triple posted"
   - "comment spam"
+  - "check if already commented"
+  - "before posting any comment"
 status: active
 ---
 
