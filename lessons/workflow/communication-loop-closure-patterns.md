@@ -1,13 +1,17 @@
 ---
 match:
   keywords:
-  - update the issue
-  - reply to the issue
-  - comment on the issue
   - close the communication loop
   - respond in the original thread
   - confirm the fix in the issue
+  - completed the work but did not
+  - marked as done without commenting
+  - silent completion
+  - link back to the original issue
+  - end the session without responding
+  - finished but never replied
 status: active
+target_grade: alignment
 ---
 
 # Communication Loop Closure Patterns
