@@ -91,6 +91,10 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
         """xAI does not support whisper-1; omit transcription config."""
         return None
 
+    def _get_reasoning_config(self) -> dict[str, str] | None:
+        """xAI's voice agent API does not expose OpenAI-style reasoning controls."""
+        return None
+
     # xAI does not emit session.created; it emits session.updated instead.
     # The base class already handles session.updated via _mark_session_ready,
     # so no override is needed here.
