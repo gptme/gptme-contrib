@@ -1600,6 +1600,16 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 @click.option("--trigger", default=None, help="Session trigger: timer, dispatch, manual, spawn")
 @click.option("--category", default=None, help="Work category (code, triage, ...)")
 @click.option(
+    "--recommended-category",
+    default=None,
+    help="Category recommended by the selector before the session ran",
+)
+@click.option(
+    "--selector-mode",
+    default=None,
+    help="Selector strategy used (e.g. scored, llm-context)",
+)
+@click.option(
     "--exit-code",
     type=int,
     default=0,
@@ -1644,6 +1654,8 @@ def post_session_cmd(
     run_type: str,
     trigger: str | None,
     category: str | None,
+    recommended_category: str | None,
+    selector_mode: str | None,
     exit_code: int,
     duration: int,
     trajectory: Path | None,
@@ -1667,6 +1679,8 @@ def post_session_cmd(
         run_type=run_type,
         trigger=trigger,
         category=category,
+        recommended_category=recommended_category,
+        selector_mode=selector_mode,
         exit_code=exit_code,
         duration_seconds=duration,
         trajectory_path=trajectory,

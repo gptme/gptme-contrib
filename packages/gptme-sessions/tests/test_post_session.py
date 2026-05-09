@@ -97,6 +97,39 @@ def test_post_session_ab_group_tier_version_none(tmp_path: Path):
     assert result.record.tier_version is None
 
 
+def test_post_session_selector_mode(tmp_path: Path):
+    """selector_mode is stored in the SessionRecord when passed to post_session."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        selector_mode="llm-context",
+        recommended_category="cleanup",
+        duration_seconds=60,
+    )
+    assert result.record.selector_mode == "llm-context"
+    assert result.record.recommended_category == "cleanup"
+
+    store2 = SessionStore(sessions_dir=tmp_path)
+    records = store2.load_all()
+    assert len(records) == 1
+    assert records[0].selector_mode == "llm-context"
+    assert records[0].recommended_category == "cleanup"
+
+
+def test_post_session_selector_mode_none(tmp_path: Path):
+    """selector_mode defaults to None when not provided."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        duration_seconds=30,
+    )
+    assert result.record.selector_mode is None
+
+
 def test_post_session_ab_group_invalid(tmp_path: Path):
     """post_session raises ValueError for invalid ab_group values."""
     store = SessionStore(sessions_dir=tmp_path)

@@ -135,6 +135,7 @@ def post_session(
     trigger: str | None = None,
     category: str | None = None,
     recommended_category: str | None = None,
+    selector_mode: str | None = None,
     cascade_intent: dict[str, Any] | None = None,
     exit_code: int = 0,
     duration_seconds: int = 0,
@@ -178,6 +179,11 @@ def post_session(
         Category recommended by the selector before the session ran
         (e.g. Thompson sampling, CASCADE). Stored alongside the actual
         category so drift between recommendation and reality is trackable.
+    selector_mode:
+        Which selector strategy was used to pick this session's work
+        (e.g. ``"scored"``, ``"llm-context"``). Set by the CASCADE
+        selector and forwarded by the runner so post-hoc analyses can
+        compare outcomes across selector strategies.
     cascade_intent:
         Structured CASCADE selector metadata (for example ``{"reasons": [...],
         "constraints": [...]}``) captured before the session ran. Stored
@@ -388,6 +394,8 @@ def post_session(
         record_kwargs["category"] = actual_category
     if recommended_category is not None:
         record_kwargs["recommended_category"] = recommended_category
+    if selector_mode is not None:
+        record_kwargs["selector_mode"] = selector_mode
     if cascade_intent is not None:
         record_kwargs["cascade_intent"] = cascade_intent
     if trajectory_path is not None:
