@@ -77,7 +77,7 @@ JUDGE_PROMPT_TEMPLATE = """\
 Rate the strategic value of this session's output on 0.0-1.0:
 - 0.9-1.0: Major progress on a top-priority goal (shipped key feature, unblocked critical path)
 - 0.7-0.8: Meaningful progress on a priority goal (solid PR, design doc, real bug fix)
-- 0.5-0.6: Useful but not top-priority work (minor improvements, maintenance)
+- 0.5-0.6: Low-impact output in any category (weak improvements, thrashing-lite)
 - 0.3-0.4: Low-value work (tiny PRs, busywork, over-engineering)
 - 0.1-0.2: Minimal output (mostly blocked, NOOP-adjacent)
 - 0.0: No output / pure NOOP
