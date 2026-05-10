@@ -1,12 +1,16 @@
 ---
 match:
   keywords:
-    - "view --comments | head"
-    - "view --comments | tail"
-    - "gh pr view --comments"
-    - "gh issue view --comments"
-    - "Truncating loses newer context"
-    - "missing newer comments that supersede"
+    - "read the full issue"
+    - "read all comments"
+    - "don't truncate"
+    - "missing newer comments"
+    - "responded to stale context"
+    - "conversation moved on"
+    - "didn't read the whole thread"
+    - "review comments superse"
+    - "gh issue view"
+    - "gh pr view"
 status: active
 ---
 
@@ -61,4 +65,5 @@ Truncation causes responding to OLD comments while missing NEWER replies that ch
 - **No re-asks**: Maintainers don't need to repeat themselves
 
 ## Related
+- Companion doc: `knowledge/lessons/workflow/read-full-github-context.md`
 - [Read PR Reviews Comprehensively](./read-pr-reviews-comprehensively.md) - PR-specific patterns
