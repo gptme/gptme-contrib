@@ -39,6 +39,11 @@ _MAX_INSTRUCTIONS_LEN = 4096
 # than enough for any realistic session-handshake delay while still capping
 # memory growth if the provider never confirms the session.
 _MAX_PENDING_AUDIO_CHUNKS = 500
+# OpenAI's model catalog currently markets `gpt-realtime-2`, while the
+# Realtime API reference may still enumerate the older generic alias instead.
+# Keep the newer default, but retry once with the generic alias if the
+# websocket handshake rejects the newer name.
+_OPENAI_MODEL_FALLBACKS = {"gpt-realtime-2": "gpt-realtime"}
 # Event types that carry transcript text — only these reset the drain idle timer.
 _TRANSCRIPT_EVENT_TYPES = frozenset(
     {
@@ -303,6 +308,31 @@ class OpenAIRealtimeClient:
             return None
         return {"effort": effort}
 
+    def _handshake_fallback_model(self, exc: websockets.InvalidStatus) -> str | None:
+        """Return a one-shot fallback model for known alias drift.
+
+        OpenAI may reject `gpt-realtime-2` at the websocket URL while still
+        accepting the older `gpt-realtime` alias. Only retry on 400/404-style
+        handshake failures that look model-related, and only for the known
+        generic alias pair.
+        """
+        current_model = self.session_config.model
+        fallback_model = _OPENAI_MODEL_FALLBACKS.get(current_model)
+        if fallback_model is None:
+            return None
+
+        status_code = exc.response.status_code
+        if status_code not in {400, 404}:
+            return None
+
+        body = exc.response.body.decode("utf-8", errors="ignore").lower()
+        if body and not any(
+            token in body for token in ("model", current_model.lower(), "realtime")
+        ):
+            return None
+
+        return fallback_model
+
     async def connect(self) -> None:
         """Connect to OpenAI Realtime API."""
         # Initialize session-ready gate inside the event loop that will drive
@@ -315,7 +345,24 @@ class OpenAIRealtimeClient:
 
         url = self._get_ws_url()
         headers = self._get_ws_headers()
-        self._ws = await websockets.connect(url, additional_headers=headers)
+        try:
+            self._ws = await websockets.connect(url, additional_headers=headers)
+        except websockets.InvalidStatus as exc:
+            fallback_model = self._handshake_fallback_model(exc)
+            if fallback_model is None:
+                raise
+
+            logger.warning(
+                "OpenAI Realtime rejected model %s during websocket handshake "
+                "(%s %s). Retrying once with %s.",
+                self.session_config.model,
+                exc.response.status_code,
+                exc.response.reason_phrase,
+                fallback_model,
+            )
+            self.session_config.model = fallback_model
+            url = self._get_ws_url()
+            self._ws = await websockets.connect(url, additional_headers=headers)
 
         instructions = self.session_config.instructions or _DEFAULT_INSTRUCTIONS
         logger.info(

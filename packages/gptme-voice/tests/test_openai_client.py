@@ -4,12 +4,15 @@ import json
 from pathlib import Path
 
 import pytest
+import websockets
 from gptme_voice.realtime.openai_client import (
     _MAX_PENDING_AUDIO_CHUNKS,
     OpenAIRealtimeClient,
     SessionConfig,
     _load_project_instructions,
 )
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 
 class _FakeWebSocket:
@@ -142,6 +145,43 @@ def test_connect_uses_current_openai_headers_and_reasoning_effort() -> None:
         assert captured_headers == {"Authorization": "Bearer test-key"}
         assert "OpenAI-Beta" not in captured_headers
         assert session_update["session"]["reasoning"] == {"effort": "low"}
+
+    asyncio.run(_exercise())
+
+
+def test_connect_retries_with_generic_alias_when_gpt_realtime_2_is_rejected() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        urls: list[str] = []
+
+        async def _fake_connect(url: str, *_args, **_kwargs):
+            urls.append(url)
+            if len(urls) == 1:
+                raise websockets.InvalidStatus(
+                    Response(
+                        status_code=404,
+                        reason_phrase="Not Found",
+                        headers=Headers(),
+                        body=b'{"error":{"message":"Unknown model gpt-realtime-2"}}',
+                    )
+                )
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await asyncio.sleep(0)
+            await client.disconnect()
+
+        assert urls == [
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime-2",
+            "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+        ]
+        assert client.session_config.model == "gpt-realtime"
+        assert fake_ws.sent[0]["type"] == "session.update"
 
     asyncio.run(_exercise())
 
