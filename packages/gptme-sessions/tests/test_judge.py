@@ -99,7 +99,7 @@ class TestJudgeSession:
         """
         prompt = JUDGE_PROMPT_TEMPLATE.format(
             goals="Test goals",
-            category="infrastructure",
+            category="code",
             journal="Reduced future friction",
         )
         assert "Category Interpretation" in prompt
