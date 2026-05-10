@@ -14,6 +14,7 @@ match:
   - "needs caching"
   - "optimize the code"
 status: active
+target_grade: alignment
 ---
 
 # Simplify Before Optimize
