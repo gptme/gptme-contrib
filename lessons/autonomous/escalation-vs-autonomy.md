@@ -7,6 +7,7 @@ match:
   - "risky action requiring approval"
   - "irreversible change decision point"
 status: active
+target_grade: harm
 ---
 
 # Escalation vs Autonomy Decision Framework
