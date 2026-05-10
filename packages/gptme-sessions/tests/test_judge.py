@@ -88,6 +88,27 @@ class TestJudgeSession:
         assert "0.0-1.0" in prompt
         assert "JSON" in JUDGE_SYSTEM
 
+    def test_prompt_template_includes_category_interpretation(self) -> None:
+        """The prompt must instruct the judge to score within-category, not penalize support categories.
+
+        Regression guard: when the judge does not see a category-interpretation block,
+        it applies revenue/goal-#1 alignment as a fixed ceiling on
+        infrastructure/monitoring/knowledge work, producing systematic harness
+        bias documented in
+        knowledge/strategic/2026-05-10-gptme-harness-verification-gap.md.
+        """
+        prompt = JUDGE_PROMPT_TEMPLATE.format(
+            goals="Test goals",
+            category="infrastructure",
+            journal="Reduced future friction",
+        )
+        assert "Category Interpretation" in prompt
+        assert "within-category value" in prompt
+        # The block must explicitly name representative support categories so
+        # the judge does not collapse them into "non-revenue, low-score".
+        for support_cat in ("infrastructure", "monitoring", "knowledge", "research"):
+            assert support_cat in prompt
+
     def test_score_clamping(self) -> None:
         """Out-of-range scores from the LLM are clamped to [0.0, 1.0]."""
         mock_anthropic = MagicMock()
