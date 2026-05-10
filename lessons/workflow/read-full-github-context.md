@@ -8,7 +8,7 @@ match:
     - "responded to stale context"
     - "conversation moved on"
     - "didn't read the whole thread"
-    - "review comments superse"
+    - "review comments supersede"
     - "gh issue view"
     - "gh pr view"
 status: active
