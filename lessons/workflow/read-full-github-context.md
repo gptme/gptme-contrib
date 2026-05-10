@@ -1,24 +1,12 @@
 ---
 match:
   keywords:
-    - "truncating github comment output"
-    - "respond to stale context when conversation evolved"
-    - "read entire issue thread before responding"
-    - "missing newer comments that supersede earlier"
-    - "gh pr view --comments | head"
-    - "not reading the whole issue"
-    - "investigate the github issue"
-    - "read the github issue"
-    - "read the issue thread"
-    - "respond to a github issue"
-    - "review pr comments"
-    - "look at the pr discussion"
-    - "check the github discussion"
-    - "reading the issue"
-    - "looking at the issue"
-    - "looking at the pr"
-    - "let me check the issue"
-    - "checking the issue"
+    - "view --comments | head"
+    - "view --comments | tail"
+    - "gh pr view --comments"
+    - "gh issue view --comments"
+    - "Truncating loses newer context"
+    - "missing newer comments that supersede"
 status: active
 ---
 
