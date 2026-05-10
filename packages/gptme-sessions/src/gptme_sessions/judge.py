@@ -82,8 +82,24 @@ Rate the strategic value of this session's output on 0.0-1.0:
 - 0.1-0.2: Minimal output (mostly blocked, NOOP-adjacent)
 - 0.0: No output / pure NOOP
 
+## Category Interpretation
+Sessions are routed across categories. Some categories (code, content,
+cross-repo) directly target top-priority product/revenue goals. Others
+(infrastructure, monitoring, cleanup, knowledge, research, self-review,
+triage, news, social, novelty, strategic) are support work that compounds
+future capability. Score on **within-category value**, not on whether the
+category itself targets goal #1:
+- A clean infrastructure / instrumentation / measurement session that
+  meaningfully reduces future friction or persists durable learning is
+  goal-aligned — score 0.7-0.9, do not cap it for "not revenue work".
+- Penalize all categories equally for thrashing, no-shipped-artifact,
+  over-engineering, or work the agent invented to fill the session.
+- Reserve 0.9-1.0 for sessions where the deliverable plausibly moves a
+  top-priority goal *or* is a category-best example of compounding work.
+
 Key principle: ONE impactful deliverable > FIVE small deliverables.
-Evaluate impact and goal-alignment, not quantity.
+Evaluate impact within the session's category, not the category's intrinsic
+priority.
 
 Return JSON: {{"score": <float>, "reason": "<1 sentence>"}}"""
 
