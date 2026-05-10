@@ -1,17 +1,13 @@
 ---
 match:
   keywords:
-  - try block too long
-  - exception handling > 10 lines
-  - split error handling into focused blocks
-  - multiple operations in one try block
-  - generic error messages
+  - "except Exception:"
+  - "except Exception as e"
   - "bare except"
+  - "broad except"
   - "broad exception"
-  - "except Exception"
   - "try/except"
-  - "split the try block"
-  - "large try block"
+  - "wrap in try"
   session_categories: [code]
 status: active
 ---
