@@ -84,6 +84,43 @@ gptme-voice-call +46701234567
 
 Use `--dry-run` to print the generated TwiML without dialing.
 
+### Cross-agent handoff
+
+`gptme-voice` supports two handoff transports. Pick one based on deployment shape:
+
+- **Directory mode**: same host or a genuinely shared filesystem. Good for local dry-runs and same-host validation.
+- **Hub mode**: real cross-host handoffs through the Phase 4 HTTP relay. Use this once Bob and Alice are on different machines.
+
+Choose exactly one of `GPTME_VOICE_HANDOFF_DIR` or `GPTME_VOICE_HANDOFF_HUB_URL`.
+
+Directory mode:
+
+```bash
+GPTME_VOICE_AGENT_NAME=bob
+GPTME_VOICE_HANDOFF_DIR=/srv/voice-shared
+GPTME_VOICE_HANDOFF_SECRET=replace-with-strong-shared-secret
+GPTME_VOICE_HANDOFF_AGENTS=alice,gordon
+gptme-voice-server
+```
+
+Hub mode:
+
+```bash
+GPTME_VOICE_AGENT_NAME=bob
+GPTME_VOICE_HANDOFF_HUB_URL=http://127.0.0.1:8787
+GPTME_VOICE_HANDOFF_HUB_TOKEN=replace-with-bob-bearer-token
+GPTME_VOICE_HANDOFF_SECRET=replace-with-strong-shared-secret
+GPTME_VOICE_HANDOFF_AGENTS=alice
+gptme-voice-server
+```
+
+Notes:
+
+- `GPTME_VOICE_HANDOFF_SECRET` still signs the payload with the per-peer HMAC in both modes.
+- `GPTME_VOICE_HANDOFF_HUB_TOKEN` only matters in hub mode; it authenticates transport to the relay.
+- Target-side polling/claim/complete is handled by Bob's `scripts/voice-handoff-listener.py`.
+- Use directory mode for same-host validation; use hub mode for real Bob↔Alice cross-host relays.
+
 ### API keys
 
 Keys are loaded from gptme config (`~/.config/gptme/config.toml` or

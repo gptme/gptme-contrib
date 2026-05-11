@@ -30,7 +30,7 @@ from starlette.responses import FileResponse, PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
-from ..handoff import HandoffWriter
+from ..handoff import HandoffHubWriter, HandoffInitiator, HandoffWriter
 from .audio import AudioConverter
 from .openai_client import (
     OpenAIRealtimeClient,
@@ -467,8 +467,11 @@ class VoiceServer:
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-        # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
+        # Cross-agent handoff writer (optional — directory mode for same-host
+        # dry-runs, hub mode for real cross-host relays).
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
+        handoff_hub_url_env = _get_config_env("GPTME_VOICE_HANDOFF_HUB_URL")
+        handoff_hub_token_env = _get_config_env("GPTME_VOICE_HANDOFF_HUB_TOKEN")
         agent_name = _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
@@ -482,6 +485,12 @@ class VoiceServer:
             if handoff_agents_env
             else _default_agents
         )
+        if handoff_dir_env and handoff_hub_url_env:
+            raise ValueError(
+                "Configure either GPTME_VOICE_HANDOFF_DIR or "
+                "GPTME_VOICE_HANDOFF_HUB_URL, not both."
+            )
+        self._handoff_writer: HandoffInitiator | None
         if handoff_dir_env:
             if not handoff_secret_env:
                 logger.warning(
@@ -490,13 +499,38 @@ class VoiceServer:
                     "to a strong random value in production."
                 )
             handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
-            self._handoff_writer: HandoffWriter | None = HandoffWriter(
+            self._handoff_writer = HandoffWriter(
                 Path(handoff_dir_env),
                 from_agent=agent_name,
                 secret=handoff_secret,
             )
             logger.info(
                 "Handoff enabled: from_agent=%s, dir=%s", agent_name, handoff_dir_env
+            )
+        elif handoff_hub_url_env:
+            if not handoff_hub_token_env:
+                raise ValueError(
+                    "GPTME_VOICE_HANDOFF_HUB_TOKEN must be set when "
+                    "GPTME_VOICE_HANDOFF_HUB_URL is configured."
+                )
+            if not handoff_secret_env:
+                logger.warning(
+                    "GPTME_VOICE_HANDOFF_SECRET not set while "
+                    "GPTME_VOICE_HANDOFF_HUB_URL is configured — using insecure "
+                    "fallback. Set GPTME_VOICE_HANDOFF_SECRET to a strong random "
+                    "value in production."
+                )
+            handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
+            self._handoff_writer = HandoffHubWriter(
+                handoff_hub_url_env,
+                bearer_token=handoff_hub_token_env,
+                from_agent=agent_name,
+                secret=handoff_secret,
+            )
+            logger.info(
+                "Handoff enabled: from_agent=%s, hub=%s",
+                agent_name,
+                handoff_hub_url_env,
             )
         else:
             self._handoff_writer = None
@@ -1139,7 +1173,8 @@ class VoiceServer:
                     "status": "not_supported",
                     "message": (
                         "Handoff is not configured. "
-                        "Set GPTME_VOICE_HANDOFF_DIR to enable cross-agent transfers."
+                        "Set GPTME_VOICE_HANDOFF_DIR or "
+                        "GPTME_VOICE_HANDOFF_HUB_URL to enable cross-agent transfers."
                     ),
                 }
             caller_id = caller_id_ref[0]

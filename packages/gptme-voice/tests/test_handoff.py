@@ -10,6 +10,7 @@ import pytest
 from gptme_voice.handoff import (
     PROTOCOL_VERSION,
     STATE_SUBDIRS,
+    HandoffHubWriter,
     HandoffWriter,
     archive_filename,
     atomic_move,
@@ -254,6 +255,130 @@ def test_handoff_writer_rejects_invalid_from_agent(tmp_path: Path):
 def test_handoff_writer_rejects_empty_secret(tmp_path: Path):
     with pytest.raises(ValueError, match="secret"):
         HandoffWriter(tmp_path, from_agent="bob", secret=b"")
+
+
+def test_handoff_hub_writer_posts_signed_payload(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def __init__(self, status: int, payload: dict[str, object]) -> None:
+            self._status = status
+            self._payload = payload
+
+        def __enter__(self) -> _FakeResponse:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def getcode(self) -> int:
+            return self._status
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _fake_urlopen(request_obj, timeout: float):
+        captured["url"] = request_obj.full_url
+        captured["timeout"] = timeout
+        headers = {key.lower(): value for key, value in request_obj.header_items()}
+        captured["authorization"] = headers.get("authorization")
+        captured["content_type"] = headers.get("content-type")
+        payload = json.loads(request_obj.data.decode("utf-8"))
+        captured["payload"] = payload
+        return _FakeResponse(
+            201,
+            {
+                "handoff_id": payload["handoff_id"],
+                "status": "pending",
+                "expires_at": payload["expires_at"],
+            },
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    writer = HandoffHubWriter(
+        "http://hub.local:8787/",
+        bearer_token="bob-token",
+        from_agent="bob",
+        secret=SECRET,
+    )
+    published = writer.initiate(
+        to_agent="alice",
+        caller_id="+15550001234",
+        reason="scheduling_capability",
+        transcript=[
+            {
+                "role": "user",
+                "text": "please get alice",
+                "ts": "2026-04-21T10:00:00Z",
+            }
+        ],
+        now=SAMPLE_NOW,
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert result.ok, result.reason
+    assert captured["url"] == "http://hub.local:8787/api/v1/handoffs/start"
+    assert captured["timeout"] == 10.0
+    assert captured["authorization"] == "Bearer bob-token"
+    assert captured["content_type"] == "application/json"
+    assert published.payload == payload
+    assert (
+        published.path
+        == f"http://hub.local:8787/api/v1/handoffs/{payload['handoff_id']}"
+    )
+
+
+def test_handoff_hub_writer_raises_value_error_on_hub_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _FakeHttpError(Exception):
+        def __init__(self, status: int, payload: dict[str, object]) -> None:
+            self.code = status
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _fake_urlopen(request_obj, timeout: float):
+        raise _FakeHttpError(
+            422,
+            {
+                "handoff_id": "test-id",
+                "status": "rejected",
+                "reason": "no peer secret configured for bob<->alice",
+            },
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("urllib.error.HTTPError", _FakeHttpError)
+
+    writer = HandoffHubWriter(
+        "http://hub.local:8787",
+        bearer_token="bob-token",
+        from_agent="bob",
+        secret=SECRET,
+    )
+
+    with pytest.raises(ValueError, match="no peer secret configured"):
+        writer.initiate(
+            to_agent="alice",
+            caller_id="+15550001234",
+            reason="scheduling_capability",
+            now=SAMPLE_NOW,
+        )
+
+
+def test_handoff_hub_writer_rejects_missing_bearer_token():
+    with pytest.raises(ValueError, match="bearer_token"):
+        HandoffHubWriter(
+            "http://hub.local:8787",
+            bearer_token="",
+            from_agent="bob",
+            secret=SECRET,
+        )
 
 
 # ---------- make_state_dirs ----------

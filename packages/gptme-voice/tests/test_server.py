@@ -95,6 +95,21 @@ class _DummyToolBridge:
         return []
 
 
+class _FakeHubWriter:
+    def __init__(
+        self,
+        hub_url: str,
+        *,
+        bearer_token: str,
+        from_agent: str,
+        secret: bytes,
+    ) -> None:
+        self.hub_url = hub_url
+        self.bearer_token = bearer_token
+        self.from_agent = from_agent
+        self.secret = secret
+
+
 def test_build_caller_instructions_no_number() -> None:
     base = "You are Bob."
     result = _build_caller_instructions(base, "", None)
@@ -161,6 +176,38 @@ def test_send_to_twilio_uses_stream_sid_field_name() -> None:
         "streamSid": "MZ123",
         "media": {"payload": base64.b64encode(b"\x00\x01").decode("utf-8")},
     }
+
+
+def test_voice_server_uses_hub_handoff_writer_when_hub_env_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_HUB_URL", "http://hub.local:8787")
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_HUB_TOKEN", "bob-token")
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_SECRET", "test-secret")
+    monkeypatch.setenv("GPTME_VOICE_AGENT_NAME", "bob")
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.HandoffHubWriter",
+        _FakeHubWriter,
+    )
+
+    server = VoiceServer()
+
+    assert isinstance(server._handoff_writer, _FakeHubWriter)
+    assert server._handoff_writer.hub_url == "http://hub.local:8787"
+    assert server._handoff_writer.bearer_token == "bob-token"
+    assert server._handoff_writer.from_agent == "bob"
+    assert server._handoff_writer.secret == b"test-secret"
+
+
+def test_voice_server_rejects_ambiguous_handoff_transport_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_DIR", "/tmp/voice-shared")
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_HUB_URL", "http://hub.local:8787")
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_SECRET", "test-secret")
+
+    with pytest.raises(ValueError, match="Configure either GPTME_VOICE_HANDOFF_DIR"):
+        VoiceServer()
 
 
 def test_build_session_config_passes_reasoning_effort_override() -> None:

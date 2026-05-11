@@ -32,7 +32,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 PROTOCOL_VERSION = 1
 
@@ -54,6 +56,7 @@ VALID_AGENTS: frozenset[str] = frozenset({"bob", "alice", "gordon", "sven"})
 STATE_SUBDIRS: tuple[str, ...] = ("handoff", "claimed", "archive", "rejected")
 
 _DEFAULT_TTL_SECONDS = 60
+_DEFAULT_HUB_TIMEOUT_SECONDS = 10.0
 
 
 class ValidationResult(NamedTuple):
@@ -285,12 +288,110 @@ def _next_sequence(handoff_dir: Path, caller_digest: str) -> int:
     return max_seq + 1
 
 
+def _build_signed_handoff(
+    *,
+    from_agent: str,
+    secret: bytes,
+    to_agent: str,
+    caller_id: str,
+    reason: str,
+    transcript: list[dict[str, Any]] | None = None,
+    ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+    extra: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    return build_handoff(
+        from_agent=from_agent,
+        to_agent=to_agent,
+        caller_id=caller_id,
+        reason=reason,
+        secret=secret,
+        transcript=transcript,
+        ttl_seconds=ttl_seconds,
+        now=now,
+        extra=extra,
+    )
+
+
+def _normalize_hub_url(hub_url: str) -> str:
+    normalized = hub_url.rstrip("/")
+    if not normalized:
+        raise ValueError("hub_url must be non-empty")
+    return normalized
+
+
+def _hub_error_message(payload: dict[str, Any] | None, default: str) -> str:
+    if isinstance(payload, dict):
+        for field in ("error", "reason"):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return default
+
+
+def _hub_post_json(
+    hub_url: str,
+    *,
+    path: str,
+    bearer_token: str,
+    body: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[int, dict[str, Any] | None]:
+    request_obj = urllib_request.Request(
+        f"{_normalize_hub_url(hub_url)}{path}",
+        data=json.dumps(body, sort_keys=True).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib_request.urlopen(request_obj, timeout=timeout_seconds) as response:
+            status = response.getcode()
+            text = response.read().decode("utf-8")
+    except urllib_error.HTTPError as exc:
+        status = exc.code
+        text = exc.read().decode("utf-8")
+    except urllib_error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        raise OSError(f"hub request failed: {reason}") from exc
+
+    if not text.strip():
+        return status, None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OSError(f"hub returned invalid JSON: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise OSError("hub returned non-object JSON")
+    return status, payload
+
+
 @dataclass
 class PublishedHandoff:
-    """Return value from :meth:`HandoffWriter.initiate`."""
+    """Return value from a handoff initiator.
 
-    path: Path
+    ``path`` is a local file path for directory mode and a logical remote
+    location string for hub mode.
+    """
+
+    path: Path | str
     payload: dict[str, Any]
+
+
+class HandoffInitiator(Protocol):
+    def initiate(
+        self,
+        *,
+        to_agent: str,
+        caller_id: str,
+        reason: str,
+        transcript: list[dict[str, Any]] | None = None,
+        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+        extra: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> PublishedHandoff: ...
 
 
 class HandoffWriter:
@@ -339,16 +440,16 @@ class HandoffWriter:
         the signed payload, so callers can log or surface the ``handoff_id``
         without re-reading the file.
         """
-        payload = build_handoff(
+        payload = _build_signed_handoff(
             from_agent=self.from_agent,
+            secret=self.secret,
             to_agent=to_agent,
             caller_id=caller_id,
             reason=reason,
-            secret=self.secret,
             transcript=transcript,
             ttl_seconds=ttl_seconds,
-            now=now,
             extra=extra,
+            now=now,
         )
         digest = payload["caller_hash"]
         seq = _next_sequence(self.handoff_dir, digest)
@@ -356,6 +457,81 @@ class HandoffWriter:
         data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         atomic_write(path, data)
         return PublishedHandoff(path=path, payload=payload)
+
+
+class HandoffHubWriter:
+    """Initiator-side helper that publishes handoffs through the HTTP hub."""
+
+    def __init__(
+        self,
+        hub_url: str,
+        *,
+        bearer_token: str,
+        from_agent: str,
+        secret: bytes,
+        timeout_seconds: float = _DEFAULT_HUB_TIMEOUT_SECONDS,
+    ) -> None:
+        if from_agent not in VALID_AGENTS:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        if not bearer_token.strip():
+            raise ValueError("bearer_token must be non-empty")
+        if not secret:
+            raise ValueError("secret must be non-empty bytes")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self.hub_url = _normalize_hub_url(hub_url)
+        self.bearer_token = bearer_token.strip()
+        self.from_agent = from_agent
+        self.secret = secret
+        self.timeout_seconds = timeout_seconds
+
+    def initiate(
+        self,
+        *,
+        to_agent: str,
+        caller_id: str,
+        reason: str,
+        transcript: list[dict[str, Any]] | None = None,
+        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+        extra: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> PublishedHandoff:
+        payload = _build_signed_handoff(
+            from_agent=self.from_agent,
+            secret=self.secret,
+            to_agent=to_agent,
+            caller_id=caller_id,
+            reason=reason,
+            transcript=transcript,
+            ttl_seconds=ttl_seconds,
+            extra=extra,
+            now=now,
+        )
+        status, response = _hub_post_json(
+            self.hub_url,
+            path="/api/v1/handoffs/start",
+            bearer_token=self.bearer_token,
+            body=payload,
+            timeout_seconds=self.timeout_seconds,
+        )
+        if status not in {200, 201}:
+            raise ValueError(
+                _hub_error_message(response, f"hub start failed with HTTP {status}")
+            )
+        if response is not None:
+            response_handoff_id = str(response.get("handoff_id") or "").strip()
+            if response_handoff_id and response_handoff_id != payload["handoff_id"]:
+                raise OSError(
+                    "hub returned mismatched handoff_id "
+                    f"{response_handoff_id!r} for {payload['handoff_id']!r}"
+                )
+            if str(response.get("status") or "") == "rejected":
+                raise ValueError(_hub_error_message(response, "hub rejected handoff"))
+
+        return PublishedHandoff(
+            path=f"{self.hub_url}/api/v1/handoffs/{payload['handoff_id']}",
+            payload=payload,
+        )
 
 
 def archive_filename(
@@ -374,6 +550,8 @@ __all__ = [
     "REQUIRED_FIELDS",
     "STATE_SUBDIRS",
     "VALID_AGENTS",
+    "HandoffHubWriter",
+    "HandoffInitiator",
     "HandoffWriter",
     "PublishedHandoff",
     "ValidationResult",

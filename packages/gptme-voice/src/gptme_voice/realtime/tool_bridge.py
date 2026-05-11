@@ -728,7 +728,8 @@ class GptmeToolBridge:
                     "status": "not_supported",
                     "message": (
                         "Handoff is not configured on this server. "
-                        "Set GPTME_VOICE_HANDOFF_DIR to enable cross-agent transfers."
+                        "Set GPTME_VOICE_HANDOFF_DIR or "
+                        "GPTME_VOICE_HANDOFF_HUB_URL to enable cross-agent transfers."
                     ),
                 }
             result = await self.on_handoff(to_agent, reason, context_summary)

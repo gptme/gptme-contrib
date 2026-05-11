@@ -872,6 +872,7 @@ def test_handoff_not_supported_when_callback_is_none() -> None:
         )
         assert result["status"] == "not_supported"
         assert "GPTME_VOICE_HANDOFF_DIR" in result["message"]
+        assert "GPTME_VOICE_HANDOFF_HUB_URL" in result["message"]
 
     asyncio.run(_exercise())
 
