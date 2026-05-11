@@ -2,7 +2,8 @@
 match:
   keywords:
     - llmlingua
-    - compression
+    - "llmlingua compression"
+    - "prompt compression technique"
 status: active
 ---
 # LLMLingua (Compression Technique)
