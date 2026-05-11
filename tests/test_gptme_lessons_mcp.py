@@ -9,6 +9,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "gptme-lessons-mcp.py"
 
 
@@ -48,8 +50,9 @@ def _find_agent_root() -> Path:
     for candidate in Path(__file__).resolve().parents:
         if (candidate / "scripts" / "memory" / "memory_retrieval.py").exists():
             return candidate
-    raise AssertionError(
-        "Could not locate agent root with scripts/memory/memory_retrieval.py"
+    pytest.skip(
+        "memory_retrieval.py not found in any parent directory; "
+        "memory tests require the Bob agent workspace"
     )
 
 

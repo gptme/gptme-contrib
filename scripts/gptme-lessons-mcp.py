@@ -285,15 +285,21 @@ def _load_memory_backend(
     if not memory_dir.exists() or not retrieval_script.exists():
         return None
 
+    module_name = f"agent_memory_retrieval_{retrieval_script.resolve()}"
     spec = importlib.util.spec_from_file_location(
-        "agent_memory_retrieval",
+        module_name,
         retrieval_script,
     )
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        del sys.modules[spec.name]
+        print(f"Warning: failed to load memory module: {exc}", file=sys.stderr)
+        return None
     return MemoryBackend(
         memory_dir=memory_dir,
         state_file=memory_state_file,
