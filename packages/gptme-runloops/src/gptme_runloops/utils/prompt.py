@@ -30,7 +30,11 @@ def get_agent_name(workspace: Path) -> str:
     if config_file.exists():
         try:
             config = tomllib.loads(config_file.read_text())
-            return config.get("agent", {}).get("name", "Agent")
+            agent_config = config.get("agent", {})
+            if isinstance(agent_config, dict):
+                name = agent_config.get("name")
+                if isinstance(name, str):
+                    return name
         except (tomllib.TOMLDecodeError, OSError):
             pass
     return "Agent"
