@@ -1459,7 +1459,7 @@ def process_timeline_tweets(
             if tweet.author_id == cached_get_me(client, user_auth=False).data.id:
                 continue
 
-            # Check if tweet already has a reply in any directory (posted, approved, new)
+            # Check if tweet already has a reply in any directory (posted, approved, new, review, rejected)
             tweet_id_str = str(tweet.id)
             if tweet_id_str in _replied_tweet_ids:
                 console.print(
