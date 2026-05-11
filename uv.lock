@@ -1400,6 +1400,7 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1411,6 +1412,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "mcp", specifier = ">=1.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=4.1.0" },
