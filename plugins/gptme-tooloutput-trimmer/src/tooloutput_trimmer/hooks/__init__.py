@@ -1,0 +1,43 @@
+"""Hook exports for the tool-output trimmer plugin."""
+
+from .trimmer import (
+    DEFAULT_MAX_OUTPUT_CHARS,
+    DEFAULT_PRESSURE_CHARS,
+    DEFAULT_PREVIEW_CHARS,
+    DEFAULT_RECENT_TURNS,
+    TOOL_OUTPUT_PREFIXES,
+    TRIMMED_MARKER,
+    TriggerDecision,
+    TrimmerConfig,
+    TrimSummary,
+    apply_tool_output_trimmer,
+    build_trimmed_content,
+    determine_trigger,
+    estimate_billed_chars,
+    generation_post_hook,
+    generation_pre_hook,
+    get_trimmer_config,
+    register,
+    reset_state,
+)
+
+__all__ = [
+    "DEFAULT_MAX_OUTPUT_CHARS",
+    "DEFAULT_PREVIEW_CHARS",
+    "DEFAULT_PRESSURE_CHARS",
+    "DEFAULT_RECENT_TURNS",
+    "TOOL_OUTPUT_PREFIXES",
+    "TRIMMED_MARKER",
+    "TrimSummary",
+    "TriggerDecision",
+    "TrimmerConfig",
+    "apply_tool_output_trimmer",
+    "build_trimmed_content",
+    "determine_trigger",
+    "estimate_billed_chars",
+    "generation_post_hook",
+    "generation_pre_hook",
+    "get_trimmer_config",
+    "register",
+    "reset_state",
+]
