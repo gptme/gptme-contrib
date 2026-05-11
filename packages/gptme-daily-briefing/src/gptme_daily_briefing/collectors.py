@@ -150,7 +150,7 @@ def collect_session_stats(sessions_dir: Path, days: int = 1) -> dict[str, Any]:
     ``count: 0`` and an ``error`` field instead of raising.
     """
     try:
-        from gptme_sessions.store import SessionStore  # type: ignore[import-not-found]
+        from gptme_sessions.store import SessionStore
 
         store = SessionStore(sessions_dir=sessions_dir)
         records = store.load_all()
