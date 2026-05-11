@@ -2,8 +2,9 @@
 match:
   keywords:
     - llmlingua
-    - compression
-status: active
+    - "llmlingua compression"
+    - "prompt compression technique"
+status: deprecated
 ---
 # LLMLingua (Compression Technique)
 

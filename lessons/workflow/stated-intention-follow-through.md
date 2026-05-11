@@ -2,13 +2,11 @@
 status: active
 match:
   keywords:
-  - i'll do
-  - i will
-  - follow through
-  - accountability
-  - intention
-  - promise
-  - stated intention
+  - "I'll submit a PR"
+  - "comment promising"
+  - "I'll fix this"
+  - "promised to"
+  - "stated intention"
 ---
 
 # Stated Intention Follow-Through
