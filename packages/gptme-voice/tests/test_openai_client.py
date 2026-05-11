@@ -56,6 +56,22 @@ class _QueuedWebSocket(_FakeWebSocket):
             await self._incoming.put(None)
 
 
+def _invalid_status(
+    *,
+    status_code: int,
+    body: bytes,
+    reason_phrase: str = "Bad Request",
+) -> websockets.InvalidStatus:
+    return websockets.InvalidStatus(
+        Response(
+            status_code=status_code,
+            reason_phrase=reason_phrase,
+            headers=Headers(),
+            body=body,
+        )
+    )
+
+
 def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
     async def _exercise() -> None:
         fake_ws = _FakeWebSocket()
@@ -157,13 +173,10 @@ def test_connect_retries_with_generic_alias_when_gpt_realtime_2_is_rejected() ->
         async def _fake_connect(url: str, *_args, **_kwargs):
             urls.append(url)
             if len(urls) == 1:
-                raise websockets.InvalidStatus(
-                    Response(
-                        status_code=404,
-                        reason_phrase="Not Found",
-                        headers=Headers(),
-                        body=b'{"error":{"message":"Unknown model gpt-realtime-2"}}',
-                    )
+                raise _invalid_status(
+                    status_code=404,
+                    reason_phrase="Not Found",
+                    body=b'{"error":{"message":"Unknown model gpt-realtime-2"}}',
                 )
             return fake_ws
 
@@ -184,6 +197,41 @@ def test_connect_retries_with_generic_alias_when_gpt_realtime_2_is_rejected() ->
         assert fake_ws.sent[0]["type"] == "session.update"
 
     asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize(
+    ("model", "status_code", "body", "expected"),
+    [
+        (
+            "gpt-realtime-2",
+            500,
+            b'{"error":{"message":"Unknown model gpt-realtime-2"}}',
+            None,
+        ),
+        ("gpt-realtime-2", 404, b"", None),
+        ("gpt-realtime-2", 400, b'{"error":{"message":"Bad request"}}', None),
+        (
+            "gpt-realtime",
+            404,
+            b'{"error":{"message":"Unknown model gpt-realtime"}}',
+            None,
+        ),
+    ],
+)
+def test_handshake_fallback_model_only_retries_model_related_alias_errors(
+    model: str,
+    status_code: int,
+    body: bytes,
+    expected: str | None,
+) -> None:
+    client = OpenAIRealtimeClient(
+        api_key="test-key",
+        session_config=SessionConfig(model=model),
+    )
+
+    exc = _invalid_status(status_code=status_code, body=body)
+
+    assert client._handshake_fallback_model(exc) == expected
 
 
 def test_connect_includes_output_speed_when_configured() -> None:
