@@ -840,7 +840,11 @@ def draft(
 def _check_for_duplicate_replies_internal(draft: TweetDraft) -> dict[str, list[Path]]:
     """Internal utility to check if we already have replies to the same tweet.
 
-    Returns dict with keys: 'posted', 'approved', 'new' containing paths to duplicates.
+    Returns dict with keys 'posted', 'approved', 'new', 'review', 'rejected'
+    containing paths to duplicates. ``rejected`` and ``review`` are included so
+    repeated dispatch cycles don't keep re-evaluating tweets we already drafted
+    a reply to — even if that draft was rejected (e.g. by the live-duplicate
+    guard when our prior reply is already on Twitter).
     """
     if not draft.in_reply_to:
         return {}
@@ -849,7 +853,7 @@ def _check_for_duplicate_replies_internal(draft: TweetDraft) -> dict[str, list[P
     tweet_id = draft.in_reply_to
 
     # Check each directory
-    for status in ["posted", "approved", "new"]:
+    for status in ["posted", "approved", "new", "review", "rejected"]:
         status_dir = TWEETS_DIR / status
         if not status_dir.exists():
             continue
@@ -1425,8 +1429,11 @@ def process_timeline_tweets(
     # Build a set of tweet IDs we already have replies for (across all directories)
     # This is more robust than filename substring matching
     # Use strings for consistent comparison (in_reply_to can be int or str)
+    # ``review`` and ``rejected`` are included so a rejected draft (e.g. moved
+    # there because our prior reply is already live on Twitter) suppresses
+    # re-drafting on subsequent dispatch cycles.
     _replied_tweet_ids: set[str] = set()
-    for status_dir_name in ["posted", "approved", "new"]:
+    for status_dir_name in ["posted", "approved", "new", "review", "rejected"]:
         status_dir = TWEETS_DIR / status_dir_name
         if not status_dir.exists():
             continue
@@ -1452,7 +1459,7 @@ def process_timeline_tweets(
             if tweet.author_id == cached_get_me(client, user_auth=False).data.id:
                 continue
 
-            # Check if tweet already has a reply in any directory (posted, approved, new)
+            # Check if tweet already has a reply in any directory (posted, approved, new, review, rejected)
             tweet_id_str = str(tweet.id)
             if tweet_id_str in _replied_tweet_ids:
                 console.print(

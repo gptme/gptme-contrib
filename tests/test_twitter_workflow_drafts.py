@@ -264,6 +264,44 @@ def test_duplicate_reply_detection_reads_markdown_drafts(
     assert duplicates == {"approved": [existing_path]}
 
 
+def test_duplicate_reply_detection_includes_rejected_and_review(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """A previously rejected draft must surface as a duplicate.
+
+    Otherwise the dispatch loop keeps regenerating drafts for the same tweet
+    every cycle, burning LLM calls and piling up rejected/ files. Same for
+    drafts pending review.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    rejected_path = workflow_module.REJECTED_DIR / "reply_rejected.md"
+    review_path = workflow_module.REVIEW_DIR / "reply_review.md"
+    _write_markdown_draft(
+        rejected_path,
+        body="Earlier rejected reply.",
+        draft_type="reply",
+        in_reply_to="4242",
+    )
+    _write_markdown_draft(
+        review_path,
+        body="Draft pending review.",
+        draft_type="reply",
+        in_reply_to="4242",
+    )
+
+    draft = workflow_module.TweetDraft(
+        text="New reply attempt",
+        type="reply",
+        in_reply_to="4242",
+    )
+    duplicates = workflow_module._check_for_duplicate_replies_internal(draft)
+
+    assert duplicates == {
+        "review": [review_path],
+        "rejected": [rejected_path],
+    }
+
+
 def test_find_live_duplicate_reply_ids_matches_own_replies(
     workflow_module: Any,
 ) -> None:
