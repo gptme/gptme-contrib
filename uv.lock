@@ -34,6 +34,7 @@ members = [
     "gptme-runloops",
     "gptme-sessions",
     "gptme-subscription",
+    "gptme-tooloutput-trimmer",
     "gptme-tts",
     "gptme-user-memories",
     "gptme-voice",
@@ -1790,6 +1791,26 @@ test = [
 requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
+]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-tooloutput-trimmer"
+version = "0.1.0"
+source = { editable = "plugins/gptme-tooloutput-trimmer" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
 ]
 provides-extras = ["test"]
 
