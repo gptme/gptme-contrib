@@ -25,12 +25,15 @@ Dependencies:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
+from typing import Any, cast
 
 # ── Lesson loading ────────────────────────────────────────────────────────────
 
@@ -226,10 +229,128 @@ def search_lessons_by_query(
     return [lesson for _, lesson in scored[:10]]
 
 
+@dataclass
+class MemoryBackend:
+    memory_dir: Path
+    state_file: Path
+    module: ModuleType
+
+    def discover_entries(self) -> list[Any]:
+        return cast(list[Any], self.module.discover_memory_entries(self.memory_dir))
+
+    def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            self.module.select_relevant_memories(
+                query,
+                memory_dir=self.memory_dir,
+                state_file=self.state_file,
+                limit=limit,
+            ),
+        )
+
+
+def _discover_agent_root(search_from: list[Path]) -> Path | None:
+    seen: set[Path] = set()
+    for base in search_from:
+        for candidate in [base, *base.parents]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if (candidate / "memory").is_dir() and (
+                candidate / "scripts" / "memory" / "memory_retrieval.py"
+            ).exists():
+                return candidate
+    return None
+
+
+def _load_memory_backend(
+    memory_dir: Path | None,
+    memory_state_file: Path | None,
+) -> MemoryBackend | None:
+    if memory_dir is None:
+        agent_root = _discover_agent_root([Path.cwd(), Path(__file__).resolve()])
+        if agent_root is None:
+            return None
+        memory_dir = agent_root / "memory"
+        memory_state_file = agent_root / "state" / "cc-memory" / "metadata.json"
+
+    memory_dir = memory_dir.expanduser().resolve()
+    if memory_state_file is None:
+        memory_state_file = memory_dir.parent / "state" / "cc-memory" / "metadata.json"
+    else:
+        memory_state_file = memory_state_file.expanduser().resolve()
+
+    retrieval_script = memory_dir.parent / "scripts" / "memory" / "memory_retrieval.py"
+    if not memory_dir.exists() or not retrieval_script.exists():
+        return None
+
+    module_name = f"agent_memory_retrieval_{retrieval_script.resolve()}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        retrieval_script,
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        del sys.modules[spec.name]
+        print(f"Warning: failed to load memory module: {exc}", file=sys.stderr)
+        return None
+    return MemoryBackend(
+        memory_dir=memory_dir,
+        state_file=memory_state_file,
+        module=module,
+    )
+
+
+def _normalize_memory_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _find_memory_entry(
+    backend: MemoryBackend, name: str
+) -> tuple[Any | None, list[str]]:
+    query = _normalize_memory_name(name)
+    if not query:
+        return None, []
+
+    exact: Any | None = None
+    partials: list[Any] = []
+
+    for entry in backend.discover_entries():
+        candidates = {
+            _normalize_memory_name(entry.key),
+            _normalize_memory_name(entry.path.stem),
+            _normalize_memory_name(entry.name),
+            *[_normalize_memory_name(alias) for alias in entry.aliases],
+        }
+        if query in candidates:
+            exact = entry
+            break
+        if any(query in candidate for candidate in candidates if candidate):
+            partials.append(entry)
+
+    if exact is not None:
+        return exact, []
+    if len(partials) == 1:
+        return partials[0], []
+    suggestions = [entry.path.name for entry in partials[:5]]
+    return None, suggestions
+
+
 # ── MCP server ────────────────────────────────────────────────────────────────
 
 
-def build_server(lessons: list[Lesson]):
+def build_server(
+    lessons: list[Lesson],
+    *,
+    memory_dir: Path | None = None,
+    memory_state_file: Path | None = None,
+):
     """Build the FastMCP server. Separated for testability."""
     try:
         from mcp.server.fastmcp import FastMCP
@@ -242,6 +363,7 @@ def build_server(lessons: list[Lesson]):
     mcp = FastMCP("gptme-lessons")
     active_lessons = [ls for ls in lessons if ls.status == "active"]
     lesson_by_id = {ls.id: ls for ls in active_lessons}
+    memory_backend = _load_memory_backend(memory_dir, memory_state_file)
 
     # ── Resources ────────────────────────────────────────────────────────────
 
@@ -274,9 +396,10 @@ def build_server(lessons: list[Lesson]):
             lines.append("\n---\n")
         return "\n".join(lines)
 
-    @mcp.resource("lessons://lesson/{lesson_id:path}")
-    def get_lesson(lesson_id: str) -> str:
+    @mcp.resource("lessons://lesson/{category}/{name}")
+    def get_lesson(category: str, name: str) -> str:
         """Full content of a specific lesson."""
+        lesson_id = f"{category}/{name}"
         lesson = lesson_by_id.get(lesson_id)
         if not lesson:
             return f"Lesson not found: {lesson_id}"
@@ -305,7 +428,7 @@ def build_server(lessons: list[Lesson]):
             kws = ", ".join(ls.keywords[:3]) if ls.keywords else "none"
             lines.append(f"**{ls.title}** (`{ls.id}`){eff}")
             lines.append(f"Keywords: {kws}")
-            lines.append(f"Resource: `lessons://lesson/{ls.id}`\n")
+            lines.append(f"Resource: `lessons://lesson/{ls.category}/{ls.path.stem}`\n")
         return "\n".join(lines)
 
     @mcp.tool()
@@ -360,6 +483,77 @@ def build_server(lessons: list[Lesson]):
             lines.append(f"- **{cat}** ({count} lessons)")
         return "\n".join(lines)
 
+    @mcp.tool()
+    def memory_search(query: str, limit: int = 5) -> str:
+        """Search durable memory entries using the agent's memory retrieval scorer.
+
+        Args:
+            query: Natural-language or alias query for memory/*.md entries
+            limit: Maximum number of matches to return (default: 5)
+        """
+        if memory_backend is None:
+            return (
+                "Memory support unavailable. Configure --memory-dir or run the server "
+                "inside an agent workspace with memory/*.md and scripts/memory/"
+                "memory_retrieval.py."
+            )
+
+        results = memory_backend.search(query, limit=max(1, min(limit, 10)))
+        if not results:
+            return f"No memory entries found matching: {query!r}"
+
+        lines = [
+            f"Found {len(results)} memory entr{'y' if len(results) == 1 else 'ies'} for {query!r}:\n"
+        ]
+        for entry in results:
+            lines.append(
+                f"**{entry['name']}** (`{entry['key']}`) "
+                f"[type={entry['type']}, score={entry['score']:.3f}]"
+            )
+            if entry["description"]:
+                lines.append(f"Description: {entry['description']}")
+            if entry["matched_terms"]:
+                lines.append(f"Match: {', '.join(entry['matched_terms'])}")
+            lines.append(
+                f"Confidence: {entry['confidence']:.2f} | Recency: {entry['recency']:.3f}"
+            )
+            if entry["excerpt"]:
+                lines.append(f"Excerpt: {entry['excerpt']}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    @mcp.tool()
+    def memory_get(name: str) -> str:
+        """Return a specific durable memory entry by filename, stem, or alias.
+
+        Args:
+            name: Memory filename, stem, or alias (for example
+                'feedback_greptile_review_loop' or 'greptile review loop')
+        """
+        if memory_backend is None:
+            return (
+                "Memory support unavailable. Configure --memory-dir or run the server "
+                "inside an agent workspace with memory/*.md and scripts/memory/"
+                "memory_retrieval.py."
+            )
+
+        entry, suggestions = _find_memory_entry(memory_backend, name)
+        if entry is None:
+            hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+            return f"Memory entry not found: {name!r}.{hint}"
+
+        aliases = ", ".join(entry.aliases[:5]) if entry.aliases else "none"
+        lines = [
+            f"# {entry.name}",
+            f"File: {entry.path.name}",
+            f"Type: {entry.type}",
+            f"Description: {entry.description or 'none'}",
+            f"Aliases: {aliases}",
+            "",
+            entry.body,
+        ]
+        return "\n".join(lines).rstrip()
+
     return mcp
 
 
@@ -390,6 +584,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--memory-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Path to memory directory. Defaults to auto-detecting an enclosing "
+            "agent workspace with memory/*.md entries."
+        ),
+    )
+    parser.add_argument(
+        "--memory-state-file",
+        type=Path,
+        default=None,
+        help=(
+            "Path to memory metadata JSON. Defaults to "
+            "<memory-dir>/../state/cc-memory/metadata.json."
+        ),
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List loaded lessons and exit (no server)",
@@ -399,6 +611,10 @@ def main():
     lessons_dir = args.lessons_dir.expanduser()
     effectiveness_file = (
         args.effectiveness_file.expanduser() if args.effectiveness_file else None
+    )
+    memory_dir = args.memory_dir.expanduser() if args.memory_dir else None
+    memory_state_file = (
+        args.memory_state_file.expanduser() if args.memory_state_file else None
     )
 
     if not lessons_dir.exists():
@@ -419,7 +635,11 @@ def main():
         return
 
     print(f"Loaded {len(lessons)} lessons from {lessons_dir}", file=sys.stderr)
-    mcp = build_server(lessons)
+    mcp = build_server(
+        lessons,
+        memory_dir=memory_dir,
+        memory_state_file=memory_state_file,
+    )
     mcp.run()
 
 
