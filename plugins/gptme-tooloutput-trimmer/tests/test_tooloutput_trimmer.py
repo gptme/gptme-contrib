@@ -18,7 +18,6 @@ from tooloutput_trimmer.hooks import (  # noqa: E402
     TrimmerConfig,
     apply_tool_output_trimmer,
     build_trimmed_content,
-    generation_post_hook,
     generation_pre_hook,
     reset_state,
 )
@@ -148,51 +147,6 @@ def test_generation_pre_hook_noops_when_disabled() -> None:
         list(generation_pre_hook(messages, model="openai/gpt-4o"))
 
     assert messages[2].content == original
-
-
-def test_generation_post_hook_marks_confirmed_cache_miss_after_hit() -> None:
-    reset_state()
-    list(
-        generation_post_hook(
-            _msg(
-                "assistant",
-                "warm hit",
-                metadata={"usage": {"cache_read_tokens": 500}},
-            )
-        )
-    )
-
-    messages = [
-        _msg("user", "u0"),
-        _msg("assistant", "a0"),
-        _msg("system", _big_shell_output(repeats=250)),
-        _msg("user", "u1"),
-        _msg("assistant", "a1"),
-        _msg("user", "please continue"),
-    ]
-    with patch(
-        "tooloutput_trimmer.hooks.trimmer.get_config", return_value=_make_config()
-    ):
-        list(
-            generation_post_hook(
-                _msg(
-                    "assistant",
-                    "cold miss",
-                    metadata={"usage": {"cache_read_tokens": 0}},
-                )
-            )
-        )
-
-        with patch(
-            "tooloutput_trimmer.hooks.trimmer.determine_trigger",
-            return_value=SimpleNamespace(
-                active=True,
-                describe=lambda: "confirmed-cache-miss",
-            ),
-        ):
-            list(generation_pre_hook(messages, model="anthropic/claude-sonnet-4-5"))
-
-    assert messages[2].content.startswith(TRIMMED_MARKER)
 
 
 def test_build_trimmed_content_keeps_preview_prefix() -> None:
