@@ -96,6 +96,7 @@ def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
         description = tool["description"]
 
         assert session_update["type"] == "session.update"
+        assert session_update["session"]["type"] == "realtime"
         assert tool["name"] == "subagent"
         assert "small, focused workspace lookup or action" in description
         assert "broad investigations" in description
@@ -127,6 +128,8 @@ def test_connect_omits_output_key_when_speed_not_configured() -> None:
 
         session_update = fake_ws.sent[0]
         assert session_update["type"] == "session.update"
+        assert session_update["session"]["type"] == "realtime"
+        assert session_update["session"]["output_modalities"] == ["audio"]
         assert "output" not in session_update["session"]
         assert "reasoning" not in session_update["session"]
 
@@ -161,6 +164,7 @@ def test_connect_uses_current_openai_headers_and_reasoning_effort() -> None:
         assert captured_headers == {"Authorization": "Bearer test-key"}
         assert "OpenAI-Beta" not in captured_headers
         assert session_update["session"]["reasoning"] == {"effort": "low"}
+        assert session_update["session"]["audio"]["output"]["voice"] == "echo"
 
     asyncio.run(_exercise())
 
@@ -640,6 +644,7 @@ def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -
             )
             await client.connect()
             await client._handle_event({"type": "session.created"})
+            await client.send_audio(b"\x01\x02\x03")
 
             async def _emit_late_events() -> None:
                 await asyncio.sleep(0.01)
@@ -673,6 +678,79 @@ def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -
         assert commit_events, "disconnect should commit pending audio before drain"
         assert user_transcripts == ["final words"]
         assert audio_chunks == []
+        assert fake_ws.closed is True
+
+    asyncio.run(_exercise())
+
+
+def test_disconnect_skips_commit_when_input_audio_already_committed() -> None:
+    """Teardown must not emit an empty commit after server VAD already committed."""
+
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.created"})
+            await client.send_audio(b"\x01\x02\x03")
+            await client._handle_event({"type": "input_audio_buffer.committed"})
+
+            await client.disconnect(
+                drain_timeout_seconds=0.0,
+                idle_timeout_seconds=0.0,
+                commit_audio=True,
+                stop_audio_output=True,
+            )
+
+        commit_events = [
+            event
+            for event in fake_ws.sent
+            if event.get("type") == "input_audio_buffer.commit"
+        ]
+        assert commit_events == []
+        assert fake_ws.closed is True
+
+    asyncio.run(_exercise())
+
+
+def test_disconnect_skips_commit_for_silence_only_pcm() -> None:
+    """Silence-only PCM should not count as pending speech at teardown."""
+
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.created"})
+            await client.send_audio(b"\x00" * 32)
+
+            await client.disconnect(
+                drain_timeout_seconds=0.0,
+                idle_timeout_seconds=0.0,
+                commit_audio=True,
+                stop_audio_output=True,
+            )
+
+        commit_events = [
+            event
+            for event in fake_ws.sent
+            if event.get("type") == "input_audio_buffer.commit"
+        ]
+        assert commit_events == []
         assert fake_ws.closed is True
 
     asyncio.run(_exercise())
@@ -849,5 +927,5 @@ def test_connect_emits_g711_ulaw_audio_format_when_passthrough_enabled() -> None
         session_update = fake_ws.sent[0]
         assert session_update["type"] == "session.update"
         session = session_update["session"]
-        assert session["input_audio_format"] == "g711_ulaw"
-        assert session["output_audio_format"] == "g711_ulaw"
+        assert session["audio"]["input"]["format"] == {"type": "audio/pcmu"}
+        assert session["audio"]["output"]["format"] == {"type": "audio/pcmu"}

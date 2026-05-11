@@ -284,6 +284,10 @@ class OpenAIRealtimeClient:
         self._pending_audio_dropped = 0
         self._event_notice: asyncio.Event | None = None
         self._initial_response_sent = False
+        # Track whether non-silent audio has been appended since the last
+        # provider-side commit so teardown can flush mid-utterance speech
+        # without sending empty-buffer commits built from trailing silence.
+        self._input_audio_buffer_dirty = False
         # When True, the initial response is held back even after session.created.
         # Set this on pre-warmed sessions; call activate_session() once the
         # call-side WebSocket is ready to receive audio.
@@ -307,6 +311,31 @@ class OpenAIRealtimeClient:
         if effort is None:
             return None
         return {"effort": effort}
+
+    @staticmethod
+    def _audio_format_config(
+        audio_format: str,
+        *,
+        sample_rate: int,
+        include_rate: bool,
+    ) -> dict[str, Any]:
+        """Translate legacy local format names into current Realtime API objects."""
+        if audio_format == "pcm16":
+            payload: dict[str, Any] = {"type": "audio/pcm"}
+            if include_rate:
+                payload["rate"] = sample_rate
+            return payload
+        if audio_format == "g711_ulaw":
+            return {"type": "audio/pcmu"}
+        if audio_format == "g711_alaw":
+            return {"type": "audio/pcma"}
+        return {"type": audio_format}
+
+    def _mark_input_audio_dirty(self, audio_data: bytes) -> None:
+        """Only treat non-silent PCM as pending user speech for teardown flushes."""
+        if self.session_config.input_format == "pcm16" and not any(audio_data):
+            return
+        self._input_audio_buffer_dirty = True
 
     def _handshake_fallback_model(self, exc: websockets.InvalidStatus) -> str | None:
         """Return a one-shot fallback model for known alias drift.
@@ -342,6 +371,7 @@ class OpenAIRealtimeClient:
         self._pending_audio_dropped = 0
         self._event_notice = asyncio.Event()
         self._initial_response_sent = False
+        self._input_audio_buffer_dirty = False
 
         url = self._get_ws_url()
         headers = self._get_ws_headers()
@@ -371,16 +401,31 @@ class OpenAIRealtimeClient:
 
         # Configure session
         session_params: dict = {
-            "modalities": ["text", "audio"],
+            "type": "realtime",
+            "output_modalities": ["audio"],
             "instructions": instructions,
-            "voice": self.session_config.voice,
-            "input_audio_format": self.session_config.input_format,
-            "output_audio_format": self.session_config.output_format,
-            "turn_detection": {
-                "type": self.session_config.turn_detection,
-                "threshold": self.session_config.vad_threshold,
-                "silence_duration_ms": self.session_config.vad_silence_duration_ms,
-                "prefix_padding_ms": self.session_config.vad_prefix_padding_ms,
+            "audio": {
+                "input": {
+                    "format": self._audio_format_config(
+                        self.session_config.input_format,
+                        sample_rate=self.session_config.input_sample_rate,
+                        include_rate=True,
+                    ),
+                    "turn_detection": {
+                        "type": self.session_config.turn_detection,
+                        "threshold": self.session_config.vad_threshold,
+                        "silence_duration_ms": self.session_config.vad_silence_duration_ms,
+                        "prefix_padding_ms": self.session_config.vad_prefix_padding_ms,
+                    },
+                },
+                "output": {
+                    "format": self._audio_format_config(
+                        self.session_config.output_format,
+                        sample_rate=self.session_config.output_sample_rate,
+                        include_rate=True,
+                    ),
+                    "voice": self.session_config.voice,
+                },
             },
             "tools": [
                 {
@@ -533,7 +578,7 @@ class OpenAIRealtimeClient:
             session_params["reasoning"] = reasoning
         transcription = self._get_transcription_config()
         if transcription is not None:
-            session_params["input_audio_transcription"] = transcription
+            session_params["audio"]["input"]["transcription"] = transcription
         await self._send_event("session.update", {"session": session_params})
 
         # Start receiving messages
@@ -598,6 +643,7 @@ class OpenAIRealtimeClient:
             commit_audio
             and self._session_ready is not None
             and self._session_ready.is_set()
+            and self._input_audio_buffer_dirty
         ):
             with contextlib.suppress(Exception):
                 await self.commit_audio()
@@ -687,6 +733,7 @@ class OpenAIRealtimeClient:
 
         audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
         await self._send_event("input_audio_buffer.append", {"audio": audio_b64})
+        self._mark_input_audio_dirty(pcm_data)
 
     async def _mark_session_ready(self, event_type: str) -> None:
         """Mark the provider session ready and flush any buffered audio once."""
@@ -742,6 +789,7 @@ class OpenAIRealtimeClient:
         for pcm_data in chunks:
             audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
             await self._send_event("input_audio_buffer.append", {"audio": audio_b64})
+            self._mark_input_audio_dirty(pcm_data)
         if self._pending_audio_dropped:
             logger.warning(
                 "Dropped %d pre-session audio chunk(s) before flush",
@@ -829,6 +877,8 @@ class OpenAIRealtimeClient:
             logger.debug("Speech detected")
         elif event_type == "input_audio_buffer.speech_stopped":
             logger.debug("Speech ended")
+        elif event_type == "input_audio_buffer.committed":
+            self._input_audio_buffer_dirty = False
 
         # Session events
         elif event_type == "session.created":
