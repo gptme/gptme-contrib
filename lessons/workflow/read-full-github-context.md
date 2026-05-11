@@ -1,16 +1,12 @@
 ---
 match:
   keywords:
-    - "read the full issue"
-    - "read all comments"
-    - "don't truncate"
-    - "missing newer comments"
-    - "responded to stale context"
-    - "conversation moved on"
-    - "didn't read the whole thread"
-    - "review comments supersede"
-    - "gh issue view"
-    - "gh pr view"
+    - "--comments | head"
+    - "--comments | tail"
+    - "view --comments | grep"
+    - "gh issue view --comments"
+    - "gh pr view --comments"
+  session_categories: [cross-repo, code]
 status: active
 ---
 

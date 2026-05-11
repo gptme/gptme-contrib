@@ -1,18 +1,16 @@
 ---
 match:
   keywords:
-  - optimize performance
-  - add caching
-  - speed up
-  - make it faster
-  - improve efficiency
-  - simplify before optimize
-  - premature optimization
-  - "caching layer"
+  - "let's add caching"
+  - "add a cache"
+  - "cache the results"
   - "performance optimization"
-  - "too slow"
-  - "needs caching"
+  - "premature optimization"
+  - "needs to be faster"
+  - "slow to run"
   - "optimize the code"
+  - "simplify before optimize"
+  session_categories: [code, infrastructure]
 status: active
 target_grade: alignment
 ---
