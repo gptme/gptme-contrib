@@ -2,7 +2,6 @@
 status: active
 match:
   keywords:
-  - "I'll follow up"
   - "I'll submit a PR"
   - "comment promising"
   - "I'll fix this"
