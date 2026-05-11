@@ -1,15 +1,20 @@
 ---
 match:
   keywords:
-  - implementing optimization without profiling
-  - assuming slowness based on complexity
-  - building caching before confirming problems
-  - this looks complex so it must be slow
-  - pytest --profile
-  - premature optimization
-  - optimize without profiling
-  session_categories: [code]
+  - "should drop to"
+  - "should be faster"
+  - "needs caching"
+  - "add caching"
+  - "without a baseline"
+  - "no baseline number"
+  - "before/after timing"
+  - "p50 = "
+  - "is the bottleneck"
+  - "premature optimization"
+  - "pytest --profile"
+  session_categories: [code, infrastructure]
 status: active
+target_grade: alignment
 ---
 
 # Measure Before Optimize
