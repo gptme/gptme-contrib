@@ -1,11 +1,20 @@
-"""Hooks for trimming old tool output before LLM calls."""
+"""Hooks for trimming old tool output before LLM calls.
+
+Triggers are all *predicted-cold* or *pressure-based* — we only trim before a
+request that we expect to miss cache anyway, so trimming has no extra cost.
+
+The previous `confirmed_cache_miss` trigger (post-hoc, based on
+`cache_read_input_tokens == 0`) was dropped on 2026-05-11: by the time it
+fires, the cache miss + cache write have already been billed, so trimming the
+*next* turn doesn't recover the cost we already paid.
+See ErikBjare/bob#770 for Erik's design feedback.
+"""
 
 from __future__ import annotations
 
 import logging
 import time
 from collections.abc import Generator
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,16 +53,11 @@ class TrimSummary:
 class TriggerDecision:
     expected_cache_cold: bool = False
     cache_invalidated: bool = False
-    confirmed_cache_miss: bool = False
     pressure_exceeded: bool = False
 
     @property
     def aggressive(self) -> bool:
-        return (
-            self.expected_cache_cold
-            or self.cache_invalidated
-            or self.confirmed_cache_miss
-        )
+        return self.expected_cache_cold or self.cache_invalidated
 
     @property
     def active(self) -> bool:
@@ -65,39 +69,14 @@ class TriggerDecision:
             reasons.append("expected-cache-cold")
         if self.cache_invalidated:
             reasons.append("cache-invalidated")
-        if self.confirmed_cache_miss:
-            reasons.append("confirmed-cache-miss")
         if self.pressure_exceeded:
             reasons.append("context-pressure")
         return ",".join(reasons) if reasons else "none"
 
 
-@dataclass
-class TrimmerState:
-    saw_cache_hit: bool = False
-    confirmed_cache_miss: bool = False
-
-
-_state_var: ContextVar[TrimmerState | None] = ContextVar(
-    "tooloutput_trimmer_state", default=None
-)
-
-
-def _get_state() -> TrimmerState:
-    state = _state_var.get()
-    if state is None:
-        state = TrimmerState()
-        _state_var.set(state)
-    return state
-
-
-def _set_state(state: TrimmerState) -> None:
-    _state_var.set(state)
-
-
 def reset_state() -> None:
-    """Reset context-local trimmer state for tests."""
-    _state_var.set(None)
+    """Kept for test compatibility; trimmer no longer carries cross-turn state."""
+    return None
 
 
 def _coerce_int(value: Any, default: int, *, minimum: int) -> int:
@@ -244,7 +223,6 @@ def determine_trigger(
         get_turns_since_invalidation,
     )
 
-    state = _get_state()
     return TriggerDecision(
         expected_cache_cold=_expected_cache_cold(
             CostTracker.get_session_costs(), model
@@ -252,7 +230,6 @@ def determine_trigger(
         cache_invalidated=(
             get_invalidation_count() > 0 and get_turns_since_invalidation() == 0
         ),
-        confirmed_cache_miss=state.confirmed_cache_miss,
         pressure_exceeded=estimate_billed_chars(messages) > config.pressure_chars,
     )
 
@@ -271,10 +248,6 @@ def generation_pre_hook(
         return
 
     rewritten, summary = apply_tool_output_trimmer(messages, config)
-    state = _get_state()
-    state.confirmed_cache_miss = False
-    _set_state(state)
-
     if summary.trimmed_count == 0:
         return
 
@@ -288,28 +261,6 @@ def generation_pre_hook(
     yield from ()
 
 
-def generation_post_hook(
-    message: Message, **kwargs: Any
-) -> Generator[Message | StopPropagation, None, None]:
-    """Track confirmed cache misses so the next turn can trim more aggressively."""
-    del kwargs
-    usage = (message.metadata or {}).get("usage", {})
-    cache_read_tokens = usage.get("cache_read_tokens")
-    if cache_read_tokens is None:
-        return
-
-    state = _get_state()
-    if cache_read_tokens > 0:
-        state.saw_cache_hit = True
-        state.confirmed_cache_miss = False
-    elif state.saw_cache_hit:
-        state.confirmed_cache_miss = True
-    else:
-        state.confirmed_cache_miss = False
-    _set_state(state)
-    yield from ()
-
-
 def register() -> None:
     """Register read-time tool-output trimming hooks."""
     register_hook(
@@ -317,10 +268,4 @@ def register() -> None:
         hook_type=HookType.GENERATION_PRE,
         func=generation_pre_hook,
         priority=200,
-    )
-    register_hook(
-        name="tooloutput_trimmer.generation_post",
-        hook_type=HookType.GENERATION_POST,
-        func=generation_post_hook,
-        priority=-10,
     )
