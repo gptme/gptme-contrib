@@ -326,7 +326,7 @@ class OpenAIRealtimeClient:
             return None
 
         body = exc.response.body.decode("utf-8", errors="ignore").lower()
-        if body and not any(
+        if not body or not any(
             token in body for token in ("model", current_model.lower(), "realtime")
         ):
             return None
