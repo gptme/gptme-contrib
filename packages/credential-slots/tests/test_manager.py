@@ -422,6 +422,28 @@ class TestSwitchTo:
         # Live symlink unchanged — still points at the initial alice slot.
         assert mgr.get_active_subscription() == "alice"
 
+    def test_fingerprint_write_failure_does_not_abort_successful_switch(
+        self, mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A disk-full or permission error during fingerprint capture must not
+        turn a successfully-flipped symlink into an unhandled exception.
+        on_switch must still fire and SwitchResult(ok=True) must be returned.
+        """
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        events: list[tuple[str, str]] = []
+        mgr.on_switch = lambda sub, reason: events.append((sub, reason))
+
+        def _raise(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mgr, "capture_slot_fingerprint", _raise)
+        result = mgr.switch_to("bob", "test")
+        assert result.ok is True
+        # symlink was placed
+        assert mgr.get_active_subscription() == "bob"
+        # on_switch still fired
+        assert events == [("bob", "test")]
+
 
 class TestSwitchResult:
     """Shape of :class:`SwitchResult`."""
@@ -645,6 +667,29 @@ class TestHealDriftTo:
         leftovers = sorted(p.name for p in mgr.creds_dir.iterdir() if ".tmp" in p.name)
         assert leftovers == [], f"unexpected tmp files: {leftovers}"
 
+    def test_fingerprint_write_failure_does_not_abort_successful_heal(
+        self, mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fingerprint capture failure after a successful symlink heal must not
+        propagate as an unhandled exception. on_switch must still fire and
+        SwitchResult(ok=True) must be returned.
+        """
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        events: list[tuple[str, str]] = []
+        mgr.on_switch = lambda sub, reason: events.append((sub, reason))
+
+        def _raise(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mgr, "capture_slot_fingerprint", _raise)
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True
+        # Live is now a symlink to bob's slot
+        assert mgr.live_path.is_symlink()
+        # on_switch still fired
+        assert len(events) == 1
+        assert "auto-heal" in events[0][1]
+
 
 class TestSlotFingerprint:
     """Identity fingerprint capture and computation."""
@@ -815,10 +860,9 @@ class TestDetectSlotIdentityDrift:
         assert info["stored_fingerprint"] is None
         assert info["current_fingerprint"] is None
 
-    def test_unknown_subscription_returns_no_drift(self, mgr: SlotManager) -> None:
-        info = mgr.detect_slot_identity_drift("not-a-real-sub")
-        assert info["drift"] is False
-        assert "unknown subscription" in info["reason"]
+    def test_unknown_subscription_raises(self, mgr: SlotManager) -> None:
+        with pytest.raises(ValueError, match="unknown subscription"):
+            mgr.detect_slot_identity_drift("not-a-real-sub")
 
     def test_switch_to_auto_captures_fingerprint(self, mgr: SlotManager) -> None:
         _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")

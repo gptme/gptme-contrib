@@ -489,12 +489,8 @@ class SlotManager:
         ============================== =====
         """
         if sub not in self.subscriptions:
-            return IdentityDriftInfo(
-                drift=False,
-                sub=sub,
-                stored_fingerprint=None,
-                current_fingerprint=None,
-                reason=f"unknown subscription: {sub!r}",
+            raise ValueError(
+                f"unknown subscription: {sub!r} (known: {self.subscriptions})"
             )
         stored = self.read_stored_fingerprint(sub)
         current = compute_slot_fingerprint(self.slot_path(sub))
@@ -605,7 +601,10 @@ class SlotManager:
             tmp.unlink(missing_ok=True)
             raise
 
-        self.capture_slot_fingerprint(sub)
+        try:
+            self.capture_slot_fingerprint(sub)
+        except Exception as exc:
+            self._log(f"fingerprint capture failed for {sub}: {exc}")
         if self.on_switch is not None:
             self.on_switch(sub, reason)
         return SwitchResult(ok=True, reason=f"switched to {sub}")
@@ -724,7 +723,10 @@ class SlotManager:
             link_tmp.unlink(missing_ok=True)
             raise
 
-        self.capture_slot_fingerprint(sub)
+        try:
+            self.capture_slot_fingerprint(sub)
+        except Exception as exc:
+            self._log(f"fingerprint capture failed for {sub}: {exc}")
         if self.on_switch is not None:
             self.on_switch(sub, "auto-heal drift (live cred resynced to slot)")
         return SwitchResult(
