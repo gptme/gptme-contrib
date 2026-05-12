@@ -419,6 +419,10 @@ def test_check_pr_updates_surfaces_draft(mock_run, workspace):
     assert item.title.startswith("[DRAFT] ")
     assert "Draft" in item.details
 
+    # Second call with same timestamp: state written, no duplicate surfaced
+    work_items = run.check_pr_updates("gptme/gptme")
+    assert len(work_items) == 0
+
 
 @patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_ci_failures_still_skips_drafts(mock_run, workspace):
