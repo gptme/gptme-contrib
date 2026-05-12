@@ -145,7 +145,8 @@ def format_routing_context(cascade_context: dict | None) -> str:
     if tier != 3:
         return ""
     blocked = cascade_context.get("blocked_tier1_2_count")
-    reason = cascade_context.get("selector_reason") or ""
+    _reason_raw = cascade_context.get("selector_reason")
+    reason = _reason_raw if isinstance(_reason_raw, str) else ""
     lines = [
         "",
         "## Routing Context",

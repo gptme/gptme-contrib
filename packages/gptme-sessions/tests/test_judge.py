@@ -211,6 +211,19 @@ class TestJudgeSession:
         assert "True" not in block
         assert "1" not in block
 
+    def test_format_routing_context_rejects_non_string_selector_reason(self) -> None:
+        """Non-string selector_reason (e.g. int) must not raise TypeError."""
+        # int: would crash reason[:200] without the isinstance guard
+        block = format_routing_context({"tier": 3, "selector_reason": 42})
+        assert "42" not in block
+        assert "Selector reason" not in block
+        # list: another non-string truthy type
+        block = format_routing_context({"tier": 3, "selector_reason": ["a", "b"]})
+        assert "Selector reason" not in block
+        # None degrades gracefully (existing behaviour)
+        block = format_routing_context({"tier": 3, "selector_reason": None})
+        assert "Selector reason" not in block
+
     def test_judge_session_passes_routing_context_into_prompt(self) -> None:
         """When cascade_context names Tier 3, the prompt carries the block."""
         captured: dict[str, str] = {}
