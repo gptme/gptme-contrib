@@ -1967,7 +1967,10 @@ class VoiceServer:
                 from twilio.rest import Client as TwilioClient
 
                 client = TwilioClient(twilio_account_sid, twilio_auth_token)
-                client.calls(call_sid).update(status="completed")
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, lambda: client.calls(call_sid).update(status="completed")
+                )
                 logger.info("Twilio call %s terminated via REST API", call_sid)
             except Exception as exc:
                 logger.warning(
@@ -1978,7 +1981,7 @@ class VoiceServer:
 
         # Brief delay so any buffered farewell audio still plays.
         try:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
         except asyncio.CancelledError:
             raise
 
