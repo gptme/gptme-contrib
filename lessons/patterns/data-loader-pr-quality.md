@@ -1,13 +1,8 @@
 ---
 match:
   keywords:
-  - data loader
-  - csv loader
   - file not found
   - assert path
-  - missing file test
-  - loader test
-  - timezone assertion
   session_categories: [code]
 status: active
 ---

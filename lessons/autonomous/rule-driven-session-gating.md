@@ -9,13 +9,7 @@ tags:
 - orchestration
 match:
   keywords:
-  - inference cost
   - monitoring sessions
-  - session gating
-  - no-op sessions
-  - skip session
-  - session orchestration
-  - routine monitoring
   - cost optimization
 ---
 
