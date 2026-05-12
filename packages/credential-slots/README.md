@@ -85,6 +85,17 @@ drift = mgr.detect_live_slot_drift()
 if drift and drift["drift"]:
     warn("live creds file matches no named slot — run /login then persist")
 
+# Identity drift — catches the case where an operator (or stray
+# `claude /login`) writes a new OAuth credential *through* the live
+# symlink, silently replacing the slot's tokens. Hash-based
+# detect_live_slot_drift() can't see this because live and slot still match.
+# See ErikBjare/bob#769.
+ident = mgr.detect_slot_identity_drift("bob")
+if ident["drift"]:
+    warn(f"slot identity changed: {ident['reason']}")
+# After a fresh login that establishes a new identity for a slot, capture it:
+# mgr.capture_slot_fingerprint("bob")  # switch_to/heal_drift_to do this automatically
+
 # Switching
 result = mgr.switch_to("alice", reason="bob quota exhausted")
 if not result.ok:

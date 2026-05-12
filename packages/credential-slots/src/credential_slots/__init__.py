@@ -30,25 +30,31 @@ Public API::
 from __future__ import annotations
 
 from credential_slots.manager import (
+    DEFAULT_FINGERPRINT_TEMPLATE,
     DEFAULT_GRACE_SECONDS,
     DEFAULT_LIVE_NAME,
     DEFAULT_SLOT_TEMPLATE,
     DriftInfo,
+    IdentityDriftInfo,
     SlotManager,
     SwitchResult,
+    compute_slot_fingerprint,
     read_slot_expiry,
     slot_is_fresh,
 )
 
 __all__ = [
+    "DEFAULT_FINGERPRINT_TEMPLATE",
     "DEFAULT_GRACE_SECONDS",
     "DEFAULT_LIVE_NAME",
     "DEFAULT_SLOT_TEMPLATE",
     "DriftInfo",
+    "IdentityDriftInfo",
     "SlotManager",
     "SwitchResult",
+    "compute_slot_fingerprint",
     "read_slot_expiry",
     "slot_is_fresh",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

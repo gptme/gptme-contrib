@@ -25,6 +25,7 @@ from typing import Callable, TypedDict
 
 DEFAULT_LIVE_NAME = ".credentials.json"
 DEFAULT_SLOT_TEMPLATE = ".credentials.json.{sub}"
+DEFAULT_FINGERPRINT_TEMPLATE = ".credentials.json.{sub}.fingerprint.json"
 DEFAULT_GRACE_SECONDS = 300
 
 
@@ -41,6 +42,38 @@ class DriftInfo(TypedDict):
     matching_slot: str | None
     live_hash: str | None
     slot_hashes: dict[str, str]
+
+
+class IdentityDriftInfo(TypedDict):
+    """Result of :meth:`SlotManager.detect_slot_identity_drift`.
+
+    Identity drift means the slot's *current* refresh-token fingerprint
+    does not match the fingerprint captured at last :meth:`switch_to` /
+    :meth:`heal_drift_to`. This catches the scenario in ErikBjare/bob#769
+    where an operator (or stray ``claude /login``) writes a new OAuth
+    credential **through** the live symlink, silently replacing the slot's
+    identity while the hash-based drift check still sees a "matching"
+    live → slot pair.
+
+    Fields:
+
+    - ``drift``: True when stored fingerprint exists and disagrees with the
+      slot's current refresh token; False when they match or when no
+      fingerprint has been captured yet (caller should call
+      :meth:`capture_slot_fingerprint` on a fresh login).
+    - ``sub``: subscription name the check was run for.
+    - ``stored_fingerprint``: hash captured at last switch/heal, or None
+      when no fingerprint file exists yet.
+    - ``current_fingerprint``: hash of the slot's current refresh token,
+      or None when the slot file is missing or unreadable.
+    - ``reason``: short human-readable explanation suitable for logs.
+    """
+
+    drift: bool
+    sub: str
+    stored_fingerprint: str | None
+    current_fingerprint: str | None
+    reason: str
 
 
 @dataclass
@@ -137,6 +170,50 @@ def _hash_file(path: Path) -> str | None:
         return None
 
 
+def _read_refresh_token(path: Path) -> str | None:
+    """Return ``claudeAiOauth.refreshToken`` from a slot file, or None.
+
+    Returns None for missing files, unreadable files, malformed JSON,
+    payloads without ``claudeAiOauth.refreshToken``, or non-string
+    refresh-token values.
+    """
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    rt = oauth.get("refreshToken")
+    if not isinstance(rt, str) or not rt:
+        return None
+    return rt
+
+
+def compute_slot_fingerprint(path: Path) -> str | None:
+    """Return sha256 of the slot's refresh token, or None if unavailable.
+
+    Used as the per-slot identity fingerprint: the refresh token rotates
+    only when the OAuth flow actively exchanges it, so a sudden change
+    between two snapshots is a strong signal that the slot's identity was
+    silently replaced (see ErikBjare/bob#769).
+
+    Hashing the refresh token (rather than storing it verbatim) keeps the
+    fingerprint files free of additional credential material — they're
+    only useful for equality comparison, not for replay.
+    """
+    rt = _read_refresh_token(path)
+    if rt is None:
+        return None
+    return hashlib.sha256(rt.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class SlotManager:
     """Manages a family of named OAuth credential slots sharing one live file.
@@ -185,6 +262,7 @@ class SlotManager:
     subscriptions: list[str]
     slot_template: str = DEFAULT_SLOT_TEMPLATE
     live_name: str = DEFAULT_LIVE_NAME
+    fingerprint_template: str = DEFAULT_FINGERPRINT_TEMPLATE
     grace_seconds: int = DEFAULT_GRACE_SECONDS
     lock_guard: Callable[[], list[str]] | None = None
     on_switch: Callable[[str, str], None] | None = None
@@ -195,6 +273,10 @@ class SlotManager:
             raise ValueError(
                 f"slot_template must contain '{{sub}}', got: {self.slot_template!r}"
             )
+        if "{sub}" not in self.fingerprint_template:
+            raise ValueError(
+                f"fingerprint_template must contain '{{sub}}', got: {self.fingerprint_template!r}"
+            )
         if not self.subscriptions:
             raise ValueError("subscriptions must be a non-empty list")
 
@@ -203,6 +285,10 @@ class SlotManager:
     def slot_path(self, sub: str) -> Path:
         """Absolute path to the named slot file."""
         return self.creds_dir / self.slot_template.format(sub=sub)
+
+    def fingerprint_path(self, sub: str) -> Path:
+        """Absolute path to the per-slot fingerprint sidecar file."""
+        return self.creds_dir / self.fingerprint_template.format(sub=sub)
 
     @property
     def live_path(self) -> Path:
@@ -324,6 +410,134 @@ class SlotManager:
             slot_hashes=slot_hashes,
         )
 
+    # ---- Identity fingerprints ----
+
+    def read_stored_fingerprint(self, sub: str) -> str | None:
+        """Return the fingerprint captured at last switch/heal, or None."""
+        fp_path = self.fingerprint_path(sub)
+        try:
+            raw = fp_path.read_text()
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        fp = payload.get("refresh_token_sha256")
+        if not isinstance(fp, str) or not fp:
+            return None
+        return fp
+
+    def capture_slot_fingerprint(self, sub: str) -> str | None:
+        """Capture the slot's current refresh-token fingerprint to disk.
+
+        Atomically writes ``fingerprint_path(sub)`` with the slot's current
+        refresh-token sha256 plus a captured-at timestamp. Returns the
+        fingerprint, or None when the slot file is missing / unreadable /
+        lacks a refresh token.
+
+        Callers should invoke this after performing a fresh OAuth login
+        for a slot, so :meth:`detect_slot_identity_drift` has a baseline
+        to compare against on later checks. :meth:`switch_to` and
+        :meth:`heal_drift_to` invoke it automatically on success.
+        """
+        fp = compute_slot_fingerprint(self.slot_path(sub))
+        if fp is None:
+            return None
+        payload = {
+            "refresh_token_sha256": fp,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "slot": sub,
+        }
+        fp_path = self.fingerprint_path(sub)
+        tmp = fp_path.with_suffix(fp_path.suffix + f".tmp{os.getpid()}")
+        try:
+            tmp.write_text(json.dumps(payload, sort_keys=True))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, fp_path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return fp
+
+    def detect_slot_identity_drift(self, sub: str) -> IdentityDriftInfo:
+        """Check whether ``sub``'s slot still holds the captured identity.
+
+        Compares the slot file's current refresh-token sha256 against the
+        fingerprint stored by the most recent :meth:`switch_to` /
+        :meth:`heal_drift_to` / :meth:`capture_slot_fingerprint` call.
+
+        Catches the failure mode in ErikBjare/bob#769: an operator (or
+        stray ``claude /login``) writes a new OAuth credential through the
+        live symlink, silently replacing the slot's identity. The classic
+        hash-based :meth:`detect_live_slot_drift` reports "no drift" in
+        that scenario because live and slot still hash-match — but they
+        now hold someone else's tokens.
+
+        Behavior matrix:
+
+        ============================== =====
+        Stored / Current               drift
+        ============================== =====
+        match                          False
+        mismatch (real identity drift) True
+        stored present, current None   True   (slot vanished or unreadable)
+        stored None, current any       False  (no baseline yet; ``reason`` says so)
+        both None                      False  (no slot file, no fingerprint)
+        ============================== =====
+        """
+        if sub not in self.subscriptions:
+            return IdentityDriftInfo(
+                drift=False,
+                sub=sub,
+                stored_fingerprint=None,
+                current_fingerprint=None,
+                reason=f"unknown subscription: {sub!r}",
+            )
+        stored = self.read_stored_fingerprint(sub)
+        current = compute_slot_fingerprint(self.slot_path(sub))
+        if stored is None and current is None:
+            return IdentityDriftInfo(
+                drift=False,
+                sub=sub,
+                stored_fingerprint=None,
+                current_fingerprint=None,
+                reason="no fingerprint stored and slot missing/unreadable",
+            )
+        if stored is None:
+            return IdentityDriftInfo(
+                drift=False,
+                sub=sub,
+                stored_fingerprint=None,
+                current_fingerprint=current,
+                reason="no fingerprint stored yet — call capture_slot_fingerprint after a fresh login",
+            )
+        if current is None:
+            return IdentityDriftInfo(
+                drift=True,
+                sub=sub,
+                stored_fingerprint=stored,
+                current_fingerprint=None,
+                reason="slot is missing or has no refresh token; cannot verify identity",
+            )
+        if stored != current:
+            return IdentityDriftInfo(
+                drift=True,
+                sub=sub,
+                stored_fingerprint=stored,
+                current_fingerprint=current,
+                reason="refresh token changed since last capture — slot identity may have been replaced",
+            )
+        return IdentityDriftInfo(
+            drift=False,
+            sub=sub,
+            stored_fingerprint=stored,
+            current_fingerprint=current,
+            reason="fingerprint matches",
+        )
+
     # ---- Switching ----
 
     def switch_to(
@@ -391,6 +605,7 @@ class SlotManager:
             tmp.unlink(missing_ok=True)
             raise
 
+        self.capture_slot_fingerprint(sub)
         if self.on_switch is not None:
             self.on_switch(sub, reason)
         return SwitchResult(ok=True, reason=f"switched to {sub}")
@@ -509,6 +724,7 @@ class SlotManager:
             link_tmp.unlink(missing_ok=True)
             raise
 
+        self.capture_slot_fingerprint(sub)
         if self.on_switch is not None:
             self.on_switch(sub, "auto-heal drift (live cred resynced to slot)")
         return SwitchResult(

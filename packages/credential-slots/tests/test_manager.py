@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 from credential_slots import (
     DriftInfo,
+    IdentityDriftInfo,
     SlotManager,
     SwitchResult,
+    compute_slot_fingerprint,
     read_slot_expiry,
     slot_is_fresh,
 )
@@ -27,15 +29,23 @@ def _ms_from_now(offset_seconds: float) -> int:
     return int((datetime.now(timezone.utc).timestamp() + offset_seconds) * 1000)
 
 
-def _write_slot(path: Path, expires_at_ms: int | None) -> None:
+def _write_slot(
+    path: Path,
+    expires_at_ms: int | None,
+    *,
+    refresh_token: str | None = "fake-refresh-token",
+) -> None:
     """Write a claudeAiOauth credential file with given ``expiresAt``.
 
     ``expires_at_ms=None`` produces a payload with no ``expiresAt`` key,
-    exercising the unknown-expiry path.
+    exercising the unknown-expiry path. ``refresh_token=None`` omits the
+    ``refreshToken`` field (used to exercise no-fingerprint paths).
     """
     oauth: dict[str, object] = {"accessToken": "fake-token"}
     if expires_at_ms is not None:
         oauth["expiresAt"] = expires_at_ms
+    if refresh_token is not None:
+        oauth["refreshToken"] = refresh_token
     path.write_text(json.dumps({"claudeAiOauth": oauth}))
 
 
@@ -634,3 +644,226 @@ class TestHealDriftTo:
         # No leftover .tmp* artifacts in creds_dir
         leftovers = sorted(p.name for p in mgr.creds_dir.iterdir() if ".tmp" in p.name)
         assert leftovers == [], f"unexpected tmp files: {leftovers}"
+
+
+class TestSlotFingerprint:
+    """Identity fingerprint capture and computation."""
+
+    def test_compute_returns_sha256_of_refresh_token(self, tmp_path: Path) -> None:
+        p = tmp_path / "slot.json"
+        _write_slot(p, _ms_from_now(3600), refresh_token="rt-bob")
+        fp = compute_slot_fingerprint(p)
+        assert fp is not None
+        assert len(fp) == 64  # sha256 hex
+        # Same content → same fingerprint
+        _write_slot(tmp_path / "slot2.json", _ms_from_now(60), refresh_token="rt-bob")
+        assert compute_slot_fingerprint(tmp_path / "slot2.json") == fp
+
+    def test_compute_distinguishes_tokens(self, tmp_path: Path) -> None:
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        _write_slot(a, _ms_from_now(3600), refresh_token="rt-bob")
+        _write_slot(b, _ms_from_now(3600), refresh_token="rt-alice")
+        assert compute_slot_fingerprint(a) != compute_slot_fingerprint(b)
+
+    def test_compute_returns_none_when_no_refresh_token(self, tmp_path: Path) -> None:
+        p = tmp_path / "no-rt.json"
+        _write_slot(p, _ms_from_now(3600), refresh_token=None)
+        assert compute_slot_fingerprint(p) is None
+
+    def test_compute_returns_none_for_missing_file(self, tmp_path: Path) -> None:
+        assert compute_slot_fingerprint(tmp_path / "nope.json") is None
+
+    def test_capture_writes_fingerprint_file(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        fp = mgr.capture_slot_fingerprint("bob")
+        assert fp is not None
+        fp_path = mgr.fingerprint_path("bob")
+        assert fp_path.exists()
+        payload = json.loads(fp_path.read_text())
+        assert payload["refresh_token_sha256"] == fp
+        assert payload["slot"] == "bob"
+        assert "captured_at" in payload
+
+    def test_capture_returns_none_when_slot_missing(self, mgr: SlotManager) -> None:
+        assert mgr.capture_slot_fingerprint("bob") is None
+        assert not mgr.fingerprint_path("bob").exists()
+
+    def test_capture_overwrites_atomically(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-old")
+        first = mgr.capture_slot_fingerprint("bob")
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-new")
+        second = mgr.capture_slot_fingerprint("bob")
+        assert first is not None and second is not None
+        assert first != second
+        # No leftover .tmp* artifacts
+        leftovers = sorted(p.name for p in mgr.creds_dir.iterdir() if ".tmp" in p.name)
+        assert leftovers == [], f"unexpected tmp files: {leftovers}"
+
+    def test_capture_uses_secure_permissions(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.capture_slot_fingerprint("bob")
+        mode = mgr.fingerprint_path("bob").stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_read_stored_handles_malformed(self, mgr: SlotManager) -> None:
+        mgr.fingerprint_path("bob").write_text("{not json")
+        assert mgr.read_stored_fingerprint("bob") is None
+
+    def test_constructor_validates_fingerprint_template(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="fingerprint_template"):
+            SlotManager(
+                creds_dir=tmp_path,
+                subscriptions=["bob"],
+                fingerprint_template=".bad_template_no_placeholder",
+            )
+
+
+class TestDetectSlotIdentityDrift:
+    """Identity drift detection via stored fingerprints.
+
+    Regression coverage for ErikBjare/bob#769: detects when a slot's
+    refresh token has been silently replaced (e.g. operator wrote a new
+    OAuth credential through the live symlink, landing in the slot file
+    while the live↔slot hashes still match).
+    """
+
+    def test_returns_no_drift_when_fingerprint_matches(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.capture_slot_fingerprint("bob")
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["sub"] == "bob"
+        assert info["stored_fingerprint"] == info["current_fingerprint"]
+        assert "match" in info["reason"].lower()
+
+    def test_detects_identity_drift_in_769_scenario(self, mgr: SlotManager) -> None:
+        """ErikBjare/bob#769 reproduction.
+
+        Bob slot is established with refresh token rt-bob, fingerprint
+        captured. Live symlink points at bob slot. An operator writes
+        Alice's credentials *through* the symlink — the bob slot now
+        contains rt-alice, but the hash-based drift check sees live and
+        slot still match. Identity drift catches it.
+        """
+        # Initial state: bob slot established, symlink + fingerprint captured
+        bob_slot = mgr.slot_path("bob")
+        _write_slot(bob_slot, _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        mgr.capture_slot_fingerprint("bob")
+
+        # Hash drift sees no drift (live == slot, by symlink)
+        legacy = mgr.detect_live_slot_drift()
+        assert legacy is not None and legacy["drift"] is False
+
+        # Operator writes Alice's creds through the live symlink — lands in bob slot
+        mgr.live_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "alice-token",
+                        "refreshToken": "rt-alice",
+                        "expiresAt": _ms_from_now(3600),
+                    }
+                }
+            )
+        )
+
+        # Hash check still misses it (live === slot)
+        legacy2 = mgr.detect_live_slot_drift()
+        assert legacy2 is not None and legacy2["drift"] is False
+
+        # Identity check catches it
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is True
+        assert info["sub"] == "bob"
+        assert info["stored_fingerprint"] != info["current_fingerprint"]
+        assert "refresh token changed" in info["reason"]
+
+    def test_no_drift_when_fingerprint_not_yet_captured(self, mgr: SlotManager) -> None:
+        """Backward-compatible: pre-existing slots without a captured
+        fingerprint must not be reported as drifting (would create
+        false-positives on first deploy)."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["stored_fingerprint"] is None
+        assert info["current_fingerprint"] is not None
+        assert "no fingerprint stored" in info["reason"].lower()
+
+    def test_drift_when_slot_vanishes_after_capture(self, mgr: SlotManager) -> None:
+        """Fingerprint was captured but the slot is now missing/unreadable —
+        treat as identity drift since we cannot verify the slot still holds
+        the expected token."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.capture_slot_fingerprint("bob")
+        mgr.slot_path("bob").unlink()
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is True
+        assert info["stored_fingerprint"] is not None
+        assert info["current_fingerprint"] is None
+        assert (
+            "missing" in info["reason"].lower()
+            or "cannot verify" in info["reason"].lower()
+        )
+
+    def test_no_drift_when_slot_missing_and_no_fingerprint(
+        self, mgr: SlotManager
+    ) -> None:
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["stored_fingerprint"] is None
+        assert info["current_fingerprint"] is None
+
+    def test_unknown_subscription_returns_no_drift(self, mgr: SlotManager) -> None:
+        info = mgr.detect_slot_identity_drift("not-a-real-sub")
+        assert info["drift"] is False
+        assert "unknown subscription" in info["reason"]
+
+    def test_switch_to_auto_captures_fingerprint(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        assert not mgr.fingerprint_path("bob").exists()
+        result = mgr.switch_to("bob", "initial")
+        assert result.ok is True
+        assert mgr.fingerprint_path("bob").exists()
+        # Subsequent identity check sees no drift
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+
+    def test_heal_drift_to_auto_captures_fingerprint(self, mgr: SlotManager) -> None:
+        # Set up drift state: live file is a regular file (no symlink),
+        # slot file is older with different refresh token
+        live = mgr.live_path
+        live.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "fresh",
+                        "refreshToken": "rt-new",
+                        "expiresAt": _ms_from_now(3600),
+                    }
+                }
+            )
+        )
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(60), refresh_token="rt-old")
+
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True, result.reason
+        assert mgr.fingerprint_path("bob").exists()
+        # Fingerprint reflects the *new* token now in the slot
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["current_fingerprint"] == compute_slot_fingerprint(
+            mgr.slot_path("bob")
+        )
+
+    def test_typed_dict_shape(self, mgr: SlotManager) -> None:
+        """IdentityDriftInfo has the documented fields."""
+        info: IdentityDriftInfo = mgr.detect_slot_identity_drift("bob")
+        assert set(info.keys()) == {
+            "drift",
+            "sub",
+            "stored_fingerprint",
+            "current_fingerprint",
+            "reason",
+        }
