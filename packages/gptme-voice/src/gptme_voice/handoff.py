@@ -29,6 +29,7 @@ import hmac
 import json
 import os
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -358,6 +359,81 @@ class HandoffWriter:
         return PublishedHandoff(path=path, payload=payload)
 
 
+class HandoffHubWriter:
+    """HTTP hub variant of HandoffWriter: signs a payload and POSTs it to a hub endpoint.
+
+    The hub accepts the signed payload at ``POST /api/v1/handoffs/start`` and
+    manages the state machine server-side.  Use this when the shared filesystem
+    is not available and agents coordinate via the HTTP hub instead.
+    """
+
+    def __init__(
+        self,
+        hub_url: str,
+        *,
+        bearer_token: str,
+        from_agent: str,
+        secret: bytes,
+    ) -> None:
+        if from_agent not in VALID_AGENTS:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        if not secret:
+            raise ValueError("secret must be non-empty bytes")
+        self.hub_url = hub_url.rstrip("/")
+        self.bearer_token = bearer_token
+        self.from_agent = from_agent
+        self.secret = secret
+
+    def initiate(
+        self,
+        *,
+        to_agent: str,
+        caller_id: str,
+        reason: str,
+        transcript: list[dict[str, Any]] | None = None,
+        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+        extra: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> PublishedHandoff:
+        """Build a signed handoff and POST it to the hub.
+
+        Returns a ``PublishedHandoff`` where ``path`` is ``Path(handoff_id)``
+        (the hub-assigned ID) and ``payload`` is the original signed payload.
+
+        Raises ``urllib.error.HTTPError`` for 4xx/5xx hub responses, and
+        ``RuntimeError`` if the hub rejects the payload (422).
+        """
+        payload = build_handoff(
+            from_agent=self.from_agent,
+            to_agent=to_agent,
+            caller_id=caller_id,
+            reason=reason,
+            secret=self.secret,
+            transcript=transcript,
+            ttl_seconds=ttl_seconds,
+            now=now,
+            extra=extra,
+        )
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        req = urllib.request.Request(
+            f"{self.hub_url}/api/v1/handoffs/start",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.bearer_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            resp_body = json.loads(resp.read())
+        if resp_body.get("status") == "rejected":
+            raise RuntimeError(
+                f"Hub rejected handoff: {resp_body.get('reason', 'unknown')}"
+            )
+        handoff_id = str(resp_body["handoff_id"])
+        return PublishedHandoff(path=Path(handoff_id), payload=payload)
+
+
 def archive_filename(
     payload: dict[str, Any], *, completed_at: float | None = None
 ) -> str:
@@ -374,6 +450,7 @@ __all__ = [
     "REQUIRED_FIELDS",
     "STATE_SUBDIRS",
     "VALID_AGENTS",
+    "HandoffHubWriter",
     "HandoffWriter",
     "PublishedHandoff",
     "ValidationResult",
