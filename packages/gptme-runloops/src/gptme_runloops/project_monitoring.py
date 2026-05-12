@@ -247,11 +247,9 @@ class ProjectMonitoringRun(BaseRunLoop):
             prs = json.loads(result.stdout)
 
             for pr in prs:
-                # Skip draft PRs — they're not on the merge path
-                if pr.get("isDraft"):
-                    continue
                 pr_number = pr["number"]
                 updated_at = pr["updatedAt"]
+                is_draft = bool(pr.get("isDraft"))
                 state_file = (
                     self.state_dir / f"{repo.replace('/', '-')}-pr-{pr_number}.state"
                 )
@@ -278,14 +276,19 @@ class ProjectMonitoringRun(BaseRunLoop):
                         state_file.write_text(updated_at)
 
                         branch_name = pr.get("headRefName", "unknown")
+                        draft_note = (
+                            "\n  - **Draft**: yes — promote to ready or address the gap blocking promotion"
+                            if is_draft
+                            else ""
+                        )
                         work_items.append(
                             WorkItem(
                                 repo=repo,
                                 item_type="pr_update",
                                 number=pr_number,
-                                title=pr["title"],
+                                title=("[DRAFT] " if is_draft else "") + pr["title"],
                                 url=pr["url"],
-                                details=f"PR #{pr_number} updated: {updated_at}\n  - **Branch**: `{branch_name}` (push to this branch!)",
+                                details=f"PR #{pr_number} updated: {updated_at}\n  - **Branch**: `{branch_name}` (push to this branch!){draft_note}",
                             )
                         )
 

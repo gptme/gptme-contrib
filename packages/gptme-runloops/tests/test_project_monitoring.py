@@ -388,6 +388,70 @@ def test_check_pr_updates_no_change(mock_run, workspace):
 
 
 @patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_check_pr_updates_surfaces_draft(mock_run, workspace):
+    """Draft PRs authored by self should still surface as pr_update items.
+
+    Regression: prior behavior skipped drafts entirely, so a Bob-authored draft
+    PR was invisible to monitoring until manually promoted. Erik flagged this
+    on gptme/gptme#2390.
+    """
+    pr_data = json.dumps(
+        [
+            {
+                "number": 999,
+                "title": "WIP: thing",
+                "updatedAt": "2026-05-12T20:17:24Z",
+                "url": "https://github.com/gptme/gptme/pull/999",
+                "headRefName": "wip-thing",
+                "isDraft": True,
+            }
+        ]
+    )
+    mock_run.return_value = MagicMock(returncode=0, stdout=pr_data, stderr="")
+
+    run = ProjectMonitoringRun(workspace)
+    work_items = run.check_pr_updates("gptme/gptme")
+
+    assert len(work_items) == 1
+    item = work_items[0]
+    assert item.item_type == "pr_update"
+    assert item.number == 999
+    assert item.title.startswith("[DRAFT] ")
+    assert "Draft" in item.details
+
+    # Second call with same timestamp: state written, no duplicate surfaced
+    work_items = run.check_pr_updates("gptme/gptme")
+    assert len(work_items) == 0
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_check_ci_failures_still_skips_drafts(mock_run, workspace):
+    """CI-failure path should keep skipping drafts.
+
+    Drafts often have intentionally-broken CI during early development;
+    chasing CI fixes on parked work is the failure mode that the original
+    skip (commit 91a8ca5) addressed. Only the pr_update path changed.
+    """
+    pr_data = json.dumps(
+        [
+            {
+                "number": 999,
+                "title": "WIP: thing",
+                "url": "https://github.com/gptme/gptme/pull/999",
+                "statusCheckRollup": [{"conclusion": "FAILURE"}],
+                "isDraft": True,
+            }
+        ]
+    )
+    mock_run.return_value = MagicMock(returncode=0, stdout=pr_data, stderr="")
+
+    run = ProjectMonitoringRun(workspace)
+    work_items = run.check_ci_failures("gptme/gptme")
+
+    assert work_items == []
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_ci_failures(mock_run, workspace):
     """Test detecting CI failures."""
     # Mock gh pr list response with failing checks
