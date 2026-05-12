@@ -394,6 +394,7 @@ class HandoffHubWriter:
         ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         extra: dict[str, Any] | None = None,
         now: datetime | None = None,
+        timeout: float = 10.0,
     ) -> PublishedHandoff:
         """Build a signed handoff and POST it to the hub.
 
@@ -401,7 +402,8 @@ class HandoffHubWriter:
         (the hub-assigned ID) and ``payload`` is the original signed payload.
 
         Raises ``urllib.error.HTTPError`` for 4xx/5xx hub responses, and
-        ``RuntimeError`` if the hub rejects the payload (422).
+        ``RuntimeError`` if the hub returns a 2xx response with
+        ``status=rejected`` or without a ``handoff_id`` field.
         """
         payload = build_handoff(
             from_agent=self.from_agent,
@@ -424,14 +426,18 @@ class HandoffHubWriter:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp_body = json.loads(resp.read())
         if resp_body.get("status") == "rejected":
             raise RuntimeError(
                 f"Hub rejected handoff: {resp_body.get('reason', 'unknown')}"
             )
-        handoff_id = str(resp_body["handoff_id"])
-        return PublishedHandoff(path=Path(handoff_id), payload=payload)
+        raw_id = resp_body.get("handoff_id")
+        if raw_id is None:
+            raise RuntimeError(
+                f"Hub response missing 'handoff_id' field: {resp_body!r}"
+            )
+        return PublishedHandoff(path=Path(str(raw_id)), payload=payload)
 
 
 def archive_filename(
