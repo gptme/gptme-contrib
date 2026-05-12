@@ -454,8 +454,10 @@ class SlotManager:
         fp_path = self.fingerprint_path(sub)
         tmp = fp_path.with_suffix(fp_path.suffix + f".tmp{os.getpid()}")
         try:
-            tmp.write_text(json.dumps(payload, sort_keys=True))
-            os.chmod(tmp, 0o600)
+            # Create at 0o600 from the start — no world-readable window before chmod
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(payload, sort_keys=True))
             os.replace(tmp, fp_path)
         except BaseException:
             tmp.unlink(missing_ok=True)
