@@ -15,10 +15,12 @@ from gptme_voice.realtime.server import (
     RecentCallRecord,
     TranscriptTurn,
     VoiceServer,
+    _assistant_committed_hangup,
     _build_caller_instructions,
     _build_resume_instructions,
     _get_twilio_field,
     _lookup_caller_identity,
+    _should_trigger_hangup_transcript_fallback,
     _truncate_resume_transcript,
 )
 
@@ -33,6 +35,15 @@ class _DummyWebSocket:
 
     async def send_bytes(self, message: bytes) -> None:
         self.binary_messages.append(message)
+
+
+class _ClosableWebSocket(_DummyWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class _DummyBrowserWebSocket:
@@ -146,6 +157,91 @@ def test_get_twilio_field_falls_back_to_snake_case() -> None:
     payload = {"stream_sid": "legacy"}
 
     assert _get_twilio_field(payload, "streamSid", "stream_sid") == "legacy"
+
+
+def test_assistant_committed_hangup_matches_live_failure_phrases() -> None:
+    assert _assistant_committed_hangup(
+        "You're welcome Erik, have a great day. I'll hang up now."
+    )
+    assert _assistant_committed_hangup(
+        "One moment. I'll call the hangup tool to end the call."
+    )
+    assert _assistant_committed_hangup("One moment. Calling hangup tool now.")
+
+
+def test_assistant_committed_hangup_rejects_conditional_offer() -> None:
+    assert not _assistant_committed_hangup("I can hang up if you'd like.")
+    assert not _assistant_committed_hangup("Would you like me to end the call?")
+
+
+def test_hangup_transcript_fallback_requires_recent_user_end_intent() -> None:
+    assert _should_trigger_hangup_transcript_fallback(
+        [TranscriptTurn(role="user", text="Yeah, thank you. Bye.")],
+        "You're welcome Erik, have a great day. I'll hang up now.",
+    )
+    assert not _should_trigger_hangup_transcript_fallback(
+        [TranscriptTurn(role="user", text="Can you tell me more about the registry?")],
+        "I'll hang up now.",
+    )
+
+
+def test_make_transcript_callbacks_schedule_hangup_fallback_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer()
+    websocket = _ClosableWebSocket()
+    transcript = [TranscriptTurn(role="user", text="Yeah, thank you. Bye.")]
+
+    async def _exercise() -> None:
+        release = asyncio.Event()
+        calls: list[dict[str, object]] = []
+
+        async def _fake_schedule_hangup(
+            websocket_arg, *, source: str, reason: str | None, call_sid: str | None
+        ) -> None:
+            calls.append(
+                {
+                    "websocket": websocket_arg,
+                    "source": source,
+                    "reason": reason,
+                    "call_sid": call_sid,
+                }
+            )
+            await release.wait()
+
+        monkeypatch.setattr(server, "_schedule_hangup", _fake_schedule_hangup)
+        on_ai_transcript, _on_user_transcript, _on_hangup = (
+            server._make_transcript_callbacks(
+                transcript=transcript,
+                websocket=websocket,
+                source="twilio",
+                call_sid="CA123",
+            )
+        )
+
+        await on_ai_transcript(
+            "You're welcome Erik, have a great day. I'll hang up now."
+        )
+        await asyncio.sleep(0)
+        await on_ai_transcript("One moment. Calling hangup tool now.")
+        await asyncio.sleep(0)
+
+        assert transcript[-1].text == "One moment. Calling hangup tool now."
+        assert calls == [
+            {
+                "websocket": websocket,
+                "source": "twilio:transcript-fallback",
+                "reason": (
+                    "assistant said: You're welcome Erik, have a great day. "
+                    "I'll hang up now."
+                ),
+                "call_sid": "CA123",
+            }
+        ]
+        release.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
 
 
 def test_send_to_twilio_uses_stream_sid_field_name() -> None:

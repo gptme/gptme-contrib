@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -100,11 +101,45 @@ def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
         logger.warning("Transcript promotion failed (network): %s", exc)
 
 
-# Delay before actually closing the WebSocket after the model requests hangup,
-# so the goodbye utterance has time to reach the caller.
-_HANGUP_FAREWELL_DELAY_SECONDS = 5.0
+# Brief pause so any queued farewell audio still reaches the caller.
+# The old 5.0s delay was a problem because it kept the call accepting audio
+# long after the model said goodbye. The real termination now happens via the
+# Twilio REST API (calls.update(status='completed')), so the WebSocket close
+# delay only needs to be long enough for buffered audio to drain.
+_HANGUP_FAREWELL_DELAY_SECONDS = 0.5
 _CALL_END_DRAIN_TIMEOUT_SECONDS = 1.5
 _CALL_END_IDLE_TIMEOUT_SECONDS = 0.25
+_USER_HANGUP_INTENT_RE = re.compile(
+    r"\b(?:bye|goodbye|hang\s*up|end(?:ing)?\s+(?:the\s+)?call|disconnect)\b",
+    re.IGNORECASE,
+)
+_ASSISTANT_HANGUP_COMMIT_RE = re.compile(
+    r"(?:"
+    r"\bi(?:'ll| will)\s+(?:hang\s*up|end(?:\s+the)?\s+call)"
+    r"(?:\s+(?:now|shortly|right now))?\b"
+    r"|"
+    r"\bi(?:'ll| will)\s+call\s+the\s+hangup\s+tool"
+    r"(?:\s+to\s+end\s+the\s+call)?(?:\s+(?:now|right now))?\b"
+    r"|"
+    r"\bcalling\s+hangup\s+tool\s+now\b"
+    r"|"
+    r"\bending\s+(?:the\s+)?call\s+now\b"
+    r")",
+    re.IGNORECASE,
+)
+_ASSISTANT_HANGUP_DISQUALIFIERS_RE = re.compile(
+    r"\b(?:"
+    r"would you like|"
+    r"if you'd like|"
+    r"if you would like|"
+    r"if you want|"
+    r"can hang up|"
+    r"could hang up|"
+    r"should i hang up|"
+    r"shall i hang up"
+    r")\b|\?",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -344,6 +379,44 @@ def _append_transcript_turn(
     cleaned = text.strip()
     if cleaned:
         transcript.append(TranscriptTurn(role=role, text=cleaned))
+
+
+def _normalize_transcript_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _user_requested_hangup(text: str) -> bool:
+    return bool(_USER_HANGUP_INTENT_RE.search(_normalize_transcript_text(text)))
+
+
+def _assistant_committed_hangup(text: str) -> bool:
+    normalized = _normalize_transcript_text(text)
+    if _ASSISTANT_HANGUP_DISQUALIFIERS_RE.search(normalized):
+        return False
+    return bool(_ASSISTANT_HANGUP_COMMIT_RE.search(normalized))
+
+
+def _recent_user_requested_hangup(
+    transcript: list[TranscriptTurn], *, max_user_turns: int = 3
+) -> bool:
+    seen_user_turns = 0
+    for turn in reversed(transcript):
+        if turn.role != "user":
+            continue
+        seen_user_turns += 1
+        if _user_requested_hangup(turn.text):
+            return True
+        if seen_user_turns >= max_user_turns:
+            break
+    return False
+
+
+def _should_trigger_hangup_transcript_fallback(
+    transcript: list[TranscriptTurn], assistant_text: str
+) -> bool:
+    return _assistant_committed_hangup(
+        assistant_text
+    ) and _recent_user_requested_hangup(transcript)
 
 
 def _format_transcript(transcript: list[TranscriptTurn]) -> str:
@@ -1445,12 +1518,14 @@ class VoiceServer:
                         return _on_audio
 
                     on_audio = _make_on_audio(stream_sid)
-
-                    def on_ai_transcript(text: str) -> None:
-                        _append_transcript_turn(transcript, "assistant", text)
-
-                    def on_user_transcript(text: str) -> None:
-                        _append_transcript_turn(transcript, "user", text)
+                    on_ai_transcript, on_user_transcript, _twilio_hangup = (
+                        self._make_transcript_callbacks(
+                            transcript=transcript,
+                            websocket=websocket,
+                            source="twilio",
+                            call_sid=call_sid,
+                        )
+                    )
 
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
@@ -1492,17 +1567,6 @@ class VoiceServer:
 
                     # Wire tool bridge BEFORE connect/activate so on_function_call
                     # is set when the initial greeting response fires.
-                    hangup_ws = websocket
-                    hangup_call_sid = call_sid
-
-                    async def _twilio_hangup(reason: str | None) -> None:
-                        await self._schedule_hangup(
-                            hangup_ws,
-                            source="twilio",
-                            reason=reason,
-                            call_sid=hangup_call_sid,
-                        )
-
                     tool_bridge = GptmeToolBridge(
                         workspace=self.workspace,
                         on_result=realtime_client.inject_message,
@@ -1619,6 +1683,55 @@ class VoiceServer:
             **kwargs,
         )
 
+    def _make_transcript_callbacks(
+        self,
+        *,
+        transcript: list[TranscriptTurn],
+        websocket,
+        source: str,
+        call_sid: str | None,
+    ):
+        hangup_task: asyncio.Task[None] | None = None
+
+        def _request_hangup(trigger: str, reason: str | None) -> None:
+            nonlocal hangup_task
+            if hangup_task is not None and not hangup_task.done():
+                logger.info(
+                    "Ignoring duplicate hangup request: source=%s trigger=%s call_sid=%s",
+                    source,
+                    trigger,
+                    call_sid,
+                )
+                return
+            hangup_task = asyncio.create_task(
+                self._schedule_hangup(
+                    websocket,
+                    source=f"{source}:{trigger}",
+                    reason=reason,
+                    call_sid=call_sid,
+                )
+            )
+
+        async def _on_hangup(reason: str | None) -> None:
+            _request_hangup("tool", reason)
+
+        async def _on_ai_transcript(text: str) -> None:
+            _append_transcript_turn(transcript, "assistant", text)
+            if _should_trigger_hangup_transcript_fallback(transcript, text):
+                logger.warning(
+                    "Assistant committed to hanging up without tool; scheduling transcript fallback: %s",
+                    text,
+                )
+                _request_hangup(
+                    "transcript-fallback",
+                    f"assistant said: {text[:120]}",
+                )
+
+        def _on_user_transcript(text: str) -> None:
+            _append_transcript_turn(transcript, "user", text)
+
+        return _on_ai_transcript, _on_user_transcript, _on_hangup
+
     async def handle_local_websocket(self, websocket):
         """
         Handle WebSocket connection for local testing.
@@ -1640,26 +1753,21 @@ class VoiceServer:
                 handoff_id=handoff_id,
             )
             session_cfg = self._build_session_config(instructions=instructions)
+            on_ai_transcript, on_user_transcript, _local_hangup = (
+                self._make_transcript_callbacks(
+                    transcript=transcript,
+                    websocket=websocket,
+                    source="local",
+                    call_sid=None,
+                )
+            )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
                 on_audio_end=lambda: self._send_local_audio_end(websocket),
-                on_ai_transcript=lambda text: _append_transcript_turn(
-                    transcript, "assistant", text
-                ),
-                on_user_transcript=lambda text: _append_transcript_turn(
-                    transcript, "user", text
-                ),
+                on_ai_transcript=on_ai_transcript,
+                on_user_transcript=on_user_transcript,
             )
-            local_ws = websocket
-
-            async def _local_hangup(reason: str | None) -> None:
-                await self._schedule_hangup(
-                    local_ws,
-                    source="local",
-                    reason=reason,
-                    call_sid=None,
-                )
 
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
@@ -1733,26 +1841,21 @@ class VoiceServer:
                 handoff_id=handoff_id,
             )
             session_cfg = self._build_session_config(instructions=instructions)
+            on_ai_transcript, on_user_transcript, _browser_hangup = (
+                self._make_transcript_callbacks(
+                    transcript=transcript,
+                    websocket=websocket,
+                    source="browser",
+                    call_sid=None,
+                )
+            )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_browser_audio(websocket, audio),
                 on_audio_end=lambda: self._send_browser_audio_end(websocket),
-                on_ai_transcript=lambda text: _append_transcript_turn(
-                    transcript, "assistant", text
-                ),
-                on_user_transcript=lambda text: _append_transcript_turn(
-                    transcript, "user", text
-                ),
+                on_ai_transcript=on_ai_transcript,
+                on_user_transcript=on_user_transcript,
             )
-            browser_ws = websocket
-
-            async def _browser_hangup(reason: str | None) -> None:
-                await self._schedule_hangup(
-                    browser_ws,
-                    source="browser",
-                    reason=reason,
-                    call_sid=None,
-                )
 
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
@@ -1840,6 +1943,11 @@ class VoiceServer:
         ``async for`` and falls through to the ``finally`` block, which runs
         the normal ``_on_call_end`` teardown (post-call hook, transcript
         persistence, resume record).
+
+        For Twilio calls, also fires the REST API ``calls.update(status='completed')``
+        as the authoritative kill — closing the WebSocket alone does NOT terminate
+        the Twilio call at the platform level, which is why calls could continue
+        long after the hangup tool was invoked.
         """
         logger.info(
             "Hangup scheduled: source=%s call_sid=%s reason=%s",
@@ -1847,10 +1955,37 @@ class VoiceServer:
             call_sid,
             reason or "<none>",
         )
+
+        # Fire-and-forget Twilio REST API call termination (authoritative kill).
+        # Do this BEFORE the farewell delay so the call stops accepting audio
+        # from the caller immediately — the farewell utterance was already sent
+        # by the model before it called the hangup tool.
+        twilio_account_sid = _get_config_env("TWILIO_ACCOUNT_SID")
+        twilio_auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
+        if call_sid and twilio_account_sid and twilio_auth_token and "twilio" in source:
+            try:
+                from twilio.rest import Client as TwilioClient
+
+                client = TwilioClient(twilio_account_sid, twilio_auth_token)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, lambda: client.calls(call_sid).update(status="completed")
+                )
+                logger.info("Twilio call %s terminated via REST API", call_sid)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to terminate Twilio call %s via REST API: %s",
+                    call_sid,
+                    exc,
+                )
+
+        # Brief delay so any buffered farewell audio still plays.
         try:
             await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
         except asyncio.CancelledError:
             raise
+
+        # Close the WebSocket to stop the media stream.
         try:
             await websocket.close()
         except Exception as exc:  # pragma: no cover - defensive
