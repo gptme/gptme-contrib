@@ -101,9 +101,12 @@ def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
         logger.warning("Transcript promotion failed (network): %s", exc)
 
 
-# Delay before actually closing the WebSocket after the model requests hangup,
-# so the goodbye utterance has time to reach the caller.
-_HANGUP_FAREWELL_DELAY_SECONDS = 5.0
+# Brief pause so any queued farewell audio still reaches the caller.
+# The old 5.0s delay was a problem because it kept the call accepting audio
+# long after the model said goodbye. The real termination now happens via the
+# Twilio REST API (calls.update(status='completed')), so the WebSocket close
+# delay only needs to be long enough for buffered audio to drain.
+_HANGUP_FAREWELL_DELAY_SECONDS = 0.5
 _CALL_END_DRAIN_TIMEOUT_SECONDS = 1.5
 _CALL_END_IDLE_TIMEOUT_SECONDS = 0.25
 _USER_HANGUP_INTENT_RE = re.compile(
@@ -1940,6 +1943,11 @@ class VoiceServer:
         ``async for`` and falls through to the ``finally`` block, which runs
         the normal ``_on_call_end`` teardown (post-call hook, transcript
         persistence, resume record).
+
+        For Twilio calls, also fires the REST API ``calls.update(status='completed')``
+        as the authoritative kill — closing the WebSocket alone does NOT terminate
+        the Twilio call at the platform level, which is why calls could continue
+        long after the hangup tool was invoked.
         """
         logger.info(
             "Hangup scheduled: source=%s call_sid=%s reason=%s",
@@ -1947,10 +1955,34 @@ class VoiceServer:
             call_sid,
             reason or "<none>",
         )
+
+        # Fire-and-forget Twilio REST API call termination (authoritative kill).
+        # Do this BEFORE the farewell delay so the call stops accepting audio
+        # from the caller immediately — the farewell utterance was already sent
+        # by the model before it called the hangup tool.
+        twilio_account_sid = _get_config_env("TWILIO_ACCOUNT_SID")
+        twilio_auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
+        if call_sid and twilio_account_sid and twilio_auth_token and "twilio" in source:
+            try:
+                from twilio.rest import Client as TwilioClient
+
+                client = TwilioClient(twilio_account_sid, twilio_auth_token)
+                client.calls(call_sid).update(status="completed")
+                logger.info("Twilio call %s terminated via REST API", call_sid)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to terminate Twilio call %s via REST API: %s",
+                    call_sid,
+                    exc,
+                )
+
+        # Brief delay so any buffered farewell audio still plays.
         try:
-            await asyncio.sleep(_HANGUP_FAREWELL_DELAY_SECONDS)
+            await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
+
+        # Close the WebSocket to stop the media stream.
         try:
             await websocket.close()
         except Exception as exc:  # pragma: no cover - defensive
