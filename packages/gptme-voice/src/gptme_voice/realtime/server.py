@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -105,6 +106,37 @@ def _http_post_sync(url: str, payload: bytes, api_key: str) -> None:
 _HANGUP_FAREWELL_DELAY_SECONDS = 5.0
 _CALL_END_DRAIN_TIMEOUT_SECONDS = 1.5
 _CALL_END_IDLE_TIMEOUT_SECONDS = 0.25
+_USER_HANGUP_INTENT_RE = re.compile(
+    r"\b(?:bye|goodbye|hang\s*up|end(?:ing)?\s+(?:the\s+)?call|disconnect)\b",
+    re.IGNORECASE,
+)
+_ASSISTANT_HANGUP_COMMIT_RE = re.compile(
+    r"(?:"
+    r"\bi(?:'ll| will)\s+(?:hang\s*up|end(?:\s+the)?\s+call)"
+    r"(?:\s+(?:now|shortly|right now))?\b"
+    r"|"
+    r"\bi(?:'ll| will)\s+call\s+the\s+hangup\s+tool"
+    r"(?:\s+to\s+end\s+the\s+call)?(?:\s+(?:now|right now))?\b"
+    r"|"
+    r"\bcalling\s+hangup\s+tool\s+now\b"
+    r"|"
+    r"\bending\s+(?:the\s+)?call\s+now\b"
+    r")",
+    re.IGNORECASE,
+)
+_ASSISTANT_HANGUP_DISQUALIFIERS_RE = re.compile(
+    r"\b(?:"
+    r"would you like|"
+    r"if you'd like|"
+    r"if you would like|"
+    r"if you want|"
+    r"can hang up|"
+    r"could hang up|"
+    r"should i hang up|"
+    r"shall i hang up"
+    r")\b|\?",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -344,6 +376,44 @@ def _append_transcript_turn(
     cleaned = text.strip()
     if cleaned:
         transcript.append(TranscriptTurn(role=role, text=cleaned))
+
+
+def _normalize_transcript_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _user_requested_hangup(text: str) -> bool:
+    return bool(_USER_HANGUP_INTENT_RE.search(_normalize_transcript_text(text)))
+
+
+def _assistant_committed_hangup(text: str) -> bool:
+    normalized = _normalize_transcript_text(text)
+    if _ASSISTANT_HANGUP_DISQUALIFIERS_RE.search(normalized):
+        return False
+    return bool(_ASSISTANT_HANGUP_COMMIT_RE.search(normalized))
+
+
+def _recent_user_requested_hangup(
+    transcript: list[TranscriptTurn], *, max_user_turns: int = 3
+) -> bool:
+    seen_user_turns = 0
+    for turn in reversed(transcript):
+        if turn.role != "user":
+            continue
+        seen_user_turns += 1
+        if _user_requested_hangup(turn.text):
+            return True
+        if seen_user_turns >= max_user_turns:
+            break
+    return False
+
+
+def _should_trigger_hangup_transcript_fallback(
+    transcript: list[TranscriptTurn], assistant_text: str
+) -> bool:
+    return _assistant_committed_hangup(
+        assistant_text
+    ) and _recent_user_requested_hangup(transcript)
 
 
 def _format_transcript(transcript: list[TranscriptTurn]) -> str:
@@ -1445,12 +1515,14 @@ class VoiceServer:
                         return _on_audio
 
                     on_audio = _make_on_audio(stream_sid)
-
-                    def on_ai_transcript(text: str) -> None:
-                        _append_transcript_turn(transcript, "assistant", text)
-
-                    def on_user_transcript(text: str) -> None:
-                        _append_transcript_turn(transcript, "user", text)
+                    on_ai_transcript, on_user_transcript, _twilio_hangup = (
+                        self._make_transcript_callbacks(
+                            transcript=transcript,
+                            websocket=websocket,
+                            source="twilio",
+                            call_sid=call_sid,
+                        )
+                    )
 
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
@@ -1492,17 +1564,6 @@ class VoiceServer:
 
                     # Wire tool bridge BEFORE connect/activate so on_function_call
                     # is set when the initial greeting response fires.
-                    hangup_ws = websocket
-                    hangup_call_sid = call_sid
-
-                    async def _twilio_hangup(reason: str | None) -> None:
-                        await self._schedule_hangup(
-                            hangup_ws,
-                            source="twilio",
-                            reason=reason,
-                            call_sid=hangup_call_sid,
-                        )
-
                     tool_bridge = GptmeToolBridge(
                         workspace=self.workspace,
                         on_result=realtime_client.inject_message,
@@ -1619,6 +1680,55 @@ class VoiceServer:
             **kwargs,
         )
 
+    def _make_transcript_callbacks(
+        self,
+        *,
+        transcript: list[TranscriptTurn],
+        websocket,
+        source: str,
+        call_sid: str | None,
+    ):
+        hangup_task: asyncio.Task[None] | None = None
+
+        def _request_hangup(trigger: str, reason: str | None) -> None:
+            nonlocal hangup_task
+            if hangup_task is not None and not hangup_task.done():
+                logger.info(
+                    "Ignoring duplicate hangup request: source=%s trigger=%s call_sid=%s",
+                    source,
+                    trigger,
+                    call_sid,
+                )
+                return
+            hangup_task = asyncio.create_task(
+                self._schedule_hangup(
+                    websocket,
+                    source=f"{source}:{trigger}",
+                    reason=reason,
+                    call_sid=call_sid,
+                )
+            )
+
+        async def _on_hangup(reason: str | None) -> None:
+            _request_hangup("tool", reason)
+
+        async def _on_ai_transcript(text: str) -> None:
+            _append_transcript_turn(transcript, "assistant", text)
+            if _should_trigger_hangup_transcript_fallback(transcript, text):
+                logger.warning(
+                    "Assistant committed to hanging up without tool; scheduling transcript fallback: %s",
+                    text,
+                )
+                _request_hangup(
+                    "transcript-fallback",
+                    f"assistant said: {text[:120]}",
+                )
+
+        def _on_user_transcript(text: str) -> None:
+            _append_transcript_turn(transcript, "user", text)
+
+        return _on_ai_transcript, _on_user_transcript, _on_hangup
+
     async def handle_local_websocket(self, websocket):
         """
         Handle WebSocket connection for local testing.
@@ -1640,26 +1750,21 @@ class VoiceServer:
                 handoff_id=handoff_id,
             )
             session_cfg = self._build_session_config(instructions=instructions)
+            on_ai_transcript, on_user_transcript, _local_hangup = (
+                self._make_transcript_callbacks(
+                    transcript=transcript,
+                    websocket=websocket,
+                    source="local",
+                    call_sid=None,
+                )
+            )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_local_audio(websocket, audio),
                 on_audio_end=lambda: self._send_local_audio_end(websocket),
-                on_ai_transcript=lambda text: _append_transcript_turn(
-                    transcript, "assistant", text
-                ),
-                on_user_transcript=lambda text: _append_transcript_turn(
-                    transcript, "user", text
-                ),
+                on_ai_transcript=on_ai_transcript,
+                on_user_transcript=on_user_transcript,
             )
-            local_ws = websocket
-
-            async def _local_hangup(reason: str | None) -> None:
-                await self._schedule_hangup(
-                    local_ws,
-                    source="local",
-                    reason=reason,
-                    call_sid=None,
-                )
 
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
@@ -1733,26 +1838,21 @@ class VoiceServer:
                 handoff_id=handoff_id,
             )
             session_cfg = self._build_session_config(instructions=instructions)
+            on_ai_transcript, on_user_transcript, _browser_hangup = (
+                self._make_transcript_callbacks(
+                    transcript=transcript,
+                    websocket=websocket,
+                    source="browser",
+                    call_sid=None,
+                )
+            )
             realtime_client = self._make_client(
                 session_cfg,
                 on_audio=lambda audio: self._send_browser_audio(websocket, audio),
                 on_audio_end=lambda: self._send_browser_audio_end(websocket),
-                on_ai_transcript=lambda text: _append_transcript_turn(
-                    transcript, "assistant", text
-                ),
-                on_user_transcript=lambda text: _append_transcript_turn(
-                    transcript, "user", text
-                ),
+                on_ai_transcript=on_ai_transcript,
+                on_user_transcript=on_user_transcript,
             )
-            browser_ws = websocket
-
-            async def _browser_hangup(reason: str | None) -> None:
-                await self._schedule_hangup(
-                    browser_ws,
-                    source="browser",
-                    reason=reason,
-                    call_sid=None,
-                )
 
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
