@@ -25,6 +25,7 @@ from gptme_sessions.judge import (
     _resolve_openrouter_api_key,
     _is_anthropic_direct_model,
     _strip_anthropic_prefix,
+    format_routing_context,
     judge_and_writeback,
     judge_from_signals,
     judge_session,
@@ -80,6 +81,7 @@ class TestJudgeSession:
         prompt = JUDGE_PROMPT_TEMPLATE.format(
             goals="Test goals",
             category="code",
+            routing_context="",
             journal="Did some work",
         )
         assert "Test goals" in prompt
@@ -100,6 +102,7 @@ class TestJudgeSession:
         prompt = JUDGE_PROMPT_TEMPLATE.format(
             goals="Test goals",
             category="infrastructure",
+            routing_context="",
             journal="Reduced future friction",
         )
         assert "Category Interpretation" in prompt
@@ -167,6 +170,97 @@ class TestJudgeSession:
         """Default goals should work for any agent, not just Bob."""
         assert "Bob" not in DEFAULT_GOALS
         assert "agent" in DEFAULT_GOALS.lower()
+
+    def test_format_routing_context_returns_empty_when_unset(self) -> None:
+        """No cascade_context => no Routing Context block (back-compat)."""
+        assert format_routing_context(None) == ""
+        assert format_routing_context({}) == ""
+
+    def test_format_routing_context_ignores_tier1_and_tier2(self) -> None:
+        """Tier 1/2 routing is itself top-priority work; no adjustment block."""
+        assert format_routing_context({"tier": 1, "blocked_tier1_2_count": 0}) == ""
+        assert format_routing_context({"tier": 2, "blocked_tier1_2_count": 0}) == ""
+        # Junk types should also degrade safely.
+        assert format_routing_context({"tier": "tier3"}) == ""
+
+    def test_format_routing_context_renders_for_tier3(self) -> None:
+        """Tier 3 with cascade evidence => routing block with summary lines."""
+        block = format_routing_context(
+            {
+                "tier": 3,
+                "blocked_tier1_2_count": 47,
+                "selector_reason": "Cleanup neglected boost suppressed",
+            }
+        )
+        assert "## Routing Context" in block
+        assert "Tier 3" in block
+        assert "47" in block
+        assert "Cleanup neglected boost suppressed" in block
+
+    def test_format_routing_context_truncates_long_reason(self) -> None:
+        """Selector reason is bounded so it can't dominate the prompt."""
+        block = format_routing_context({"tier": 3, "selector_reason": "x" * 500})
+        # Cap at 200 chars; the raw 500-char string must not appear verbatim.
+        assert "x" * 500 not in block
+        assert "x" * 200 in block
+
+    def test_judge_session_passes_routing_context_into_prompt(self) -> None:
+        """When cascade_context names Tier 3, the prompt carries the block."""
+        captured: dict[str, str] = {}
+
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text='{"score": 0.7, "reason": "OK"}')]
+
+        def _capture_create(**kwargs):
+            # The prompt is the first user message's content
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return mock_response
+
+        mock_anthropic.Anthropic.return_value.messages.create.side_effect = _capture_create
+
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
+        ):
+            result = judge_session(
+                "session text",
+                category="cleanup",
+                cascade_context={"tier": 3, "blocked_tier1_2_count": 30},
+            )
+
+        assert result is not None
+        assert "\n## Routing Context\n" in captured["prompt"]
+        assert "## Routing-Aware Adjustment" in captured["prompt"]
+        # The adjustment instructs the judge to cap the priority penalty.
+        assert "−0.15" in captured["prompt"] or "-0.15" in captured["prompt"]
+
+    def test_judge_session_omits_routing_block_when_no_context(self) -> None:
+        """No cascade_context => the prompt has no Routing Context block."""
+        captured: dict[str, str] = {}
+
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text='{"score": 0.5, "reason": "Mid"}')]
+
+        def _capture_create(**kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return mock_response
+
+        mock_anthropic.Anthropic.return_value.messages.create.side_effect = _capture_create
+
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="test-key"),
+        ):
+            result = judge_session("session text", category="code")
+
+        assert result is not None
+        # The Routing-Aware adjustment text references the block name in
+        # backticks; the actual block header is bare. Look for the header form.
+        assert "\n## Routing Context\n" not in captured["prompt"]
+        # The adjustment paragraph is always rendered (it self-skips when the
+        # block is absent), so we don't assert its presence/absence here.
 
     def test_parse_judge_payload_handles_think_tags_and_fences(self) -> None:
         parsed = _parse_judge_payload(

@@ -69,7 +69,7 @@ JUDGE_PROMPT_TEMPLATE = """\
 
 ## Session Category
 {category}
-
+{routing_context}
 ## Session Journal
 {journal}
 
@@ -101,6 +101,16 @@ Key principle: ONE impactful deliverable > FIVE small deliverables.
 Evaluate impact within the session's category, not the category's intrinsic
 priority.
 
+## Routing-Aware Adjustment
+If a `## Routing Context` block above states the session legitimately
+routed to lower-tier work because higher-tier work was unavailable
+(blocked / waiting / no actionable items), score primarily on execution
+quality within the chosen scope. Do not penalize for non-advancement of
+top-priority goals beyond −0.15 below the execution-quality score: the
+selector — not the agent — decided what was eligible.
+If no `## Routing Context` block is present, ignore this adjustment and
+apply the default rubric.
+
 Return JSON: {{"score": <float>, "reason": "<1 sentence>"}}"""
 
 DEFAULT_GOALS = """\
@@ -109,6 +119,48 @@ The agent is a general-purpose autonomous AI assistant.
 2. Write high-quality code and documentation
 3. Self-improve through lessons and patterns
 4. Contribute to open-source projects"""
+
+
+def format_routing_context(cascade_context: dict | None) -> str:
+    """Render a `## Routing Context` block from a CASCADE selector payload.
+
+    Returns an empty string when ``cascade_context`` is None or doesn't
+    describe a legitimate lower-tier route. The string is plugged into
+    JUDGE_PROMPT_TEMPLATE between Session Category and Session Journal.
+
+    Recognised keys (all optional):
+    - ``tier`` (int): CASCADE tier the selector landed on. 1/2 are
+      ignored (those *are* top-priority work). 3 enables the block.
+    - ``blocked_tier1_2_count`` (int): how many higher-tier tasks were
+      unactionable at selection time.
+    - ``selector_reason`` (str): human-readable selector rationale,
+      typically the top item from cascade_intent["reasons"].
+
+    The block intentionally only fires for Tier 3 + explicit blocked
+    context, so callers without that data degrade to "no adjustment".
+    """
+    if not cascade_context or not isinstance(cascade_context, dict):
+        return ""
+    tier = cascade_context.get("tier")
+    if tier != 3:
+        return ""
+    blocked = cascade_context.get("blocked_tier1_2_count")
+    reason = cascade_context.get("selector_reason") or ""
+    lines = [
+        "",
+        "## Routing Context",
+        "Session legitimately routed to Tier 3 (self-improvement / strategic /",
+        "cleanup / knowledge / research / content / novelty) because higher-tier",
+        "work was unavailable at selection time.",
+    ]
+    if isinstance(blocked, int) and blocked > 0:
+        lines.append(f"- Higher-tier tasks blocked / waiting at selection time: {blocked}")
+    if reason:
+        # Keep selector reasoning short; one line is enough signal for the judge.
+        lines.append(f"- Selector reason: {reason[:200]}")
+    return "\n".join(lines) + "\n"
+
+
 NO_THINK_PREFILL = "<think></think>\n"
 NO_THINK_PREFILL_MODELS = frozenset({"lmstudio/qwen/qwen3.6-35b-a3b"})
 
@@ -411,6 +463,7 @@ def judge_session(
     goals: str = DEFAULT_GOALS,
     model: str = DEFAULT_JUDGE_MODEL,
     api_key: str | None = None,
+    cascade_context: dict | None = None,
 ) -> dict | None:
     """Score a session's strategic value using an LLM judge.
 
@@ -426,6 +479,14 @@ def judge_session(
             installed.
         api_key: Anthropic API key (Anthropic-direct path only). Falls
             back to env/config if not provided.
+        cascade_context: Optional CASCADE selector payload describing
+            which tier the session legitimately routed to. When the
+            payload signals a Tier 3 fallback (higher-tier work was
+            blocked), the prompt instructs the judge to score primarily
+            on execution quality rather than penalize for not advancing
+            top-priority goals. See :func:`format_routing_context` for
+            the recognised keys. Pass ``None`` (default) to keep prompt
+            behaviour unchanged.
 
     Returns:
         Dict with keys ``score`` (float), ``reason`` (str), ``model`` (str),
@@ -441,6 +502,7 @@ def judge_session(
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         goals=goals,
         category=category or "unknown",
+        routing_context=format_routing_context(cascade_context),
         journal=truncated,
     )
 
@@ -457,19 +519,11 @@ def judge_session_with_fallback(
     default_model: str = DEFAULT_JUDGE_MODEL,
     fallback_models: tuple[str, ...] = (),
     api_key: str | None = None,
+    cascade_context: dict | None = None,
 ) -> dict | None:
     """Score a session, trying fallback models if the primary is unavailable.
 
-    Args:
-        journal_text: The session journal/summary text to evaluate.
-        category: Work category (e.g. "code", "triage", "content").
-        goals: Agent goals description (ordered by priority).
-        default_model: Primary judge model. Tried first.
-        fallback_models: Additional models to try in order when the primary fails.
-        api_key: Anthropic API key (Anthropic-direct path only).
-
-    Returns:
-        Dict with keys ``score``, ``reason``, ``model`` or ``None`` if all models fail.
+    See :func:`judge_session` for ``cascade_context`` semantics.
     """
     models_to_try = (default_model, *fallback_models)
     for i, model in enumerate(models_to_try):
@@ -485,6 +539,7 @@ def judge_session_with_fallback(
             goals=goals,
             model=model,
             api_key=api_key,
+            cascade_context=cascade_context,
         )
         if result is not None:
             return result
@@ -605,10 +660,12 @@ def judge_and_writeback(
     model: str = DEFAULT_JUDGE_MODEL,
     fallback_models: tuple[str, ...] = (),
     api_key: str | None = None,
+    cascade_context: dict | None = None,
 ) -> dict[str, Any]:
     """Judge a session and persist the verdict via SessionStore.
 
     If ``fallback_models`` is provided, tries them in order when ``model`` fails.
+    See :func:`judge_session` for ``cascade_context`` semantics.
     """
     if fallback_models:
         verdict = judge_session_with_fallback(
@@ -618,6 +675,7 @@ def judge_and_writeback(
             default_model=model,
             fallback_models=fallback_models,
             api_key=api_key,
+            cascade_context=cascade_context,
         )
     else:
         verdict = judge_session(
@@ -626,6 +684,7 @@ def judge_and_writeback(
             goals=goals,
             model=model,
             api_key=api_key,
+            cascade_context=cascade_context,
         )
     if verdict is None:
         return {"status": "failed"}
