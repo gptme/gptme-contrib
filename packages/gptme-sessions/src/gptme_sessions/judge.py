@@ -153,7 +153,7 @@ def format_routing_context(cascade_context: dict | None) -> str:
         "cleanup / knowledge / research / content / novelty) because higher-tier",
         "work was unavailable at selection time.",
     ]
-    if isinstance(blocked, int) and blocked > 0:
+    if isinstance(blocked, int) and not isinstance(blocked, bool) and blocked > 0:
         lines.append(f"- Higher-tier tasks blocked / waiting at selection time: {blocked}")
     if reason:
         # Keep selector reasoning short; one line is enough signal for the judge.
@@ -523,7 +523,17 @@ def judge_session_with_fallback(
 ) -> dict | None:
     """Score a session, trying fallback models if the primary is unavailable.
 
-    See :func:`judge_session` for ``cascade_context`` semantics.
+    Args:
+        journal_text: The session journal/summary text to evaluate.
+        category: Work category (e.g. "code", "triage", "content").
+        goals: Agent goals description (ordered by priority).
+        default_model: Primary judge model. Tried first.
+        fallback_models: Additional models to try in order when the primary fails.
+        api_key: Anthropic API key (Anthropic-direct path only).
+        cascade_context: Optional CASCADE selector payload. See :func:`judge_session`.
+
+    Returns:
+        Dict with keys ``score``, ``reason``, ``model`` or ``None`` if all models fail.
     """
     models_to_try = (default_model, *fallback_models)
     for i, model in enumerate(models_to_try):

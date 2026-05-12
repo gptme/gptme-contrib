@@ -204,6 +204,13 @@ class TestJudgeSession:
         assert "x" * 500 not in block
         assert "x" * 200 in block
 
+    def test_format_routing_context_rejects_bool_as_blocked_count(self) -> None:
+        """bool is a subclass of int; True should NOT render as blocked count."""
+        block = format_routing_context({"tier": 3, "blocked_tier1_2_count": True})
+        # The bool guard must stop 'True' from appearing in the prompt.
+        assert "True" not in block
+        assert "1" not in block
+
     def test_judge_session_passes_routing_context_into_prompt(self) -> None:
         """When cascade_context names Tier 3, the prompt carries the block."""
         captured: dict[str, str] = {}
