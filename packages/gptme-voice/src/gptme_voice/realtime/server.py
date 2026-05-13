@@ -118,10 +118,10 @@ _ASSISTANT_HANGUP_COMMIT_RE = re.compile(
     r"\bi(?:'ll| will)\s+(?:hang\s*up|end(?:\s+the)?\s+call)"
     r"(?:\s+(?:now|shortly|right now))?\b"
     r"|"
-    r"\bi(?:'ll| will)\s+call\s+the\s+hangup\s+tool"
+    r"\bi(?:'ll| will)\s+(?:call|use)\s+the\s+hangup\s+tool"
     r"(?:\s+to\s+end\s+the\s+call)?(?:\s+(?:now|right now))?\b"
     r"|"
-    r"\bcalling\s+hangup\s+tool\s+now\b"
+    r"\b(?:calling|using)\s+hangup\s+tool\s+now\b"
     r"|"
     r"\bending\s+(?:the\s+)?call\s+now\b"
     r")",
