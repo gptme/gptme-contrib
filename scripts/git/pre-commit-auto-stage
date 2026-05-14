@@ -104,6 +104,14 @@ while IFS= read -r line; do
   ORIGINALLY_STAGED_FILES+=("$line")
 done < <(git diff --cached --name-only --diff-filter=ACM)
 
+staged_snapshot_for_original_files() {
+  if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  git ls-files -s -- "${ORIGINALLY_STAGED_FILES[@]}" 2>/dev/null || true
+}
+
 run_precommit() {
   if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then
     "$PRECOMMIT_CMD" run
@@ -111,6 +119,8 @@ run_precommit() {
     "$PRECOMMIT_CMD" run --files "${ORIGINALLY_STAGED_FILES[@]}"
   fi
 }
+
+ORIGINAL_STAGED_SNAPSHOT="$(staged_snapshot_for_original_files)"
 
 set +e
 PRECOMMIT_OUTPUT="$(run_precommit 2>&1)"
@@ -128,6 +138,25 @@ else
   # output above is the remediation surface — don't bury it under a misleading
   # "checking for auto-staging" header.
   if git diff --quiet; then
+    UPDATED_STAGED_SNAPSHOT="$(staged_snapshot_for_original_files)"
+    if [ "$UPDATED_STAGED_SNAPSHOT" != "$ORIGINAL_STAGED_SNAPSHOT" ]; then
+      echo -e "${YELLOW}Pre-commit updated staged files directly, re-running checks...${NC}"
+
+      set +e
+      PRECOMMIT_OUTPUT="$(run_precommit 2>&1)"
+      PRECOMMIT_EXIT=$?
+      set -e
+
+      if [ $PRECOMMIT_EXIT -eq 0 ]; then
+        echo -e "${GREEN}✓ All checks passed after staged-file updates${NC}"
+        exit 0
+      else
+        echo "$PRECOMMIT_OUTPUT"
+        echo -e "${RED}✗ Pre-commit still failing after staged-file updates${NC}"
+        exit 1
+      fi
+    fi
+
     echo -e "${RED}✗ Pre-commit hook failed (no auto-fixable changes)${NC}" >&2
     echo -e "${RED}  See the hook output above for the specific failure and fix.${NC}" >&2
     echo -e "${RED}  To re-run a single hook directly: ${PRECOMMIT_CMD} run --files <path>${NC}" >&2
