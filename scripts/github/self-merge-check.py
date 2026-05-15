@@ -243,7 +243,7 @@ def parse_pr_target(
             if not repo:
                 raise ValueError("--repo is required when PR is given as a number")
             return repo, int(pr)
-        if pr.startswith("http://") or pr.startswith("https://"):
+        if pr.startswith(("http://", "https://")):
             # Strip query string and fragment before parsing (e.g. ?tab=files, #discussion)
             clean_pr = pr.split("?")[0].split("#")[0].rstrip("/")
             parts = clean_pr.split("/")

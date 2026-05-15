@@ -367,10 +367,7 @@ def main() -> None:
 
     # Only load agents config for commands that need remote delivery
     # (list/read work on local inbox — no need to warn about missing agents.yaml)
-    if args.command in ("send", "broadcast", "status"):
-        agents = load_agents()
-    else:
-        agents = {}
+    agents = load_agents() if args.command in ("send", "broadcast", "status") else {}
 
     if args.command == "send":
         success = send_message(
