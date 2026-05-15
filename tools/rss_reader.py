@@ -183,18 +183,16 @@ def search_entries(
     for dt, source, entry in entries:
         match = False
 
-        if field in ("title", "all"):
-            if pattern.search(entry.title):
-                match = True
+        if field in ("title", "all") and pattern.search(entry.title):
+            match = True
 
         if field in ("summary", "all"):
             summary = getattr(entry, "summary", "") or getattr(entry, "description", "")
             if summary and pattern.search(summary):
                 match = True
 
-        if field in ("link", "all"):
-            if pattern.search(entry.link):
-                match = True
+        if field in ("link", "all") and pattern.search(entry.link):
+            match = True
 
         if match:
             filtered.append((dt, source, entry))
@@ -400,7 +398,7 @@ def get_all_tags(config: dict[str, Any]) -> dict[str, list[str]]:
     """
     tag_map: dict[str, list[str]] = {}
 
-    for domain_name, domain_config in config.get("domains", {}).items():
+    for _domain_name, domain_config in config.get("domains", {}).items():
         for source in domain_config.get("sources", []):
             source_name = source["name"]
             keywords = source.get("keywords", [])
@@ -431,7 +429,7 @@ def get_feeds_by_tags(
     feeds: dict[str, str] = {}
     normalized_tags = [t.lower() for t in tags]
 
-    for domain_name, domain_config in config.get("domains", {}).items():
+    for _domain_name, domain_config in config.get("domains", {}).items():
         for source in domain_config.get("sources", []):
             source_name = source["name"]
             source_url = source["url"]
@@ -900,9 +898,8 @@ def discover_feeds(url: str, timeout: int = 10) -> list[str]:
                             "xml" in content_type
                             or "rss" in content_type
                             or "atom" in content_type
-                        ):
-                            if feed_url not in discovered:
-                                discovered.append(feed_url)
+                        ) and feed_url not in discovered:
+                            discovered.append(feed_url)
                 except requests.RequestException:
                     pass  # Skip failed attempts
 
@@ -957,10 +954,7 @@ def format_multi_feed_output(
     dt_entries = []
     for source, entry in all_entries:
         dt = entry.get("updated_parsed") or entry.get("published_parsed")
-        if dt:
-            dt = datetime(*dt[:6])
-        else:
-            dt = datetime.now()
+        dt = datetime(*dt[:6]) if dt else datetime.now()
         dt_entries.append((dt, source, entry))
     dt_entries.sort(key=lambda x: x[0], reverse=True)
 
@@ -1018,7 +1012,7 @@ def format_by_tag_groups(
     """
     # Build source -> tags mapping
     source_tags: dict[str, list[str]] = {}
-    for domain_name, domain_config in config.get("domains", {}).items():
+    for _domain_name, domain_config in config.get("domains", {}).items():
         for source in domain_config.get("sources", []):
             source_name = source["name"]
             keywords = [k.lower() for k in source.get("keywords", [])]
@@ -1029,10 +1023,7 @@ def format_by_tag_groups(
     for source_name, entry in all_entries:
         # Get datetime for entry
         dt = entry.get("updated_parsed") or entry.get("published_parsed")
-        if dt:
-            dt = datetime(*dt[:6])
-        else:
-            dt = datetime.now()
+        dt = datetime(*dt[:6]) if dt else datetime.now()
 
         # Add entry to all tags for this source
         tags = source_tags.get(source_name, ["untagged"])
@@ -1492,7 +1483,7 @@ def main(
 
                     # Convert back to fetched_feeds structure
                     filtered_feeds = {}
-                    for dt, source_name, entry in all_entries:
+                    for _dt, source_name, entry in all_entries:
                         if source_name not in filtered_feeds:
                             # Create a new feed object with filtered entries
                             original_feed = fetched_feeds[source_name]

@@ -63,7 +63,7 @@ import click
 # Silence SyntaxWarning spam from tweepy's invalid escape sequences
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="tweepy")
-    import tweepy  # noqa: E402
+    import tweepy
 
 from dotenv import load_dotenv
 from gptmail.communication_utils.auth import (  # type: ignore[import-not-found]
