@@ -8,16 +8,14 @@ tags:
 match:
   keywords:
   - strategic focus discipline
-  - productivity trap avoidance
   - darwinian trap avoidance
-  - autonomous session planning
-  - strategic work selection
   - "strategic focus"
   - "productivity trap"
   - "darwinian trap"
   - "busy work"
   - "productivity theater"
-  - "low-ROI work"
+  - "anti-monotony guard"
+  - "category_monotony"
   - "idea backlog"
   session_categories: [strategic, self-review]
 status: active
@@ -38,6 +36,8 @@ Observable signals that strategic focus discipline is needed:
 - Completed major deliverables but unclear on next strategic priorities
 - Available time could be spent on optimization vs. strategic advancement
 - Risk of "productivity theater" - appearing busy without strategic progress
+- `anti-monotony guard` suggests the current session is repeating a familiar lane instead of advancing the highest-leverage work
+- `category_monotony` from the work-category bandit indicates repeated work-category selection and should trigger a strategic reset
 
 ## Pattern
 Apply strategic focus discipline throughout autonomous session:
