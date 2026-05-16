@@ -31,6 +31,12 @@ Environment:
                     whitespace-separated. Auto-detected single repo used when
                     unset. Set to empty string to disable the cross-repo
                     restriction entirely.
+    SELF_MERGE_ALLOWED_PATHS
+                    Per-repo path-glob allowlist for files that don't match
+                    the generic self-merge categories. Format:
+                    "owner/repo:path-glob[,owner/repo:path-glob...]".
+                    Uses PurePosixPath.match() semantics (* does NOT cross
+                    directory boundaries; use ** for recursive matching).
 """
 
 from __future__ import annotations
@@ -43,8 +49,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 MAX_GRAPHQL_PAGE_SIZE = 100
@@ -664,7 +669,9 @@ def is_repo_allowlisted_path(
     if not allowlist:
         return False
     normalized = path.replace("\\", "/")
-    return any(fnmatchcase(normalized, pattern) for pattern in allowlist.get(repo, []))
+    return any(
+        PurePosixPath(normalized).match(pattern) for pattern in allowlist.get(repo, [])
+    )
 
 
 def is_sensitive_path(path: str) -> bool:

@@ -592,3 +592,101 @@ def test_check_workspace_repo_not_in_allowlist_disqualifies() -> None:
     assert "some-other/repo" in reasons[0]
     assert "ErikBjare/bob" in reasons[0]
     assert "gptme/gptme" in reasons[0]
+
+
+# --- repo-path allowlist tests ---
+
+
+def test_parse_repo_path_allowlist_space_separated() -> None:
+    result = self_merge_check._parse_repo_path_allowlist(
+        "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py "
+        "OtherOrg/repo:src/*.py"
+    )
+    assert "TimeToBuildBob/whatdidyougetdone" in result
+    assert result["TimeToBuildBob/whatdidyougetdone"] == ["whatdidyougetdone.py"]
+    assert "OtherOrg/repo" in result
+    assert result["OtherOrg/repo"] == ["src/*.py"]
+
+
+def test_parse_repo_path_allowlist_comma_separated() -> None:
+    result = self_merge_check._parse_repo_path_allowlist(
+        "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py,"
+        "OtherOrg/repo:src/*.py"
+    )
+    assert result["TimeToBuildBob/whatdidyougetdone"] == ["whatdidyougetdone.py"]
+    assert result["OtherOrg/repo"] == ["src/*.py"]
+
+
+def test_parse_repo_path_allowlist_empty() -> None:
+    assert self_merge_check._parse_repo_path_allowlist("") == {}
+    assert self_merge_check._parse_repo_path_allowlist(None) == {}
+
+
+def test_parse_repo_path_allowlist_invalid_entries_ignored() -> None:
+    # Entries without a colon or with empty sides are skipped
+    result = self_merge_check._parse_repo_path_allowlist(
+        "just-plain-text :orphan_pattern orphan_repo:"
+    )
+    assert result == {}
+
+
+def test_is_repo_allowlisted_path_basic_match() -> None:
+    allowlist = {"TimeToBuildBob/whatdidyougetdone": ["whatdidyougetdone.py"]}
+    assert self_merge_check.is_repo_allowlisted_path(
+        "whatdidyougetdone.py", "TimeToBuildBob/whatdidyougetdone", allowlist
+    )
+    assert not self_merge_check.is_repo_allowlisted_path(
+        "other.py", "TimeToBuildBob/whatdidyougetdone", allowlist
+    )
+
+
+def test_is_repo_allowlisted_path_empty_repo_or_allowlist() -> None:
+    assert not self_merge_check.is_repo_allowlisted_path("f.py", None)
+    assert not self_merge_check.is_repo_allowlisted_path("f.py", "repo", {})
+
+
+def test_is_repo_allowlisted_path_star_does_not_cross_dirs() -> None:
+    """PurePosixPath.match prevents * from crossing directory boundaries."""
+    allowlist = {"repo": ["src/*.py"]}
+    # Should match a file directly in src/
+    assert self_merge_check.is_repo_allowlisted_path("src/main.py", "repo", allowlist)
+    # Should NOT match a file in a subdirectory
+    assert not self_merge_check.is_repo_allowlisted_path(
+        "src/subdir/secret.py", "repo", allowlist
+    )
+
+
+def test_is_repo_allowlisted_path_double_star_crosses_dirs() -> None:
+    """** pattern should match across directory boundaries."""
+    allowlist = {"repo": ["src/**/*.py"]}
+    assert self_merge_check.is_repo_allowlisted_path(
+        "src/subdir/secret.py", "repo", allowlist
+    )
+
+
+def test_classify_repo_allowlisted_path_allowed() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "SELF_MERGE_ALLOWED_PATHS": "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py"
+        },
+    ):
+        category, reasons = self_merge_check.classify_category(
+            ["whatdidyougetdone.py"], repo="TimeToBuildBob/whatdidyougetdone"
+        )
+        assert category == "repo-allowlisted(TimeToBuildBob/whatdidyougetdone)"
+        assert reasons == []
+
+
+def test_classify_repo_allowlisted_path_is_repo_scoped() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "SELF_MERGE_ALLOWED_PATHS": "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py"
+        },
+    ):
+        category, reasons = self_merge_check.classify_category(
+            ["whatdidyougetdone.py"], repo="TimeToBuildBob/other-repo"
+        )
+        assert category is None
+        assert any("allowed self-merge category" in reason for reason in reasons)
