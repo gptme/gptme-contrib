@@ -43,6 +43,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
 
@@ -108,6 +109,7 @@ BOT_CONFIG_FILES = {
     "Makefile",
 }
 BOT_CONFIG_PREFIXES = (".github/",)
+SELF_MERGE_ALLOWED_PATHS_ENV = "SELF_MERGE_ALLOWED_PATHS"
 
 
 @dataclass
@@ -620,6 +622,51 @@ def is_bot_config(path: str) -> bool:
     return path in BOT_CONFIG_FILES or path.startswith(BOT_CONFIG_PREFIXES)
 
 
+def _parse_repo_path_allowlist(value: str | None) -> dict[str, list[str]]:
+    """Parse SELF_MERGE_ALLOWED_PATHS into a repo -> glob patterns mapping.
+
+    Format:
+        owner/repo:path-glob[,owner/repo:path-glob...]
+
+    Both commas and whitespace may separate entries. Invalid entries are ignored.
+    """
+    if value is None:
+        return {}
+    stripped = value.strip()
+    if not stripped:
+        return {}
+
+    mapping: dict[str, list[str]] = {}
+    for entry in stripped.replace(",", " ").split():
+        repo, sep, pattern = entry.partition(":")
+        if not sep or not repo or not pattern:
+            continue
+        mapping.setdefault(repo, []).append(pattern.replace("\\", "/"))
+    return mapping
+
+
+def _get_repo_path_allowlist() -> dict[str, list[str]]:
+    return _parse_repo_path_allowlist(os.environ.get(SELF_MERGE_ALLOWED_PATHS_ENV))
+
+
+def is_repo_allowlisted_path(
+    path: str,
+    repo: str | None,
+    repo_path_allowlist: dict[str, list[str]] | None = None,
+) -> bool:
+    if not repo:
+        return False
+    allowlist = (
+        repo_path_allowlist
+        if repo_path_allowlist is not None
+        else _get_repo_path_allowlist()
+    )
+    if not allowlist:
+        return False
+    normalized = path.replace("\\", "/")
+    return any(fnmatchcase(normalized, pattern) for pattern in allowlist.get(repo, []))
+
+
 def is_sensitive_path(path: str) -> bool:
     normalized = path.lower().replace("\\", "/")
     if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
@@ -642,7 +689,11 @@ def is_sensitive_path(path: str) -> bool:
     return False
 
 
-def is_allowed_file(path: str) -> bool:
+def is_allowed_file(
+    path: str,
+    repo: str | None = None,
+    repo_path_allowlist: dict[str, list[str]] | None = None,
+) -> bool:
     """Check if a file falls into any allowed self-merge category."""
     if is_sensitive_path(path):
         return False
@@ -656,10 +707,13 @@ def is_allowed_file(path: str) -> bool:
         or is_task_metadata(path)
         or is_internal_tooling(path)
         or is_doc_file(path)
+        or is_repo_allowlisted_path(path, repo, repo_path_allowlist)
     )
 
 
-def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
+def classify_category(
+    paths: list[str], repo: str | None = None
+) -> tuple[str | None, list[str]]:
     """Return the allowed category, or None with disqualifying reasons.
 
     The policy says all changed files must fall into *one of* the allowed
@@ -684,6 +738,8 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
         reasons.append("Touches spec-like documentation requiring human review")
         return None, reasons
 
+    repo_path_allowlist = _get_repo_path_allowlist()
+
     # Single-category fast paths
     if all(is_test_file(path) for path in paths):
         return "test-only", reasons
@@ -695,9 +751,13 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
         return "internal-tooling", reasons
     if all(is_doc_file(path) for path in paths):
         return "docs-only", reasons
+    if repo and all(
+        is_repo_allowlisted_path(path, repo, repo_path_allowlist) for path in paths
+    ):
+        return f"repo-allowlisted({repo})", reasons
 
     # Mixed-category: eligible if ALL files are in some allowed category
-    if all(is_allowed_file(path) for path in paths):
+    if all(is_allowed_file(path, repo, repo_path_allowlist) for path in paths):
         categories: list[str] = []
         if any(is_test_file(path) for path in paths):
             categories.append("tests")
@@ -709,9 +769,15 @@ def classify_category(paths: list[str]) -> tuple[str | None, list[str]]:
             categories.append("internal-tooling")
         if any(is_doc_file(path) for path in paths):
             categories.append("docs")
+        if repo and any(
+            is_repo_allowlisted_path(path, repo, repo_path_allowlist) for path in paths
+        ):
+            categories.append("repo-paths")
         return f"mixed-allowed({'+'.join(categories)})", reasons
 
-    disqualifying = [p for p in paths if not is_allowed_file(p)]
+    disqualifying = [
+        p for p in paths if not is_allowed_file(p, repo, repo_path_allowlist)
+    ]
     return None, [
         f"Files not in any allowed self-merge category: {', '.join(disqualifying)}"
     ]
@@ -829,7 +895,7 @@ def evaluate_pr(
             f"from: {authors}"
         )
 
-    category, category_reasons = classify_category(files)
+    category, category_reasons = classify_category(files, repo=repo)
     result.category = category
     result.reasons.extend(category_reasons)
 
