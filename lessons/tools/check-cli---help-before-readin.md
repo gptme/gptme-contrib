@@ -4,11 +4,6 @@ match:
     - "doesn't have a flag for"
     - "wrap the command to add"
     - "before patching the wrapper"
-    - "no built-in option for"
-    - "let me read the source to figure out"
-    - "doesn't seem to support"
-    - "build a wrapper around"
-    - "monkey-patch the CLI"
 status: active
 ---
 

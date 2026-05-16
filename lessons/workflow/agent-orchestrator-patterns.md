@@ -2,7 +2,6 @@
 status: active
 match:
   keywords:
-    - "agent standup"
     - "orchestrator"
     - "multi-agent"
     - "agent health"

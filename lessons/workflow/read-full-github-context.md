@@ -1,9 +1,7 @@
 ---
 match:
   keywords:
-    - "--comments | head"
     - "--comments | tail"
-    - "view --comments | grep"
     - "gh issue view --comments"
     - "gh pr view --comments"
   session_categories: [cross-repo, code]
