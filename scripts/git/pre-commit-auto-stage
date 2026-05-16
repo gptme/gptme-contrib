@@ -175,11 +175,11 @@ else
   set -e
 
   if [ $PRECOMMIT_EXIT -eq 0 ]; then
-    echo -e "${GREEN}✓ All checks passed after auto-staging${NC}"
+    echo -e "${GREEN}✓ All checks passed after verification re-run${NC}"
     exit 0
   else
     echo "$PRECOMMIT_OUTPUT"
-    echo -e "${RED}✗ Pre-commit still failing after auto-staging${NC}"
+    echo -e "${RED}✗ Pre-commit still failing after verification re-run${NC}"
     exit 1
   fi
 fi
