@@ -124,10 +124,11 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     echo "Note: ANTHROPIC_API_KEY found in env, will be unset for CC subprocess." >&2
 fi
 
-# Start CC in a headless tmux session
-# Unset CLAUDECODE (nested protection) and ANTHROPIC_API_KEY (force OAuth)
+# Start CC in a headless tmux session.
+# Clear known Claude Code nesting vars so the subprocess behaves like a fresh
+# standalone client, not a weird child of the current harness session.
 tmux new-session -d -s "$SESSION_NAME" -x 120 -y 50 \
-    "env -u ANTHROPIC_API_KEY -u CLAUDECODE claude 2>&1; sleep 2"
+    "env -u ANTHROPIC_API_KEY -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CC_SESSION_ID -u CC_MODEL claude 2>&1; sleep 2"
 
 # Wait for CC to initialize
 for _ in $(seq 1 "$TIMEOUT"); do
@@ -263,7 +264,14 @@ for label_text, key in labels:
             break
 
 if not result:
-    print('Error: Could not parse usage data from CC output.', file=sys.stderr)
+    if 'Loading usage data' in text:
+        print(
+            'Error: Claude /usage never finished loading quota data. '
+            'Likely auth/bootstrap trouble; rerun with --raw and consider /login.',
+            file=sys.stderr,
+        )
+    else:
+        print('Error: Could not parse usage data from CC output.', file=sys.stderr)
     print('Run with --raw to see raw output.', file=sys.stderr)
     sys.exit(1)
 
