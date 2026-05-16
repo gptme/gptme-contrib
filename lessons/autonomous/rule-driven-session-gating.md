@@ -9,7 +9,6 @@ tags:
 - orchestration
 match:
   keywords:
-  - monitoring sessions
   - cost optimization
 ---
 
