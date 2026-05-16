@@ -246,7 +246,7 @@ def _run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        elif fetch_errors > 0:
+        if fetch_errors > 0:
             print(
                 f"Error: could not fetch PRs from {fetch_errors}/{len(repos)} repos; "
                 "no PRs found in the remaining repos — some PRs may have been missed.",
