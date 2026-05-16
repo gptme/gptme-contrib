@@ -5,6 +5,16 @@ match:
   - "discovered tangential improvement opportunity"
   - "also fixed some nearby code while at it"
   - "scope creep during autonomous session"
+  - "scope creep"
+  - "while I'm here"
+  - "bonus improvement"
+  - "bonus commit"
+  - "bonus cleanup"
+  - "bonus fix"
+  - "nice to have"
+  - "convenient fix"
+  - "discovered a related fix"
+  - "out-of-scope improvement"
   - "staying focused on stated objective"
 status: active
 ---

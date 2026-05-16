@@ -4,8 +4,6 @@ match:
   keywords:
     - "orchestrator"
     - "multi-agent"
-    - "agent health"
-    - "peripheral agent"
     - "standup missing"
     - "agent coordination"
     - "inference utilization"

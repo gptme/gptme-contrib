@@ -3,12 +3,6 @@ match:
   keywords:
     - "greptile score"
     - "trigger greptile"
-    - "run greptile re-review"
-    - "greptile feedback"
-    - "check greptile results"
-    - "greptile found issues in PR"
-    - "greptile quality review"
-    - "improvements since greptile"
   session_categories: [cross-repo, code]
 status: active
 ---

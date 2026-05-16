@@ -2,8 +2,6 @@
 match:
   keywords:
   - "autonomous session"
-  - "task selection"
-  - "work queue"
   session_categories: [strategic, self-review]
 status: active
 ---
