@@ -1,6 +1,7 @@
 ---
 match:
-  keywords: ["contrib PR"]
+  keywords: ["contrib PR", "gptme-contrib PR", "contributing lesson to gptme"]
+  session_categories: [cross-repo, code]
 status: active
 ---
 

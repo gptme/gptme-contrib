@@ -1,17 +1,14 @@
 ---
 match:
   keywords:
-    - "trigger greptile re-review after improvements"
-    - "PR received low quality score from greptile"
-    - "validate quality improvements before human review"
-    - "@greptileai review comment"
-    - "post @greptileai"
-    - "request greptile re-review"
-    - "greptile found issues in PR"
     - "greptile score"
     - "trigger greptile"
-    - "pushed fixes after the earlier Greptile"
-    - "after the earlier Greptile review"
+    - "run greptile re-review"
+    - "greptile feedback"
+    - "check greptile results"
+    - "greptile found issues in PR"
+    - "greptile quality review"
+    - "improvements since greptile"
   session_categories: [cross-repo, code]
 status: active
 ---
