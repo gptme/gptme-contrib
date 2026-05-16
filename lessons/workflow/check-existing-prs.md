@@ -6,7 +6,7 @@ match:
   - gh pr list --search
   - gh api graphql
   session_categories: [cross-repo, code, triage]
-status: active
+status: archived
 ---
 
 # Check for Existing PRs Before Creating

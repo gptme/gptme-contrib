@@ -15,7 +15,7 @@ match:
   - "blocked on upstream"
   - "all tasks blocked on external"
   session_categories: [code, cross-repo, triage, cleanup, infrastructure]
-status: active
+status: archived
 ---
 
 # Making Progress Despite Blockers
