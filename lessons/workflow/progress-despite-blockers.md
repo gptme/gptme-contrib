@@ -2,7 +2,7 @@
 match:
   keywords:
   - "completely blocked"
-  - "waiting on Erik"
+  - "need human review"
   - "waiting for input"
   - "cannot proceed"
   - "stuck on this"
