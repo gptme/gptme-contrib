@@ -36,6 +36,8 @@ Observable signals that strategic focus discipline is needed:
 - Completed major deliverables but unclear on next strategic priorities
 - Available time could be spent on optimization vs. strategic advancement
 - Risk of "productivity theater" - appearing busy without strategic progress
+- `anti-monotony guard` suggests the current session is repeating a familiar lane instead of advancing the highest-leverage work
+- `category_monotony` from the work-category bandit indicates repeated work-category selection and should trigger a strategic reset
 
 ## Pattern
 Apply strategic focus discipline throughout autonomous session:
