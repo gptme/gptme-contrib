@@ -1,18 +1,18 @@
 ---
 match:
   keywords:
-  - "PR queue overloaded"
-  - "multiple PRs awaiting review"
-  - "all tasks waiting on review"
-  - "nothing to do while waiting"
-  - "everything blocked on external"
-  - "no unblocked tasks found"
+  - "completely blocked"
+  - "waiting on Erik"
+  - "waiting for input"
+  - "cannot proceed"
+  - "stuck on this"
+  - "no review bandwidth"
   - "all active tasks are blocked"
-  - "all active tasks blocked"
+  - "stuck on review queue"
   - "all primary tasks blocked"
   - "all primary items are blocked"
   - "tasks blocked on external dependencies"
-  - "blocked on external dependencies"
+  - "blocked on upstream"
   - "all tasks blocked on external"
   session_categories: [code, cross-repo, triage, cleanup, infrastructure]
 status: active
