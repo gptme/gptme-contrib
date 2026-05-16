@@ -2,9 +2,7 @@
 match:
   keywords:
     - knowledge base
-    - curated index
     - knowledge retrieval
-    - indexed knowledge
 status: active
 ---
 
@@ -17,6 +15,12 @@ Structure knowledge as a directory of markdown files with a curated index file. 
 LLMs need knowledge that grows over time — data inventories, design decisions, user preferences, domain facts. Dumping everything into a system prompt doesn't scale. But the LLM can't search files on its own without tooling.
 
 The solution is a two-tier structure: a **compact index** (always in context) that points to **detail files** (loaded on demand). Claude Code's auto-memory system uses exactly this pattern, but it's general-purpose and works for any knowledge base.
+
+## Detection
+- You need a growing knowledge store without loading every file into baseline context
+- A repo has many notes but no compact manifest telling the agent what exists
+- Retrieval is opaque because the only options are "load everything" or "search ad hoc"
+- Knowledge descriptions are too vague for selective loading
 
 ## Pattern
 
