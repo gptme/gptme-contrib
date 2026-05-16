@@ -599,8 +599,7 @@ def test_check_workspace_repo_not_in_allowlist_disqualifies() -> None:
 
 def test_parse_repo_path_allowlist_space_separated() -> None:
     result = self_merge_check._parse_repo_path_allowlist(
-        "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py "
-        "OtherOrg/repo:src/*.py"
+        "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py OtherOrg/repo:src/*.py"
     )
     assert "TimeToBuildBob/whatdidyougetdone" in result
     assert result["TimeToBuildBob/whatdidyougetdone"] == ["whatdidyougetdone.py"]
@@ -610,8 +609,7 @@ def test_parse_repo_path_allowlist_space_separated() -> None:
 
 def test_parse_repo_path_allowlist_comma_separated() -> None:
     result = self_merge_check._parse_repo_path_allowlist(
-        "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py,"
-        "OtherOrg/repo:src/*.py"
+        "TimeToBuildBob/whatdidyougetdone:whatdidyougetdone.py,OtherOrg/repo:src/*.py"
     )
     assert result["TimeToBuildBob/whatdidyougetdone"] == ["whatdidyougetdone.py"]
     assert result["OtherOrg/repo"] == ["src/*.py"]
