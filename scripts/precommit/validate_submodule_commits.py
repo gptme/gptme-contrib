@@ -87,7 +87,7 @@ def check_commit_exists_upstream(submodule_path: str, sha: str, url: str) -> boo
             timeout=60,
         )
         return result.returncode == 0
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+    except subprocess.TimeoutExpired:
         pass
 
     return False
