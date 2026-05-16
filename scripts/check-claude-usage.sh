@@ -146,7 +146,7 @@ tmux send-keys -t "$SESSION_NAME" Enter
 # Wait for usage data to render
 for _ in $(seq 1 "$TIMEOUT"); do
     content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-    if echo "$content" | grep -qiE '(%\s*used|not enabled|Extra usage|Resets)'; then
+    if echo "$content" | grep -qiE '(Current week \(all models\)|Current week \(Sonnet only\)|not enabled)'; then
         break
     fi
     sleep 1
@@ -159,6 +159,13 @@ OUTPUT=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
 if [ "$MODE" = "raw" ]; then
     echo "$OUTPUT"
     exit 0
+fi
+
+if echo "$OUTPUT" | grep -qi 'Loading usage data' \
+    && ! echo "$OUTPUT" | grep -qiE '(Current week \(all models\)|Current week \(Sonnet only\)|not enabled)'; then
+    echo "Error: Claude /usage never finished loading quota data." >&2
+    echo "Run with --raw to see raw output." >&2
+    exit 3
 fi
 
 # Parse the TUI output
