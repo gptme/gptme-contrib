@@ -35,8 +35,8 @@ Environment:
                     Per-repo path-glob allowlist for files that don't match
                     the generic self-merge categories. Format:
                     "owner/repo:path-glob[,owner/repo:path-glob...]".
-                    Uses PurePosixPath.match() semantics (* does NOT cross
-                    directory boundaries; use ** for recursive matching).
+                    Uses repo-relative segment globs (* stays within one
+                    directory segment; ** matches zero or more directories).
 """
 
 from __future__ import annotations
@@ -49,7 +49,9 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from fnmatch import fnmatchcase
+from functools import cache
+from pathlib import Path
 from typing import Any, cast
 
 MAX_GRAPHQL_PAGE_SIZE = 100
@@ -654,6 +656,38 @@ def _get_repo_path_allowlist() -> dict[str, list[str]]:
     return _parse_repo_path_allowlist(os.environ.get(SELF_MERGE_ALLOWED_PATHS_ENV))
 
 
+def _path_glob_match(path: str, pattern: str) -> bool:
+    """Match repo-relative paths with shell-style globs.
+
+    `*` stays within one path segment. A standalone `**` segment matches zero or
+    more full directory segments, which keeps the allowlist semantics stable
+    across Python versions and matches normal globstar expectations.
+    """
+    path_parts = tuple(part for part in path.replace("\\", "/").split("/") if part)
+    pattern_parts = tuple(
+        part for part in pattern.replace("\\", "/").split("/") if part
+    )
+
+    @cache
+    def _match(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+
+        pattern_part = pattern_parts[pattern_index]
+        if pattern_part == "**":
+            return _match(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and _match(path_index + 1, pattern_index)
+            )
+
+        if path_index >= len(path_parts):
+            return False
+        if not fnmatchcase(path_parts[path_index], pattern_part):
+            return False
+        return _match(path_index + 1, pattern_index + 1)
+
+    return _match(0, 0)
+
+
 def is_repo_allowlisted_path(
     path: str,
     repo: str | None,
@@ -670,7 +704,7 @@ def is_repo_allowlisted_path(
         return False
     normalized = path.replace("\\", "/")
     return any(
-        PurePosixPath(normalized).match(pattern) for pattern in allowlist.get(repo, [])
+        _path_glob_match(normalized, pattern) for pattern in allowlist.get(repo, [])
     )
 
 

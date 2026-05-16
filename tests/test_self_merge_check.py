@@ -646,7 +646,7 @@ def test_is_repo_allowlisted_path_empty_repo_or_allowlist() -> None:
 
 
 def test_is_repo_allowlisted_path_star_does_not_cross_dirs() -> None:
-    """PurePosixPath.match prevents * from crossing directory boundaries."""
+    """Single-star globs stay within one directory level."""
     allowlist = {"repo": ["src/*.py"]}
     # Should match a file directly in src/
     assert self_merge_check.is_repo_allowlisted_path("src/main.py", "repo", allowlist)
@@ -657,10 +657,14 @@ def test_is_repo_allowlisted_path_star_does_not_cross_dirs() -> None:
 
 
 def test_is_repo_allowlisted_path_double_star_crosses_dirs() -> None:
-    """** pattern should match across directory boundaries."""
+    """Globstar should match zero or more directory segments."""
     allowlist = {"repo": ["src/**/*.py"]}
+    assert self_merge_check.is_repo_allowlisted_path("src/main.py", "repo", allowlist)
     assert self_merge_check.is_repo_allowlisted_path(
         "src/subdir/secret.py", "repo", allowlist
+    )
+    assert self_merge_check.is_repo_allowlisted_path(
+        "src/subdir/deep/nested/main.py", "repo", allowlist
     )
 
 
