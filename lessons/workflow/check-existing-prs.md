@@ -1,9 +1,6 @@
 ---
 match:
   keywords:
-  - gh pr create
-  - git checkout -b fix-
-  - gh pr list --search
   - gh api graphql
   session_categories: [cross-repo, code, triage]
 status: archived
