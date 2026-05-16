@@ -11,7 +11,7 @@ match:
   - response loops
   - issue creation
   - memory follow-through
-status: active
+status: archived
 ---
 
 # Memory Failure Prevention

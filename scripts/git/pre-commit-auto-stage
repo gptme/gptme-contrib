@@ -112,6 +112,9 @@ run_precommit() {
   fi
 }
 
+WORKTREE_RAW_BEFORE="$(git diff --raw --no-ext-diff --ignore-submodules -- 2>/dev/null || true)"
+INDEX_TREE_BEFORE="$(git write-tree 2>/dev/null || true)"
+
 set +e
 PRECOMMIT_OUTPUT="$(run_precommit 2>&1)"
 PRECOMMIT_EXIT=$?
@@ -123,29 +126,45 @@ if [ $PRECOMMIT_EXIT -eq 0 ]; then
 else
   echo "$PRECOMMIT_OUTPUT"
 
-  # Check if any files were actually modified by formatters before announcing
-  # auto-staging. If nothing was modified, this is a real hook failure and the
-  # output above is the remediation surface — don't bury it under a misleading
-  # "checking for auto-staging" header.
-  if git diff --quiet; then
+  WORKTREE_RAW_AFTER="$(git diff --raw --no-ext-diff --ignore-submodules -- 2>/dev/null || true)"
+  INDEX_TREE_AFTER="$(git write-tree 2>/dev/null || true)"
+  WORKTREE_CHANGED=0
+  INDEX_CHANGED=0
+
+  if [ "$WORKTREE_RAW_AFTER" != "$WORKTREE_RAW_BEFORE" ]; then
+    WORKTREE_CHANGED=1
+  fi
+  if [ "$INDEX_TREE_AFTER" != "$INDEX_TREE_BEFORE" ]; then
+    INDEX_CHANGED=1
+  fi
+
+  # Distinguish real hook failures from auto-fixable changes. Some hooks leave
+  # unstaged formatter edits in the worktree; others stage their own fixes
+  # directly. Both cases should trigger a verification rerun instead of a hard
+  # failure.
+  if [ $WORKTREE_CHANGED -eq 0 ] && [ $INDEX_CHANGED -eq 0 ]; then
     echo -e "${RED}✗ Pre-commit hook failed (no auto-fixable changes)${NC}" >&2
     echo -e "${RED}  See the hook output above for the specific failure and fix.${NC}" >&2
     echo -e "${RED}  To re-run a single hook directly: ${PRECOMMIT_CMD} run --files <path>${NC}" >&2
     exit 1
   fi
 
-  echo -e "${YELLOW}Pre-commit modified files, auto-staging formatter fixes...${NC}"
+  if [ $WORKTREE_CHANGED -eq 1 ]; then
+    echo -e "${YELLOW}Pre-commit modified files, auto-staging formatter fixes...${NC}"
 
-  while IFS= read -r file; do
-    for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
-      if [ "$file" = "$staged_file" ]; then
-        git add "$file"
-        break
-      fi
-    done
-  done < <(git diff --name-only --diff-filter=M)
+    while IFS= read -r file; do
+      for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
+        if [ "$file" = "$staged_file" ]; then
+          git add "$file"
+          break
+        fi
+      done
+    done < <(git diff --name-only --diff-filter=M)
 
-  echo -e "${GREEN}✓ Auto-staged formatter fixes for originally staged files${NC}"
+    echo -e "${GREEN}✓ Auto-staged formatter fixes for originally staged files${NC}"
+  else
+    echo -e "${YELLOW}Pre-commit updated staged files directly (staged-file updates), re-running checks...${NC}"
+  fi
 
   # Re-run pre-commit to verify all checks pass
   echo -e "${GREEN}Re-running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
