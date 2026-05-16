@@ -72,21 +72,22 @@ def get_staged_submodule_sha(submodule_path: str) -> str | None:
     return None
 
 
-# TODO: The 'url' parameter is not used in check_commit_exists_upstream. Either use it to fetch from the correct remote or remove it to avoid confusion.
 def check_commit_exists_upstream(submodule_path: str, sha: str, url: str) -> bool:
     """Check if a commit SHA exists in the upstream repository."""
     # Use git fetch with depth=1 to check if commit is fetchable
     # Note: git ls-remote only finds refs (branches/tags), not arbitrary commits,
-    # so we go directly to fetch which works for any commit SHA
+    # so we go directly to fetch which works for any commit SHA. Use the URL
+    # from .gitmodules instead of assuming a local remote alias named "origin"
+    # is present and points at the correct upstream.
     try:
         result = subprocess.run(
-            ["git", "-C", submodule_path, "fetch", "--depth=1", "origin", sha],
+            ["git", "-C", submodule_path, "fetch", "--depth=1", url, sha],
             capture_output=True,
             text=True,
             timeout=60,
         )
         return result.returncode == 0
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+    except subprocess.TimeoutExpired:
         pass
 
     return False
