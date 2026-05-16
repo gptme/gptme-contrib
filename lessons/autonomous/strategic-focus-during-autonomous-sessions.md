@@ -8,16 +8,14 @@ tags:
 match:
   keywords:
   - strategic focus discipline
-  - productivity trap avoidance
   - darwinian trap avoidance
-  - autonomous session planning
-  - strategic work selection
   - "strategic focus"
   - "productivity trap"
   - "darwinian trap"
   - "busy work"
   - "productivity theater"
-  - "low-ROI work"
+  - "anti-monotony guard"
+  - "category_monotony"
   - "idea backlog"
   session_categories: [strategic, self-review]
 status: active
