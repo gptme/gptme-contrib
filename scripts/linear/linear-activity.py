@@ -41,11 +41,13 @@ API Commands:
 
 import json
 import os
+import secrets
 import sys
 import time
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -125,6 +127,7 @@ class ActivityType(Enum):
 # Load environment from .env file in script directory
 ENV_FILE = Path(__file__).parent / ".env"
 TOKENS_FILE = Path(__file__).parent / ".tokens.json"
+OAUTH_STATE_FILE = Path(__file__).parent / ".oauth-state"
 load_dotenv(ENV_FILE)
 
 # Linear endpoints
@@ -192,6 +195,76 @@ def load_oauth_credentials() -> tuple[str, str]:
         )
 
     return client_id, client_secret
+
+
+def save_pending_oauth_state(state: str) -> None:
+    """Persist the pending OAuth state for the next callback."""
+    OAUTH_STATE_FILE.write_text(state)
+
+
+def load_pending_oauth_state() -> str | None:
+    """Load the pending OAuth state if it exists."""
+    if not OAUTH_STATE_FILE.exists():
+        return None
+
+    value = OAUTH_STATE_FILE.read_text().strip()
+    return value or None
+
+
+def clear_pending_oauth_state() -> None:
+    """Remove the pending OAuth state after a successful auth flow."""
+    OAUTH_STATE_FILE.unlink(missing_ok=True)
+
+
+def generate_and_save_oauth_state() -> str:
+    """Generate a per-attempt OAuth state and persist it."""
+    state = secrets.token_urlsafe(32)
+    save_pending_oauth_state(state)
+    return state
+
+
+def get_oauth_state_error(
+    received_state: str | None, *, expected_state: str | None
+) -> str | None:
+    """Return an error message when the OAuth state is missing or invalid."""
+    if not expected_state:
+        return "No pending OAuth state found. Start a new authorization attempt."
+    if not received_state:
+        return "No OAuth state found in callback URL."
+    if received_state != expected_state:
+        return "OAuth state mismatch. Start a new authorization attempt."
+    return None
+
+
+def build_authorization_url(
+    *,
+    client_id: str,
+    callback_url: str,
+    scopes: str,
+    state: str,
+) -> str:
+    """Build the Linear authorization URL with a per-attempt state."""
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": callback_url,
+            "scope": scopes,
+            "response_type": "code",
+            "actor": "app",
+            "state": state,
+        }
+    )
+    return f"{LINEAR_OAUTH_AUTHORIZE_URL}?{query}"
+
+
+def parse_redirect_callback(redirect_url: str) -> tuple[str | None, str | None]:
+    """Extract the OAuth code and state from a callback URL."""
+    query = parse_qs(urlparse(redirect_url).query)
+    code_values: list[str] | None = query.get("code")
+    state_values: list[str] | None = query.get("state")
+    code = code_values[0] if code_values else None
+    state = state_values[0] if state_values else None
+    return code, state
 
 
 def is_token_expired() -> bool:
@@ -296,14 +369,12 @@ def do_auth() -> None:
 
     # Build authorization URL
     scopes = "read,write,app:mentionable,app:assignable,initiative:read,initiative:write,issues:create,comments:create"
-    auth_url = (
-        f"{LINEAR_OAUTH_AUTHORIZE_URL}?"
-        f"client_id={client_id}&"
-        f"redirect_uri={callback_url}&"
-        f"scope={scopes}&"
-        f"response_type=code&"
-        f"actor=app&"
-        f"state=auth"
+    expected_state = generate_and_save_oauth_state()
+    auth_url = build_authorization_url(
+        client_id=client_id,
+        callback_url=callback_url,
+        scopes=scopes,
+        state=expected_state,
     )
 
     print("=== Linear OAuth Authorization ===\n")
@@ -318,11 +389,14 @@ def do_auth() -> None:
     except (EOFError, KeyboardInterrupt):
         raise AuthenticationError("Authorization aborted")
 
-    # Extract code from URL
-    if "code=" not in redirect_url:
+    code, returned_state = parse_redirect_callback(redirect_url)
+    if not code:
         raise AuthenticationError("No authorization code found in URL")
 
-    code = redirect_url.split("code=")[1].split("&")[0]
+    state_error = get_oauth_state_error(returned_state, expected_state=expected_state)
+    if state_error:
+        raise AuthenticationError(state_error)
+
     print("\nExchanging code for tokens...")
 
     # Exchange code for tokens
@@ -358,6 +432,7 @@ def do_auth() -> None:
         }
 
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+        clear_pending_oauth_state()
         print(f"✓ Tokens saved to {TOKENS_FILE}")
         print(f"  Expires in {data.get('expires_in', 0) // 3600}h")
 

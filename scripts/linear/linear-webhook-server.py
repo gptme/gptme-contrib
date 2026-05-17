@@ -110,6 +110,7 @@ GPTME_TIMEOUT = 30 * 60  # 30 minutes
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 TOKENS_FILE = Path(__file__).parent / ".tokens.json"
+OAUTH_STATE_FILE = Path(__file__).parent / ".oauth-state"
 
 # Session tracking for deduplication
 processed_sessions: set[str] = set()
@@ -142,6 +143,38 @@ log.addHandler(_file_handler)
 
 # Path to the linear-activity.py CLI
 LINEAR_ACTIVITY_CLI = Path(__file__).parent / "linear-activity.py"
+
+
+def save_pending_oauth_state(state: str) -> None:
+    """Persist the pending OAuth state for the next callback."""
+    OAUTH_STATE_FILE.write_text(state)
+
+
+def load_pending_oauth_state() -> str | None:
+    """Load the pending OAuth state if it exists."""
+    if not OAUTH_STATE_FILE.exists():
+        return None
+
+    value = OAUTH_STATE_FILE.read_text().strip()
+    return value or None
+
+
+def clear_pending_oauth_state() -> None:
+    """Remove the pending OAuth state after a successful auth flow."""
+    OAUTH_STATE_FILE.unlink(missing_ok=True)
+
+
+def get_oauth_state_error(
+    received_state: str | None, *, expected_state: str | None
+) -> str | None:
+    """Return an error message when the OAuth state is missing or invalid."""
+    if not expected_state:
+        return "No pending OAuth state found. Start a new authorization attempt."
+    if not received_state:
+        return "No OAuth state found in callback URL."
+    if received_state != expected_state:
+        return "OAuth state mismatch. Start a new authorization attempt."
+    return None
 
 
 def ensure_valid_token() -> bool:
@@ -839,7 +872,7 @@ def oauth_callback():
     """
     # Get the authorization code from the query string
     code = request.args.get("code")
-    _state = request.args.get("state")  # TODO: Implement CSRF validation with state
+    state = request.args.get("state")
     error = request.args.get("error")
 
     if error:
@@ -867,6 +900,24 @@ def oauth_callback():
         <body style="font-family: sans-serif; padding: 40px; text-align: center;">
             <h1 style="color: #dc3545;">❌ Missing Authorization Code</h1>
             <p>No authorization code was provided in the callback.</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            400,
+        )
+
+    state_error = get_oauth_state_error(
+        state, expected_state=load_pending_oauth_state()
+    )
+    if state_error:
+        return (
+            f"""
+        <html>
+        <head><title>Invalid OAuth State</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Invalid OAuth State</h1>
+            <p>{html.escape(state_error)}</p>
             <p><a href="/">Back to home</a></p>
         </body>
         </html>
@@ -968,6 +1019,7 @@ def oauth_callback():
         }
 
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+        clear_pending_oauth_state()
         print(f"✓ OAuth tokens saved to {TOKENS_FILE}", file=sys.stderr)
 
         return """
