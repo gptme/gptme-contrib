@@ -292,7 +292,6 @@ class AgentEmail:
         )
 
     # TODO: this should probably return some list[Message] or list[EmailMessage] type instead of a list of tuples
-    # TODO: this should probably sort the emails by timestamp in some suitable order (or make it easy for consumers to sort by using an Message type)
     def get_unreplied_emails(self, folders: list[str] | None = None) -> list[tuple[str, str, str]]:
         """Get list of emails that haven't been replied to.
 
@@ -307,7 +306,7 @@ class AgentEmail:
             # Default to inbox only - caller can pass ["inbox", "archive"] if needed
             folders = ["inbox"]
 
-        unreplied = []
+        unreplied_with_dates: list[tuple[datetime, str, tuple[str, str, str]]] = []
         seen_message_ids: set[str] = set()  # Avoid duplicates across folders
 
         for folder in folders:
@@ -336,6 +335,7 @@ class AgentEmail:
                     seen_message_ids.add(message_id)
 
                     subject = subject_match.group(1)
+                    date_match = re.search(r"Date: (.+)", content)
                     from_line = from_match.group(1)
 
                     # Skip if not addressed to the agent's email
@@ -380,13 +380,22 @@ class AgentEmail:
                     if already_replied:
                         continue
 
-                    unreplied.append((message_id, subject, sender))
+                    sort_date = (
+                        self._parse_email_date(date_match.group(1))
+                        if date_match
+                        else datetime.min.replace(tzinfo=timezone.utc)
+                    )
+                    unreplied_with_dates.append(
+                        (sort_date, email_file.name, (message_id, subject, sender))
+                    )
 
                 except Exception as e:
                     print(f"Error processing {email_file}: {e}")
                     continue
 
-        return unreplied
+        # Oldest-first keeps watcher and CLI processing deterministic.
+        unreplied_with_dates.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in unreplied_with_dates]
 
     def _is_allowlisted_sender(self, sender: str) -> bool:
         """Check if sender is allowlisted for auto-responses.
