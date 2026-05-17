@@ -12,6 +12,7 @@ Created: 2025-10-29 (Session 370)
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -158,9 +159,49 @@ class LessonDiscovery:
         try:
             with open(metrics_file) as f:
                 data = json.load(f)
-                return dict(data.get("lessons", {}))
-        except (json.JSONDecodeError, KeyError):
+                metrics = data.get("metrics")
+                if metrics is None:
+                    metrics = data.get("lessons", {})
+                return dict(metrics) if isinstance(metrics, dict) else {}
+        except (json.JSONDecodeError, KeyError, OSError):
             return {}
+
+    def _get_lesson_activity_timestamp(
+        self, lesson_path: Path, lesson_metrics: Dict | None
+    ) -> datetime:
+        """Return the best available freshness timestamp for a lesson.
+
+        Prefer metrics timestamps when present, and fall back to filesystem mtime.
+        """
+        if isinstance(lesson_metrics, dict):
+            for field in ("last_updated", "created"):
+                raw_value = lesson_metrics.get(field)
+                if not isinstance(raw_value, str) or not raw_value:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+
+        return datetime.fromtimestamp(
+            lesson_path.stat().st_mtime, tz=timezone.utc
+        ).astimezone(timezone.utc)
+
+    def score_recency(self, lesson_path: Path, lesson_id: str, metrics: Dict) -> float:
+        """Score lesson freshness.
+
+        Returns score 0.0-1.0 with a linear decay across one year.
+        """
+        lesson_metrics = metrics.get(lesson_id)
+        activity_time = self._get_lesson_activity_timestamp(lesson_path, lesson_metrics)
+        age_days = max(
+            0.0,
+            (datetime.now(timezone.utc) - activity_time).total_seconds() / 86400,
+        )
+        return max(0.0, 1.0 - min(age_days, 365.0) / 365.0)
 
     def score_keyword_match(
         self, features: LessonFeatures, context_keywords: Set[str]
@@ -251,7 +292,7 @@ class LessonDiscovery:
             keyword_score = self.score_keyword_match(features, context_keywords)
             success_score = self.score_success_rate(lesson_id, metrics)
             adoption_score = self.score_adoption(lesson_id, metrics)
-            recency_score = 0.0  # TODO: implement based on last access time
+            recency_score = self.score_recency(lesson_file, lesson_id, metrics)
 
             # Weighted composite score
             total_score = (
