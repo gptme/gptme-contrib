@@ -5,7 +5,8 @@ Structural code retrieval for gptme via [tree-sitter](https://tree-sitter.github
 ## Features
 
 - **9 MCP tools**: `codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`, `codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_blast`, `codegraph_impact`
-- **Cross-file import resolution** (including `import X as Y`, `from X import Y as Z`, wildcard imports)
+- **Multi-language symbol extraction** for Python, JavaScript/TypeScript, and Rust
+- **Cross-file import resolution** for Python, plus early JS/TS import capture for named and namespace imports
 - **Qualified symbol IDs** (`module::Class.method`) for unambiguous cross-file references
 - **SQLite index cache** — optional persistent cache for large codebases
 - **Blast/impact semantics split**: `blast` = dependency closure (what X needs), `impact` = what breaks if you change X
@@ -30,6 +31,7 @@ uv add gptme-codegraph[treesitter,mcp]
 ```bash
 # Extract symbols from a file
 gptme-codegraph path/to/file.py parse
+gptme-codegraph path/to/file.ts parse
 
 # Who calls a function?
 gptme-codegraph path/to/file.py callers my_function
@@ -89,6 +91,9 @@ print(radius)  # {"depth_0": {…}, "depth_1": {…}, …}
 
 ## Status
 
-Experimental package — Python only (v0). Multi-language support planned for v1.1.
+Experimental package — Python support is the deepest path today, with Phase 1
+JavaScript/TypeScript and Rust extraction now wired into the same surface.
+Cross-file resolution remains strongest on Python; JS/TS import handling is
+currently best-effort rather than fully semantic.
 
 > Namespace packages (`import google.cloud.storage` without `__init__.py`) are a known v1.1 gap.

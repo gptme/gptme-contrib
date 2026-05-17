@@ -1,0 +1,589 @@
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust).
+
+Verifies that parse_file, extract_symbols, and build_index work correctly
+for JavaScript, TypeScript, and Rust source files.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from collections.abc import Generator
+from pathlib import Path
+
+import pytest
+from gptme_codegraph.core import (
+    _tree_sitter_parse,
+    build_index,
+    extract_symbols,
+    parse_file,
+)
+
+
+def _has_grammar(lang: str) -> bool:
+    """Check if a tree-sitter grammar is available."""
+    import importlib
+
+    try:
+        importlib.import_module(f"tree_sitter_{lang}")
+        return True
+    except ImportError:
+        return False
+
+
+_skip_no_js = pytest.mark.skipif(
+    not _has_grammar("javascript"),
+    reason="tree-sitter-javascript not installed",
+)
+_skip_no_ts = pytest.mark.skipif(
+    not _has_grammar("typescript"),
+    reason="tree-sitter-typescript not installed",
+)
+_skip_no_rust = pytest.mark.skipif(
+    not _has_grammar("rust"),
+    reason="tree-sitter-rust not installed",
+)
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def js_module() -> Generator[Path, None, None]:
+    """A JavaScript module with functions, classes, and methods."""
+    code = """\
+// utils.js — shared helpers
+
+export function greet(name) {
+    return `Hello ${name}`;
+}
+
+export function formatDate(date) {
+    const ts = date.getTime();
+    return date.toISOString().split('T')[0];
+}
+
+export class Calculator {
+    constructor(initialValue = 0) {
+        this.value = initialValue;
+    }
+
+    add(n) {
+        this.value += n;
+        return this;
+    }
+
+    multiply(n) {
+        this.value *= n;
+        return this;
+    }
+
+    result() {
+        return this.value;
+    }
+}
+
+const PI = 3.14159;
+export { PI };
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, prefix="test_js_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def ts_module() -> Generator[Path, None, None]:
+    """A TypeScript module with functions, classes, and methods."""
+    code = """\
+// models.ts — typed data models
+
+export interface User {
+    id: number;
+    name: string;
+    email: string;
+}
+
+export class UserRepository {
+    private users: User[] = [];
+
+    addUser(user: User): void {
+        this.users.push(user);
+    }
+
+    findById(id: number): User | undefined {
+        return this.users.find(u => u.id === id);
+    }
+
+    findAll(): User[] {
+        return [...this.users];
+    }
+}
+
+export function validateEmail(email: string): boolean {
+    const re = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;
+    return re.test(email);
+}
+
+export const APP_VERSION = "1.0.0";
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ts", delete=False, prefix="test_ts_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def tsx_module() -> Generator[Path, None, None]:
+    """A TSX module with React components."""
+    code = """\
+// Button.tsx — reusable button component
+import React from 'react';
+
+interface ButtonProps {
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+}
+
+export function Button({ label, onClick, disabled = false }: ButtonProps): JSX.Element {
+    return (
+        <button onClick={onClick} disabled={disabled} className="btn">
+            {label}
+        </button>
+    );
+}
+
+export function IconButton({ icon, ...props }: ButtonProps & { icon: string }): JSX.Element {
+    return (
+        <button {...props} className="btn-icon">
+            <span className="icon">{icon}</span>
+            <span>{props.label}</span>
+        </button>
+    );
+}
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".tsx", delete=False, prefix="test_tsx_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def rust_module() -> Generator[Path, None, None]:
+    """A Rust module with functions, struct, impl, enum, and trait."""
+    code = """\
+// calculator.rs — a simple calculator module
+
+/// Adds two numbers together.
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+/// Multiplies two numbers.
+pub fn multiply(a: i32, b: i32) -> i32 {
+    let result = a * b;
+    multiply_internal(result)
+}
+
+fn multiply_internal(value: i32) -> i32 {
+    value
+}
+
+pub struct Config {
+    pub precision: u8,
+    pub max_value: i32,
+}
+
+impl Config {
+    pub fn new(precision: u8) -> Self {
+        Self {
+            precision,
+            max_value: 100,
+        }
+    }
+
+    pub fn with_max(mut self, max: i32) -> Self {
+        self.max_value = max;
+        self
+    }
+}
+
+pub enum Operation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+pub trait Calculator {
+    fn calculate(&self, op: Operation, a: i32, b: i32) -> i32;
+}
+
+use std::fmt;
+use std::io::{self, Write};
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".rs", delete=False, prefix="test_rust_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def rust_simple() -> Generator[Path, None, None]:
+    """A minimal Rust file for quick parse tests."""
+    code = """\
+fn main() {
+    println!("Hello");
+}
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".rs", delete=False, prefix="test_rust_simple_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def multilang_project(tmp_path: Path) -> Generator[Path, None, None]:
+    """A project directory with JS, TS, and Rust source files."""
+    proj = tmp_path / "multilang"
+    proj.mkdir()
+
+    js_dir = proj / "src" / "js"
+    js_dir.mkdir(parents=True)
+    (js_dir / "main.js").write_text(
+        "export function run() { return 42; }\n"
+        "export class App { start() { run(); } }\n"
+    )
+
+    ts_dir = proj / "src" / "ts"
+    ts_dir.mkdir(parents=True)
+    (ts_dir / "types.ts").write_text(
+        "export interface Config { debug: boolean; }\n"
+        "export function loadConfig(): Config { return { debug: true }; }\n"
+    )
+
+    rust_dir = proj / "src" / "rust"
+    rust_dir.mkdir(parents=True)
+    (rust_dir / "lib.rs").write_text(
+        "pub fn init() -> bool { true }\n" "pub struct State { pub ready: bool }\n"
+    )
+
+    yield proj
+
+
+# ---------------------------------------------------------------------------
+# Language detection
+# ---------------------------------------------------------------------------
+
+
+def test_language_detection_python():
+    """Default language is python."""
+    code = b"def foo(): pass\n"
+    root, parser = _tree_sitter_parse(code)
+    assert root is not None
+    assert root.type == "module"
+
+
+@_skip_no_js
+def test_language_detection_js():
+    """_tree_sitter_parse detects .js files."""
+    code = b"function foo() { return 1; }\n"
+    root, parser = _tree_sitter_parse(code, lang_name="javascript")
+    assert root is not None
+    assert root.type == "program"
+
+
+@_skip_no_ts
+def test_language_detection_ts():
+    """_tree_sitter_parse detects .ts files."""
+    code = b"function foo(): number { return 1; }\n"
+    root, parser = _tree_sitter_parse(code, lang_name="typescript")
+    assert root is not None
+    assert root.type == "program"
+
+
+@_skip_no_ts
+def test_language_detection_tsx():
+    """_tree_sitter_parse detects .tsx files."""
+    code = b"const el = <div>hello</div>;\n"
+    root, parser = _tree_sitter_parse(code, lang_name="tsx")
+    assert root is not None
+    assert root.type == "program"
+
+
+@_skip_no_rust
+def test_language_detection_rust():
+    """_tree_sitter_parse detects .rs files."""
+    code = b"fn main() {}\n"
+    root, parser = _tree_sitter_parse(code, lang_name="rust")
+    assert root is not None
+    assert root.type == "source_file"
+
+
+# ---------------------------------------------------------------------------
+# JavaScript parsing
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_js
+def test_parse_js_functions(js_module: Path):
+    """JavaScript: parse_file extracts functions."""
+    result = parse_file(js_module)
+    func_names = {s.name for s in result.symbols if s.kind == "function"}
+    assert "greet" in func_names
+    assert "formatDate" in func_names
+
+
+@_skip_no_js
+def test_parse_js_classes(js_module: Path):
+    """JavaScript: parse_file extracts classes and methods."""
+    result = parse_file(js_module)
+    class_names = {s.name for s in result.symbols if s.kind == "class"}
+    assert "Calculator" in class_names
+
+    methods = [s for s in result.symbols if s.kind == "method"]
+    method_names = {s.name for s in methods}
+    assert "add" in method_names
+    assert "multiply" in method_names
+    assert "result" in method_names
+    # Verify parent class linkage
+    for m in methods:
+        assert m.parent_class == "Calculator"
+
+
+@_skip_no_js
+def test_parse_js_method_locations(js_module: Path):
+    """JavaScript: method locations are correct."""
+    result = parse_file(js_module)
+    constructor = [s for s in result.symbols if s.name == "constructor"]
+    assert len(constructor) == 1
+    ctor = constructor[0]
+    assert ctor.kind == "method"
+    assert ctor.parent_class == "Calculator"
+    assert ctor.start_line >= 1
+    assert ctor.end_line >= ctor.start_line
+
+
+@_skip_no_js
+def test_extract_symbols_js(js_module: Path):
+    """extract_symbols works on JS files."""
+    symbols = extract_symbols(js_module)
+    assert len(symbols) >= 5  # 2 functions + 1 class + 3 methods + 1 variable
+    assert any(s.name == "greet" and s.kind == "function" for s in symbols)
+
+
+# ---------------------------------------------------------------------------
+# TypeScript parsing
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_ts
+def test_parse_ts_functions(ts_module: Path):
+    """TypeScript: parse_file extracts functions."""
+    result = parse_file(ts_module)
+    func_names = {s.name for s in result.symbols if s.kind == "function"}
+    assert "validateEmail" in func_names
+
+
+@_skip_no_ts
+def test_parse_ts_classes(ts_module: Path):
+    """TypeScript: parse_file extracts classes and methods."""
+    result = parse_file(ts_module)
+    class_names = {s.name for s in result.symbols if s.kind == "class"}
+    assert "UserRepository" in class_names
+
+    methods = [s for s in result.symbols if s.kind == "method"]
+    method_names = {s.name for s in methods}
+    assert "addUser" in method_names
+    assert "findById" in method_names
+    assert "findAll" in method_names
+
+
+@_skip_no_ts
+def test_parse_ts_interface_not_symbol(ts_module: Path):
+    """TypeScript: interfaces are not extracted as symbols."""
+    result = parse_file(ts_module)
+    # Interfaces are not classes/functions/methods, so they shouldn't appear
+    interface_symbols = [s for s in result.symbols if s.name == "User"]
+    assert len(interface_symbols) == 0
+
+
+@_skip_no_ts
+def test_parse_tsx_react_components(tsx_module: Path):
+    """TSX: React function components are extracted."""
+    result = parse_file(tsx_module)
+    func_names = {s.name for s in result.symbols if s.kind == "function"}
+    assert "Button" in func_names
+    assert "IconButton" in func_names
+
+
+# ---------------------------------------------------------------------------
+# Rust parsing
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_rust
+def test_parse_rust_functions(rust_module: Path):
+    """Rust: parse_file extracts functions."""
+    result = parse_file(rust_module)
+    func_names = {s.name for s in result.symbols if s.kind == "function"}
+    assert "add" in func_names
+    assert "multiply" in func_names
+    assert "multiply_internal" in func_names
+
+
+@_skip_no_rust
+def test_parse_rust_struct(rust_module: Path):
+    """Rust: parse_file extracts struct."""
+    result = parse_file(rust_module)
+    structs = [s for s in result.symbols if s.kind == "class"]
+    struct_names = {s.name for s in structs}
+    assert "Config" in struct_names
+
+
+@_skip_no_rust
+def test_parse_rust_impl_methods(rust_module: Path):
+    """Rust: impl methods are extracted as methods of the struct."""
+    result = parse_file(rust_module)
+    methods = [
+        s for s in result.symbols if s.kind == "method" and s.parent_class == "Config"
+    ]
+    method_names = {s.name for s in methods}
+    assert "new" in method_names
+    assert "with_max" in method_names
+    # Verify parent class linkage
+    for m in methods:
+        assert m.parent_class == "Config"
+
+
+@_skip_no_rust
+def test_parse_rust_enum(rust_module: Path):
+    """Rust: enum is extracted as a class."""
+    result = parse_file(rust_module)
+    enums = [s for s in result.symbols if s.name == "Operation"]
+    assert len(enums) == 1
+    assert enums[0].kind == "class"
+
+
+@_skip_no_rust
+def test_parse_rust_trait(rust_module: Path):
+    """Rust: trait with method signature is extracted."""
+    result = parse_file(rust_module)
+    trait = [s for s in result.symbols if s.name == "Calculator"]
+    assert len(trait) == 1
+    # trait items are symbols in our model
+    trait_methods = [
+        s
+        for s in result.symbols
+        if s.kind == "method" and s.parent_class == "Calculator"
+    ]
+    assert len(trait_methods) == 1
+    assert trait_methods[0].name == "calculate"
+
+
+@_skip_no_rust
+def test_parse_rust_simple(rust_simple: Path):
+    """Rust: minimal file parses correctly."""
+    result = parse_file(rust_simple)
+    funcs = [s for s in result.symbols if s.kind == "function"]
+    assert len(funcs) == 1
+    assert funcs[0].name == "main"
+
+
+# ---------------------------------------------------------------------------
+# build_index with multi-language
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not (
+        _has_grammar("javascript")
+        and _has_grammar("typescript")
+        and _has_grammar("rust")
+    ),
+    reason="Need all three tree-sitter grammars",
+)
+def test_build_index_multilang(multilang_project: Path):
+    """build_index handles JS, TS, and Rust files in the same directory."""
+    index = build_index(multilang_project)
+    names = set(index.all_names())
+    # JS
+    assert "run" in names
+    assert "App" in names
+    # TS
+    assert "loadConfig" in names
+    # Rust
+    assert "init" in names
+    assert "State" in names
+
+
+# ---------------------------------------------------------------------------
+# Graceful fallback
+# ---------------------------------------------------------------------------
+
+
+def test_parse_file_unknown_extension_fallback(tmp_path: Path):
+    """Unknown extensions fall back to Python parser gracefully."""
+    f = tmp_path / "script.c"
+    f.write_text("int main() { return 0; }")
+    result = parse_file(f)
+    # Should not crash — falls back to Python parser which can't parse C
+    assert isinstance(result.symbols, list)
+
+
+def test_parse_file_empty(tmp_path: Path):
+    """Empty file returns empty result."""
+    f = tmp_path / "empty.py"
+    f.write_text("")
+    result = parse_file(f)
+    assert result.symbols == []
+
+
+def test_tree_sitter_parse_unknown_lang():
+    """Unknown language falls back gracefully."""
+    code = b"some code"
+    root, parser = _tree_sitter_parse(code, lang_name="fortran")
+    # Should fall back to Python or return None
+    # Either is acceptable — main thing is no crash
+    assert root is None or root.type in ("program", "module", "source_file", "ERROR")
+
+
+# ---------------------------------------------------------------------------
+# Symbol quality checks
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_js
+def test_js_symbol_locations(js_module: Path):
+    """JavaScript: symbol locations are non-zero."""
+    result = parse_file(js_module)
+    for s in result.symbols:
+        assert s.start_line >= 1
+        assert s.end_line >= s.start_line
+        assert s.file == str(js_module)
+
+
+@_skip_no_rust
+def test_rust_symbol_locations(rust_module: Path):
+    """Rust: symbol locations are non-zero."""
+    result = parse_file(rust_module)
+    for s in result.symbols:
+        assert s.start_line >= 1
+        assert s.end_line >= s.start_line
+        assert s.file == str(rust_module)
