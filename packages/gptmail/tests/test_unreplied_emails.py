@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from gptmail.lib import AgentEmail
+from gptmail.lib import AgentEmail, UnrepliedEmail
 
 
 @pytest.fixture
@@ -107,10 +107,11 @@ def test_get_unreplied_emails_sorts_oldest_first(
 
     unreplied = agent.get_unreplied_emails()
 
-    assert [message_id for message_id, _, _ in unreplied] == [
+    assert [entry.message_id for entry in unreplied] == [
         "<older@example.com>",
         "<newer@example.com>",
     ]
+    assert [entry.folder for entry in unreplied] == ["inbox", "inbox"]
 
 
 def test_get_unreplied_emails_treats_missing_and_malformed_dates_as_oldest(
@@ -145,10 +146,36 @@ def test_get_unreplied_emails_treats_missing_and_malformed_dates_as_oldest(
 
     unreplied = agent.get_unreplied_emails()
 
-    assert [message_id for message_id, _, _ in unreplied] == [
+    assert [entry.message_id for entry in unreplied] == [
         "<malformed@example.com>",
         "<missing@example.com>",
         "<valid@example.com>",
+    ]
+
+
+def test_get_unreplied_emails_returns_typed_records(agent: AgentEmail) -> None:
+    archive = agent.email_dir / "archive"
+    expected_date = datetime(2026, 5, 16, 11, 0, tzinfo=timezone.utc)
+
+    _write_email(
+        archive / "typed-record.md",
+        message_id="<typed@example.com>",
+        subject="Typed record",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=expected_date,
+    )
+
+    unreplied = agent.get_unreplied_emails(folders=["archive"])
+
+    assert unreplied == [
+        UnrepliedEmail(
+            message_id="<typed@example.com>",
+            subject="Typed record",
+            sender="friend@example.com",
+            date=expected_date,
+            folder="archive",
+        )
     ]
 
 
