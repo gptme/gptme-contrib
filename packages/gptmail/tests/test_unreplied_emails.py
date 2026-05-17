@@ -42,6 +42,32 @@ def _write_email(
     )
 
 
+def _write_email_with_raw_date(
+    path: Path,
+    *,
+    message_id: str,
+    subject: str,
+    sender: str,
+    recipient: str,
+    date_header: str | None,
+) -> None:
+    lines = [
+        f"Message-ID: {message_id}",
+        f"From: Friend <{sender}>",
+        f"To: {recipient}",
+    ]
+    if date_header is not None:
+        lines.append(f"Date: {date_header}")
+    lines.extend(
+        [
+            f"Subject: {subject}",
+            "",
+            "Body",
+        ]
+    )
+    path.write_text("\n".join(lines))
+
+
 def test_get_unreplied_emails_sorts_oldest_first(
     agent: AgentEmail,
     monkeypatch: pytest.MonkeyPatch,
@@ -81,4 +107,43 @@ def test_get_unreplied_emails_sorts_oldest_first(
     assert [message_id for message_id, _, _ in unreplied] == [
         "<older@example.com>",
         "<newer@example.com>",
+    ]
+
+
+def test_get_unreplied_emails_treats_missing_and_malformed_dates_as_oldest(
+    agent: AgentEmail,
+) -> None:
+    inbox = agent.email_dir / "inbox"
+
+    _write_email_with_raw_date(
+        inbox / "b-missing-date.md",
+        message_id="<missing@example.com>",
+        subject="Missing date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date_header=None,
+    )
+    _write_email_with_raw_date(
+        inbox / "a-malformed-date.md",
+        message_id="<malformed@example.com>",
+        subject="Malformed date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date_header="definitely not a real date",
+    )
+    _write_email(
+        inbox / "c-valid-date.md",
+        message_id="<valid@example.com>",
+        subject="Valid date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc),
+    )
+
+    unreplied = agent.get_unreplied_emails()
+
+    assert [message_id for message_id, _, _ in unreplied] == [
+        "<malformed@example.com>",
+        "<missing@example.com>",
+        "<valid@example.com>",
     ]

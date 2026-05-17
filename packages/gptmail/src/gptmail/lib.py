@@ -380,11 +380,7 @@ class AgentEmail:
                     if already_replied:
                         continue
 
-                    sort_date = (
-                        self._parse_email_date(date_match.group(1))
-                        if date_match
-                        else datetime.min.replace(tzinfo=timezone.utc)
-                    )
+                    sort_date = self._parse_email_date(date_match.group(1) if date_match else "")
                     unreplied_with_dates.append(
                         (sort_date, email_file.name, (message_id, subject, sender))
                     )
@@ -1051,8 +1047,8 @@ class AgentEmail:
 
             return parsedate_to_datetime(date_str)
         except Exception:
-            # Fallback to current time if parsing fails
-            return datetime.now(timezone.utc)
+            # Unknown dates should sort with the oldest messages.
+            return datetime.min.replace(tzinfo=timezone.utc)
 
     def _format_thread_display(self, message_id: str) -> str:
         """Format a complete thread for display."""
