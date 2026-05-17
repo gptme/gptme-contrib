@@ -1493,6 +1493,23 @@ def _clip_outline(
     return clipped, shown
 
 
+def _repo_map_path_penalty(rel_path: str) -> int:
+    """Prefer production code over test-heavy files in repo-map ranking."""
+    path = Path(rel_path)
+    stem = path.stem.lower()
+    dir_parts = {part.lower() for part in path.parts[:-1]}
+
+    if dir_parts & {"test", "tests", "__tests__"}:
+        return 1
+    if stem == "conftest":
+        return 1
+    if stem.startswith("test_") or stem.endswith("_test"):
+        return 1
+    if stem.endswith(".test") or stem.endswith(".spec") or stem.endswith("_spec"):
+        return 1
+    return 0
+
+
 def build_repo_map(
     directory: str | Path,
     *,
@@ -1522,7 +1539,11 @@ def build_repo_map(
         )
 
     file_rows.sort(
-        key=lambda row: (-cast(int, row["symbol_count"]), str(row["path"])),
+        key=lambda row: (
+            _repo_map_path_penalty(str(row["path"])),
+            -cast(int, row["symbol_count"]),
+            str(row["path"]),
+        ),
     )
 
     shown_rows = file_rows[: max(0, max_files)]

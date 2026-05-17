@@ -580,6 +580,49 @@ const normalize = (req) => req
     assert any(entry["name"] == "helper" for entry in web_outline)
 
 
+def test_build_repo_map_prefers_production_files_over_tests(tmp_path: Path):
+    """Repo-map ranking should not let oversized test files crowd out source."""
+    src_dir = tmp_path / "src"
+    tests_dir = tmp_path / "tests"
+    src_dir.mkdir()
+    tests_dir.mkdir()
+
+    (src_dir / "app.py").write_text(
+        """
+def run_app() -> str:
+    return helper()
+
+
+def helper() -> str:
+    return "ok"
+"""
+    )
+    (tests_dir / "test_app.py").write_text(
+        """
+def test_one():
+    return 1
+
+
+def test_two():
+    return 2
+
+
+def test_three():
+    return 3
+
+
+def test_four():
+    return 4
+"""
+    )
+
+    repo_map = build_repo_map(tmp_path, max_files=2, max_symbols_per_file=10)
+    files = cast(list[dict[str, object]], repo_map["files"])
+
+    assert cast(str, files[0]["path"]) == "src/app.py"
+    assert cast(str, files[1]["path"]) == "tests/test_app.py"
+
+
 def test_format_repo_map_human_readable(multi_file_project: Path):
     """Repo-map formatter should emit a compact outline."""
     repo_map = build_repo_map(multi_file_project, max_files=2, max_symbols_per_file=2)
