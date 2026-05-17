@@ -42,6 +42,35 @@ def _write_email(
     )
 
 
+def _write_email_with_raw_date(
+    path: Path,
+    *,
+    message_id: str,
+    subject: str,
+    sender: str,
+    recipient: str,
+    date_header: str | None,
+    in_reply_to: str | None = None,
+) -> None:
+    lines = [
+        f"Message-ID: {message_id}",
+        f"From: Friend <{sender}>",
+        f"To: {recipient}",
+    ]
+    if date_header is not None:
+        lines.append(f"Date: {date_header}")
+    if in_reply_to is not None:
+        lines.append(f"In-Reply-To: {in_reply_to}")
+    lines.extend(
+        [
+            f"Subject: {subject}",
+            "",
+            "Body",
+        ]
+    )
+    path.write_text("\n".join(lines))
+
+
 def test_get_unreplied_emails_sorts_oldest_first(
     agent: AgentEmail,
     monkeypatch: pytest.MonkeyPatch,
@@ -82,3 +111,100 @@ def test_get_unreplied_emails_sorts_oldest_first(
         "<older@example.com>",
         "<newer@example.com>",
     ]
+
+
+def test_get_unreplied_emails_treats_missing_and_malformed_dates_as_oldest(
+    agent: AgentEmail,
+) -> None:
+    inbox = agent.email_dir / "inbox"
+
+    _write_email_with_raw_date(
+        inbox / "b-missing-date.md",
+        message_id="<missing@example.com>",
+        subject="Missing date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date_header=None,
+    )
+    _write_email_with_raw_date(
+        inbox / "a-malformed-date.md",
+        message_id="<malformed@example.com>",
+        subject="Malformed date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date_header="definitely not a real date",
+    )
+    _write_email(
+        inbox / "c-valid-date.md",
+        message_id="<valid@example.com>",
+        subject="Valid date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc),
+    )
+
+    unreplied = agent.get_unreplied_emails()
+
+    assert [message_id for message_id, _, _ in unreplied] == [
+        "<malformed@example.com>",
+        "<missing@example.com>",
+        "<valid@example.com>",
+    ]
+
+
+def test_list_messages_keeps_malformed_dates_last(agent: AgentEmail) -> None:
+    inbox = agent.email_dir / "inbox"
+
+    _write_email(
+        inbox / "valid-date.md",
+        message_id="<valid@example.com>",
+        subject="Valid date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=datetime(2000, 1, 1, 10, 0, tzinfo=timezone.utc),
+    )
+    _write_email_with_raw_date(
+        inbox / "malformed-date.md",
+        message_id="<malformed@example.com>",
+        subject="Malformed date",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date_header="definitely not a real date",
+    )
+
+    messages = agent.list_messages("inbox")
+
+    assert [message_id for message_id, _, _ in messages] == [
+        "<valid@example.com>",
+        "<malformed@example.com>",
+    ]
+
+
+def test_get_thread_messages_keeps_malformed_dates_last(agent: AgentEmail) -> None:
+    inbox = agent.email_dir / "inbox"
+    sent = agent.email_dir / "sent"
+
+    root_id = "<root@example.com>"
+    reply_id = "<reply@example.com>"
+
+    _write_email(
+        inbox / agent._format_filename(root_id),
+        message_id=root_id,
+        subject="Root message",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=datetime(2000, 1, 1, 10, 0, tzinfo=timezone.utc),
+    )
+    _write_email_with_raw_date(
+        sent / agent._format_filename(reply_id),
+        message_id=reply_id,
+        subject="Reply message",
+        sender="test@example.com",
+        recipient="friend@example.com",
+        date_header="definitely not a real date",
+        in_reply_to=root_id,
+    )
+
+    thread_messages = agent.get_thread_messages(root_id)
+
+    assert [message["id"] for message in thread_messages] == [root_id, reply_id]

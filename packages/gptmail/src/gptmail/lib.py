@@ -380,10 +380,9 @@ class AgentEmail:
                     if already_replied:
                         continue
 
-                    sort_date = (
-                        self._parse_email_date(date_match.group(1))
-                        if date_match
-                        else datetime.min.replace(tzinfo=timezone.utc)
+                    sort_date = self._parse_email_date(
+                        date_match.group(1) if date_match else "",
+                        invalid_default=datetime.min.replace(tzinfo=timezone.utc),
                     )
                     unreplied_with_dates.append(
                         (sort_date, email_file.name, (message_id, subject, sender))
@@ -1041,18 +1040,22 @@ class AgentEmail:
 
         return "unknown"
 
-    def _parse_email_date(self, date_str: str) -> datetime:
+    def _parse_email_date(
+        self, date_str: str, *, invalid_default: datetime | None = None
+    ) -> datetime:
         """Parse email date string to datetime object."""
         if not date_str:
             return datetime.min.replace(tzinfo=timezone.utc)
+
+        if invalid_default is None:
+            invalid_default = datetime.now(timezone.utc)
 
         try:
             # Try parsing RFC 2822 format
 
             return parsedate_to_datetime(date_str)
         except Exception:
-            # Fallback to current time if parsing fails
-            return datetime.now(timezone.utc)
+            return invalid_default
 
     def _format_thread_display(self, message_id: str) -> str:
         """Format a complete thread for display."""
