@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+from .similarity import calculate_recency_scores
+
 # Try importing sklearn, but provide fallback
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
@@ -158,9 +160,46 @@ class LessonDiscovery:
         try:
             with open(metrics_file) as f:
                 data = json.load(f)
-                return dict(data.get("lessons", {}))
+                metrics = data.get("metrics")
+                if metrics is None:
+                    metrics = data.get("lessons", {})
+                if isinstance(metrics, dict):
+                    return dict(metrics)
         except (json.JSONDecodeError, KeyError):
+            pass
+
+        return {}
+
+    def load_recency_scores(self) -> Dict[str, float]:
+        """Load freshness scores for lessons.
+
+        Returns a mapping of lesson relative paths to a normalized freshness
+        score where 1.0 is most recent and 0.0 is most stale.
+        """
+        try:
+            scores = calculate_recency_scores(self.lessons_dir)
+        except Exception:
             return {}
+
+        return {
+            score.path: max(0.0, min(1.0, 1.0 - score.staleness_score))
+            for score in scores
+        }
+
+    def score_recency(
+        self, lesson_path: Path, recency_scores: Dict[str, float]
+    ) -> float:
+        """Score lesson based on freshness.
+
+        Returns normalized score 0.0-1.0, with a neutral fallback if no
+        recency data is available for the lesson.
+        """
+        try:
+            rel_path = str(lesson_path.relative_to(self.lessons_dir))
+        except ValueError:
+            rel_path = str(lesson_path)
+
+        return recency_scores.get(rel_path, 0.5)
 
     def score_keyword_match(
         self, features: LessonFeatures, context_keywords: Set[str]
@@ -237,6 +276,7 @@ class LessonDiscovery:
 
         # Load metrics
         metrics = self.load_metrics()
+        recency_scores = self.load_recency_scores()
 
         # Score all lessons
         scores = []
@@ -251,7 +291,7 @@ class LessonDiscovery:
             keyword_score = self.score_keyword_match(features, context_keywords)
             success_score = self.score_success_rate(lesson_id, metrics)
             adoption_score = self.score_adoption(lesson_id, metrics)
-            recency_score = 0.0  # TODO: implement based on last access time
+            recency_score = self.score_recency(lesson_file, recency_scores)
 
             # Weighted composite score
             total_score = (
@@ -472,6 +512,7 @@ def main():
             print(f"   - Keyword match: {rec.keyword_score:.2f}")
             print(f"   - Success rate: {rec.success_score:.2f}")
             print(f"   - Adoption: {rec.adoption_score:.2f}")
+            print(f"   - Recency: {rec.recency_score:.2f}")
             print()
 
     @cli.command()
