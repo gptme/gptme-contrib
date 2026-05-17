@@ -86,6 +86,22 @@ def test_sqlite_freshness_detects_new_file(sample_dir):
     cache.close()
 
 
+def test_sqlite_freshness_detects_new_typescript_file(sample_dir):
+    """New non-Python source files should also invalidate the cache."""
+    cache = SqliteIndexCache(sample_dir)
+
+    index = build_index(Path(sample_dir))
+    cache.save(index)
+    assert cache.is_fresh()
+
+    (Path(sample_dir) / "new.ts").write_text(
+        "export function newFunc(name: string) { return name.trim() }\n"
+    )
+    assert not cache.is_fresh()
+
+    cache.close()
+
+
 def test_sqlite_freshness_detects_deleted_file(sample_dir):
     """Test that is_fresh returns False after a file is removed."""
     cache = SqliteIndexCache(sample_dir)

@@ -70,6 +70,16 @@ class ChatterboxTTSBackend:
         voices = _list_voices(self.voice_sample_dir)
         self.default_voice: str | None = voices[0] if voices else None
 
+    def close(self) -> None:
+        """Close the Chatterbox TTS client and release resources."""
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                log.warning("Error closing Chatterbox client", exc_info=True)
+        self.client = None
+        log.info("Chatterbox TTS client closed")
+
     def initialize(self, voice: str | None = None) -> None:
         """Initialize the Chatterbox TTS client."""
         try:

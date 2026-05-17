@@ -3,20 +3,19 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-v0: In-memory, single-file Python only. Tree-sitter grammars are the
-bottleneck (one per language). This prototype proves the concept before
-committing to SQLite + multi-language + persistent indexing.
+Supports Python, TypeScript/JavaScript, and Rust via tree-sitter grammars.
+To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
+and _load_language, then add extractor functions.
 
 Usage:
-    gptme-codegraph <file.py> parse           # Extract symbols
-    gptme-codegraph <file.py> callers <name>  # Who calls X?
-    gptme-codegraph <file.py> callees <name>  # What does X call?
-    python3 scripts/codegraph.py <file.py> deps <name>     # Dependency closure (what X needs)
-    python3 scripts/codegraph.py <file.py> impact <name>   # Impact radius (what needs X)
-    python3 scripts/codegraph.py <file.py> blast <name>    # [deprecated] alias for deps
-    python3 scripts/codegraph.py <file.py> def <name>      # Where is X defined?
-    python3 scripts/codegraph.py <file.py> refs <name>     # Where is X referenced?
-    gptme-codegraph <repo-or-file> map                      # Token-cheap repo skeleton
+    gptme-codegraph <file> parse           # Extract symbols
+    gptme-codegraph <file> callers <name>  # Who calls X?
+    gptme-codegraph <file> callees <name>  # What does X call?
+    python3 scripts/codegraph.py <file> deps <name>     # Dependency closure
+    python3 scripts/codegraph.py <file> impact <name>   # Impact radius
+    python3 scripts/codegraph.py <file> def <name>      # Where is X defined?
+    python3 scripts/codegraph.py <file> refs <name>     # Where is X referenced?
+    gptme-codegraph <repo-or-file> map                  # Token-cheap repo skeleton
 """
 
 from __future__ import annotations
@@ -32,6 +31,83 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
+
+# ---------------------------------------------------------------------------
+# Language mapping
+# ---------------------------------------------------------------------------
+
+_LANG_MAP: dict[str, str] = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".rs": "rust",
+}
+
+_SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
+
+
+def _detect_language(filepath: Path) -> str | None:
+    """Detect the tree-sitter language name from a file extension."""
+    suffix = filepath.suffix
+    if suffix in _LANG_MAP:
+        return _LANG_MAP[suffix]
+    # Try double extension (.d.ts → .ts)
+    if len(filepath.suffixes) >= 2:
+        double = filepath.suffixes[-2] + suffix
+        if double in _LANG_MAP:
+            return _LANG_MAP[double]
+    return None
+
+
+def _load_language(name: str):
+    """Load a tree-sitter Language for the given name.
+
+    Returns None if the grammar is not installed.
+    """
+    from tree_sitter import Language  # type: ignore[import-untyped,unused-ignore]
+
+    # Lazy import each grammar; missing grammars silently return None
+    grammar_map: dict[str, object] = {}
+    try:
+        import tree_sitter_python as tspython  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["python"] = tspython.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_typescript as tstypescript  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["typescript"] = tstypescript.language_typescript()
+        grammar_map["tsx"] = tstypescript.language_tsx()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_javascript as tsjavascript  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["javascript"] = tsjavascript.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_rust as tsrust  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["rust"] = tsrust.language()
+    except ImportError:
+        pass
+
+    lang = grammar_map.get(name)
+    if lang is None:
+        # Fallback: tsx → typescript
+        if name == "tsx":
+            lang = grammar_map.get("typescript")
+        elif name == "jsx":
+            lang = grammar_map.get("javascript")
+    if lang is None:
+        return None
+    return Language(lang)
 
 
 def _module_path(filepath: str, directory: str | None = None) -> str:
@@ -84,7 +160,7 @@ class IndexEntry:
 
 @dataclass
 class ImportInfo:
-    """A single import in a Python file.
+    """A single import in a source file.
 
     Naming conventions:
     - ``name`` is the *original imported name* as written in the source.
@@ -142,31 +218,42 @@ class SymbolIndex:
         return self.imports.get(filepath, [])
 
 
-def _iter_python_files(directory: Path) -> list[Path]:
-    """Return Python source files under ``directory``, skipping junk dirs.
+def _iter_source_files(directory: Path) -> list[Path]:
+    """Return source files under ``directory``, skipping junk dirs.
 
     Uses ``git ls-files`` when the directory is a git repository, falling
     back to ``rglob`` for non-git directories or when git is unavailable.
+    Supports Python, TypeScript/JavaScript, and Rust.
     """
     # When directory is a git repo, use git ls-files — faster and avoids
     # vendored deps (node_modules, .venv, etc.) and generated files.
     git_dir = directory / ".git"
     if git_dir.exists() and git_dir.is_dir():
         try:
-            result = subprocess.run(
-                ["git", "ls-files", "*.py"],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return [directory / p for p in result.stdout.strip().split("\n") if p]
+            all_files: set[Path] = set()
+            for pattern in (f"*{ext}" for ext in _SOURCE_EXTENSIONS):
+                result = subprocess.run(
+                    ["git", "ls-files", pattern],
+                    cwd=directory,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    all_files.update(
+                        directory / p for p in result.stdout.strip().split("\n") if p
+                    )
+            if all_files:
+                return sorted(all_files)
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
     files: list[Path] = []
-    for fp in sorted(directory.rglob("*.py")):
+    for fp in sorted(directory.rglob("*")):
+        if not fp.suffix:
+            continue
+        if _detect_language(fp) is None:
+            continue
         parts = fp.relative_to(directory).parts
         if any(
             p.startswith(".") or p in ("__pycache__", "node_modules", ".git")
@@ -298,7 +385,7 @@ class SqliteIndexCache:
         Returns True if:
         - The database has entries for this directory
         - All indexed files still exist and have the same mtime
-        - No new Python files exist in the directory
+        - No new supported source files exist in the directory
         """
         conn = self._connect()
         self._init_schema()
@@ -327,8 +414,8 @@ class SqliteIndexCache:
             if _file_mtime(fp) != cached_mtime:
                 return False
 
-        # Check that no new Python files appeared
-        for fp in dir_path.rglob("*.py"):
+        # Check that no new supported source files appeared
+        for fp in _iter_source_files(dir_path):
             if str(fp.resolve()) not in tracked:
                 return False
 
@@ -385,9 +472,9 @@ class SqliteIndexCache:
                 (fp_str, _file_mtime(fp), self._directory),
             )
 
-        # Also track all Python files to detect new files on freshness check
+        # Also track all supported source files to detect new files on freshness check
         dir_path = Path(self._directory)
-        for fp in dir_path.rglob("*.py"):
+        for fp in _iter_source_files(dir_path):
             fp_str = str(fp.resolve())
             if fp_str not in seen_files:
                 conn.execute(
@@ -482,7 +569,7 @@ class Symbol:
 
 @dataclass
 class FileParseResult:
-    """Result of parsing a single Python file."""
+    """Result of parsing a single source file."""
 
     symbols: list[Symbol] = field(default_factory=list)
     imports: list[ImportInfo] = field(default_factory=list)
@@ -491,18 +578,16 @@ class FileParseResult:
 def _tree_sitter_parse(code: bytes, lang_name: str = "python"):
     """Parse source code with tree-sitter and return the root node.
 
-    Falls back gracefully if tree-sitter is not installed or the grammar
-    is unavailable. Returns (root_node, parser) on success.
+    Falls back gracefully if tree-sitter or the grammar is unavailable.
+    Returns (root_node, parser) on success.
     """
     try:
-        import tree_sitter_python as tspython  # type: ignore[import-not-found,unused-ignore]
-        from tree_sitter import (  # type: ignore[import-untyped,unused-ignore]
-            Language,
-            Parser,
-        )
+        from tree_sitter import Parser  # type: ignore[import-untyped,unused-ignore]
 
         parser = Parser()
-        language = Language(tspython.language())
+        language = _load_language(lang_name)
+        if language is None:
+            return None, None
         parser.language = language
         tree = parser.parse(code)
         if tree is None:
@@ -544,7 +629,7 @@ def _extract_calls(node) -> list[str]:
         cursor = node.walk()
         reached_root = False
         while not reached_root:
-            if cursor.node.type == "call":
+            if cursor.node.type in {"call", "call_expression"}:
                 func_node = cursor.node.child_by_field_name("function")
                 if func_node:
                     calls.append(_text(func_node))
@@ -562,6 +647,13 @@ def _extract_calls(node) -> list[str]:
     except Exception:
         pass
     return calls
+
+
+def _strip_string_quotes(text: str) -> str:
+    """Return a string literal without its outer quote characters."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    return text
 
 
 def _extract_imports(root) -> list[ImportInfo]:
@@ -660,61 +752,372 @@ def _extract_imports(root) -> list[ImportInfo]:
     return imports
 
 
+def _extract_imports_javascript(root) -> list[ImportInfo]:
+    """Extract import statements from JavaScript/TypeScript code.
+
+    Phase 1 keeps the mapping intentionally simple:
+    - named imports preserve original names and aliases
+    - namespace imports resolve dotted calls like ``util.foo()``
+    - default imports map the local binding directly as a best-effort guess
+    """
+    imports: list[ImportInfo] = []
+    try:
+        for node in root.named_children:
+            if node.type != "import_statement":
+                continue
+
+            source_node = next(
+                (child for child in node.named_children if child.type == "string"),
+                None,
+            )
+            clause_node = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type == "import_clause"
+                ),
+                None,
+            )
+            if source_node is None or clause_node is None:
+                continue
+
+            module = _strip_string_quotes(_text(source_node))
+            for child in clause_node.named_children:
+                if child.type == "identifier":
+                    local_name = _text(child)
+                    imports.append(
+                        ImportInfo(
+                            file="",
+                            name=local_name,
+                            module=module,
+                            is_from=True,
+                        )
+                    )
+                elif child.type == "named_imports":
+                    for specifier in child.named_children:
+                        if specifier.type != "import_specifier":
+                            continue
+                        name_node = specifier.child_by_field_name("name")
+                        alias_node = specifier.child_by_field_name("alias")
+                        name = _text(name_node) if name_node else ""
+                        alias = _text(alias_node) if alias_node else None
+                        imports.append(
+                            ImportInfo(
+                                file="",
+                                name=name,
+                                module=module,
+                                is_from=True,
+                                alias=alias,
+                            )
+                        )
+                elif child.type == "namespace_import":
+                    alias = next(
+                        (
+                            _text(grandchild)
+                            for grandchild in child.named_children
+                            if grandchild.type == "identifier"
+                        ),
+                        None,
+                    )
+                    imports.append(
+                        ImportInfo(
+                            file="",
+                            name=module.split("/")[-1] or module,
+                            module=module,
+                            is_from=False,
+                            alias=alias,
+                        )
+                    )
+    except Exception:
+        pass
+    return imports
+
+
+# ---------------------------------------------------------------------------
+# TypeScript / JavaScript extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_symbols_typescript(root, filepath: str) -> list[Symbol]:
+    """Extract functions, classes, and methods from a TS/JS parse tree."""
+    symbols: list[Symbol] = []
+
+    def _text_ts(node) -> str:
+        try:
+            return node.text.decode("utf-8") if node.text else ""
+        except Exception:
+            return ""
+
+    def walk(node, parent_class: str | None = None):
+        if node.type in ("function_declaration", "method_definition"):
+            name_node = node.child_by_field_name("name")
+            body_node = node.child_by_field_name("body")
+            if name_node:
+                name = _text_ts(name_node)
+                kind = "method" if parent_class else "function"
+                calls = _extract_calls(body_node) if body_node else []
+                symbols.append(
+                    Symbol(
+                        name=name,
+                        kind=kind,
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent_class=parent_class,
+                        calls=list(set(calls)),
+                    )
+                )
+            return
+        elif node.type == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = _text_ts(name_node)
+                symbols.append(
+                    Symbol(
+                        name=name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+                body_node = node.child_by_field_name("body")
+                if body_node:
+                    for child in body_node.named_children:
+                        walk(child, parent_class=name)
+            return
+        elif node.type in ("lexical_declaration", "variable_declaration"):
+            # Handle arrow functions assigned to const/let/var:
+            # const foo = (x) => { ... }
+            for child in node.named_children:
+                if child.type == "variable_declarator":
+                    name_node = child.child_by_field_name("name")
+                    value_node = child.child_by_field_name("value")
+                    if (
+                        name_node
+                        and value_node
+                        and value_node.type
+                        in (
+                            "arrow_function",
+                            "function_expression",
+                        )
+                    ):
+                        name = _text_ts(name_node)
+                        body_node = value_node.child_by_field_name("body")
+                        calls = _extract_calls(body_node) if body_node else []
+                        symbols.append(
+                            Symbol(
+                                name=name,
+                                kind="function",
+                                file=filepath,
+                                start_line=child.start_point[0] + 1,
+                                end_line=child.end_point[0] + 1,
+                                calls=list(set(calls)),
+                            )
+                        )
+            return
+        elif node.type == "export_statement":
+            # export function / class / const
+            for child in node.named_children:
+                walk(child, parent_class)
+            return
+
+        # Recurse into children
+        for child in node.named_children:
+            walk(child, parent_class)
+
+    walk(root)
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Rust extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
+    """Extract functions, structs, enums, traits, and impl blocks from a Rust parse tree."""
+    symbols: list[Symbol] = []
+
+    def _text_rs(node) -> str:
+        try:
+            return node.text.decode("utf-8") if node.text else ""
+        except Exception:
+            return ""
+
+    def walk(node, parent_scope: str | None = None, parent_kind: str | None = None):
+        if node.type == "function_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = _text_rs(name_node)
+                # Determine kind: methods are inside impl_item
+                kind = "method" if parent_kind == "impl" else "function"
+                parent_class = parent_scope if kind == "method" else None
+                symbols.append(
+                    Symbol(
+                        name=name,
+                        kind=kind,
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent_class=parent_class,
+                    )
+                )
+            return
+        elif node.type == "function_signature_item" and parent_kind == "trait":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append(
+                    Symbol(
+                        name=_text_rs(name_node),
+                        kind="method",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent_class=parent_scope,
+                    )
+                )
+            return
+        elif node.type == "struct_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append(
+                    Symbol(
+                        name=_text_rs(name_node),
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+            return
+        elif node.type == "enum_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append(
+                    Symbol(
+                        name=_text_rs(name_node),
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+            return
+        elif node.type == "trait_item":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                trait_name = _text_rs(name_node)
+                symbols.append(
+                    Symbol(
+                        name=trait_name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+                for child in node.named_children:
+                    walk(child, parent_scope=trait_name, parent_kind="trait")
+            return
+        elif node.type == "impl_item":
+            # impl Foo { fn method() ... } → methods get parent_class="Foo"
+            type_node = node.child_by_field_name("type")
+            scope_name = None
+            if type_node:
+                scope_name = _text_rs(type_node)
+            for child in node.named_children:
+                walk(child, parent_scope=scope_name, parent_kind="impl")
+            return
+
+        for child in node.named_children:
+            walk(child, parent_scope, parent_kind)
+
+    walk(root)
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Multi-language parse_file
+# ---------------------------------------------------------------------------
+
+
 def parse_file(filepath: Path) -> FileParseResult:
-    """Extract all symbols and imports from a Python file."""
+    """Extract all symbols and imports from a source file.
+
+    Detects language from file extension and dispatches to the correct
+    tree-sitter grammar. Supports Python, TypeScript/JavaScript, and Rust.
+    """
     code = filepath.read_bytes()
-    root, _parser = _tree_sitter_parse(code)
+    lang_name = _detect_language(filepath)
+    if lang_name is None:
+        return FileParseResult()
+    root, _parser = _tree_sitter_parse(code, lang_name)
     if root is None:
         return FileParseResult()
 
     filename = str(filepath)
     symbols: list[Symbol] = []
 
-    def walk(node, parent_class: str | None = None):
-        if node.type == "function_definition":
-            name_node = node.child_by_field_name("name")
-            body_node = node.child_by_field_name("body")
-            if name_node:
-                name = _text(name_node)
-                calls = _extract_calls(body_node) if body_node else []
-                docstring = _extract_docstring(body_node) if body_node else None
-                kind = "method" if parent_class else "function"
-                symbols.append(
-                    Symbol(
-                        name=name,
-                        kind=kind,
-                        file=filename,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
-                        parent_class=parent_class,
-                        docstring=docstring,
-                        calls=list(set(calls)),
-                    )
-                )
-        elif node.type == "class_definition":
-            name_node = node.child_by_field_name("name")
-            body_node = node.child_by_field_name("body")
-            if name_node:
-                name = _text(name_node)
-                docstring = _extract_docstring(body_node) if body_node else None
-                symbols.append(
-                    Symbol(
-                        name=name,
-                        kind="class",
-                        file=filename,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
-                        docstring=docstring,
-                    )
-                )
-                if body_node:
-                    for child in body_node.named_children:
-                        walk(child, parent_class=name)
+    if lang_name == "python":
+        # --- Python extraction (existing logic) ---
 
-    for child in root.named_children:
-        walk(child)
+        def walk(node, parent_class: str | None = None):
+            if node.type == "function_definition":
+                name_node = node.child_by_field_name("name")
+                body_node = node.child_by_field_name("body")
+                if name_node:
+                    name = _text(name_node)
+                    calls = _extract_calls(body_node) if body_node else []
+                    docstring = _extract_docstring(body_node) if body_node else None
+                    kind = "method" if parent_class else "function"
+                    symbols.append(
+                        Symbol(
+                            name=name,
+                            kind=kind,
+                            file=filename,
+                            start_line=node.start_point[0] + 1,
+                            end_line=node.end_point[0] + 1,
+                            parent_class=parent_class,
+                            docstring=docstring,
+                            calls=list(set(calls)),
+                        )
+                    )
+            elif node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                body_node = node.child_by_field_name("body")
+                if name_node:
+                    name = _text(name_node)
+                    docstring = _extract_docstring(body_node) if body_node else None
+                    symbols.append(
+                        Symbol(
+                            name=name,
+                            kind="class",
+                            file=filename,
+                            start_line=node.start_point[0] + 1,
+                            end_line=node.end_point[0] + 1,
+                            docstring=docstring,
+                        )
+                    )
+                    if body_node:
+                        for child in body_node.named_children:
+                            walk(child, parent_class=name)
 
-    imports = _extract_imports(root)
+        for child in root.named_children:
+            walk(child)
+
+    elif lang_name in ("typescript", "javascript", "tsx"):
+        symbols = _extract_symbols_typescript(root, filename)
+
+    elif lang_name == "rust":
+        symbols = _extract_symbols_rust(root, filename)
+
+    imports: list[ImportInfo] = []
+    if lang_name == "python":
+        imports = _extract_imports(root)
+    elif lang_name in ("typescript", "javascript", "tsx"):
+        imports = _extract_imports_javascript(root)
+
     for imp in imports:
         imp.file = filename
 
@@ -722,7 +1125,7 @@ def parse_file(filepath: Path) -> FileParseResult:
 
 
 def extract_symbols(filepath: Path) -> list[Symbol]:
-    """Extract all symbols (functions, classes) from a Python file.
+    """Extract all symbols (functions, classes) from a source file.
 
     Returns a list of Symbol objects with names, locations, docstrings,
     and call graphs. (Convenience wrapper around parse_file.)
@@ -731,15 +1134,11 @@ def extract_symbols(filepath: Path) -> list[Symbol]:
 
 
 def build_index(directory: str | Path) -> SymbolIndex:
-    """Build a cross-file symbol index for all Python files in a directory.
-
-    Scans all ``.py`` files recursively, extracts symbols and imports, and
-    creates an ``IndexEntry`` for each symbol and ``ImportInfo`` for each import.
-    """
+    """Build a cross-file symbol index for supported source files in a directory."""
     index = SymbolIndex()
     directory = Path(directory)
     dir_str = str(directory)
-    for fp in _iter_python_files(directory):
+    for fp in _iter_source_files(directory):
         result = parse_file(fp)
         mp = _module_path(str(fp), dir_str)
         for sym in result.symbols:
@@ -1094,6 +1493,23 @@ def _clip_outline(
     return clipped, shown
 
 
+def _repo_map_path_penalty(rel_path: str) -> int:
+    """Prefer production code over test-heavy files in repo-map ranking."""
+    path = Path(rel_path)
+    stem = path.stem.lower()
+    dir_parts = {part.lower() for part in path.parts[:-1]}
+
+    if dir_parts & {"test", "tests", "__tests__"}:
+        return 1
+    if stem == "conftest":
+        return 1
+    if stem.startswith("test_") or stem.endswith("_test"):
+        return 1
+    if stem.endswith(".test") or stem.endswith(".spec") or stem.endswith("_spec"):
+        return 1
+    return 0
+
+
 def build_repo_map(
     directory: str | Path,
     *,
@@ -1102,7 +1518,7 @@ def build_repo_map(
 ) -> dict[str, object]:
     """Build a token-cheap repo skeleton grouped by file and class."""
     root = Path(directory)
-    files = _iter_python_files(root)
+    files = _iter_source_files(root)
     file_rows: list[dict[str, object]] = []
     total_symbols = 0
 
@@ -1123,7 +1539,11 @@ def build_repo_map(
         )
 
     file_rows.sort(
-        key=lambda row: (-cast(int, row["symbol_count"]), str(row["path"])),
+        key=lambda row: (
+            _repo_map_path_penalty(str(row["path"])),
+            -cast(int, row["symbol_count"]),
+            str(row["path"]),
+        ),
     )
 
     shown_rows = file_rows[: max(0, max_files)]
@@ -1251,7 +1671,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Structural code retrieval via tree-sitter"
     )
-    parser.add_argument("file", help="Python file to analyze")
+    parser.add_argument("file", help="Source file or directory to analyze")
     parser.add_argument(
         "--directory",
         help="Cross-file index directory (enables cross-file lookups)",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import tempfile
 from collections.abc import Generator
@@ -28,6 +29,25 @@ from gptme_codegraph.core import (
     format_symbols,
     impact_radius,
     parse_file,
+)
+
+
+def _has_grammar(module: str) -> bool:
+    """Return True when an optional tree-sitter grammar is importable."""
+    try:
+        importlib.import_module(module)
+        return True
+    except ImportError:
+        return False
+
+
+_skip_no_js = pytest.mark.skipif(
+    not _has_grammar("tree_sitter_javascript"),
+    reason="tree-sitter-javascript not installed",
+)
+_skip_no_ts = pytest.mark.skipif(
+    not _has_grammar("tree_sitter_typescript"),
+    reason="tree-sitter-typescript not installed",
 )
 
 # ---------------------------------------------------------------------------
@@ -118,6 +138,62 @@ class DataProcessor:
     path.unlink(missing_ok=True)
 
 
+@pytest.fixture
+def javascript_module() -> Generator[Path, None, None]:
+    """A JavaScript module with top-level functions, arrow functions, and a class."""
+    code = """
+export function greet(name) {
+    return helper(name)
+}
+
+const helper = (value) => value.trim()
+
+class User {
+    speak() {
+        return greet(this.name)
+    }
+}
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, prefix="test_js_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def typescript_module() -> Generator[Path, None, None]:
+    """A TypeScript module with typed functions and methods."""
+    code = """
+export function greet(name: string): string {
+    return helper(name)
+}
+
+const helper = (value: string) => value.trim()
+
+class User {
+    name: string
+
+    constructor(name: string) {
+        this.name = name
+    }
+
+    speak(): string {
+        return greet(this.name)
+    }
+}
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ts", delete=False, prefix="test_ts_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Symbol extraction
 # ---------------------------------------------------------------------------
@@ -192,6 +268,40 @@ def test_extract_symbols_class_only(class_only_module: Path):
     assert len(funcs) == 0
     methods = [s for s in symbols if s.kind == "method"]
     assert len(methods) == 2
+
+
+@_skip_no_js
+def test_extract_symbols_javascript_calls_and_methods(javascript_module: Path):
+    symbols = extract_symbols(javascript_module)
+    names = {s.name for s in symbols}
+    assert {"greet", "helper", "User", "speak"} <= names
+
+    greet = next(s for s in symbols if s.name == "greet")
+    helper = next(s for s in symbols if s.name == "helper")
+    speak = next(s for s in symbols if s.name == "speak")
+
+    assert helper.kind == "function"
+    assert speak.kind == "method"
+    assert speak.parent_class == "User"
+    assert "helper" in greet.calls
+    assert "greet" in speak.calls
+
+
+@_skip_no_ts
+def test_extract_symbols_typescript_calls_and_constructor(typescript_module: Path):
+    symbols = extract_symbols(typescript_module)
+    names = {s.name for s in symbols}
+    assert {"greet", "helper", "User", "constructor", "speak"} <= names
+
+    constructor = next(s for s in symbols if s.name == "constructor")
+    speak = next(s for s in symbols if s.name == "speak")
+    greet = next(s for s in symbols if s.name == "greet")
+
+    assert constructor.kind == "method"
+    assert constructor.parent_class == "User"
+    assert speak.parent_class == "User"
+    assert "helper" in greet.calls
+    assert "greet" in speak.calls
 
 
 def test_extract_symbols_kind_distribution(simple_module: Path):
@@ -428,6 +538,89 @@ def test_build_repo_map_groups_class_methods(multi_file_project: Path):
     }
     assert "__init__" in method_names
     assert "greet" in method_names
+
+
+@_skip_no_js
+@_skip_no_ts
+def test_build_repo_map_mixed_language_sources(tmp_path: Path):
+    """Repo-map should count and outline non-Python source files too."""
+    (tmp_path / "web.ts").write_text(
+        """
+export function render(name: string): string {
+    return helper(name)
+}
+
+const helper = (value: string) => value.trim()
+"""
+    )
+    (tmp_path / "api.js").write_text(
+        """
+export function handle(req) {
+    return normalize(req)
+}
+
+const normalize = (req) => req
+"""
+    )
+
+    repo_map = build_repo_map(tmp_path, max_files=10, max_symbols_per_file=10)
+    assert repo_map["files_scanned"] == 2
+    assert repo_map["files_with_symbols"] == 2
+
+    files = cast(list[dict[str, object]], repo_map["files"])
+    paths = {cast(str, row["path"]) for row in files}
+    assert {"web.ts", "api.js"} <= paths
+
+    web_outline = next(
+        cast(list[dict[str, object]], row["outline"])
+        for row in files
+        if row["path"] == "web.ts"
+    )
+    assert any(entry["name"] == "render" for entry in web_outline)
+    assert any(entry["name"] == "helper" for entry in web_outline)
+
+
+def test_build_repo_map_prefers_production_files_over_tests(tmp_path: Path):
+    """Repo-map ranking should not let oversized test files crowd out source."""
+    src_dir = tmp_path / "src"
+    tests_dir = tmp_path / "tests"
+    src_dir.mkdir()
+    tests_dir.mkdir()
+
+    (src_dir / "app.py").write_text(
+        """
+def run_app() -> str:
+    return helper()
+
+
+def helper() -> str:
+    return "ok"
+"""
+    )
+    (tests_dir / "test_app.py").write_text(
+        """
+def test_one():
+    return 1
+
+
+def test_two():
+    return 2
+
+
+def test_three():
+    return 3
+
+
+def test_four():
+    return 4
+"""
+    )
+
+    repo_map = build_repo_map(tmp_path, max_files=2, max_symbols_per_file=10)
+    files = cast(list[dict[str, object]], repo_map["files"])
+
+    assert cast(str, files[0]["path"]) == "src/app.py"
+    assert cast(str, files[1]["path"]) == "tests/test_app.py"
 
 
 def test_format_repo_map_human_readable(multi_file_project: Path):

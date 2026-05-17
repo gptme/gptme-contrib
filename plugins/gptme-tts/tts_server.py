@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize backend on startup."""
+    """Initialize backend on startup and teardown on shutdown."""
     global current_backend
 
     try:
@@ -74,7 +74,15 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # TODO: cleanup
+    # Cleanup backend on shutdown
+    if current_backend is not None:
+        try:
+            current_backend.close()
+            log.info(f"Cleaned up {backend_name} backend")
+        except Exception as e:
+            log.error(f"Error during backend cleanup: {e}")
+        finally:
+            current_backend = None
 
 
 # Initialize FastAPI app
@@ -395,6 +403,13 @@ def main(
         except Exception as e:
             click.echo(f"Error listing voices: {e}", err=True)
             return
+        finally:
+            try:
+                temp_backend.close()
+            except NameError:
+                pass
+            except Exception:
+                pass
 
     # Check if the selected backend is available
     available_backends = TTSBackendLoader.get_available_backends()

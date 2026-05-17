@@ -319,9 +319,9 @@ class InputSourcesConfig(BaseModel):
             Validated InputSourcesConfig instance
         """
         try:
-            import tomllib
+            import tomllib  # type: ignore[import-not-found]  # Python 3.11+ stdlib; only exists on 3.10 via tomli shim
         except ImportError:
-            import tomli as tomllib  # type: ignore[no-redef]
+            import tomli as tomllib  # type: ignore[no-redef,import-not-found]
 
         with open(config_path, "rb") as f:
             config_dict = tomllib.load(f)

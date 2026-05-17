@@ -6,13 +6,30 @@ knowledge/research/2026-05-03-codegraph-productization-roadmap.md item #4.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
+import pytest
 from gptme_codegraph.core import (
     _extract_imports,
     _tree_sitter_parse,
     build_cross_file_call_graph,
     build_index,
+)
+
+
+def _has_grammar(module: str) -> bool:
+    """Return True when an optional tree-sitter grammar is importable."""
+    try:
+        importlib.import_module(module)
+        return True
+    except ImportError:
+        return False
+
+
+_skip_no_js = pytest.mark.skipif(
+    not _has_grammar("tree_sitter_javascript"),
+    reason="tree-sitter-javascript not installed",
 )
 
 # ---------------------------------------------------------------------------
@@ -68,6 +85,42 @@ def test_dotted_module_alias(tmp_path: Path):
         f"Expected aliased dotted import; got "
         f"{[(i.name, i.module, i.alias) for i in imports]}"
     )
+
+
+@_skip_no_js
+def test_javascript_named_import_alias_resolves_call(tmp_path: Path):
+    """`import { trimName as normalize } ...; normalize()` resolves cross-file."""
+    (tmp_path / "helpers.js").write_text(
+        "export function trimName(name) { return name.trim() }\n"
+    )
+    (tmp_path / "main.js").write_text(
+        'import { trimName as normalize } from "./helpers.js";\n'
+        "function run(name) { return normalize(name) }\n"
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "helpers::trimName" in callees.get("main::run", set())
+    assert "main::run" in callers.get("helpers::trimName", set())
+
+
+@_skip_no_js
+def test_javascript_namespace_import_resolves_dotted_call(tmp_path: Path):
+    """`import * as helpers ...; helpers.trimName()` resolves cross-file."""
+    (tmp_path / "helpers.js").write_text(
+        "export function trimName(name) { return name.trim() }\n"
+    )
+    (tmp_path / "main.js").write_text(
+        'import * as helpers from "./helpers.js";\n'
+        "function run(name) { return helpers.trimName(name) }\n"
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "helpers::trimName" in callees.get("main::run", set())
+    assert "main::run" in callers.get("helpers::trimName", set())
 
 
 # ---------------------------------------------------------------------------
