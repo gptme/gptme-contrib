@@ -406,6 +406,8 @@ def main(
         finally:
             try:
                 temp_backend.close()
+            except NameError:
+                pass
             except Exception:
                 pass
 
