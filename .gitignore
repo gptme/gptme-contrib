@@ -5,8 +5,10 @@ __pycache__
 # Secrets - never commit
 scripts/discord/logs/*
 scripts/*/.env
+scripts/*/.oauth-state
 scripts/*/.tokens.json
 scripts/.env
+*.oauth-state
 *.tokens.json
 
 .venv/

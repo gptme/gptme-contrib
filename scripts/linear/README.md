@@ -191,24 +191,25 @@ uv run linear-activity.py auth
 
 This will:
 1. Generate the Linear authorization URL
-2. Open it in your browser (or print if no display)
-3. After you authorize, Linear redirects to your callback URL
-4. Extract the code from the redirect and exchange for tokens
+2. Include a one-time OAuth `state` value in that URL
+3. Open it in your browser (or print if no display)
+4. After you authorize, Linear redirects to your callback URL
+5. Validate the returned `state`, then exchange the code for tokens
 
 ### Option B: Manual Token Creation
 
 If the CLI auth flow doesn't work, manually create tokens:
 
-1. Build the authorization URL:
-   ```
-   https://linear.app/oauth/authorize?client_id=<CLIENT_ID>&redirect_uri=<CALLBACK_URL>&scope=read,write,app:mentionable,app:assignable&response_type=code&state=auth
-   ```
+1. Run `uv run linear-activity.py auth` and copy the full authorization URL it prints.
+   Do not replace the `state` parameter with a hardcoded value; the command
+   generates a one-time state token for each auth attempt.
 
-2. Visit the URL in browser and authorize
+2. Visit that exact URL in your browser and authorize.
 
-3. After redirect, extract the `code` parameter from the URL
+3. After redirect, extract both the `code` and `state` parameters from the URL.
 
-4. Exchange code for tokens:
+4. Verify the returned `state` matches the URL from step 1, then exchange the
+   `code` for tokens:
    ```bash
    curl -X POST https://api.linear.app/oauth/token \
      -H "Content-Type: application/x-www-form-urlencoded" \

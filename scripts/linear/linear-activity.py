@@ -46,8 +46,10 @@ import time
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+import linear_oauth_state  # type: ignore[import-not-found]
 from dotenv import load_dotenv
 
 # ============================================================================
@@ -194,6 +196,37 @@ def load_oauth_credentials() -> tuple[str, str]:
     return client_id, client_secret
 
 
+def build_authorization_url(
+    *,
+    client_id: str,
+    callback_url: str,
+    scopes: str,
+    state: str,
+) -> str:
+    """Build the Linear authorization URL with a per-attempt state."""
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": callback_url,
+            "scope": scopes,
+            "response_type": "code",
+            "actor": "app",
+            "state": state,
+        }
+    )
+    return f"{LINEAR_OAUTH_AUTHORIZE_URL}?{query}"
+
+
+def parse_redirect_callback(redirect_url: str) -> tuple[str | None, str | None]:
+    """Extract the OAuth code and state from a callback URL."""
+    query = parse_qs(urlparse(redirect_url).query)
+    code_values: list[str] | None = query.get("code")
+    state_values: list[str] | None = query.get("state")
+    code = code_values[0] if code_values else None
+    state = state_values[0] if state_values else None
+    return code, state
+
+
 def is_token_expired() -> bool:
     """Check if the current token is expired."""
     if not TOKENS_FILE.exists():
@@ -296,14 +329,12 @@ def do_auth() -> None:
 
     # Build authorization URL
     scopes = "read,write,app:mentionable,app:assignable,initiative:read,initiative:write,issues:create,comments:create"
-    auth_url = (
-        f"{LINEAR_OAUTH_AUTHORIZE_URL}?"
-        f"client_id={client_id}&"
-        f"redirect_uri={callback_url}&"
-        f"scope={scopes}&"
-        f"response_type=code&"
-        f"actor=app&"
-        f"state=auth"
+    expected_state = linear_oauth_state.generate_and_save_oauth_state()
+    auth_url = build_authorization_url(
+        client_id=client_id,
+        callback_url=callback_url,
+        scopes=scopes,
+        state=expected_state,
     )
 
     print("=== Linear OAuth Authorization ===\n")
@@ -316,17 +347,24 @@ def do_auth() -> None:
     try:
         redirect_url = input("Redirect URL: ").strip()
     except (EOFError, KeyboardInterrupt):
+        linear_oauth_state.clear_pending_oauth_state()
         raise AuthenticationError("Authorization aborted")
 
-    # Extract code from URL
-    if "code=" not in redirect_url:
-        raise AuthenticationError("No authorization code found in URL")
-
-    code = redirect_url.split("code=")[1].split("&")[0]
-    print("\nExchanging code for tokens...")
-
-    # Exchange code for tokens
     try:
+        code, returned_state = parse_redirect_callback(redirect_url)
+        if not code:
+            raise AuthenticationError("No authorization code found in URL")
+
+        state_error = linear_oauth_state.get_oauth_state_error(
+            returned_state,
+            expected_state=expected_state,
+        )
+        if state_error:
+            raise AuthenticationError(state_error)
+
+        print("\nExchanging code for tokens...")
+
+        # Exchange code for tokens
         response = httpx.post(
             LINEAR_OAUTH_TOKEN_URL,
             data={
@@ -358,11 +396,16 @@ def do_auth() -> None:
         }
 
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+        linear_oauth_state.clear_pending_oauth_state()
         print(f"✓ Tokens saved to {TOKENS_FILE}")
         print(f"  Expires in {data.get('expires_in', 0) // 3600}h")
 
     except httpx.HTTPError as e:
+        linear_oauth_state.clear_pending_oauth_state()
         raise AuthenticationError(f"HTTP error during token exchange: {e}")
+    except Exception:
+        linear_oauth_state.clear_pending_oauth_state()
+        raise
 
 
 def token_status() -> None:

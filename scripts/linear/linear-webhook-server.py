@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import linear_oauth_state  # type: ignore[import-not-found]
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
@@ -839,7 +840,7 @@ def oauth_callback():
     """
     # Get the authorization code from the query string
     code = request.args.get("code")
-    _state = request.args.get("state")  # TODO: Implement CSRF validation with state
+    state = request.args.get("state")
     error = request.args.get("error")
 
     if error:
@@ -867,6 +868,25 @@ def oauth_callback():
         <body style="font-family: sans-serif; padding: 40px; text-align: center;">
             <h1 style="color: #dc3545;">❌ Missing Authorization Code</h1>
             <p>No authorization code was provided in the callback.</p>
+            <p><a href="/">Back to home</a></p>
+        </body>
+        </html>
+        """,
+            400,
+        )
+
+    state_error = linear_oauth_state.get_oauth_state_error(
+        state,
+        expected_state=linear_oauth_state.load_pending_oauth_state(),
+    )
+    if state_error:
+        return (
+            f"""
+        <html>
+        <head><title>Invalid OAuth State</title></head>
+        <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+            <h1 style="color: #dc3545;">❌ Invalid OAuth State</h1>
+            <p>{html.escape(state_error)}</p>
             <p><a href="/">Back to home</a></p>
         </body>
         </html>
@@ -968,6 +988,7 @@ def oauth_callback():
         }
 
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+        linear_oauth_state.clear_pending_oauth_state()
         print(f"✓ OAuth tokens saved to {TOKENS_FILE}", file=sys.stderr)
 
         return """
