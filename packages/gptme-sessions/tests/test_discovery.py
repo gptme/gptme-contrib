@@ -835,6 +835,12 @@ class TestExtractProject:
         jsonl.write_text(json.dumps(event) + "\n")
         assert extract_project("codex", jsonl) is None
 
+    def test_codex_invalid_json_returns_none(self, tmp_path: Path) -> None:
+        """codex: returns None when the first line is not valid JSON."""
+        jsonl = tmp_path / "session.jsonl"
+        jsonl.write_text("not valid json{{{[[[")
+        assert extract_project("codex", jsonl) is None
+
     def test_copilot_returns_none(self, tmp_path: Path) -> None:
         """copilot: returns None (no project info available)."""
         events = tmp_path / "events.jsonl"
