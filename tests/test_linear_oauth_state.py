@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -45,23 +46,16 @@ def load_script_module(name: str, path: Path):
 
 def configure_state_file(
     monkeypatch: pytest.MonkeyPatch,
-    module: object,
+    module: Any,
     state_file: Path,
     *,
     expected_state: str | None = None,
 ) -> None:
     """Route OAuth state storage to a temp file for the test."""
-    monkeypatch.setattr(module, "OAUTH_STATE_FILE", state_file, raising=False)
-
-    oauth_state = sys.modules.get("oauth_state")
-    if oauth_state is not None:
-        monkeypatch.setattr(oauth_state, "OAUTH_STATE_FILE", state_file)
-        if expected_state is not None:
-            oauth_state.save_pending_oauth_state(expected_state)
-        return
+    monkeypatch.setattr(module.linear_oauth_state, "OAUTH_STATE_FILE", state_file)
 
     if expected_state is not None:
-        state_file.write_text(expected_state)
+        module.linear_oauth_state.save_pending_oauth_state(expected_state)
 
 
 @pytest.fixture
@@ -120,6 +114,7 @@ def test_do_auth_rejects_mismatched_state_before_token_exchange(
         activity.do_auth()
 
     assert not token_exchange_called
+    assert not state_file.exists()
     assert not token_file.exists()
 
 

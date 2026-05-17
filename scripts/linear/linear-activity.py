@@ -41,7 +41,6 @@ API Commands:
 
 import json
 import os
-import secrets
 import sys
 import time
 from enum import Enum
@@ -50,6 +49,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+import linear_oauth_state  # type: ignore[import-not-found]
 from dotenv import load_dotenv
 
 # ============================================================================
@@ -127,7 +127,6 @@ class ActivityType(Enum):
 # Load environment from .env file in script directory
 ENV_FILE = Path(__file__).parent / ".env"
 TOKENS_FILE = Path(__file__).parent / ".tokens.json"
-OAUTH_STATE_FILE = Path(__file__).parent / ".oauth-state"
 load_dotenv(ENV_FILE)
 
 # Linear endpoints
@@ -195,45 +194,6 @@ def load_oauth_credentials() -> tuple[str, str]:
         )
 
     return client_id, client_secret
-
-
-def save_pending_oauth_state(state: str) -> None:
-    """Persist the pending OAuth state for the next callback."""
-    OAUTH_STATE_FILE.write_text(state)
-
-
-def load_pending_oauth_state() -> str | None:
-    """Load the pending OAuth state if it exists."""
-    if not OAUTH_STATE_FILE.exists():
-        return None
-
-    value = OAUTH_STATE_FILE.read_text().strip()
-    return value or None
-
-
-def clear_pending_oauth_state() -> None:
-    """Remove the pending OAuth state after a successful auth flow."""
-    OAUTH_STATE_FILE.unlink(missing_ok=True)
-
-
-def generate_and_save_oauth_state() -> str:
-    """Generate a per-attempt OAuth state and persist it."""
-    state = secrets.token_urlsafe(32)
-    save_pending_oauth_state(state)
-    return state
-
-
-def get_oauth_state_error(
-    received_state: str | None, *, expected_state: str | None
-) -> str | None:
-    """Return an error message when the OAuth state is missing or invalid."""
-    if not expected_state:
-        return "No pending OAuth state found. Start a new authorization attempt."
-    if not received_state:
-        return "No OAuth state found in callback URL."
-    if received_state != expected_state:
-        return "OAuth state mismatch. Start a new authorization attempt."
-    return None
 
 
 def build_authorization_url(
@@ -369,7 +329,7 @@ def do_auth() -> None:
 
     # Build authorization URL
     scopes = "read,write,app:mentionable,app:assignable,initiative:read,initiative:write,issues:create,comments:create"
-    expected_state = generate_and_save_oauth_state()
+    expected_state = linear_oauth_state.generate_and_save_oauth_state()
     auth_url = build_authorization_url(
         client_id=client_id,
         callback_url=callback_url,
@@ -387,20 +347,24 @@ def do_auth() -> None:
     try:
         redirect_url = input("Redirect URL: ").strip()
     except (EOFError, KeyboardInterrupt):
+        linear_oauth_state.clear_pending_oauth_state()
         raise AuthenticationError("Authorization aborted")
 
-    code, returned_state = parse_redirect_callback(redirect_url)
-    if not code:
-        raise AuthenticationError("No authorization code found in URL")
-
-    state_error = get_oauth_state_error(returned_state, expected_state=expected_state)
-    if state_error:
-        raise AuthenticationError(state_error)
-
-    print("\nExchanging code for tokens...")
-
-    # Exchange code for tokens
     try:
+        code, returned_state = parse_redirect_callback(redirect_url)
+        if not code:
+            raise AuthenticationError("No authorization code found in URL")
+
+        state_error = linear_oauth_state.get_oauth_state_error(
+            returned_state,
+            expected_state=expected_state,
+        )
+        if state_error:
+            raise AuthenticationError(state_error)
+
+        print("\nExchanging code for tokens...")
+
+        # Exchange code for tokens
         response = httpx.post(
             LINEAR_OAUTH_TOKEN_URL,
             data={
@@ -432,12 +396,16 @@ def do_auth() -> None:
         }
 
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
-        clear_pending_oauth_state()
+        linear_oauth_state.clear_pending_oauth_state()
         print(f"✓ Tokens saved to {TOKENS_FILE}")
         print(f"  Expires in {data.get('expires_in', 0) // 3600}h")
 
     except httpx.HTTPError as e:
+        linear_oauth_state.clear_pending_oauth_state()
         raise AuthenticationError(f"HTTP error during token exchange: {e}")
+    except Exception:
+        linear_oauth_state.clear_pending_oauth_state()
+        raise
 
 
 def token_status() -> None:

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import linear_oauth_state  # type: ignore[import-not-found]
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
@@ -110,7 +111,6 @@ GPTME_TIMEOUT = 30 * 60  # 30 minutes
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token"
 TOKENS_FILE = Path(__file__).parent / ".tokens.json"
-OAUTH_STATE_FILE = Path(__file__).parent / ".oauth-state"
 
 # Session tracking for deduplication
 processed_sessions: set[str] = set()
@@ -143,38 +143,6 @@ log.addHandler(_file_handler)
 
 # Path to the linear-activity.py CLI
 LINEAR_ACTIVITY_CLI = Path(__file__).parent / "linear-activity.py"
-
-
-def save_pending_oauth_state(state: str) -> None:
-    """Persist the pending OAuth state for the next callback."""
-    OAUTH_STATE_FILE.write_text(state)
-
-
-def load_pending_oauth_state() -> str | None:
-    """Load the pending OAuth state if it exists."""
-    if not OAUTH_STATE_FILE.exists():
-        return None
-
-    value = OAUTH_STATE_FILE.read_text().strip()
-    return value or None
-
-
-def clear_pending_oauth_state() -> None:
-    """Remove the pending OAuth state after a successful auth flow."""
-    OAUTH_STATE_FILE.unlink(missing_ok=True)
-
-
-def get_oauth_state_error(
-    received_state: str | None, *, expected_state: str | None
-) -> str | None:
-    """Return an error message when the OAuth state is missing or invalid."""
-    if not expected_state:
-        return "No pending OAuth state found. Start a new authorization attempt."
-    if not received_state:
-        return "No OAuth state found in callback URL."
-    if received_state != expected_state:
-        return "OAuth state mismatch. Start a new authorization attempt."
-    return None
 
 
 def ensure_valid_token() -> bool:
@@ -907,8 +875,9 @@ def oauth_callback():
             400,
         )
 
-    state_error = get_oauth_state_error(
-        state, expected_state=load_pending_oauth_state()
+    state_error = linear_oauth_state.get_oauth_state_error(
+        state,
+        expected_state=linear_oauth_state.load_pending_oauth_state(),
     )
     if state_error:
         return (
@@ -1019,7 +988,7 @@ def oauth_callback():
         }
 
         TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
-        clear_pending_oauth_state()
+        linear_oauth_state.clear_pending_oauth_state()
         print(f"✓ OAuth tokens saved to {TOKENS_FILE}", file=sys.stderr)
 
         return """
