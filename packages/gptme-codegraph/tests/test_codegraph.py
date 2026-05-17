@@ -968,11 +968,13 @@ class Tool:
         symbol for symbol in result.symbols if symbol.name == "cmd_plugin"
     )
     assert "helper" in cmd_plugin.calls
+    assert cmd_plugin.start_line == 12  # decorator line, not def keyword (13)
 
     cmd_run = next(symbol for symbol in result.symbols if symbol.name == "cmd_run")
     assert cmd_run.kind == "method"
     assert cmd_run.parent_class == "Tool"
     assert "helper" in cmd_run.calls
+    assert cmd_run.start_line == 18  # decorator line, not def keyword (19)
 
 
 # ---------------------------------------------------------------------------
@@ -1089,6 +1091,7 @@ def cmd_plugin():
 
     assert len(entries) == 1
     assert entries[0].kind == "function"
+    assert entries[0].start_line == 12  # decorator line (not def keyword at 13)
 
     callees, callers = build_cross_file_call_graph(index, tmp_path)
 

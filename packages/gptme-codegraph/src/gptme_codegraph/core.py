@@ -854,13 +854,18 @@ def _extract_symbols_python(root, filepath: str) -> list[Symbol]:
     symbols: list[Symbol] = []
 
     def walk(node, parent_class: str | None = None):
-        node = _unwrap_python_definition(node)
-        if node is None:
+        unwrapped = _unwrap_python_definition(node)
+        if unwrapped is None:
             return
 
-        if node.type == "function_definition":
-            name_node = node.child_by_field_name("name")
-            body_node = node.child_by_field_name("body")
+        # Use the outer (decorated_definition) node for start_line so
+        # decorated symbols report their full extent (first decorator),
+        # not just the def/class keyword line.
+        start_node = node if node.type == "decorated_definition" else unwrapped
+
+        if unwrapped.type == "function_definition":
+            name_node = unwrapped.child_by_field_name("name")
+            body_node = unwrapped.child_by_field_name("body")
             if name_node:
                 name = _text(name_node)
                 calls = _extract_calls(body_node) if body_node else []
@@ -871,8 +876,8 @@ def _extract_symbols_python(root, filepath: str) -> list[Symbol]:
                         name=name,
                         kind=kind,
                         file=filepath,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
+                        start_line=start_node.start_point[0] + 1,
+                        end_line=unwrapped.end_point[0] + 1,
                         parent_class=parent_class,
                         docstring=docstring,
                         calls=list(set(calls)),
@@ -880,9 +885,9 @@ def _extract_symbols_python(root, filepath: str) -> list[Symbol]:
                 )
             return
 
-        if node.type == "class_definition":
-            name_node = node.child_by_field_name("name")
-            body_node = node.child_by_field_name("body")
+        if unwrapped.type == "class_definition":
+            name_node = unwrapped.child_by_field_name("name")
+            body_node = unwrapped.child_by_field_name("body")
             if name_node:
                 name = _text(name_node)
                 docstring = _extract_docstring(body_node) if body_node else None
@@ -891,8 +896,8 @@ def _extract_symbols_python(root, filepath: str) -> list[Symbol]:
                         name=name,
                         kind="class",
                         file=filepath,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
+                        start_line=start_node.start_point[0] + 1,
+                        end_line=unwrapped.end_point[0] + 1,
                         docstring=docstring,
                     )
                 )
