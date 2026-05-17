@@ -112,6 +112,27 @@ class TestJudgeSession:
         for support_cat in ("infrastructure", "monitoring", "knowledge", "research"):
             assert support_cat in prompt
 
+    def test_prompt_includes_worked_examples(self) -> None:
+        """The judge prompt must include worked reasoning examples showing how to grade
+        support-category sessions.
+
+        Regression guard: if the worked examples are removed or become unreachable,
+        the judge loses the "teaching why" layer that counteracts the remaining bias
+        documented in knowledge/research/2026-05-09-teaching-claude-why-lesson-validation.md.
+        """
+        prompt = JUDGE_PROMPT_TEMPLATE.format(
+            goals="Test goals",
+            category="cleanup",
+            routing_context="",
+            journal="Cleaned up stale references",
+        )
+        assert "## Worked Examples" in prompt
+        assert "infrastructure, ~0.78" in prompt
+        assert "cleanup, ~0.75" in prompt
+        assert "research, ~0.72" in prompt
+        assert "within-category" in prompt
+        assert "compounding" in prompt
+
     def test_score_clamping(self) -> None:
         """Out-of-range scores from the LLM are clamped to [0.0, 1.0]."""
         mock_anthropic = MagicMock()
