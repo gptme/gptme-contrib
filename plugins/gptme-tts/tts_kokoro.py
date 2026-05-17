@@ -126,6 +126,11 @@ class KokoroTTSBackend:
 
         return ["af_heart"]  # Default fallback
 
+    def close(self) -> None:
+        """Close the Kokoro TTS pipeline and release resources."""
+        self.pipeline = None
+        log.info("Kokoro pipeline closed")
+
     def initialize(self, voice: str | None = None) -> None:
         """Initialize the Kokoro TTS pipeline."""
         try:
