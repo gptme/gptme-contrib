@@ -803,11 +803,23 @@ class TestExtractProject:
         config.write_text("[chat]\nmodel = 'opus'\n")
         assert extract_project("gptme", session_dir) is None
 
-    def test_codex_returns_none(self, tmp_path: Path) -> None:
-        """codex: returns None (no project info available)."""
+    def test_codex_empty_file(self, tmp_path: Path) -> None:
+        """codex: returns None when JSONL is empty."""
         jsonl = tmp_path / "session.jsonl"
         jsonl.touch()
         assert extract_project("codex", jsonl) is None
+
+    def test_codex_extracts_cwd(self, tmp_path: Path) -> None:
+        """codex: extracts cwd from the first event's payload."""
+        import json
+
+        jsonl = tmp_path / "session.jsonl"
+        event = {
+            "type": "session_meta",
+            "payload": {"cwd": "/home/bob/bob"},
+        }
+        jsonl.write_text(json.dumps(event) + "\n")
+        assert extract_project("codex", jsonl) == "/home/bob/bob"
 
     def test_copilot_returns_none(self, tmp_path: Path) -> None:
         """copilot: returns None (no project info available)."""

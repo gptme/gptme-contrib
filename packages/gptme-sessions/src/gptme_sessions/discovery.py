@@ -524,6 +524,7 @@ def extract_project(harness: str, path: Path) -> str | None:
     - **claude-code**: decode the project directory name via
       :func:`decode_cc_project_path` (e.g. ``-Users-erb-myproj`` → ``/Users/erb/myproj``)
     - **gptme**: read ``workspace`` from the session's ``config.toml``
+    - **codex**: read ``payload.cwd`` from the first event in the JSONL file
 
     Returns ``None`` for harnesses where project cannot be determined.
     """
@@ -537,7 +538,25 @@ def extract_project(harness: str, path: Path) -> str | None:
         config = parse_gptme_config(session_dir)
         workspace = config.get("workspace", "")
         return workspace if workspace else None
+    elif harness == "codex":
+        # Read the first event's payload.cwd from the JSONL file
+        return _first_event_cwd(path)
     return None
+
+
+def _first_event_cwd(jsonl_path: Path) -> str | None:
+    """Extract ``payload.cwd`` from the first event in a Codex JSONL file."""
+    try:
+        with jsonl_path.open(encoding="utf-8") as f:
+            first_line = f.readline().strip()
+        if not first_line:
+            return None
+        event = json.loads(first_line)
+        payload: dict[str, object] = event.get("payload", {})
+        cwd: object = payload.get("cwd")
+        return str(cwd) if isinstance(cwd, str) else None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
 
 
 def discover_copilot_sessions(
