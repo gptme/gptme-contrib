@@ -932,6 +932,51 @@ def test_parse_file_returns_imports(tmp_path: Path):
     assert result.imports[0].name == "json"
 
 
+def test_parse_file_includes_decorated_python_definitions(tmp_path: Path):
+    """parse_file preserves decorated Python functions and methods."""
+    f = tmp_path / "decorated.py"
+    f.write_text(
+        """
+def command(name):
+    def decorator(func):
+        return func
+    return decorator
+
+
+def helper():
+    return "ok"
+
+
+@command("plugin")
+def cmd_plugin():
+    return helper()
+
+
+class Tool:
+    @command("run")
+    def cmd_run(self):
+        return helper()
+"""
+    )
+
+    result = parse_file(f)
+    names = {symbol.name for symbol in result.symbols}
+
+    assert {"command", "helper", "cmd_plugin", "Tool", "cmd_run"} <= names
+
+    cmd_plugin = next(
+        symbol for symbol in result.symbols if symbol.name == "cmd_plugin"
+    )
+    assert "helper" in cmd_plugin.calls
+    assert cmd_plugin.start_line == 12  # decorator line, not def keyword (13)
+
+    cmd_run = next(symbol for symbol in result.symbols if symbol.name == "cmd_run")
+    assert cmd_run.kind == "method"
+    assert cmd_run.parent_class == "Tool"
+    assert "helper" in cmd_run.calls
+    assert cmd_run.start_line == 18  # decorator line, not def keyword (19)
+
+
 # ---------------------------------------------------------------------------
 # Cross-file call graph
 # ---------------------------------------------------------------------------
@@ -1019,3 +1064,36 @@ def test_build_index_collects_imports(tmp_path: Path):
     names = {imp.name for imp in imports}
     assert "os" in names
     assert "path" in names
+
+
+def test_build_index_and_call_graph_include_decorated_functions(tmp_path: Path):
+    """Decorated Python functions stay visible to the index and call graph."""
+    (tmp_path / "main.py").write_text(
+        """
+def command(name):
+    def decorator(func):
+        return func
+    return decorator
+
+
+def helper():
+    return "ok"
+
+
+@command("plugin")
+def cmd_plugin():
+    return helper()
+"""
+    )
+
+    index = build_index(tmp_path)
+    entries = index.lookup("cmd_plugin")
+
+    assert len(entries) == 1
+    assert entries[0].kind == "function"
+    assert entries[0].start_line == 12  # decorator line (not def keyword at 13)
+
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "main::helper" in callees.get("main::cmd_plugin", set())
+    assert "main::cmd_plugin" in callers.get("main::helper", set())
