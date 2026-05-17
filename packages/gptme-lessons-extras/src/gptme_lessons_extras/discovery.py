@@ -11,9 +11,11 @@ Created: 2025-10-29 (Session 370)
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 # Try importing sklearn, but provide fallback
 try:
@@ -79,6 +81,23 @@ class LessonDiscovery:
         self.lessons_dir = lessons_dir or Path("lessons")
         self.history_dir = history_dir or Path(".lessons-history")
         self.features_cache: Dict[str, LessonFeatures] = {}
+
+    def get_last_modified_date(self, lesson_path: Path) -> datetime:
+        """Get last commit date for a lesson, falling back to file mtime."""
+        try:
+            result = subprocess.run(
+                ["git", "log", "-1", "--format=%cI", str(lesson_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            date_str = result.stdout.strip()
+            if date_str:
+                return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except (subprocess.CalledProcessError, ValueError):
+            pass
+
+        return datetime.fromtimestamp(lesson_path.stat().st_mtime).astimezone()
 
     def extract_features(self, lesson_path: Path) -> LessonFeatures:
         """Extract features from a lesson file."""
@@ -158,9 +177,64 @@ class LessonDiscovery:
         try:
             with open(metrics_file) as f:
                 data = json.load(f)
-                return dict(data.get("lessons", {}))
+                metrics = data.get("metrics")
+                if isinstance(metrics, dict):
+                    return dict(metrics)
+
+                # Backward compatibility with older cache shape.
+                lessons = data.get("lessons")
+                if isinstance(lessons, dict):
+                    return dict(lessons)
+
+                return {}
         except (json.JSONDecodeError, KeyError):
             return {}
+
+    def score_recency(
+        self, lesson_path: Path, lesson_metrics: Dict[str, Any] | None = None
+    ) -> float:
+        """Score lesson recency/freshness from last activity.
+
+        Prefer the most recent concrete signal available:
+        - last referenced timestamp from metrics, if present
+        - otherwise last modified time from git/file metadata
+
+        Returns normalized score 0.0-1.0.
+        """
+        lesson_metrics = lesson_metrics or {}
+        activity_days: list[int] = []
+
+        try:
+            last_modified = self.get_last_modified_date(lesson_path)
+            now = datetime.now(last_modified.tzinfo or timezone.utc)
+            activity_days.append(max(0, (now - last_modified).days))
+        except OSError:
+            pass
+
+        last_referenced = lesson_metrics.get("last_referenced")
+        if isinstance(last_referenced, str):
+            try:
+                referenced_at = datetime.fromisoformat(
+                    last_referenced.replace("Z", "+00:00")
+                )
+                now = datetime.now(referenced_at.tzinfo or timezone.utc)
+                activity_days.append(max(0, (now - referenced_at).days))
+            except ValueError:
+                pass
+
+        if not activity_days:
+            return 0.5
+
+        days_since_activity = min(activity_days)
+        if days_since_activity <= 7:
+            return 1.0
+        if days_since_activity <= 30:
+            return 0.8
+        if days_since_activity <= 90:
+            return 0.5
+        if days_since_activity <= 180:
+            return 0.3
+        return 0.1
 
     def score_keyword_match(
         self, features: LessonFeatures, context_keywords: Set[str]
@@ -251,7 +325,7 @@ class LessonDiscovery:
             keyword_score = self.score_keyword_match(features, context_keywords)
             success_score = self.score_success_rate(lesson_id, metrics)
             adoption_score = self.score_adoption(lesson_id, metrics)
-            recency_score = 0.0  # TODO: implement based on last access time
+            recency_score = self.score_recency(lesson_file, metrics.get(lesson_id))
 
             # Weighted composite score
             total_score = (
