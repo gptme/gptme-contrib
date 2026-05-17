@@ -1,3 +1,7 @@
+import asyncio
+import importlib
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -226,69 +230,147 @@ def test_wait_on_session_end_disabled():
 # --- Backend teardown contract tests ---
 
 
-def _has_backend_kokoro():
+def _import_tts_kokoro():
+    kokoro_stub = types.ModuleType("kokoro")
+    kokoro_stub.KPipeline = type("DummyPipeline", (), {})
+    kokoro_stub.__version__ = "test"
+
+    previous = sys.modules.get("kokoro")
+    sys.modules.pop("tts_kokoro", None)
+    sys.modules["kokoro"] = kokoro_stub
     try:
-        from tts_kokoro import KokoroTTSBackend  # noqa: F401
+        return importlib.import_module("tts_kokoro")
+    finally:
+        if previous is None:
+            sys.modules.pop("kokoro", None)
+        else:
+            sys.modules["kokoro"] = previous
 
-        return True
-    except ImportError:
-        return False
 
+def _import_tts_chatterbox():
+    gradio_client_stub = types.ModuleType("gradio_client")
 
-def _has_backend_chatterbox():
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    gradio_client_stub.Client = DummyClient
+    gradio_client_stub.handle_file = lambda path: path
+
+    previous = sys.modules.get("gradio_client")
+    sys.modules.pop("tts_chatterbox", None)
+    sys.modules["gradio_client"] = gradio_client_stub
     try:
-        from tts_chatterbox import ChatterboxTTSBackend  # noqa: F401
+        return importlib.import_module("tts_chatterbox")
+    finally:
+        if previous is None:
+            sys.modules.pop("gradio_client", None)
+        else:
+            sys.modules["gradio_client"] = previous
 
-        return True
-    except ImportError:
-        return False
+
+def _import_tts_server():
+    fastapi_stub = types.ModuleType("fastapi")
+    fastapi_responses_stub = types.ModuleType("fastapi.responses")
+
+    class DummyFastAPI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    class DummyHTTPException(Exception):
+        def __init__(self, status_code: int, detail: str):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    class DummyStreamingResponse:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    fastapi_stub.FastAPI = DummyFastAPI
+    fastapi_stub.HTTPException = DummyHTTPException
+    fastapi_responses_stub.StreamingResponse = DummyStreamingResponse
+
+    previous_fastapi = sys.modules.get("fastapi")
+    previous_fastapi_responses = sys.modules.get("fastapi.responses")
+    sys.modules.pop("tts_server", None)
+    sys.modules["fastapi"] = fastapi_stub
+    sys.modules["fastapi.responses"] = fastapi_responses_stub
+    try:
+        return importlib.import_module("tts_server")
+    finally:
+        if previous_fastapi is None:
+            sys.modules.pop("fastapi", None)
+        else:
+            sys.modules["fastapi"] = previous_fastapi
+        if previous_fastapi_responses is None:
+            sys.modules.pop("fastapi.responses", None)
+        else:
+            sys.modules["fastapi.responses"] = previous_fastapi_responses
 
 
 def test_kokoro_backend_close_contract():
     """KokoroTTSBackend.close() exists, is idempotent, and does not raise."""
-    from tts_kokoro import KokoroTTSBackend
+    module = _import_tts_kokoro()
 
-    backend = KokoroTTSBackend(lang_code="a", voice="af_heart")
-    # close() with uninitialized pipeline should be a no-op
+    with patch.object(module.KokoroTTSBackend, "_check_espeak", return_value=None):
+        backend = module.KokoroTTSBackend(lang_code="a", voice="af_heart")
+
+    backend.pipeline = object()
     backend.close()
-    # second call should also be safe (idempotent)
+    assert backend.pipeline is None
+
     backend.close()
-    # If the backend has an `initialize` method, close after init should also be safe
-    # (we skip actual init here since it requires espeak; the no-op path is the contract)
+    assert backend.pipeline is None
 
 
 def test_chatterbox_backend_close_contract():
     """ChatterboxTTSBackend.close() exists, is idempotent, and does not raise."""
-    from tts_chatterbox import ChatterboxTTSBackend
+    module = _import_tts_chatterbox()
 
-    # Initialize without HF token; close should still be safe
     with patch.dict("os.environ", {"HF_TOKEN": "test-token"}):
-        backend = ChatterboxTTSBackend(voice_sample_dir="/tmp")
-        # close() with uninitialized client should be a no-op
+        backend = module.ChatterboxTTSBackend(voice_sample_dir="/tmp")
         backend.close()
-    # second call should also be safe
+
+    client = MagicMock()
+    backend.client = client
     backend.close()
+    client.close.assert_called_once()
+    assert backend.client is None
+
+    backend.close()
+    client.close.assert_called_once()
 
 
 def test_lifespan_shutdown_calls_close():
     """FastAPI lifespan shutdown path calls close() on the backend."""
-    from tts_kokoro import KokoroTTSBackend
+    module = _import_tts_server()
 
-    backend = KokoroTTSBackend(lang_code="a", voice="af_heart")
-    backend.initialize = MagicMock()
-    backend.close = MagicMock()
+    backend = MagicMock()
 
-    # This tests the post-yield path: close() is called after shutdown
-    # We can't easily run the full lifespan context manager in a synthetic test,
-    # so we verify the pattern directly.
-    close_mock = MagicMock()
-    backend.close = close_mock
+    async def exercise_lifespan():
+        module.current_backend = None
+        module.backend_name = "kokoro"
+        async with module.lifespan(module.app):
+            assert module.current_backend is backend
 
-    # Simulate the shutdown path: close() + clear
-    backend.close()
-    assert close_mock.call_count == 1
+        backend.close.assert_called_once()
+        assert module.current_backend is None
 
-    # close() again (idempotent)
-    backend.close()
-    assert close_mock.call_count == 2
-    # No exception on second call
+    with patch.object(
+        module.TTSBackendLoader,
+        "load_kokoro_backend",
+        return_value=backend,
+    ) as load_backend:
+        asyncio.run(exercise_lifespan())
+
+    load_backend.assert_called_once_with(lang_code="a", voice="af_heart")
