@@ -48,6 +48,9 @@ _LANG_MAP: dict[str, str] = {
 }
 
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
+_NOISE_PATH_PARTS: frozenset[str] = frozenset(
+    {"__pycache__", "node_modules", ".git", "target"}
+)
 
 
 def _detect_language(filepath: Path) -> str | None:
@@ -61,6 +64,15 @@ def _detect_language(filepath: Path) -> str | None:
         if double in _LANG_MAP:
             return _LANG_MAP[double]
     return None
+
+
+def _is_noise_path(filepath: Path, directory: Path) -> bool:
+    """Return True when ``filepath`` lives under a junk/generated path."""
+    try:
+        parts = filepath.relative_to(directory).parts
+    except ValueError:
+        parts = filepath.parts
+    return any(part.startswith(".") or part in _NOISE_PATH_PARTS for part in parts)
 
 
 def _load_language(name: str):
@@ -244,7 +256,9 @@ def _iter_source_files(directory: Path) -> list[Path]:
                         directory / p for p in result.stdout.strip().split("\n") if p
                     )
             if all_files:
-                return sorted(all_files)
+                return sorted(
+                    fp for fp in all_files if not _is_noise_path(fp, directory)
+                )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
@@ -254,11 +268,7 @@ def _iter_source_files(directory: Path) -> list[Path]:
             continue
         if _detect_language(fp) is None:
             continue
-        parts = fp.relative_to(directory).parts
-        if any(
-            p.startswith(".") or p in ("__pycache__", "node_modules", ".git")
-            for p in parts
-        ):
+        if _is_noise_path(fp, directory):
             continue
         files.append(fp)
     return files

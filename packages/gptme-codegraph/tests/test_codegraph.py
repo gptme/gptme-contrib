@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
@@ -828,6 +829,38 @@ def test_build_index_skips_noise(tmp_path: Path):
     assert index.has("foo")
     assert not index.has("injected")
     assert not index.has("cached")
+
+
+def test_build_repo_map_skips_tracked_target_in_git_repo(tmp_path: Path):
+    """Git-backed discovery should still ignore tracked target/ artifacts."""
+    root = tmp_path / "project"
+    src_dir = root / "src"
+    target_dir = root / "target" / "debug" / "build" / "demo" / "out"
+    src_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    (src_dir / "app.py").write_text("def real_func():\n    return 'ok'\n")
+    (target_dir / "generated.py").write_text(
+        "def generated_func():\n    return 'noise'\n"
+    )
+
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "add", "src/app.py", "target/debug/build/demo/out/generated.py"],
+        cwd=root,
+        check=True,
+    )
+
+    index = build_index(root)
+    assert index.has("real_func")
+    assert not index.has("generated_func")
+
+    repo_map = build_repo_map(root, max_files=10, max_symbols_per_file=10)
+    assert repo_map["files_scanned"] == 1
+    assert repo_map["files_with_symbols"] == 1
+
+    files = cast(list[dict[str, object]], repo_map["files"])
+    paths = {cast(str, row["path"]) for row in files}
+    assert paths == {"src/app.py"}
 
 
 def test_build_index_multi_file(multi_file_project: Path):
