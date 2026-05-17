@@ -64,9 +64,6 @@ Return ONLY a JSON object with two keys: "score" (float 0.0-1.0) and "reason" (s
 Do not wrap in markdown code blocks."""
 
 JUDGE_PROMPT_TEMPLATE = """\
-## Agent Goals (ordered by priority)
-{goals}
-
 ## Session Category
 {category}
 {routing_context}
@@ -89,17 +86,73 @@ cross-repo) directly target top-priority product/revenue goals. Others
 triage, news, social, novelty, strategic) are support work that compounds
 future capability. Score on **within-category value**, not on whether the
 category itself targets goal #1:
+
 - A clean infrastructure / instrumentation / measurement session that
   meaningfully reduces future friction or persists durable learning is
   goal-aligned — score 0.7-0.9, do not cap it for "not revenue work".
+- A well-executed research, knowledge, or strategic session that yields
+  genuine insight or a durable artifact is goal-aligned — score 0.7-0.9,
+  do not cap it for "not revenue work".
 - Penalize all categories equally for thrashing, no-shipped-artifact,
   over-engineering, or work the agent invented to fill the session.
 - Reserve 0.9-1.0 for sessions where the deliverable plausibly moves a
   top-priority goal *or* is a category-best example of compounding work.
 
 Key principle: ONE impactful deliverable > FIVE small deliverables.
-Evaluate impact within the session's category, not the category's intrinsic
-priority.
+
+## Agent Goals (ordered by priority)
+{goals}
+
+## Worked Examples
+The following worked examples show how the rubric applies to real session
+shapes, explaining *why* specific categories earn their score range:
+
+**Example 1 (infrastructure, ~0.78)**: A session normalizes a flaky CI health
+check that has been producing false alerts for a week. It discovers the stale
+worker accumulation, removes the redundant probes, and adds a regression test.
+This session scores ~0.78 because:
+- Infrastructure compounding: every future session inherits a cleaner CI signal.
+- The artifact (test + config fix) is self-verifying and durable.
+- The work is not "revenue work" — that is irrelevant. The within-category
+  value is high: it permanently reduced future friction.
+
+**Example 2 (cleanup, ~0.75)**: A session audits lesson keywords using the LOO
+analysis tool, removes 8 dead keywords whose delta was harmfully negative, and
+updates a companion doc with the audit rationale. This session scores ~0.75
+because:
+- The removed keywords measurably improved agent behavior (validated by
+  LOO effect-size delta).
+- The artifact (keyword changes + companion doc) is durable — every future
+  agent session benefits without extra effort.
+- Busywork-versus-value boundary: the session only removed *harmful* keywords,
+  not all dead weight. It stopped at the value line.
+
+**Example 3 (research, ~0.72)**: A session reads an arXiv paper on tool-use
+reliability, writes a structured research note connecting the findings to the
+agent's architecture, and files a targeted idea-backlog entry. This session
+scores ~0.72 because:
+- The research note is a durable artifact that future sessions reference.
+- It connects abstract findings to concrete, actionable next steps (e.g.,
+  "try two-pass prompting on high-stakes turns").
+- It does *not* score higher because it produced no code change, no test, no
+  automated verification — the impact is mediated through future sessions'
+  ability to use the insight.
+
+Key principle across all three: the grade follows from *within-category*
+execution quality, compounding value, and durability — not from whether the
+category number matches a top goal.
+
+## Forbidden Constructions
+Do NOT invoke any of the following as a penalty rationale:
+- "low priority", "Tier 3", "Tier 5", "not a top goal"
+- "misaligned with top goals" or "misaligned with top-priority"
+- "not revenue-generating" or "not revenue work"
+- "below the top revenue-generating goal"
+- "fallback tier" or "lower-tier work" (in a negative sense)
+
+These phrases are category signals, NOT quality signals. Penalize only
+on actual execution quality: thrashing, no-shipped-artifact, over-engineering,
+or invented work — not on what tier or priority the category occupies.
 
 ## Routing-Aware Adjustment
 If a `## Routing Context` block above states the session legitimately
