@@ -1412,6 +1412,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "pyyaml" },
+    { name = "types-pyyaml" },
 ]
 
 [package.metadata]
@@ -1424,6 +1425,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.1.0" },
     { name = "pytest-mock", specifier = ">=3.12.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -5128,6 +5130,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/97/c439bc2c058f8a24edd732f5cc82adedd8794bcc2da0836c2eff1e2dbe91/twilio-9.10.5.tar.gz", hash = "sha256:d9f93b9280349ee7b52e7f17a0600fd7bfd0f7ff88eb00c40270164bc058743f", size = 1641690, upload-time = "2026-04-14T09:52:09.392Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/97/4fdde5e54fcbb789aa1a70c371f2f33d7eb1e58e8a6131fdbd8a98490976/twilio-9.10.5-py2.py3-none-any.whl", hash = "sha256:7972db54496fbf501b238f34d1f717f80ff22720313dc706632787aad5934997", size = 2284944, upload-time = "2026-04-14T09:52:07.333Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260510"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/36/85/0d9fafce21be112e977a89677f1ce9d1aef921d745b17c758c93e861c11f/types_pyyaml-6.0.12.20260510.tar.gz", hash = "sha256:09c1f1cb65a6eebea1e2e51ccf4918b8288e152909609a35cdb0d805efd125ad", size = 17831, upload-time = "2026-05-10T05:26:28.136Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/ad/fd618a218925daada7b8a5e7326e662599fa5fdff4a4c44ab2795bd2d9ca/types_pyyaml-6.0.12.20260510-py3-none-any.whl", hash = "sha256:3492eb9ba4d9d833473214c4d5736cccf5f37d93f5854059721e1c84f785309d", size = 20304, upload-time = "2026-05-10T05:26:26.981Z" },
 ]
 
 [[package]]
