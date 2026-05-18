@@ -179,6 +179,78 @@ def test_get_unreplied_emails_returns_typed_records(agent: AgentEmail) -> None:
     ]
 
 
+def test_process_unreplied_emails_keeps_legacy_callback_contract(agent: AgentEmail) -> None:
+    inbox = agent.email_dir / "inbox"
+    expected_date = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
+
+    _write_email(
+        inbox / "legacy-callback.md",
+        message_id="<legacy@example.com>",
+        subject="Legacy callback",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=expected_date,
+    )
+
+    seen: list[tuple[str, str, str]] = []
+
+    def callback(message_id: str, subject: str, sender: str) -> None:
+        seen.append((message_id, subject, sender))
+
+    processed = agent.process_unreplied_emails(callback)
+
+    assert processed == 1
+    assert seen == [("<legacy@example.com>", "Legacy callback", "friend@example.com")]
+
+
+def test_process_unreplied_emails_exposes_optional_metadata(agent: AgentEmail) -> None:
+    archive = agent.email_dir / "archive"
+    expected_date = datetime(2026, 5, 16, 13, 0, tzinfo=timezone.utc)
+
+    _write_email(
+        archive / "metadata-callback.md",
+        message_id="<metadata@example.com>",
+        subject="Metadata callback",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=expected_date,
+    )
+
+    seen: list[tuple[str, datetime, str, UnrepliedEmail]] = []
+
+    def callback(
+        message_id: str,
+        subject: str,
+        sender: str,
+        *,
+        date: datetime,
+        folder: str,
+        email_item: UnrepliedEmail,
+    ) -> None:
+        assert message_id == "<metadata@example.com>"
+        assert subject == "Metadata callback"
+        assert sender == "friend@example.com"
+        seen.append((message_id, date, folder, email_item))
+
+    processed = agent.process_unreplied_emails(callback, folders=["archive"])
+
+    assert processed == 1
+    assert seen == [
+        (
+            "<metadata@example.com>",
+            expected_date,
+            "archive",
+            UnrepliedEmail(
+                message_id="<metadata@example.com>",
+                subject="Metadata callback",
+                sender="friend@example.com",
+                date=expected_date,
+                folder="archive",
+            ),
+        )
+    ]
+
+
 def test_list_messages_keeps_malformed_dates_last(agent: AgentEmail) -> None:
     inbox = agent.email_dir / "inbox"
 

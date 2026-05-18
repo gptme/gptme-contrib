@@ -33,6 +33,7 @@ Example:
 """
 
 import email.charset
+import inspect
 import logging
 import os
 import re
@@ -527,7 +528,8 @@ class AgentEmail:
 
         Args:
             callback_func: Function to call for each unreplied email,
-                          should accept (message_id, subject, sender)
+                          should accept (message_id, subject, sender) and may
+                          opt into date, folder, and email_item keyword args
             folders: List of folders to scan (default: ["inbox"])
 
         Returns:
@@ -544,7 +546,7 @@ class AgentEmail:
                     print(
                         f"Processing unreplied email from {email_item.sender}: {email_item.subject}"
                     )
-                    callback_func(email_item.message_id, email_item.subject, email_item.sender)
+                    self._call_unreplied_callback(callback_func, email_item)
                     processed_count += 1
             except LockError:
                 print(f"Skipping {email_item.message_id} (already being processed)")
@@ -552,6 +554,32 @@ class AgentEmail:
                 print(f"Error processing {email_item.message_id}: {e}")
 
         return processed_count
+
+    def _call_unreplied_callback(self, callback_func, email_item: UnrepliedEmail) -> None:
+        """Invoke an unreplied-email callback without breaking legacy consumers."""
+        legacy_args = (email_item.message_id, email_item.subject, email_item.sender)
+
+        try:
+            signature = inspect.signature(callback_func)
+        except (TypeError, ValueError):
+            callback_func(*legacy_args)
+            return
+
+        parameters = signature.parameters
+        accepts_varkw = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+
+        extra_kwargs = {}
+        for name, value in (
+            ("date", email_item.date),
+            ("folder", email_item.folder),
+            ("email_item", email_item),
+        ):
+            if accepts_varkw or name in parameters:
+                extra_kwargs[name] = value
+
+        callback_func(*legacy_args, **extra_kwargs)
 
     def _generate_message_id(self) -> str:
         """Generate a unique message ID.
