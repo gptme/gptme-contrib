@@ -18,19 +18,22 @@ from tooloutput_trimmer.hooks import (  # noqa: E402
     BYPASS_ENV_VAR,
     TRIMMED_MARKER,
     TrimmerConfig,
-    _is_tool_output_message,
     apply_tool_output_trimmer,
     build_trimmed_content,
     generation_pre_hook,
+    get_trimmer_config,
     reset_state,
 )
+from tooloutput_trimmer.hooks.trimmer import _is_tool_output_message  # noqa: E402
 
 
 def _msg(role: str, content: str, **kwargs: object) -> Message:
     return Message(role, content, timestamp=datetime.now(timezone.utc), **kwargs)
 
 
-def _make_config(*, enabled: bool = True) -> SimpleNamespace:
+def _make_config(
+    *, enabled: bool = True, plugin_settings: dict[str, object] | None = None
+) -> SimpleNamespace:
     plugin_cfg = {
         "tooloutput_trimmer": {
             "max_output_chars": 200,
@@ -39,6 +42,8 @@ def _make_config(*, enabled: bool = True) -> SimpleNamespace:
             "pressure_chars": 1_000,
         }
     }
+    if plugin_settings:
+        plugin_cfg["tooloutput_trimmer"].update(plugin_settings)
     return SimpleNamespace(
         get_env_bool=lambda key: enabled if key == "GPTME_READ_TIME_TRIMMER" else None,
         user=SimpleNamespace(plugin={}),
@@ -174,6 +179,29 @@ def test_is_tool_output_message_respects_raw_prefixes() -> None:
 
     # With a non-matching raw_prefix, should still be eligible.
     assert _is_tool_output_message(msg, max_output_chars=200, raw_prefixes=("diff ",))
+
+
+def test_get_trimmer_config_coerces_single_raw_prefix_string() -> None:
+    with patch(
+        "tooloutput_trimmer.hooks.trimmer.get_config",
+        return_value=_make_config(plugin_settings={"raw_tool_prefixes": "cat "}),
+    ):
+        config = get_trimmer_config()
+
+    assert config.raw_tool_prefixes == ("cat ",)
+
+
+def test_is_tool_output_message_keeps_code_block_outputs_eligible() -> None:
+    content = "Executed code block.\n\n```stdout\nhello\n```\n" + ("abc" * 100)
+    msg = _msg("system", content)
+
+    # Python tool outputs do not retain the original code string, so
+    # raw_tool_prefixes cannot exempt them.
+    assert _is_tool_output_message(
+        msg,
+        max_output_chars=50,
+        raw_prefixes=("print(",),
+    )
 
 
 def test_apply_tool_output_trimmer_respects_raw_prefixes() -> None:

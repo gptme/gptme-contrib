@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -55,8 +56,11 @@ class TrimmerConfig:
     recent_turns: int = DEFAULT_RECENT_TURNS
     preview_chars: int = DEFAULT_PREVIEW_CHARS
     pressure_chars: int = DEFAULT_PRESSURE_CHARS
-    # Policy-layering fields (new in Phase 1 bypass contract):
-    # Commands/prefixes whose output should stay raw (never trim).
+    # Policy-layering field (Phase 1 bypass contract):
+    # Commands/prefixes whose shell output should stay raw (never trim).
+    # This only applies to "Ran command: `...`" messages; "Executed code block."
+    # payloads do not retain the original code string, so there is no command
+    # prefix to match against.
     raw_tool_prefixes: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -117,6 +121,27 @@ def _get_plugin_settings() -> dict[str, Any]:
     return {**user_cfg, **project_cfg}
 
 
+def _coerce_raw_tool_prefixes(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, list | tuple):
+        logger.warning(
+            "tooloutput_trimmer: ignoring invalid raw_tool_prefixes=%r; expected string or list[str]",
+            value,
+        )
+        return ()
+
+    prefixes = tuple(prefix for prefix in value if isinstance(prefix, str))
+    if len(prefixes) != len(value):
+        logger.warning(
+            "tooloutput_trimmer: ignoring non-string raw_tool_prefixes entries: %r",
+            value,
+        )
+    return prefixes
+
+
 def get_trimmer_config() -> TrimmerConfig:
     """Read trimmer config from env + [plugin.tooloutput_trimmer]."""
     settings = _get_plugin_settings()
@@ -145,7 +170,9 @@ def get_trimmer_config() -> TrimmerConfig:
             DEFAULT_PRESSURE_CHARS,
             minimum=1,
         ),
-        raw_tool_prefixes=tuple(settings.get("raw_tool_prefixes", [])),
+        raw_tool_prefixes=_coerce_raw_tool_prefixes(
+            settings.get("raw_tool_prefixes", [])
+        ),
     )
 
 
@@ -175,13 +202,9 @@ def _expected_cache_cold(costs: SessionCosts | None, model: str | None) -> bool:
 
 
 def _content_matches_raw_prefix(content: str, raw_prefixes: tuple[str, ...]) -> bool:
-    """Check if a tool-output message's command matches a raw prefix."""
+    """Check if a shell tool-output message's command matches a raw prefix."""
     if not raw_prefixes:
         return False
-    # Extract the command from the backtick-delimited portion of the first line.
-    # Format: "Ran command: `cmd args`" or "Executed code block."
-    import re  # noqa: PLC0415
-
     first_line = content.splitlines()[0] if content else ""
     if m := re.search(r"`([^`]+)`", first_line):
         cmd = m.group(1)
