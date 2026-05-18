@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .discovery import extract_project, extract_session_name
 from .record import SessionRecord
 from .signals import extract_from_path
 from .store import SessionStore
@@ -400,6 +401,12 @@ def post_session(
         record_kwargs["cascade_intent"] = cascade_intent
     if trajectory_path is not None:
         record_kwargs["trajectory_path"] = str(trajectory_path)
+        session_name = extract_session_name(harness, trajectory_path)
+        if session_name:
+            record_kwargs["session_name"] = session_name
+        project = extract_project(harness, trajectory_path)
+        if project:
+            record_kwargs["project"] = project
     # Fallback: if caller didn't provide journal_path, use the first
     # journal path extracted from the trajectory signals.
     if journal_path is None and signals:

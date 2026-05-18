@@ -130,6 +130,26 @@ def test_post_session_selector_mode_none(tmp_path: Path):
     assert result.record.selector_mode is None
 
 
+def test_post_session_backfills_session_name_and_project_from_trajectory(tmp_path: Path):
+    """Trajectory metadata should populate session_name/project when available."""
+    store = SessionStore(sessions_dir=tmp_path)
+    traj_dir = tmp_path / ".codex" / "sessions" / "2026" / "05" / "18"
+    traj_dir.mkdir(parents=True)
+    fake_traj = traj_dir / "12345678-abcdef.jsonl"
+    fake_traj.write_text('{"timestamp":"2026-05-18T04:00:00Z","payload":{"cwd":"/home/bob/bob"}}\n')
+
+    result = post_session(
+        store=store,
+        harness="codex",
+        model="gpt-5.4",
+        duration_seconds=30,
+        trajectory_path=fake_traj,
+    )
+
+    assert result.record.session_name == "12345678"
+    assert result.record.project == "/home/bob/bob"
+
+
 def test_post_session_ab_group_invalid(tmp_path: Path):
     """post_session raises ValueError for invalid ab_group values."""
     store = SessionStore(sessions_dir=tmp_path)

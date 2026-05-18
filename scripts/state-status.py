@@ -118,8 +118,8 @@ class StateChecker:
 
         # Get timestamps from frontmatter or git
         try:
-            created = datetime.fromisoformat(metadata.get("created", ""))
-            modified = datetime.fromisoformat(metadata.get("modified", ""))
+            created = datetime.fromisoformat(str(metadata.get("created", "")))
+            modified = datetime.fromisoformat(str(metadata.get("modified", "")))
         except (ValueError, TypeError):
             # Fallback to git timestamps
             try:
@@ -150,7 +150,7 @@ class StateChecker:
 
         return FileStatus(
             path=file,
-            state=current_state,
+            state=str(current_state) if current_state else None,
             issues=issues,
             created=created,
             modified=modified,
