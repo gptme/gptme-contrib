@@ -14,21 +14,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from gptme.chat import Message
-from gptme.dirs import get_logs_dir
 from gptme.logmanager import LogManager
 
 
-def test_user_message_survives_reload(tmp_path: Path) -> None:
-    """User message appended through LogManager persists across reload.
+@pytest.fixture
+def logs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return a clean tmp_path wired into LogManager's log root."""
+    monkeypatch.setattr("gptme.dirs.get_logs_dir", lambda: tmp_path)
+    monkeypatch.setattr("gptme.logmanager.manager.get_logs_dir", lambda: tmp_path)
+    return tmp_path
 
-    Uses a logdir under get_logs_dir() so that LogManager.logfile resolves
-    to the same location LogManager.load() reads from.
-    """
-    # Simulate the channel path the Discord bot would use
-    logsdir = get_logs_dir()
-    channel_id = "test_persistence_channel_948b"
-    logdir = logsdir / channel_id
+
+def test_user_message_survives_reload(logs_dir: Path) -> None:
+    """User message appended through LogManager persists across reload."""
+    channel_id = "test_persistence_channel"
+    logdir = logs_dir / channel_id
 
     initial_msgs = [
         Message("system", "You are a helpful assistant."),
@@ -54,11 +56,10 @@ def test_user_message_survives_reload(tmp_path: Path) -> None:
     assert any(m.content == "Hello, bot!" for m in user_msgs2)
 
 
-def test_multiple_turns_survive_reload(tmp_path: Path) -> None:
+def test_multiple_turns_survive_reload(logs_dir: Path) -> None:
     """A full conversation turn (user + assistant + system) persists."""
-    logsdir = get_logs_dir()
-    channel_id = "test_multi_turn_948b"
-    logdir = logsdir / channel_id
+    channel_id = "test_multi_turn"
+    logdir = logs_dir / channel_id
 
     initial_msgs = [
         Message("system", "You are a helpful assistant."),
@@ -90,11 +91,10 @@ def test_multiple_turns_survive_reload(tmp_path: Path) -> None:
     assert "3+3 is 6." in contents
 
 
-def test_message_count_across_sessions(tmp_path: Path) -> None:
+def test_message_count_across_sessions(logs_dir: Path) -> None:
     """Message count is correct after multiple appends and a reload."""
-    logsdir = get_logs_dir()
-    channel_id = "test_count_948b"
-    logdir = logsdir / channel_id
+    channel_id = "test_count"
+    logdir = logs_dir / channel_id
 
     initial_msgs = [Message("system", "You are a helpful assistant.")]
 

@@ -23,6 +23,7 @@ import contextvars
 import logging
 import os
 import re
+import shutil
 from copy import copy
 from pathlib import Path
 from typing import (
@@ -740,8 +741,16 @@ async def checkperms(ctx: commands.Context) -> None:
 async def clear(ctx: commands.Context) -> None:
     """Clear the conversation history in this channel."""
     channel_id = ctx.channel.id
-    if channel_id in conversations:
+    logpath = logsdir / str(channel_id)
+    had_memory = channel_id in conversations
+    had_persisted = logpath.exists()
+
+    if had_memory:
         del conversations[channel_id]
+    if had_persisted:
+        shutil.rmtree(logpath)
+
+    if had_memory or had_persisted:
         await ctx.send("Conversation history cleared! Starting fresh.")
     else:
         await ctx.send("No conversation history to clear.")
