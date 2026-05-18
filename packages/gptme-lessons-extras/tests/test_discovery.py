@@ -1,0 +1,128 @@
+"""Tests for lesson discovery recommendation scoring."""
+
+import json
+import os
+import time
+from pathlib import Path
+
+from gptme_lessons_extras.discovery import LessonDiscovery
+
+LESSON_TEMPLATE = """---
+match:
+  keywords: [shell]
+---
+# {title}
+
+## Rule
+Use the shell.
+
+## Pattern
+Run the command.
+"""
+
+
+def _write_lesson(path: Path, title: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(LESSON_TEMPLATE.format(title=title))
+
+
+def test_load_metrics_supports_current_network_format(tmp_path: Path) -> None:
+    """Discovery should load the metrics key written by the aggregator."""
+    history_dir = tmp_path / ".lessons-history"
+    metrics_dir = history_dir / "metrics"
+    metrics_dir.mkdir(parents=True)
+    expected = {
+        "demo": {
+            "success_rate": 0.9,
+            "adoption_count": 3,
+            "last_updated": "2026-05-17T00:00:00+00:00",
+        }
+    }
+    (metrics_dir / "network_metrics.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-17T00:00:00+00:00",
+                "lesson_count": 1,
+                "metrics": expected,
+            }
+        )
+    )
+
+    discovery = LessonDiscovery(history_dir=history_dir)
+
+    assert discovery.load_metrics() == expected
+
+
+def test_recommend_uses_loaded_metrics_scores(tmp_path: Path) -> None:
+    """Success and adoption scores should reflect the current metrics format."""
+    lessons_dir = tmp_path / "lessons" / "tools"
+    strong = lessons_dir / "strong.md"
+    weak = lessons_dir / "weak.md"
+    _write_lesson(strong, "Strong")
+    _write_lesson(weak, "Weak")
+
+    shared_time = time.time() - 30 * 24 * 3600
+    os.utime(strong, (shared_time, shared_time))
+    os.utime(weak, (shared_time, shared_time))
+
+    history_dir = tmp_path / ".lessons-history"
+    metrics_dir = history_dir / "metrics"
+    metrics_dir.mkdir(parents=True)
+    (metrics_dir / "network_metrics.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-17T00:00:00+00:00",
+                "lesson_count": 2,
+                "metrics": {
+                    "strong": {
+                        "success_rate": 1.0,
+                        "adoption_count": 5,
+                        "last_updated": "2026-05-01T00:00:00+00:00",
+                    },
+                    "weak": {
+                        "success_rate": 0.0,
+                        "adoption_count": 0,
+                        "last_updated": "2026-05-01T00:00:00+00:00",
+                    },
+                },
+            }
+        )
+    )
+
+    discovery = LessonDiscovery(
+        lessons_dir=tmp_path / "lessons", history_dir=history_dir
+    )
+
+    recommendations = discovery.recommend(keywords=["shell"], top_k=2)
+
+    assert [rec.lesson_id for rec in recommendations] == ["strong", "weak"]
+    assert recommendations[0].success_score == 1.0
+    assert recommendations[0].adoption_score == 1.0
+    assert recommendations[1].success_score == 0.0
+    assert recommendations[1].adoption_score == 0.0
+
+
+def test_recommend_uses_file_recency_when_metrics_are_missing(tmp_path: Path) -> None:
+    """Recent files should get a freshness boost even without metrics data."""
+    lessons_dir = tmp_path / "lessons" / "tools"
+    recent = lessons_dir / "recent.md"
+    old = lessons_dir / "old.md"
+    _write_lesson(recent, "Recent")
+    _write_lesson(old, "Old")
+
+    now = time.time()
+    recent_time = now - 5 * 24 * 3600
+    old_time = now - 400 * 24 * 3600
+    os.utime(recent, (recent_time, recent_time))
+    os.utime(old, (old_time, old_time))
+
+    discovery = LessonDiscovery(
+        lessons_dir=tmp_path / "lessons", history_dir=tmp_path / ".lessons-history"
+    )
+
+    recommendations = discovery.recommend(keywords=["shell"], top_k=2)
+
+    assert [rec.lesson_id for rec in recommendations] == ["recent", "old"]
+    assert recommendations[0].recency_score > recommendations[1].recency_score
+    assert recommendations[0].recency_score > 0.0
+    assert recommendations[1].recency_score == 0.0
