@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .discovery import extract_project, extract_session_name
 from .record import SessionRecord
 from .signals import extract_from_path
 from .store import SessionStore
@@ -412,6 +413,13 @@ def post_session(
         record_kwargs["journal_path"] = journal_path
     if session_id is not None:
         record_kwargs["session_id"] = session_id
+    if trajectory_path is not None:
+        session_name = extract_session_name(harness, trajectory_path)
+        if session_name:
+            record_kwargs["session_name"] = session_name
+        project = extract_project(harness, trajectory_path)
+        if project:
+            record_kwargs["project"] = project
     if token_count is not None:
         record_kwargs["token_count"] = token_count
     if input_tokens is not None:
