@@ -55,8 +55,8 @@ class JudgeVerdict(TypedDict, total=False):
     score: float
     reason: str
     model: str
-    alignment_score: float
-    pivot_verdict: str
+    alignment_score: float | None
+    pivot_verdict: str | None
     meta: JudgeMetadata
 
 
@@ -200,6 +200,7 @@ have strong evidence otherwise.
 
 Return JSON: {{"score": <float>, "reason": "<1 sentence>", "alignment_score": <float or null>, "pivot_verdict": <"on_track"|"partial"|"pivot"|"off_target"|null>}}"""
 
+
 def format_intent_context(intent: dict | None) -> str:
     """Render an `## Session Intent` block from a pre-session intent payload.
 
@@ -235,7 +236,6 @@ def format_intent_context(intent: dict | None) -> str:
     if alignment is not None:
         lines.append(f"- **Self-assigned alignment**: {alignment}")
     return "\n".join(lines) + "\n"
-
 
 
 DEFAULT_GOALS = """\
