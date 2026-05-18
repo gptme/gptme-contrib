@@ -482,6 +482,15 @@ def _resolve_openrouter_api_key() -> str:
     return ""
 
 
+def _resolve_scoped_openrouter_api_key() -> str:
+    """Return only Twitter/social-specific OpenRouter keys, if present."""
+    for env_var in ("OPENROUTER_API_KEY_TWITTER", "OPENROUTER_API_KEY_SOCIAL"):
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+    return ""
+
+
 def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     """Call LLM with explicit max_tokens to control OpenRouter budget reservation.
 
@@ -490,20 +499,24 @@ def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     ~200 tokens are actually generated. Setting max_tokens=4096 drops the
     reservation to ~$0.06/request, allowing 160+ requests on a $10/day budget.
 
-    Falls back to gptme's reply() if OPENROUTER_API_KEY is not set.
-
-    TODO: Simplify to reply(..., max_tokens=TWITTER_MAX_TOKENS) once gptme#1828 is merged.
-    See: https://github.com/gptme/gptme/pull/1828
+    Use gptme's reply() by default now that it supports max_tokens. Keep the
+    direct OpenRouter call only for Twitter/social-specific key overrides, since
+    gptme caches provider clients and cannot yet swap OPENROUTER_API_KEY per call.
     """
+    scoped_api_key = _resolve_scoped_openrouter_api_key()
+    shared_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not scoped_api_key or scoped_api_key == shared_api_key:
+        return reply(
+            messages,
+            model_name,
+            stream=False,
+            max_tokens=TWITTER_MAX_TOKENS,
+        )
+
     import openai
 
-    api_key = _resolve_openrouter_api_key()
-    if not api_key:
-        # Not using OpenRouter — fall back to gptme's reply (no budget issue)
-        return reply(messages, model_name, stream=False)
-
     client = openai.OpenAI(
-        api_key=api_key,
+        api_key=scoped_api_key,
         base_url="https://openrouter.ai/api/v1",
     )
 
