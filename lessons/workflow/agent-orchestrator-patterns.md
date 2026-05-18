@@ -7,6 +7,9 @@ match:
     - "standup missing"
     - "agent coordination"
     - "inference utilization"
+    - "orchestrating multiple agents"
+    - "standup report"
+    - "inference spend"
   session_categories: [monitoring, cross-repo]
 ---
 

@@ -2,6 +2,8 @@
 match:
   keywords:
     - "update gptme-contrib"
+    - "update submodule to latest"
+    - "submodule is behind"
   session_categories: [cleanup]
 status: active
 ---
