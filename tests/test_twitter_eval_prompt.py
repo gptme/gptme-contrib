@@ -44,7 +44,13 @@ def _load_llm_module() -> types.ModuleType:
     gptme_dirs_stub = types.ModuleType("gptme.dirs")
     gptme_dirs_stub.get_project_git_dir = lambda: Path("/tmp")  # type: ignore[attr-defined]
     gptme_message_stub = types.ModuleType("gptme.message")
-    gptme_message_stub.Message = type("Message", (), {})  # type: ignore[attr-defined]
+
+    class _StubMessage:
+        def __init__(self, role: str, content: str) -> None:
+            self.role = role
+            self.content = content
+
+    gptme_message_stub.Message = _StubMessage  # type: ignore[attr-defined]
     gptme_prompts_stub = types.ModuleType("gptme.prompts")
     gptme_prompts_stub.prompt_workspace = lambda *args, **kwargs: iter([])  # type: ignore[attr-defined]
     rich_stub: Any = _make_pkg("rich")
@@ -217,6 +223,105 @@ def test_openrouter_key_resolution_falls_back_to_social_key(
     monkeypatch.setenv("OPENROUTER_API_KEY_SOCIAL", "social-key")
 
     assert llm_module._resolve_openrouter_api_key() == "social-key"
+
+
+def test_reply_with_max_tokens_delegates_when_scoped_key_matches_shared_key(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY_TWITTER", "shared-key")
+
+    expected = llm_module.Message("assistant", "delegated")
+    calls: dict[str, Any] = {}
+
+    def fake_reply(messages: list[Any], model_name: str, **kwargs: Any) -> Any:
+        calls["messages"] = messages
+        calls["model_name"] = model_name
+        calls["kwargs"] = kwargs
+        return expected
+
+    monkeypatch.setattr(llm_module, "reply", fake_reply)
+
+    messages = [llm_module.Message("user", "hello")]
+    result = llm_module._reply_with_max_tokens(
+        messages, "openrouter/anthropic/claude-sonnet-4-5"
+    )
+
+    assert result is expected
+    assert calls["messages"] == messages
+    assert calls["model_name"] == "openrouter/anthropic/claude-sonnet-4-5"
+    assert calls["kwargs"] == {
+        "stream": False,
+        "max_tokens": llm_module.TWITTER_MAX_TOKENS,
+    }
+
+
+def test_reply_with_max_tokens_keeps_direct_openrouter_call_for_scoped_override(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY_TWITTER", "twitter-key")
+
+    monkeypatch.setattr(
+        llm_module,
+        "reply",
+        lambda *args, **kwargs: pytest.fail(
+            "reply() should not be used for scoped override"
+        ),
+    )
+
+    created: dict[str, Any] = {}
+    completion_calls: list[dict[str, Any]] = []
+
+    class _FakeOpenAI:
+        def __init__(self, *, api_key: str, base_url: str) -> None:
+            created["api_key"] = api_key
+            created["base_url"] = base_url
+            self.chat = types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=self.create)
+            )
+
+        def create(self, **kwargs: Any) -> Any:
+            completion_calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="scoped override")
+                    )
+                ]
+            )
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    messages = [
+        llm_module.Message("system", "system prompt"),
+        llm_module.Message("user", "hello"),
+    ]
+    result = llm_module._reply_with_max_tokens(
+        messages, "openrouter/anthropic/claude-sonnet-4-5"
+    )
+
+    assert created == {
+        "api_key": "twitter-key",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+    assert completion_calls == [
+        {
+            "model": "anthropic/claude-sonnet-4-5",
+            "messages": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "hello"},
+            ],
+            "max_tokens": llm_module.TWITTER_MAX_TOKENS,
+            "temperature": 0.5,
+        }
+    ]
+    assert result.role == "assistant"
+    assert result.content == "scoped override"
 
 
 def test_our_handle_in_thread_context_triggers_identity_note(
