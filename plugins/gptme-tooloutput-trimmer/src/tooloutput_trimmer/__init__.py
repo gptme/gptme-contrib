@@ -1,6 +1,20 @@
 """Read-time tool-output trimmer plugin for gptme."""
 
-from gptme.plugins.plugin import GptmePlugin
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
+try:
+    from gptme.plugins.plugin import GptmePlugin
+except ModuleNotFoundError:
+
+    @dataclass(frozen=True)
+    class GptmePlugin:  # pragma: no cover - exercised in old-gptme envs
+        """Compatibility shim for pre-unified-plugin gptme releases."""
+
+        name: str
+        register_hooks: Callable[[], None] | None = None
 
 
 def _register_hooks() -> None:

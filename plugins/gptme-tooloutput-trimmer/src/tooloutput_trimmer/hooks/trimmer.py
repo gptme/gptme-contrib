@@ -22,7 +22,19 @@ from typing import Any
 from gptme.config import get_config
 from gptme.hooks import HookType, StopPropagation, register_hook
 from gptme.message import Message
-from gptme.util.cost_tracker import CostTracker, SessionCosts
+
+try:
+    from gptme.util.cost_tracker import CostTracker, SessionCosts
+except ModuleNotFoundError:
+    SessionCosts = Any
+
+    class CostTracker:
+        """Compatibility shim for older gptme releases."""
+
+        @staticmethod
+        def get_session_costs() -> None:
+            return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -249,10 +261,18 @@ def determine_trigger(
     model: str | None,
     config: TrimmerConfig,
 ) -> TriggerDecision:
-    from gptme.hooks.cache_awareness import (
-        get_invalidation_count,
-        get_turns_since_invalidation,
-    )
+    try:
+        from gptme.hooks.cache_awareness import (
+            get_invalidation_count,
+            get_turns_since_invalidation,
+        )
+    except ModuleNotFoundError:
+
+        def get_invalidation_count() -> int:
+            return 0
+
+        def get_turns_since_invalidation() -> int:
+            return 1
 
     return TriggerDecision(
         expected_cache_cold=_expected_cache_cold(
