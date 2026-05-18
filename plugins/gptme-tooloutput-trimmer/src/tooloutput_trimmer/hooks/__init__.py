@@ -1,6 +1,7 @@
 """Hook exports for the tool-output trimmer plugin."""
 
 from .trimmer import (
+    BYPASS_ENV_VAR,
     DEFAULT_MAX_OUTPUT_CHARS,
     DEFAULT_PRESSURE_CHARS,
     DEFAULT_PREVIEW_CHARS,
@@ -21,6 +22,7 @@ from .trimmer import (
 )
 
 __all__ = [
+    "BYPASS_ENV_VAR",
     "DEFAULT_MAX_OUTPUT_CHARS",
     "DEFAULT_PREVIEW_CHARS",
     "DEFAULT_PRESSURE_CHARS",
