@@ -154,17 +154,17 @@ def process_unreplied_emails(limit: int | None = None):
                 logging.info("No unreplied emails found")
                 return False
 
-            message_id, subject, sender = unreplied[0]
-            logging.info(f"Processing single email from {sender}: {subject}")
+            first = unreplied[0]
+            logging.info(f"Processing single email from {first.sender}: {first.subject}")
 
-            lock_file = email.locks_dir / f"{email._format_filename(message_id)}.lock"
+            lock_file = email.locks_dir / f"{email._format_filename(first.message_id)}.lock"
             try:
                 with FileLock(lock_file, timeout=0):
-                    process_single_email(message_id, subject, sender)
+                    process_single_email(first.message_id, first.subject, first.sender)
                     logging.info("Processed 1 unreplied email")
                     return True
             except LockError:
-                logging.info(f"Email {message_id} is already being processed")
+                logging.info(f"Email {first.message_id} is already being processed")
                 return False
         else:
             # Process all unreplied emails

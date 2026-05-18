@@ -480,11 +480,11 @@ def sync_maildir(folder: str) -> None:
 def check_unreplied(folders: tuple[str, ...] | None) -> None:
     """Check for unreplied emails from allowlisted senders."""
     workspace_dir = get_workspace_dir()
-    email = AgentEmail(workspace_dir)
+    agent = AgentEmail(workspace_dir)
 
     # Convert tuple to list, or None if empty
     folders_list = list(folders) if folders else None
-    unreplied = email.get_unreplied_emails(folders=folders_list)
+    unreplied = agent.get_unreplied_emails(folders=folders_list)
 
     if not unreplied:
         click.echo("No unreplied emails found.")
@@ -494,8 +494,8 @@ def check_unreplied(folders: tuple[str, ...] | None) -> None:
     click.echo(f"{'Sender':<30} | {'Subject':<40} | Message ID")
     click.echo("-" * 90)
 
-    for message_id, subject, sender in unreplied:
-        click.echo(f"{sender:<30} | {subject[:40]:<40} | {message_id}")
+    for entry in unreplied:
+        click.echo(f"{entry.sender:<30} | {entry.subject[:40]:<40} | {entry.message_id}")
 
     # Exit with code 1 to indicate emails were found
     sys.exit(1)
@@ -713,7 +713,7 @@ def check_complexity(threshold: float, mark_complex: bool) -> None:
     from email.policy import default as email_policy
 
     workspace_dir = get_workspace_dir()
-    email = AgentEmail(workspace_dir)
+    agent = AgentEmail(workspace_dir)
 
     # Inline complexity detection
     SENSITIVE_KEYWORDS = {
@@ -785,7 +785,7 @@ def check_complexity(threshold: float, mark_complex: bool) -> None:
 
         return min(score, 1.0), reasons
 
-    unreplied = email.get_unreplied_emails()
+    unreplied = agent.get_unreplied_emails()
 
     if not unreplied:
         click.echo("No unreplied emails found.")
@@ -798,8 +798,8 @@ def check_complexity(threshold: float, mark_complex: bool) -> None:
     complex_count = 0
     simple_count = 0
 
-    for msg_id, subject, sender in unreplied:
-        message_data = email.read_message(msg_id)
+    for email in unreplied:
+        message_data = agent.read_message(email.message_id)
         msg = Parser(policy=email_policy).parsestr(message_data)
 
         body = ""
@@ -822,13 +822,15 @@ def check_complexity(threshold: float, mark_complex: bool) -> None:
         if is_complex:
             complex_count += 1
             if mark_complex:
-                email._mark_no_reply_needed(msg_id, f"complex email - {', '.join(reasons[:2])}")
+                agent._mark_no_reply_needed(
+                    email.message_id, f"complex email - {', '.join(reasons[:2])}"
+                )
                 status += " (marked)"
         else:
             simple_count += 1
 
-        sender_short = sender[:28] + ".." if len(sender) > 30 else sender
-        subject_short = subject[:38] + ".." if len(subject) > 40 else subject
+        sender_short = email.sender[:28] + ".." if len(email.sender) > 30 else email.sender
+        subject_short = email.subject[:38] + ".." if len(email.subject) > 40 else email.subject
 
         click.echo(
             f"{sender_short:<30} | {subject_short:<40} | {complexity_score:<6.2f} | {status:<10}"
