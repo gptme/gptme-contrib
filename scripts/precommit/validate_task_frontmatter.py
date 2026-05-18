@@ -20,7 +20,7 @@ Checks:
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, cast
 
 import click
 import frontmatter
@@ -92,7 +92,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     # Validate timestamps
     for field in ["created", "modified"]:
         if field in metadata:
-            if error := validate_timestamp(metadata[field]):
+            if error := validate_timestamp(cast("str | datetime", metadata[field])):
                 errors.append(f"Field '{field}': {error}")
 
     # Validate optional fields
@@ -130,7 +130,9 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
 
     # Validate waiting_since timestamp
     if "waiting_since" in metadata:
-        if error := validate_timestamp(metadata["waiting_since"]):
+        if error := validate_timestamp(
+            cast("str | datetime", metadata["waiting_since"])
+        ):
             errors.append(f"Field 'waiting_since': {error}")
 
     # Check waiting_since requires waiting_for
@@ -144,7 +146,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
 @click.argument(
     "files",
     nargs=-1,
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),  # type: ignore
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),  # type: ignore[type-var]
 )
 @click.option(
     "--type",
