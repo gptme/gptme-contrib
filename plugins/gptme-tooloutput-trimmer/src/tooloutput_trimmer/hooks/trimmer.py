@@ -13,9 +13,10 @@ See ErikBjare/bob#770 for Erik's design feedback.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from gptme.config import get_config
@@ -32,6 +33,7 @@ DEFAULT_PRESSURE_CHARS = 100_000
 ANTHROPIC_CACHE_TTL_SECS = 5 * 60
 TOOL_OUTPUT_PREFIXES = ("Ran command: `", "Executed code block.")
 TRIMMED_MARKER = "[Tool output trimmed"
+BYPASS_ENV_VAR = "GPTME_TRIM_BYPASS"
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,9 @@ class TrimmerConfig:
     recent_turns: int = DEFAULT_RECENT_TURNS
     preview_chars: int = DEFAULT_PREVIEW_CHARS
     pressure_chars: int = DEFAULT_PRESSURE_CHARS
+    # Policy-layering fields (new in Phase 1 bypass contract):
+    # Commands/prefixes whose output should stay raw (never trim).
+    raw_tool_prefixes: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,7 @@ def get_trimmer_config() -> TrimmerConfig:
             DEFAULT_PRESSURE_CHARS,
             minimum=1,
         ),
+        raw_tool_prefixes=tuple(settings.get("raw_tool_prefixes", [])),
     )
 
 
@@ -156,14 +162,37 @@ def _expected_cache_cold(costs: SessionCosts | None, model: str | None) -> bool:
     return (time.time() - last_timestamp) > ANTHROPIC_CACHE_TTL_SECS
 
 
-def _is_tool_output_message(message: Message, *, max_output_chars: int) -> bool:
+def _content_matches_raw_prefix(content: str, raw_prefixes: tuple[str, ...]) -> bool:
+    """Check if a tool-output message's command matches a raw prefix."""
+    if not raw_prefixes:
+        return False
+    # Extract the command from the backtick-delimited portion of the first line.
+    # Format: "Ran command: `cmd args`" or "Executed code block."
+    import re  # noqa: PLC0415
+
+    first_line = content.splitlines()[0] if content else ""
+    if m := re.search(r"`([^`]+)`", first_line):
+        cmd = m.group(1)
+        for prefix in raw_prefixes:
+            if cmd.startswith(prefix):
+                return True
+    return False
+
+
+def _is_tool_output_message(
+    message: Message, *, max_output_chars: int, raw_prefixes: tuple[str, ...]
+) -> bool:
     if message.role != "system" or message.pinned:
         return False
     if message.content.startswith(TRIMMED_MARKER):
         return False
     if len(message.content) <= max_output_chars:
         return False
-    return message.content.startswith(TOOL_OUTPUT_PREFIXES)
+    if not message.content.startswith(TOOL_OUTPUT_PREFIXES):
+        return False
+    if _content_matches_raw_prefix(message.content, raw_prefixes):
+        return False
+    return True
 
 
 def _assistant_cutoff(messages: list[Message], recent_turns: int) -> int | None:
@@ -197,7 +226,9 @@ def apply_tool_output_trimmer(
     saved_chars = 0
     for index, message in enumerate(messages):
         if index < cutoff and _is_tool_output_message(
-            message, max_output_chars=config.max_output_chars
+            message,
+            max_output_chars=config.max_output_chars,
+            raw_prefixes=config.raw_tool_prefixes,
         ):
             trimmed_content = build_trimmed_content(
                 message.content, config.preview_chars
@@ -234,6 +265,12 @@ def determine_trigger(
     )
 
 
+def _check_bypass_env() -> bool:
+    """Check if the GPTME_TRIM_BYPASS env var is set, enabling full output pass-through."""
+    val = os.environ.get(BYPASS_ENV_VAR, "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
 def generation_pre_hook(
     messages: list[Message],
     **kwargs: Any,
@@ -241,6 +278,11 @@ def generation_pre_hook(
     """Trim old oversized tool output in-place before the LLM call."""
     config = get_trimmer_config()
     if not config.enabled:
+        return
+
+    # Explicit bypass: operator wants full output for current request.
+    if _check_bypass_env():
+        logger.info("tooloutput_trimmer: bypass active via %s", BYPASS_ENV_VAR)
         return
 
     trigger = determine_trigger(messages, model=kwargs.get("model"), config=config)
