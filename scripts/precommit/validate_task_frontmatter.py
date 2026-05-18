@@ -146,7 +146,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
 @click.argument(
     "files",
     nargs=-1,
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),  # type: ignore[type-var]
+    type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
 @click.option(
     "--type",
