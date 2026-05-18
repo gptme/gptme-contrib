@@ -55,6 +55,8 @@ class JudgeVerdict(TypedDict, total=False):
     score: float
     reason: str
     model: str
+    alignment_score: float
+    pivot_verdict: str
     meta: JudgeMetadata
 
 
@@ -67,6 +69,7 @@ JUDGE_PROMPT_TEMPLATE = """\
 ## Session Category
 {category}
 {routing_context}
+{intent_context}
 ## Session Journal
 {journal}
 
@@ -164,7 +167,76 @@ selector — not the agent — decided what was eligible.
 If no `## Routing Context` block is present, ignore this adjustment and
 apply the default rubric.
 
-Return JSON: {{"score": <float>, "reason": "<1 sentence>"}}"""
+## Intent→Outcome Alignment
+When a `## Session Intent` block is present above, separately rate how well
+the session's actual output matched its declared intent. This is a *separate*
+axis from the execution-quality score — a good pivot still gets a high
+execution score but lower alignment.
+
+If no `## Session Intent` block is present, omit the alignment fields.
+
+**Alignment scale**:
+- 0.9-1.0: Session exactly hit its declared objective and produced the
+  expected artifact (or superseded it with a better outcome).
+- 0.7-0.8: Session achieved its objective but the artifact was partial or
+  the scope drifted slightly.
+- 0.5-0.6: Session delivered something useful, but it materially diverged
+  from the declared objective (pivot).
+- 0.3-0.4: Session touched the intent area but produced a different or
+  weakly-related outcome.
+- 0.0-0.2: Session output is unrelated to the declared intent.
+
+**Pivot verdict** (when alignment < 0.7):
+- ``"well_justified"``: The pivot produced better value than the original
+  intent would have (e.g., found a real blocker and fixed it instead).
+- ``"neutral"``: The pivot was reasonable but not clearly better.
+- ``"poorly_justified"``: The session abandoned the intent for lower-value
+  work without good reason.
+
+**Self-assigned calibration**: If the session already self-assigned an
+alignment verdict (``on_track`` / ``partial`` / ``pivot`` / ``off_target``),
+use it as calibration — your score should agree in direction unless you
+have strong evidence otherwise.
+
+Return JSON: {{"score": <float>, "reason": "<1 sentence>", "alignment_score": <float or null>, "pivot_verdict": <"on_track"|"partial"|"pivot"|"off_target"|null>}}"""
+
+def format_intent_context(intent: dict | None) -> str:
+    """Render an `## Session Intent` block from a pre-session intent payload.
+
+    Returns an empty string when ``intent`` is None or lacks the required fields.
+    The string is plugged into ``JUDGE_PROMPT_TEMPLATE`` between the Routing
+    Context and Session Journal blocks (before the rubric).
+
+    Expected keys (all required for a non-empty return):
+    - ``session_id`` (str): Canonical session ID.
+    - ``lane`` (str): CASCADE tier/category, e.g. ``"Tier3:internal-code"``.
+    - ``objective`` (str): One-sentence session goal.
+    - ``expected_artifact`` (str): One-sentence concrete output.
+    - ``outcome_alignment`` (str | None): Self-assigned alignment verdict
+      (``"on_track"``, ``"partial"``, ``"pivot"``, ``"off_target"``, or None).
+
+    The presence of ``outcome_alignment`` switches the block from pre-session
+    intent (no self-grade yet) to post-session intent (self-assigned verdict
+    included as judge calibration signal).
+    """
+    if not intent or not isinstance(intent, dict):
+        return ""
+    required = {"objective", "expected_artifact", "lane"}
+    if not required.issubset(intent):
+        return ""
+    lines = [
+        "",
+        "## Session Intent",
+        f"- **Objective**: {intent['objective']}",
+        f"- **Expected artifact**: {intent['expected_artifact']}",
+        f"- **Lane**: {intent['lane']}",
+    ]
+    alignment = intent.get("outcome_alignment")
+    if alignment is not None:
+        lines.append(f"- **Self-assigned alignment**: {alignment}")
+    return "\n".join(lines) + "\n"
+
+
 
 DEFAULT_GOALS = """\
 The agent is a general-purpose autonomous AI assistant.
@@ -365,21 +437,52 @@ def _build_judge_meta(*, model: str) -> JudgeMetadata:
     }
 
 
+VALID_ALIGNMENT_VALUES = frozenset({"on_track", "partial", "pivot", "off_target"})
+
+
+def _coerce_alignment_score(raw: Any) -> float | None:
+    """Normalize an alignment_score value to float 0.0-1.0 or None."""
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+        if not (0.0 <= val <= 1.0):
+            return None
+        return val
+    except (ValueError, TypeError):
+        return None
+
+
+def _coerce_pivot_verdict(raw: Any) -> str | None:
+    """Normalize a pivot_verdict to a recognised string or None."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s if s in VALID_ALIGNMENT_VALUES else None
+
+
 def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
-    """Attach stable metadata to a raw judge verdict."""
+    """Attach stable metadata to a raw judge verdict.
+
+    When the payload includes ``alignment_score`` and/or ``pivot_verdict``
+    (Phase 3: intent contract), those fields are preserved in the output.
+    """
     model = str(payload.get("model", ""))
     raw_meta = payload.get("meta")
     meta = raw_meta if isinstance(raw_meta, dict) else {}
     base_meta = _build_judge_meta(model=model)
-    return {
+    verdict: JudgeVerdict = {
         "score": max(0.0, min(1.0, float(payload.get("score", 0.5)))),
         "reason": str(payload.get("reason", "")),
         "model": model,
+        "alignment_score": _coerce_alignment_score(payload.get("alignment_score")),
+        "pivot_verdict": _coerce_pivot_verdict(payload.get("pivot_verdict")),
         "meta": {
             "backend": str(meta.get("backend", base_meta["backend"])),
             "judge_version": str(meta.get("judge_version", base_meta["judge_version"])),
         },
     }
+    return verdict
 
 
 def _strip_json_wrappers(text: str) -> str:
@@ -414,7 +517,15 @@ def _parse_judge_payload(text: str, model: str) -> dict | None:
     score = float(verdict.get("score", 0.5))
     reason = str(verdict.get("reason", ""))
     score = max(0.0, min(1.0, score))
-    return {"score": score, "reason": reason, "model": model}
+    result: dict[str, Any] = {"score": score, "reason": reason, "model": model}
+    # Phase 3: pass through intent-contract fields when the judge returns them
+    alignment_score = _coerce_alignment_score(verdict.get("alignment_score"))
+    if alignment_score is not None:
+        result["alignment_score"] = alignment_score
+    pivot_verdict = _coerce_pivot_verdict(verdict.get("pivot_verdict"))
+    if pivot_verdict is not None:
+        result["pivot_verdict"] = pivot_verdict
+    return result
 
 
 def _prepare_messages_for_model(messages: list[Any], model: str) -> list[Any]:
@@ -518,6 +629,7 @@ def judge_session(
     model: str = DEFAULT_JUDGE_MODEL,
     api_key: str | None = None,
     cascade_context: dict | None = None,
+    intent: dict | None = None,
 ) -> dict | None:
     """Score a session's strategic value using an LLM judge.
 
@@ -541,11 +653,19 @@ def judge_session(
             top-priority goals. See :func:`format_routing_context` for
             the recognised keys. Pass ``None`` (default) to keep prompt
             behaviour unchanged.
+        intent: Optional pre-session intent dict (Phase 3: intent contract).
+            When provided, an ``## Session Intent`` block is injected into
+            the prompt and the judge is asked to return ``alignment_score``
+            and ``pivot_verdict`` fields alongside ``score`` and ``reason``.
+            Expected keys: ``session_id``, ``lane``, ``objective``,
+            ``expected_artifact``, and optionally ``outcome_alignment``
+            (self-assigned pre-closeout verdict).
 
     Returns:
         Dict with keys ``score`` (float), ``reason`` (str), ``model`` (str),
-        or ``None`` if the evaluation fails (missing API key, import error,
-        non-JSON response, etc.).
+        and when ``intent`` is provided also ``alignment_score`` (float | None)
+        and ``pivot_verdict`` (str | None). Returns ``None`` if the evaluation
+        fails (missing API key, import error, non-JSON response, etc.).
     """
     # Truncate journal to ~4000 chars to keep costs low
     truncated = journal_text[:4000] if journal_text else "(empty session)"
@@ -557,6 +677,7 @@ def judge_session(
         goals=goals,
         category=category or "unknown",
         routing_context=format_routing_context(cascade_context),
+        intent_context=format_intent_context(intent),
         journal=truncated,
     )
 
@@ -574,6 +695,7 @@ def judge_session_with_fallback(
     fallback_models: tuple[str, ...] = (),
     api_key: str | None = None,
     cascade_context: dict | None = None,
+    intent: dict | None = None,
 ) -> dict | None:
     """Score a session, trying fallback models if the primary is unavailable.
 
@@ -585,6 +707,7 @@ def judge_session_with_fallback(
         fallback_models: Additional models to try in order when the primary fails.
         api_key: Anthropic API key (Anthropic-direct path only).
         cascade_context: Optional CASCADE selector payload. See :func:`judge_session`.
+        intent: Optional pre-session intent dict. See :func:`judge_session`.
 
     Returns:
         Dict with keys ``score``, ``reason``, ``model`` or ``None`` if all models fail.
@@ -604,6 +727,7 @@ def judge_session_with_fallback(
             model=model,
             api_key=api_key,
             cascade_context=cascade_context,
+            intent=intent,
         )
         if result is not None:
             return result
@@ -697,6 +821,15 @@ def write_alignment_grade(
             reason=normalized["reason"],
             model=normalized["model"],
         )
+        # Phase 3: persist intent-contract alignment fields via legacy bridge
+        if normalized.get("alignment_score") is not None:
+            legacy_fields = getattr(record, "_legacy_fields", None)
+            if isinstance(legacy_fields, dict):
+                legacy_fields["alignment_score"] = normalized["alignment_score"]
+        if normalized.get("pivot_verdict") is not None:
+            legacy_fields = getattr(record, "_legacy_fields", None)
+            if isinstance(legacy_fields, dict):
+                legacy_fields["pivot_verdict"] = normalized["pivot_verdict"]
         _store_judge_meta(record, normalized.get("meta"))
         # Safe to run unconditionally: returns False when trajectory_path is
         # missing / unreadable or harness is unknown, and is idempotent when
@@ -725,6 +858,7 @@ def judge_and_writeback(
     fallback_models: tuple[str, ...] = (),
     api_key: str | None = None,
     cascade_context: dict | None = None,
+    intent: dict | None = None,
 ) -> dict[str, Any]:
     """Judge a session and persist the verdict via SessionStore.
 
@@ -740,6 +874,7 @@ def judge_and_writeback(
             fallback_models=fallback_models,
             api_key=api_key,
             cascade_context=cascade_context,
+            intent=intent,
         )
     else:
         verdict = judge_session(
@@ -749,6 +884,7 @@ def judge_and_writeback(
             model=model,
             api_key=api_key,
             cascade_context=cascade_context,
+            intent=intent,
         )
     if verdict is None:
         return {"status": "failed"}
