@@ -261,12 +261,14 @@ class TestJudgeSession:
 
     def test_format_intent_context_renders_full_block(self) -> None:
         """All required fields produce a well-formed intent block."""
-        block = format_intent_context({
-            "session_id": "d255",
-            "lane": "Tier3:internal-code",
-            "objective": "Design session intent contract",
-            "expected_artifact": "scripts/session-intent.py + design doc",
-        })
+        block = format_intent_context(
+            {
+                "session_id": "d255",
+                "lane": "Tier3:internal-code",
+                "objective": "Design session intent contract",
+                "expected_artifact": "scripts/session-intent.py + design doc",
+            }
+        )
         assert "## Session Intent" in block
         assert "Design session intent contract" in block
         assert "scripts/session-intent.py" in block
@@ -275,13 +277,15 @@ class TestJudgeSession:
 
     def test_format_intent_context_includes_self_alignment(self) -> None:
         """When outcome_alignment is set, the block shows the self-assigned verdict."""
-        block = format_intent_context({
-            "session_id": "d255",
-            "lane": "Tier1:strategic",
-            "objective": "Wire intent contract into run wrapper",
-            "expected_artifact": "autonomous-run.sh patches",
-            "outcome_alignment": "on_track",
-        })
+        block = format_intent_context(
+            {
+                "session_id": "d255",
+                "lane": "Tier1:strategic",
+                "objective": "Wire intent contract into run wrapper",
+                "expected_artifact": "autonomous-run.sh patches",
+                "outcome_alignment": "on_track",
+            }
+        )
         assert "## Session Intent" in block
         assert "**Self-assigned alignment**: on_track" in block
 
@@ -291,12 +295,14 @@ class TestJudgeSession:
         mock_response = MagicMock()
         mock_response.content = [
             MagicMock(
-                text=json.dumps({
-                    "score": 0.80,
-                    "reason": "Aligned with intent",
-                    "alignment_score": 0.90,
-                    "pivot_verdict": "on_track",
-                })
+                text=json.dumps(
+                    {
+                        "score": 0.80,
+                        "reason": "Aligned with intent",
+                        "alignment_score": 0.90,
+                        "pivot_verdict": "on_track",
+                    }
+                )
             )
         ]
         mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
