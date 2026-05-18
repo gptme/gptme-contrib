@@ -10,6 +10,8 @@ match:
   - link back to the original issue
   - end the session without responding
   - finished but never replied
+  - reply to the issue
+  - update the issue
 status: active
 target_grade: alignment
 ---
