@@ -289,6 +289,30 @@ class TestJudgeSession:
         assert "## Session Intent" in block
         assert "**Self-assigned alignment**: on_track" in block
 
+    def test_prompt_template_uses_canonical_alignment_verdict_vocabulary(self) -> None:
+        """The prompt vocabulary must match the values accepted by the parser."""
+        prompt = JUDGE_PROMPT_TEMPLATE.format(
+            goals=DEFAULT_GOALS,
+            category="code",
+            routing_context="",
+            intent_context=format_intent_context(
+                {
+                    "session_id": "abc123",
+                    "lane": "Tier1:code",
+                    "objective": "Fix a bug",
+                    "expected_artifact": "a PR",
+                }
+            ),
+            journal="Fixed the bug",
+        )
+
+        assert '"on_track"' in prompt
+        assert '"partial"' in prompt
+        assert '"pivot"' in prompt
+        assert '"off_target"' in prompt
+        assert '"well_justified"' not in prompt
+        assert '"poorly_justified"' not in prompt
+
     def test_judge_session_passes_intent_into_prompt(self) -> None:
         """When intent is provided, the prompt carries the block."""
         mock_anthropic = MagicMock()

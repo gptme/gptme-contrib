@@ -186,12 +186,15 @@ If no `## Session Intent` block is present, omit the alignment fields.
   weakly-related outcome.
 - 0.0-0.2: Session output is unrelated to the declared intent.
 
-**Pivot verdict** (when alignment < 0.7):
-- ``"well_justified"``: The pivot produced better value than the original
-  intent would have (e.g., found a real blocker and fixed it instead).
-- ``"neutral"``: The pivot was reasonable but not clearly better.
-- ``"poorly_justified"``: The session abandoned the intent for lower-value
-  work without good reason.
+**Alignment verdict** (`pivot_verdict`):
+- ``"on_track"``: The session hit its declared objective and produced the
+  expected artifact (or clearly superseded it with a better outcome).
+- ``"partial"``: The session mostly achieved the objective, but the artifact
+  was partial or the scope drifted slightly.
+- ``"pivot"``: The session delivered something useful, but it materially
+  diverged from the declared objective.
+- ``"off_target"``: The session output is unrelated or only weakly related
+  to the declared intent.
 
 **Self-assigned calibration**: If the session already self-assigned an
 alignment verdict (``on_track`` / ``partial`` / ``pivot`` / ``off_target``),
@@ -454,7 +457,7 @@ def _coerce_alignment_score(raw: Any) -> float | None:
 
 
 def _coerce_pivot_verdict(raw: Any) -> str | None:
-    """Normalize a pivot_verdict to a recognised string or None."""
+    """Normalize a pivot_verdict/alignment label to a recognised string or None."""
     if raw is None:
         return None
     s = str(raw).strip()
@@ -822,13 +825,11 @@ def write_alignment_grade(
             model=normalized["model"],
         )
         # Phase 3: persist intent-contract alignment fields via legacy bridge
-        if normalized.get("alignment_score") is not None:
-            legacy_fields = getattr(record, "_legacy_fields", None)
-            if isinstance(legacy_fields, dict):
+        legacy_fields = getattr(record, "_legacy_fields", None)
+        if isinstance(legacy_fields, dict):
+            if normalized.get("alignment_score") is not None:
                 legacy_fields["alignment_score"] = normalized["alignment_score"]
-        if normalized.get("pivot_verdict") is not None:
-            legacy_fields = getattr(record, "_legacy_fields", None)
-            if isinstance(legacy_fields, dict):
+            if normalized.get("pivot_verdict") is not None:
                 legacy_fields["pivot_verdict"] = normalized["pivot_verdict"]
         _store_judge_meta(record, normalized.get("meta"))
         # Safe to run unconditionally: returns False when trajectory_path is
