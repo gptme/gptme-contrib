@@ -69,7 +69,7 @@ DISCORD_MSG_LIMIT = 2000
 ChannelID: TypeAlias = int
 CommandPrefix = str | Callable[..., str]  # Type for command prefix
 Settings: TypeAlias = Dict[ChannelID, "ChannelSettings"]
-Conversations: TypeAlias = Dict[ChannelID, Log]
+Conversations: TypeAlias = Dict[ChannelID, LogManager]
 
 # Global state with type hints
 conversations: Conversations = {}  # channel_id -> conversation log
@@ -382,13 +382,12 @@ def get_conversation(channel_id: ChannelID) -> Log:
         logpath = logsdir / str(channel_id)
         logpath.mkdir(parents=True, exist_ok=True)
         logger.info(f"Loading conversation log for channel {channel_id} ({logpath})")
-        # TODO: actually save conversations so there is something to load/resume, persisting tooluse responses across messages
         manager = LogManager.load(logpath, initial_msgs, create=True)
-        conversations[channel_id] = manager.log
+        conversations[channel_id] = manager
 
     # always keep system messages fresh
     # strip leading system messages, replace with initial_msgs
-    msgs = copy(conversations[channel_id].messages)
+    msgs = copy(conversations[channel_id].log.messages)
     while msgs and msgs[0].role == "system" and "<chat-history>" not in msgs[0].content:
         msgs.pop(0)
     for msg in reversed(initial_msgs):
@@ -753,7 +752,7 @@ async def status(ctx: commands.Context) -> None:
     """Show status of the current conversation."""
     channel_id = ctx.channel.id
     if channel_id in conversations:
-        log = conversations[channel_id]
+        log = conversations[channel_id].log
         msg_count = len(log)
         user_msgs = sum(1 for m in log if m.role == "user")
         assistant_msgs = sum(1 for m in log if m.role == "assistant")
@@ -896,7 +895,9 @@ async def process_conversation_step(
     had_error = False
     accumulated_content = ""
 
-    async for msg in async_step(conversations[channel_id], channel_id, message.channel):
+    async for msg in async_step(
+        conversations[channel_id].log, channel_id, message.channel
+    ):
         logger.info(f"Processing response msg: {msg}")
         (
             current_response,
@@ -906,11 +907,13 @@ async def process_conversation_step(
         ) = await process_message(
             msg,
             message.channel,
-            conversations[channel_id],
+            conversations[channel_id].log,
             current_response,
             accumulated_content,
         )
-        conversations[channel_id] = updated_log
+        # Sync the updated log back through the LogManager and write to disk
+        conversations[channel_id].log = updated_log
+        conversations[channel_id].write()
         had_error = had_error or msg_error
 
     return current_response, had_error
@@ -978,7 +981,7 @@ async def on_message(message: discord.Message) -> None:
             return  # Don't process the message further, let the welcome message be the only response
 
     # Add user message to conversation (only if we're not showing the welcome message)
-    conversations[channel_id] = log.append(Message("user", content))
+    conversations[channel_id].append(Message("user", content))
 
     try:
         # Setup message processing
