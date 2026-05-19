@@ -73,10 +73,12 @@
 #   first-time discovery DOES emit immediately — merge-ready PRs are actionable.
 #   State-tracked with 12-hour cooldown; re-emits on HEAD SHA change.
 #
-#   API efficiency: PR data is fetched once per repo via fetch_pr_data() and
-#   shared across check_pr_updates, check_ci_failures, check_merge_conflicts,
-#   and check_merge_ready.
-#   This reduces gh pr list calls from 3N to N (where N = number of repos).
+#   API efficiency: cached PR data is fetched once per repo via fetch_pr_data()
+#   and shared across the state-tracked checks (PR updates, CI failures,
+#   Greptile sweep). Merge-sensitive checks (merge conflicts, merge-ready) use
+#   a live PR fetch each run so they don't inherit cache staleness.
+#   This reduces gh pr list calls from 3N to ~1.5N on average (where N = number
+#   of repos), while preserving the "nag every run" merge-conflict contract.
 #   The repo list from discover_repos() is cached for 1 hour.
 #
 #   Parallelism: Per-repo work runs concurrently (up to 8 repos at once).
@@ -271,18 +273,31 @@ gh_cache_get_or_fetch() {
     return 1
 }
 
-# Fetch all PR data once per repo, with all fields needed by every check function.
-# This replaces 3 separate `gh pr list` calls with a single one. Cached at
-# GH_CACHE_TTL_PR (default 240s) since the gate cadence is 120s.
-fetch_pr_data() {
+# Fetch all PR data once per repo, with all fields needed by every check
+# function. Cache state-tracked checks, but let merge-sensitive callers opt out
+# so they always see live merge status.
+fetch_pr_data_with_ttl() {
     local repo=$1
+    local ttl=$2
     # Filter out draft PRs — they're intentionally deprioritized/not on merge path
-    gh_cache_get_or_fetch "pr-${repo}" "$GH_CACHE_TTL_PR" \
+    gh_cache_get_or_fetch "pr-${repo}" "$ttl" \
         "gh pr list --repo '$repo' --author '$AUTHOR' --state open \
             --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
             --jq '[.[] | select(.isDraft | not)]' \
             2>/dev/null" \
         "[]"
+}
+
+# Cached view for state-tracked checks; default TTL is tuned to the 2-minute gate
+# cadence to cut GraphQL load roughly in half.
+fetch_pr_data() {
+    fetch_pr_data_with_ttl "$1" "$GH_CACHE_TTL_PR"
+}
+
+# Live view for merge-sensitive checks. They intentionally bypass the cache so
+# conflict nagging and merge readiness reflect the current branch state.
+fetch_live_pr_data() {
+    fetch_pr_data_with_ttl "$1" 0
 }
 
 # Check whether the last activity on a PR was from someone worth responding to.
@@ -501,7 +516,7 @@ check_master_ci() {
 
 # Check for merge conflicts on open PRs (DIRTY or CONFLICTING status).
 # Intentionally NOT state-tracked — conflicts should nag every run until resolved.
-# Accepts pre-fetched PR data from fetch_pr_data() to avoid redundant API calls.
+# Callers should pass live PR data (fetch_live_pr_data), not the cached view.
 check_merge_conflicts() {
     local repo=$1
     local prs=$2
@@ -857,8 +872,10 @@ running=0
 for repo in $all_repos; do
     repo_safe="${repo//\//-}"
     (
-        # Fetch all PR data once per repo (replaces 3 separate gh pr list calls)
+        # Cached PR data drives the state-tracked checks.
         pr_data=$(fetch_pr_data "$repo")
+        # Merge-sensitive checks need live status every run, regardless of cache.
+        live_pr_data=$(fetch_live_pr_data "$repo")
         repo_items=""
 
         items=$(check_pr_updates "$repo" "$pr_data" 2>/dev/null || true)
@@ -873,13 +890,13 @@ for repo in $all_repos; do
         items=$(check_master_ci "$repo" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
-        items=$(check_merge_conflicts "$repo" "$pr_data" 2>/dev/null || true)
+        items=$(check_merge_conflicts "$repo" "$live_pr_data" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
-        items=$(check_merge_ready "$repo" "$pr_data" 2>/dev/null || true)
+        items=$(check_merge_ready "$repo" "$live_pr_data" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         [ -n "$repo_items" ] && printf '%s' "$repo_items" > "$PARALLEL_TMPDIR/$repo_safe"
