@@ -369,8 +369,10 @@ if [ "$NO_VERIFY" -ne 1 ]; then
     PRE_COMMIT_HOOK=""
     ALLOW_UNTRACKED_FOR_HOOK=0
     if PRE_COMMIT_HOOK="$(resolve_pre_commit_hook)"; then
-        if [ "${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}" = "default" ] && \
-           hook_allows_untracked_dirty_guard_relaxation "$PRE_COMMIT_HOOK"; then
+        DIRTY_GUARD_MODE="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
+        if [ "$DIRTY_GUARD_MODE" = "off" ] || \
+           { [ "$DIRTY_GUARD_MODE" = "default" ] && \
+             hook_allows_untracked_dirty_guard_relaxation "$PRE_COMMIT_HOOK"; }; then
             ALLOW_UNTRACKED_FOR_HOOK=1
         fi
         :

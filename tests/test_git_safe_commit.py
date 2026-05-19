@@ -442,6 +442,72 @@ def test_safe_commit_default_mode_blocks_untracked_worktree_for_unknown_hook(
     assert "1 untracked path" in result.stderr
 
 
+def test_safe_commit_off_mode_allows_untracked_worktree_with_auto_stage_hook(
+    git_repo: Path,
+):
+    """Off mode should bypass both the outer and inner untracked-file guards."""
+    hooks_dir = git_repo / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks_dir)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    (hooks_dir / "pre-commit").unlink(missing_ok=True)
+    (hooks_dir / "pre-commit").symlink_to(PRE_COMMIT_HOOK)
+
+    fake_bin = Path(tempfile.mkdtemp(prefix="fake-prek-"))
+    fake_prek = fake_bin / "prek"
+    fake_prek.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            if [ "$1" = "run" ]; then
+                exit 0
+            fi
+            echo "unexpected args: $*" >&2
+            exit 2
+            """
+        )
+    )
+    fake_prek.chmod(0o755)
+
+    (git_repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+    subprocess.run(
+        ["git", "add", ".pre-commit-config.yaml"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--no-verify", "-m", "add config"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    (git_repo / "scratch.txt").write_text("scratch\n")
+    (git_repo / "commit.txt").write_text("commit me\n")
+    subprocess.run(
+        ["git", "add", "commit.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+
+    env = os.environ.copy()
+    env["GIT_SAFE_COMMIT_DIRTY_GUARD"] = "off"
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: off mode allows untracked"],
+        cwd=git_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "detected new dirty paths" not in result.stderr
+
+
 def test_safe_commit_strict_mode_reports_both_tracked_and_untracked_paths(
     git_repo: Path,
 ):
