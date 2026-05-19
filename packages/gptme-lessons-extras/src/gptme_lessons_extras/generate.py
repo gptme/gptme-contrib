@@ -79,6 +79,48 @@ def save_lesson_draft(lesson_markdown: str, title: str, output_dir: Path) -> Pat
     return filepath
 
 
+def _prepare_existing_lesson_check(
+    check_existing: bool,
+    existing_lessons_dir: Path | None,
+) -> tuple[bool, Path | None]:
+    """Normalize existing-lesson duplicate-check configuration."""
+    if not check_existing:
+        return False, existing_lessons_dir
+
+    if existing_lessons_dir is None:
+        existing_lessons_dir = Path("lessons")
+
+    if not existing_lessons_dir.exists():
+        click.echo(
+            f"Warning: Existing lessons directory not found: {existing_lessons_dir}"
+        )
+        click.echo("Skipping duplicate check.")
+        return False, None
+
+    return True, existing_lessons_dir
+
+
+def _check_existing_lesson_similarity(
+    title: str,
+    context: str,
+    existing_lessons_dir: Path,
+    similarity_threshold: float,
+) -> list[dict]:
+    """Return similar existing lessons for a pending lesson draft."""
+    from .utils.similarity import check_against_existing_lessons
+
+    temp_lesson = {
+        "title": title,
+        "context": str(context or ""),
+        "filepath": Path("temp"),
+    }
+    return check_against_existing_lessons(
+        temp_lesson,
+        existing_lessons_dir,
+        threshold=similarity_threshold,
+    )
+
+
 def generate_lessons_with_evolution(
     analysis_file: Path,
     output_dir: Path,
@@ -135,6 +177,10 @@ def generate_lessons_with_evolution(
     if max_lessons:
         experiences = experiences[:max_lessons]
 
+    check_existing, existing_lessons_dir = _prepare_existing_lesson_check(
+        check_existing, existing_lessons_dir
+    )
+
     if verbose:
         print("\n📚 Generating lessons with GEPA-lite evolution")
         print(f"  Source: {analysis_file.name}")
@@ -151,8 +197,30 @@ def generate_lessons_with_evolution(
             print(f"Experience {i}/{len(experiences)}: {title}")
             print(f"{'=' * 60}")
 
-        # TODO: Add preliminary similarity check using check_against_existing_lessons()
-        # For now, let deduplication system handle similar lessons after generation
+        if check_existing and existing_lessons_dir is not None:
+            similar_lessons = _check_existing_lesson_similarity(
+                title=title,
+                context=moment.get("context", ""),
+                existing_lessons_dir=existing_lessons_dir,
+                similarity_threshold=similarity_threshold,
+            )
+
+            if similar_lessons:
+                top_match = similar_lessons[0]
+                similarity_pct = int(top_match["similarity"] * 100)
+                click.echo(
+                    f"    ⚠️  Similar lesson found ({similarity_pct}% match): {top_match['title']}"
+                )
+                click.echo(
+                    "       Location: "
+                    f"{top_match['filepath'].relative_to(existing_lessons_dir)}"
+                )
+
+                if skip_duplicates:
+                    click.echo("    ⏭️  Skipping (duplicate detection enabled)")
+                    continue
+
+                click.echo("    ⚠️  Generating anyway (--no-skip-duplicates)")
 
         # Run GEPA-lite evolution
         try:
@@ -261,17 +329,9 @@ def generate_lessons_from_analysis(
     if max_lessons is not None and len(high_confidence_moments) > max_lessons:
         high_confidence_moments = high_confidence_moments[:max_lessons]
 
-    # Set up existing lessons directory if checking is enabled
-    if check_existing:
-        if existing_lessons_dir is None:
-            existing_lessons_dir = Path("lessons")
-
-        if not existing_lessons_dir.exists():
-            click.echo(
-                f"Warning: Existing lessons directory not found: {existing_lessons_dir}"
-            )
-            click.echo("Skipping duplicate check.")
-            check_existing = False
+    check_existing, existing_lessons_dir = _prepare_existing_lesson_check(
+        check_existing, existing_lessons_dir
+    )
 
     click.echo(f"Generating {len(high_confidence_moments)} lessons using LLM Author...")
     if check_existing:
@@ -286,17 +346,11 @@ def generate_lessons_from_analysis(
 
         # Check against existing lessons if enabled
         if check_existing and existing_lessons_dir is not None:
-            from .utils.similarity import check_against_existing_lessons
-
-            # Create a temporary lesson info for similarity checking
-            temp_lesson = {
-                "title": title,
-                "context": moment.get("context", ""),
-                "filepath": Path("temp"),  # Dummy path for checking
-            }
-
-            similar_lessons = check_against_existing_lessons(
-                temp_lesson, existing_lessons_dir, threshold=similarity_threshold
+            similar_lessons = _check_existing_lesson_similarity(
+                title=title,
+                context=moment.get("context", ""),
+                existing_lessons_dir=existing_lessons_dir,
+                similarity_threshold=similarity_threshold,
             )
 
             if similar_lessons:
