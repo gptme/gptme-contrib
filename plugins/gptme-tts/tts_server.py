@@ -7,6 +7,7 @@
 #   "click",
 #   "gradio-client",
 #   "kokoro>=0.9.0",
+#   "kittentts",
 #   "scipy",
 # ]
 # [tool.uv]
@@ -14,11 +15,10 @@
 # ///
 """
 Multi-backend TTS server supporting Kokoro and Chatterbox TTS.
-
 Usage:
     ./tts_server.py --backend kokoro
     ./tts_server.py --backend chatterbox
-
+    ./tts_server.py --backend kittentts
 API Endpoints:
     GET /tts?text=Hello&voice=af_heart&speed=1.0 - Convert text to speech
     GET /health - Check server health and backend info
@@ -51,7 +51,6 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Initialize backend on startup and teardown on shutdown."""
     global current_backend
-
     try:
         if backend_name == "kokoro":
             current_backend = TTSBackendLoader.load_kokoro_backend(
@@ -63,17 +62,18 @@ async def lifespan(app: FastAPI):
                 voice_sample_dir=os.getenv("TTS_VOICE_DIR"),
                 voice=os.getenv("TTS_VOICE"),
             )
+        elif backend_name == "kittentts":
+            current_backend = TTSBackendLoader.load_kittentts_backend(
+                model=os.getenv("TTS_MODEL", "KittenML/kitten-tts-micro-0.8"),
+                voice=os.getenv("TTS_VOICE", "Jasper"),
+            )
         else:
             raise ValueError(f"Unknown backend: {backend_name}")
-
         log.info(f"Successfully initialized {backend_name} backend")
-
     except Exception as e:
         log.error(f"Failed to initialize backend: {e}")
         raise
-
     yield
-
     # Cleanup backend on shutdown
     if current_backend is not None:
         try:
@@ -87,7 +87,6 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app
 app = FastAPI(title="Multi-Backend TTS Server", lifespan=lifespan)
-
 # Global variables
 current_backend = None
 backend_name = "kokoro"  # Default backend
@@ -107,7 +106,6 @@ class TTSBackendLoader:
             backend = KokoroTTSBackend(lang_code=lang_code, voice=voice)
             backend.initialize(voice)
             return backend
-
         except ImportError as e:
             raise ImportError(
                 f"Failed to import Kokoro backend: {e}. Install dependencies with: pip install kokoro scipy soundfile numpy"
@@ -128,7 +126,6 @@ class TTSBackendLoader:
             backend = ChatterboxTTSBackend(voice_sample_dir=voice_sample_dir)
             backend.initialize(voice)
             return backend
-
         except ImportError as e:
             raise ImportError(
                 f"Failed to import Chatterbox backend: {e}. Install dependencies with: pip install gradio-client"
@@ -137,14 +134,37 @@ class TTSBackendLoader:
             raise RuntimeError(f"Failed to initialize Chatterbox backend: {e}") from e
 
     @staticmethod
+    def load_kittentts_backend(
+        model: str = "KittenML/kitten-tts-micro-0.8", voice: str = "Jasper"
+    ):
+        """Load and initialize KittenTTS backend."""
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from tts_kittentts import KittenTTSBackend  # fmt: skip
+
+            backend = KittenTTSBackend(model_name=model, voice=voice)
+            backend.initialize()
+            return backend
+        except ImportError as e:
+            raise ImportError(
+                f"Failed to import KittenTTS backend: {e}. Install dependencies with: pip install soundfile numpy"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize KittenTTS backend: {e}") from e
+
+    @staticmethod
     def get_available_backends() -> list[str]:
         """Get list of available backends."""
         backends = []
-
         # Check if Kokoro is available
         if find_spec("kokoro"):
             backends.append("kokoro")
-
+        # Check if KittenTTS is available
+        if (
+            find_spec("kittentts")
+            or Path(__file__).parent.joinpath("tts_kittentts.py").exists()
+        ):
+            backends.append("kittentts")
         # Check if Chatterbox is available
         if os.getenv("GRADIO_SRC", "").count("/") > 1:
             # Not using HF_TOKEN for local dev versions
@@ -155,7 +175,6 @@ class TTSBackendLoader:
             if find_spec("gradio_client"):
                 log.info("Chatterbox backend is available")
                 backends.append("chatterbox")
-
         return backends
 
 
@@ -186,7 +205,6 @@ async def root():
 async def health():
     """Health check endpoint with backend information."""
     backend = get_backend()
-
     try:
         backend_info = backend.get_info()
         return {"status": "healthy", "backend": backend_name, **backend_info}
@@ -201,13 +219,11 @@ async def health():
 async def list_voices():
     """List available voices for the current backend."""
     backend = get_backend()
-
     try:
         if hasattr(backend, "list_voices"):
             voices = backend.list_voices()
         else:
             voices = []
-
         return {"backend": backend_name, "voices": voices, "count": len(voices)}
     except Exception as e:
         log.error(f"Failed to list voices: {e}")
@@ -227,6 +243,7 @@ async def list_backends():
             "descriptions": {
                 "kokoro": "Local neural TTS with multiple languages and voices",
                 "chatterbox": "Cloud-based TTS with voice cloning capabilities",
+                "kittentts": "Ultra-lightweight ONNX TTS under 25MB",
             },
         }
     except Exception as e:
@@ -249,10 +266,8 @@ async def text_to_speech(
 ) -> StreamingResponse:
     """Convert text to speech and return audio stream."""
     backend = get_backend()
-
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text parameter cannot be empty")
-
     # Note: server accepts 0–3.0; the gptme plugin client enforces 0.5–2.0 for
     # typical voice quality. The wider server range allows direct API use with
     # experimental speeds outside the plugin's recommended range.
@@ -260,14 +275,16 @@ async def text_to_speech(
         raise HTTPException(
             status_code=400, detail="Speed must be greater than 0 and at most 3.0"
         )
-
     try:
         log.info(
             f"Generating audio: {shorten(text, 50, placeholder='...')} (backend: {backend_name})"
         )
-
         # Prepare synthesis parameters based on backend
         if backend_name == "kokoro":
+            audio_buffer = await asyncio.to_thread(
+                backend.synthesize, text=text, voice=voice, speed=speed
+            )
+        elif backend_name == "kittentts":
             audio_buffer = await asyncio.to_thread(
                 backend.synthesize, text=text, voice=voice, speed=speed
             )
@@ -286,32 +303,25 @@ async def text_to_speech(
             raise HTTPException(
                 status_code=500, detail=f"Unknown backend: {backend_name}"
             )
-
         # Save audio to outputs directory with timestamp
         timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[
             :-3
         ]  # Remove last 3 digits of microseconds
         outputs_dir = Path("outputs")
         outputs_dir.mkdir(exist_ok=True)
-
         output_path = outputs_dir / f"{timestamp}.wav"
-
         # Save audio buffer to file
         audio_data = audio_buffer.getvalue()
         with open(output_path, "wb") as f:
             f.write(audio_data)
-
         log.info(f"Saved audio to {output_path}")
-
         # Reset buffer position for streaming
         audio_buffer.seek(0)
-
         return StreamingResponse(
             audio_buffer,
             media_type="audio/wav",
             headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
         )
-
     except ValueError as e:
         log.error(f"Invalid input: {e}")
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -327,7 +337,7 @@ async def text_to_speech(
 @click.option("--host", default="127.0.0.1", help="Host to run the server on")
 @click.option(
     "--backend",
-    type=click.Choice(["kokoro", "chatterbox"]),
+    type=click.Choice(["kokoro", "chatterbox", "kittentts"]),
     default="kokoro",
     help="TTS backend to use",
 )
@@ -344,7 +354,7 @@ async def text_to_speech(
 def main(
     port: int,
     host: str,
-    backend: Literal["kokoro", "chatterbox"],
+    backend: Literal["kokoro", "chatterbox", "kittentts"],
     voice: str | None,
     lang: str,
     voice_dir: str | None,
@@ -354,12 +364,9 @@ def main(
 ):
     """Run the multi-backend TTS server."""
     global backend_name, current_backend
-
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-
     backend_name = backend
-
     # Set environment variables for backend configuration
     if voice:
         os.environ["TTS_VOICE"] = voice
@@ -367,7 +374,6 @@ def main(
         os.environ["TTS_LANG"] = lang
     if voice_dir:
         os.environ["TTS_VOICE_DIR"] = voice_dir
-
     if list_backends:
         available = TTSBackendLoader.get_available_backends()
         click.echo("Available TTS backends:")
@@ -375,10 +381,9 @@ def main(
             click.echo(f"  - {b}")
         if not available:
             click.echo(
-                "  No backends available. Install dependencies for kokoro or chatterbox."
+                "  No backends available. Install dependencies for kokoro, chatterbox, or kittentts."
             )
         return
-
     if list_voices:
         try:
             # Initialize the specified backend temporarily
@@ -390,16 +395,18 @@ def main(
                 temp_backend = TTSBackendLoader.load_chatterbox_backend(
                     voice_dir, voice
                 )
+            elif backend == "kittentts":
+                temp_backend = TTSBackendLoader.load_kittentts_backend(
+                    voice=voice or "Jasper",
+                )
             else:
                 click.echo(f"Unknown backend: {backend}", err=True)
                 return
-
             voices = temp_backend.list_voices()
             click.echo(f"Available voices for {backend}:")
             for v in voices:
                 click.echo(f"  - {v}")
             return
-
         except Exception as e:
             click.echo(f"Error listing voices: {e}", err=True)
             return
@@ -410,7 +417,6 @@ def main(
                 pass
             except Exception:
                 pass
-
     # Check if the selected backend is available
     available_backends = TTSBackendLoader.get_available_backends()
     if backend not in available_backends:
@@ -426,17 +432,22 @@ def main(
                 "Install Chatterbox dependencies: pip install gradio-client", err=True
             )
             click.echo("Set HF_TOKEN environment variable", err=True)
+        elif backend == "kittentts":
+            click.echo(
+                "Install KittenTTS dependencies: pip install soundfile numpy scipy",
+                err=True,
+            )
         sys.exit(1)
-
     log.info(f"Starting TTS server on {host}:{port}")
     log.info(f"Using backend: {backend}")
     if voice:
         log.info(f"Default voice: {voice}")
     if backend == "kokoro":
         log.info(f"Language: {lang}")
+    if backend == "kittentts":
+        log.info(f"Model: {os.getenv('TTS_MODEL', 'KittenML/kitten-tts-micro-0.8')}")
     if voice_dir:
         log.info(f"Voice directory: {voice_dir}")
-
     uvicorn.run(app, host=host, port=port)
 
 
