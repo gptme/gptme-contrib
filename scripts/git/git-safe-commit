@@ -188,11 +188,19 @@ check_index_corruption() {
 
 check_clean_worktree_for_hooks() {
     local unstaged_files untracked_files unstaged_count untracked_count
+    local sample_count mode block block_reason
+    local unstaged_reason untracked_reason
 
     unstaged_files="$(git diff --name-only --ignore-submodules -- 2>/dev/null)" || true
     untracked_files="$(git ls-files --others --exclude-standard 2>/dev/null)" || true
     unstaged_count=0
     untracked_count=0
+    sample_count=0
+    mode=""
+    block=0
+    block_reason=""
+    unstaged_reason=""
+    untracked_reason=""
 
     if [ -n "$unstaged_files" ]; then
         unstaged_count=$(printf '%s\n' "$unstaged_files" | grep -c . || true)
@@ -210,21 +218,35 @@ check_clean_worktree_for_hooks() {
     # Default: block on unstaged-modified tracked files. Untracked files alone → warn + proceed.
     # Override: GIT_SAFE_COMMIT_DIRTY_GUARD=strict restores the old "any dirt blocks" behavior.
     # Override: GIT_SAFE_COMMIT_DIRTY_GUARD=off skips the guard entirely.
-    local mode="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
+    mode="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
 
     if [ "$mode" = "off" ]; then
         return 0
     fi
 
-    local block=0
-    local block_reason=""
     if [ "$unstaged_count" -gt 0 ]; then
-        block=1
-        block_reason="${unstaged_count} unstaged tracked modifications"
+        unstaged_reason="${unstaged_count} unstaged tracked modification"
+        if [ "$unstaged_count" -ne 1 ]; then
+            unstaged_reason="${unstaged_reason}s"
+        fi
     fi
-    if [ "$mode" = "strict" ] && [ "$untracked_count" -gt 0 ] && [ "$block" -eq 0 ]; then
+    if [ "$mode" = "strict" ] && [ "$untracked_count" -gt 0 ]; then
+        untracked_reason="${untracked_count} untracked path"
+        if [ "$untracked_count" -ne 1 ]; then
+            untracked_reason="${untracked_reason}s"
+        fi
+        untracked_reason="${untracked_reason} (strict mode)"
+    fi
+
+    if [ -n "$unstaged_reason" ] && [ -n "$untracked_reason" ]; then
         block=1
-        block_reason="${untracked_count} untracked paths (strict mode)"
+        block_reason="${unstaged_reason} and ${untracked_reason}"
+    elif [ -n "$unstaged_reason" ]; then
+        block=1
+        block_reason="$unstaged_reason"
+    elif [ -n "$untracked_reason" ]; then
+        block=1
+        block_reason="$untracked_reason"
     fi
 
     if [ "$block" -eq 1 ]; then
@@ -241,6 +263,13 @@ check_clean_worktree_for_hooks() {
             printf '%s\n' "$unstaged_files"
             [ "$mode" = "strict" ] && printf '%s\n' "$untracked_files"
         } | grep -v '^$' | head -10 | sed 's/^/     /' >&2
+        sample_count=$unstaged_count
+        if [ "$mode" = "strict" ]; then
+            sample_count=$((sample_count + untracked_count))
+        fi
+        if [ "$sample_count" -gt 10 ]; then
+            echo "     ... and $((sample_count - 10)) more" >&2
+        fi
         echo "" >&2
         exit 1
     fi

@@ -263,7 +263,11 @@ def test_safe_commit_allows_explicit_all_staged_opt_in(git_repo: Path):
 
 
 def test_safe_commit_refuses_dirty_worktree_without_no_verify(git_repo: Path):
-    """Dirty worktrees are blocked before prek can stash unrelated files."""
+    """Tracked dirty worktrees are blocked before prek can stash unrelated files."""
+    (git_repo / "dirty.txt").write_text("tracked\n")
+    subprocess.run(
+        ["git", "add", "dirty.txt"], cwd=git_repo, check=True, capture_output=True
+    )
     (git_repo / "dirty.txt").write_text("dirty\n")
     (git_repo / "commit.txt").write_text("commit me\n")
     subprocess.run(
@@ -332,11 +336,97 @@ def test_safe_commit_allows_dirty_worktree_with_no_verify(git_repo: Path):
     assert "test: dirty worktree allowed" in log.stdout
 
 
-def test_safe_commit_rechecks_dirty_worktree_after_waiting_for_lock(git_repo: Path):
-    """The dirty-worktree check must happen after lock acquisition, not before."""
+def test_safe_commit_allows_untracked_worktree_by_default(git_repo: Path):
+    """Default mode should warn about untracked files without blocking commits."""
+    (git_repo / "scratch.txt").write_text("scratch\n")
     (git_repo / "commit.txt").write_text("commit me\n")
     subprocess.run(
         ["git", "add", "commit.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: untracked allowed"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "untracked path(s); proceeding" in result.stderr
+
+
+def test_safe_commit_strict_mode_reports_both_tracked_and_untracked_paths(
+    git_repo: Path,
+):
+    """Strict mode should report both blocking categories when both are present."""
+    (git_repo / "dirty.txt").write_text("dirty\n")
+    subprocess.run(
+        ["git", "add", "dirty.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+    (git_repo / "dirty.txt").write_text("dirty again\n")
+    (git_repo / "scratch.txt").write_text("scratch\n")
+    (git_repo / "commit.txt").write_text("commit me\n")
+    subprocess.run(
+        ["git", "add", "commit.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+
+    env = os.environ.copy()
+    env["GIT_SAFE_COMMIT_DIRTY_GUARD"] = "strict"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: strict mode blocked"],
+        cwd=git_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "1 unstaged tracked modification and 1 untracked path (strict mode)"
+        in result.stderr
+    )
+    assert "dirty.txt" in result.stderr
+    assert "scratch.txt" in result.stderr
+
+
+def test_safe_commit_dirty_worktree_message_keeps_truncation_notice(git_repo: Path):
+    """Dirty-worktree diagnostics should keep the truncated-path count footer."""
+    for i in range(11):
+        file_path = git_repo / f"dirty-{i}.txt"
+        file_path.write_text(f"dirty {i}\n")
+        subprocess.run(
+            ["git", "add", file_path.name],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        file_path.write_text(f"dirty again {i}\n")
+
+    (git_repo / "commit.txt").write_text("commit me\n")
+    subprocess.run(
+        ["git", "add", "commit.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: many dirty files blocked"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "... and 1 more" in result.stderr
+
+
+def test_safe_commit_rechecks_dirty_worktree_after_waiting_for_lock(git_repo: Path):
+    """The tracked-dirty check must happen after lock acquisition, not before."""
+    (git_repo / "commit.txt").write_text("commit me\n")
+    subprocess.run(
+        ["git", "add", "commit.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+    (git_repo / "dirty.txt").write_text("tracked\n")
+    subprocess.run(
+        ["git", "add", "dirty.txt"], cwd=git_repo, check=True, capture_output=True
     )
 
     sha_before = subprocess.run(
@@ -362,7 +452,7 @@ def test_safe_commit_rechecks_dirty_worktree_after_waiting_for_lock(git_repo: Pa
         )
         # Give git-safe-commit time to start and block on flock.
         time.sleep(0.3)
-        (git_repo / "dirty.txt").write_text("dirty\n")
+        (git_repo / "dirty.txt").write_text("dirty again\n")
         # Release the lock so git-safe-commit can proceed and recheck.
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
