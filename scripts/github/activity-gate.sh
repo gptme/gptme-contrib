@@ -207,15 +207,69 @@ discover_repos() {
     for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
 }
 
+# Per-repo GraphQL response cache. Default cadence is every 2 minutes across 50
+# repos × 3 gh calls = 150 GraphQL ops/run → 4,500/hr. With a 4-min TTL on
+# PR data (the most time-critical) and 5-min TTLs on issues/master-CI, we serve
+# from cache on every other run and refresh in the next, cutting load by ~50%
+# without changing cadence.
+#
+# Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN (seconds).
+# Set any to 0 to bypass the cache (useful for diagnostics).
+GH_CACHE_DIR="${GH_CACHE_DIR:-$STATE_DIR/gh-cache}"
+GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-240}"
+GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-300}"
+GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-300}"
+
+# Read cached value if fresh enough, else run the producer command and cache its
+# stdout. The producer is passed as a single shell-evaluated string so callers
+# can include flags and pipes.
+#
+# Args:
+#   $1 — cache key (filesystem-safe; will be normalized)
+#   $2 — TTL seconds (0 = no cache)
+#   $3 — producer command (eval'd in subshell)
+gh_cache_get_or_fetch() {
+    local key="$1" ttl="$2" producer="$3"
+    if [ "$ttl" -le 0 ]; then
+        eval "$producer"
+        return $?
+    fi
+    mkdir -p "$GH_CACHE_DIR" 2>/dev/null || true
+    # Normalize key: replace slashes with `-`
+    local safe_key="${key//\//-}"
+    local cache_file="$GH_CACHE_DIR/${safe_key}.json"
+    if [ -f "$cache_file" ]; then
+        local mtime
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo "")
+        if [ -n "$mtime" ]; then
+            local age=$(( $(date +%s) - mtime ))
+            if [ "$age" -lt "$ttl" ]; then
+                cat "$cache_file"
+                return 0
+            fi
+        fi
+    fi
+    local out
+    out=$(eval "$producer")
+    local rc=$?
+    if [ $rc -eq 0 ] && [ -n "$out" ]; then
+        printf '%s' "$out" > "$cache_file"
+    fi
+    printf '%s' "$out"
+    return $rc
+}
+
 # Fetch all PR data once per repo, with all fields needed by every check function.
-# This replaces 3 separate `gh pr list` calls with a single one.
+# This replaces 3 separate `gh pr list` calls with a single one. Cached at
+# GH_CACHE_TTL_PR (default 240s) since the gate cadence is 120s.
 fetch_pr_data() {
     local repo=$1
     # Filter out draft PRs — they're intentionally deprioritized/not on merge path
-    gh pr list --repo "$repo" --author "$AUTHOR" --state open \
-        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
-        --jq '[.[] | select(.isDraft | not)]' \
-        2>/dev/null || echo "[]"
+    gh_cache_get_or_fetch "pr-${repo}" "$GH_CACHE_TTL_PR" \
+        "gh pr list --repo '$repo' --author '$AUTHOR' --state open \
+            --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
+            --jq '[.[] | select(.isDraft | not)]' \
+            2>/dev/null || echo '[]'"
 }
 
 # Check whether the last activity on a PR was from someone worth responding to.
@@ -352,12 +406,15 @@ check_ci_failures() {
     done
 }
 
-# Check for assigned issues with new activity (state-tracked like PRs)
+# Check for assigned issues with new activity (state-tracked like PRs).
+# Cached at GH_CACHE_TTL_ISSUE (default 300s); assigned-issue updates aren't
+# 2-min-urgent — the gate's state-tracking still fires when cache refreshes.
 check_assigned_issues() {
     local repo=$1
     local issues
-    issues=$(gh issue list --repo "$repo" --assignee "$AUTHOR" --state open \
-        --json number,title,updatedAt 2>/dev/null || echo "[]")
+    issues=$(gh_cache_get_or_fetch "issue-${repo}" "$GH_CACHE_TTL_ISSUE" \
+        "gh issue list --repo '$repo' --assignee '$AUTHOR' --state open \
+            --json number,title,updatedAt 2>/dev/null || echo '[]'")
     [ "$issues" = "[]" ] || [ -z "$issues" ] && return 0
 
     echo "$issues" | jq -c '.[]' | while read -r issue_data; do
@@ -387,12 +444,14 @@ check_assigned_issues() {
 check_master_ci() {
     local repo=$1
     local runs
-    runs=$(gh run list --repo "$repo" --branch master --limit 3 \
-        --json databaseId,name,conclusion,createdAt 2>/dev/null || echo "[]")
+    runs=$(gh_cache_get_or_fetch "run-master-${repo}" "$GH_CACHE_TTL_RUN" \
+        "gh run list --repo '$repo' --branch master --limit 3 \
+            --json databaseId,name,conclusion,createdAt 2>/dev/null || echo '[]'")
     # Also try 'main' if master returned nothing
     if [ "$runs" = "[]" ]; then
-        runs=$(gh run list --repo "$repo" --branch main --limit 3 \
-            --json databaseId,name,conclusion,createdAt 2>/dev/null || echo "[]")
+        runs=$(gh_cache_get_or_fetch "run-main-${repo}" "$GH_CACHE_TTL_RUN" \
+            "gh run list --repo '$repo' --branch main --limit 3 \
+                --json databaseId,name,conclusion,createdAt 2>/dev/null || echo '[]'")
     fi
     [ "$runs" = "[]" ] || [ -z "$runs" ] && return 0
 
