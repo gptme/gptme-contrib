@@ -46,6 +46,22 @@ def _write_analysis(path: Path, title: str, context: str) -> None:
     path.write_text(json.dumps(analysis), encoding="utf-8")
 
 
+def _write_author_analysis(path: Path, title: str, context: str) -> None:
+    analysis = {
+        "conversation_id": "conv-123",
+        "metadata": {
+            "experiences": [
+                {
+                    "title": title,
+                    "context": context,
+                    "confidence": 0.95,
+                }
+            ]
+        },
+    }
+    path.write_text(json.dumps(analysis), encoding="utf-8")
+
+
 def _write_existing_lesson(path: Path, title: str, context: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -66,6 +82,10 @@ def _fake_save_lesson_draft(lesson_markdown: str, title: str, output_dir: Path) 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(lesson_markdown, encoding="utf-8")
     return path
+
+
+def _fake_lesson_markdown(moment, conversation_id: str) -> str:
+    return "---\nstatus: active\n---\n# Fresh lesson\n"
 
 
 def test_generate_lessons_with_evolution_skips_similar_existing_lessons(
@@ -176,4 +196,69 @@ def test_generate_lessons_with_evolution_ignores_missing_existing_dir(
 
     assert "Skipping duplicate check." in captured.out
     assert calls["count"] == 1
+    assert generated == [output_dir / "patterns" / "generated.md"]
+
+
+def test_generate_lessons_from_analysis_skips_duplicate_check_when_disabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    analysis_file = tmp_path / "analysis.json"
+    output_dir = tmp_path / "out"
+    title = "Generate without duplicate checks"
+    context = "Disabled duplicate checks should bypass similarity lookups."
+
+    _write_author_analysis(analysis_file, title, context)
+
+    similarity_called = False
+
+    def fake_similarity(**kwargs):
+        nonlocal similarity_called
+        similarity_called = True
+        return []
+
+    monkeypatch.setattr(generate, "_check_existing_lesson_similarity", fake_similarity)
+    monkeypatch.setattr(generate, "llm_author_reflect", _fake_lesson_markdown)
+    monkeypatch.setattr(generate, "save_lesson_draft", _fake_save_lesson_draft)
+
+    generated = generate.generate_lessons_from_analysis(
+        analysis_file=analysis_file,
+        output_dir=output_dir,
+        check_existing=False,
+    )
+
+    assert similarity_called is False
+    assert generated == [output_dir / "patterns" / "generated.md"]
+
+
+def test_generate_lessons_from_analysis_uses_default_lessons_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    analysis_file = tmp_path / "analysis.json"
+    output_dir = tmp_path / "out"
+    title = "Use default lessons directory"
+    context = "When no lessons dir is passed, the default lessons/ path should be used."
+    lessons_dir = tmp_path / "lessons"
+
+    _write_author_analysis(analysis_file, title, context)
+    lessons_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    seen = {}
+
+    def fake_similarity(**kwargs):
+        seen["existing_lessons_dir"] = kwargs["existing_lessons_dir"]
+        return []
+
+    monkeypatch.setattr(generate, "_check_existing_lesson_similarity", fake_similarity)
+    monkeypatch.setattr(generate, "llm_author_reflect", _fake_lesson_markdown)
+    monkeypatch.setattr(generate, "save_lesson_draft", _fake_save_lesson_draft)
+
+    generated = generate.generate_lessons_from_analysis(
+        analysis_file=analysis_file,
+        output_dir=output_dir,
+        check_existing=True,
+        existing_lessons_dir=None,
+    )
+
+    assert seen["existing_lessons_dir"].resolve() == lessons_dir.resolve()
     assert generated == [output_dir / "patterns" / "generated.md"]
