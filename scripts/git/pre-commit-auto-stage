@@ -63,6 +63,7 @@ if [ "${GIT_SAFE_COMMIT_LOCK_HELD:-0}" != "1" ]; then
 fi
 
 if [ "${GIT_SAFE_COMMIT_EXPECT_CLEAN:-0}" = "1" ]; then
+  ALLOW_UNTRACKED="${GIT_SAFE_COMMIT_ALLOW_UNTRACKED:-0}"
   UNSTAGED_FILES="$(git diff --name-only --ignore-submodules -- 2>/dev/null)" || true
   UNTRACKED_FILES="$(git ls-files --others --exclude-standard 2>/dev/null)" || true
   DIRTY_COUNT=0
@@ -70,7 +71,7 @@ if [ "${GIT_SAFE_COMMIT_EXPECT_CLEAN:-0}" = "1" ]; then
   if [ -n "$UNSTAGED_FILES" ]; then
     DIRTY_COUNT=$((DIRTY_COUNT + $(printf '%s\n' "$UNSTAGED_FILES" | grep -c . || true)))
   fi
-  if [ -n "$UNTRACKED_FILES" ]; then
+  if [ "$ALLOW_UNTRACKED" != "1" ] && [ -n "$UNTRACKED_FILES" ]; then
     DIRTY_COUNT=$((DIRTY_COUNT + $(printf '%s\n' "$UNTRACKED_FILES" | grep -c . || true)))
   fi
 
@@ -82,7 +83,9 @@ if [ "${GIT_SAFE_COMMIT_EXPECT_CLEAN:-0}" = "1" ]; then
     echo -e "${YELLOW}Sample dirty paths:${NC}" >&2
     {
       printf '%s\n' "$UNSTAGED_FILES"
-      printf '%s\n' "$UNTRACKED_FILES"
+      if [ "$ALLOW_UNTRACKED" != "1" ]; then
+        printf '%s\n' "$UNTRACKED_FILES"
+      fi
     } | grep -v '^$' | head -10 | sed 's/^/  /' >&2
     if [ "$DIRTY_COUNT" -gt 10 ]; then
       echo "  ... and $((DIRTY_COUNT - 10)) more" >&2

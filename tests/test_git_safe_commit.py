@@ -336,8 +336,94 @@ def test_safe_commit_allows_dirty_worktree_with_no_verify(git_repo: Path):
     assert "test: dirty worktree allowed" in log.stdout
 
 
-def test_safe_commit_allows_untracked_worktree_by_default(git_repo: Path):
-    """Default mode should warn about untracked files without blocking commits."""
+def test_safe_commit_allows_untracked_worktree_by_default_with_auto_stage_hook(
+    git_repo: Path,
+):
+    """Default mode should allow untracked files only for the known safe hook path."""
+    hooks_dir = git_repo / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks_dir)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    (hooks_dir / "pre-commit").unlink(missing_ok=True)
+    (hooks_dir / "pre-commit").symlink_to(PRE_COMMIT_HOOK)
+
+    fake_bin = Path(tempfile.mkdtemp(prefix="fake-prek-"))
+    fake_prek = fake_bin / "prek"
+    fake_prek.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            if [ "$1" = "run" ]; then
+                exit 0
+            fi
+            echo "unexpected args: $*" >&2
+            exit 2
+            """
+        )
+    )
+    fake_prek.chmod(0o755)
+
+    (git_repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+    subprocess.run(
+        ["git", "add", ".pre-commit-config.yaml"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--no-verify", "-m", "add config"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    (git_repo / "scratch.txt").write_text("scratch\n")
+    (git_repo / "commit.txt").write_text("commit me\n")
+    subprocess.run(
+        ["git", "add", "commit.txt"], cwd=git_repo, check=True, capture_output=True
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: untracked allowed"],
+        cwd=git_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "untracked path(s); proceeding" in result.stderr
+
+
+def test_safe_commit_default_mode_blocks_untracked_worktree_for_unknown_hook(
+    git_repo: Path,
+):
+    """Default mode must stay strict for repo-specific hooks we cannot classify."""
+    hooks_dir = git_repo / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks_dir)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    pre_commit_hook = hooks_dir / "pre-commit"
+    pre_commit_hook.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            exit 0
+            """
+        )
+    )
+    pre_commit_hook.chmod(0o755)
+
     (git_repo / "scratch.txt").write_text("scratch\n")
     (git_repo / "commit.txt").write_text("commit me\n")
     subprocess.run(
@@ -345,14 +431,15 @@ def test_safe_commit_allows_untracked_worktree_by_default(git_repo: Path):
     )
 
     result = subprocess.run(
-        [str(SAFE_COMMIT), "commit.txt", "-m", "test: untracked allowed"],
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: untracked blocked"],
         cwd=git_repo,
         capture_output=True,
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "untracked path(s); proceeding" in result.stderr
+    assert result.returncode == 1
+    assert "dirty worktree" in result.stderr.lower()
+    assert "1 untracked path" in result.stderr
 
 
 def test_safe_commit_strict_mode_reports_both_tracked_and_untracked_paths(
