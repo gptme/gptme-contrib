@@ -46,6 +46,11 @@ from fastapi.responses import StreamingResponse
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+KITTENTTS_WHEEL_URL = (
+    "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/"
+    "kittentts-0.8.1-py3-none-any.whl"
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -147,7 +152,9 @@ class TTSBackendLoader:
             return backend
         except ImportError as e:
             raise ImportError(
-                f"Failed to import KittenTTS backend: {e}. Install dependencies with: pip install soundfile numpy"
+                f"Failed to import KittenTTS backend: {e}. "
+                f"Install KittenTTS: pip install {KITTENTTS_WHEEL_URL}. "
+                "Also install: pip install soundfile numpy scipy"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to initialize KittenTTS backend: {e}") from e
@@ -240,7 +247,7 @@ async def list_backends():
             "descriptions": {
                 "kokoro": "Local neural TTS with multiple languages and voices",
                 "chatterbox": "Cloud-based TTS with voice cloning capabilities",
-                "kittentts": "Ultra-lightweight ONNX TTS under 25MB",
+                "kittentts": "Ultra-lightweight ONNX TTS with 25-80MB models",
             },
         }
     except Exception as e:
@@ -277,11 +284,7 @@ async def text_to_speech(
             f"Generating audio: {shorten(text, 50, placeholder='...')} (backend: {backend_name})"
         )
         # Prepare synthesis parameters based on backend
-        if backend_name == "kokoro":
-            audio_buffer = await asyncio.to_thread(
-                backend.synthesize, text=text, voice=voice, speed=speed
-            )
-        elif backend_name == "kittentts":
+        if backend_name in {"kokoro", "kittentts"}:
             audio_buffer = await asyncio.to_thread(
                 backend.synthesize, text=text, voice=voice, speed=speed
             )
@@ -394,6 +397,7 @@ def main(
                 )
             elif backend == "kittentts":
                 temp_backend = TTSBackendLoader.load_kittentts_backend(
+                    model=os.getenv("TTS_MODEL", "KittenML/kitten-tts-micro-0.8"),
                     voice=voice or "Jasper",
                 )
             else:
@@ -431,7 +435,11 @@ def main(
             click.echo("Set HF_TOKEN environment variable", err=True)
         elif backend == "kittentts":
             click.echo(
-                "Install KittenTTS dependencies: pip install soundfile numpy scipy",
+                f"Install KittenTTS: pip install {KITTENTTS_WHEEL_URL}",
+                err=True,
+            )
+            click.echo(
+                "Also install: pip install soundfile numpy scipy",
                 err=True,
             )
         sys.exit(1)

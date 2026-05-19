@@ -374,3 +374,70 @@ def test_lifespan_shutdown_calls_close():
         asyncio.run(exercise_lifespan())
 
     load_backend.assert_called_once_with(lang_code="a", voice="af_heart")
+
+
+def test_list_voices_kittentts_uses_tts_model_env_var():
+    """The temporary kittentts backend should honor TTS_MODEL for --list-voices."""
+    module = _import_tts_server()
+    temp_backend = MagicMock()
+    temp_backend.list_voices.return_value = ["Jasper"]
+
+    with (
+        patch.dict("os.environ", {"TTS_MODEL": "KittenML/kitten-tts-mini-0.8"}),
+        patch.object(
+            module.TTSBackendLoader,
+            "load_kittentts_backend",
+            return_value=temp_backend,
+        ) as load_backend,
+        patch("click.echo"),
+    ):
+        module.main.callback(
+            port=8765,
+            host="127.0.0.1",
+            backend="kittentts",
+            voice=None,
+            lang="a",
+            voice_dir=None,
+            list_voices=True,
+            list_backends=False,
+            verbose=False,
+        )
+
+    load_backend.assert_called_once_with(
+        model="KittenML/kitten-tts-mini-0.8",
+        voice="Jasper",
+    )
+    temp_backend.close.assert_called_once()
+
+
+def test_unavailable_kittentts_backend_prints_install_hint():
+    """Unavailable kittentts backend should tell users how to install it."""
+    module = _import_tts_server()
+
+    with (
+        patch.object(
+            module.TTSBackendLoader, "get_available_backends", return_value=[]
+        ),
+        patch("click.echo") as echo,
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        module.main.callback(
+            port=8765,
+            host="127.0.0.1",
+            backend="kittentts",
+            voice=None,
+            lang="a",
+            voice_dir=None,
+            list_voices=False,
+            list_backends=False,
+            verbose=False,
+        )
+
+    assert excinfo.value.code == 1
+    echo.assert_any_call("Backend 'kittentts' is not available.", err=True)
+    echo.assert_any_call("Available backends: []", err=True)
+    echo.assert_any_call(
+        f"Install KittenTTS: pip install {module.KITTENTTS_WHEEL_URL}",
+        err=True,
+    )
+    echo.assert_any_call("Also install: pip install soundfile numpy scipy", err=True)
