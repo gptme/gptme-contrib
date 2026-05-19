@@ -437,9 +437,7 @@ def test_unavailable_kittentts_backend_prints_install_hint():
     echo.assert_any_call("Backend 'kittentts' is not available.", err=True)
     echo.assert_any_call("Available backends: []", err=True)
     echo.assert_any_call(
-        "Install KittenTTS: pip install "
-        "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/"
-        "kittentts-0.8.1-py3-none-any.whl",
+        f"Install KittenTTS: pip install {module.KITTENTTS_WHEEL_URL}",
         err=True,
     )
     echo.assert_any_call("Also install: pip install soundfile numpy scipy", err=True)
