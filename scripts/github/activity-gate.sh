@@ -258,10 +258,16 @@ gh_cache_get_or_fetch() {
             fi
         fi
     fi
-    local out
+    local out tmp_file
     if out=$(eval "$producer"); then
         if [ -n "$out" ]; then
-            printf '%s' "$out" > "$cache_file"
+            tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
+            if [ -n "$tmp_file" ]; then
+                # Write via temp file + rename so readers never observe partial JSON.
+                if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
+                    rm -f "$tmp_file"
+                fi
+            fi
         fi
         printf '%s' "$out"
         return 0
