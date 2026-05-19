@@ -405,7 +405,7 @@ class OpenAIRealtimeClient:
                             },
                             "mode": {
                                 "type": "string",
-                                "enum": ["smart", "fast"],
+                                "enum": ["fast", "smart"],
                                 "description": (
                                     "Response urgency. 'fast' (default) uses a smaller model for speed — "
                                     "prefer this for most live-call lookups. 'smart' uses a "
