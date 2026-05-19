@@ -142,7 +142,7 @@ class TTSBackendLoader:
             sys.path.insert(0, str(Path(__file__).parent))
             from tts_kittentts import KittenTTSBackend  # fmt: skip
 
-            backend = KittenTTSBackend(model_name=model, voice=voice)
+            backend = KittenTTSBackend(model=model, voice=voice)
             backend.initialize()
             return backend
         except ImportError as e:
@@ -159,11 +159,8 @@ class TTSBackendLoader:
         # Check if Kokoro is available
         if find_spec("kokoro"):
             backends.append("kokoro")
-        # Check if KittenTTS is available
-        if (
-            find_spec("kittentts")
-            or Path(__file__).parent.joinpath("tts_kittentts.py").exists()
-        ):
+        # Check if KittenTTS is available (pip package must be installed)
+        if find_spec("kittentts"):
             backends.append("kittentts")
         # Check if Chatterbox is available
         if os.getenv("GRADIO_SRC", "").count("/") > 1:
