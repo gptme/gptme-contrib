@@ -405,12 +405,13 @@ class OpenAIRealtimeClient:
                             },
                             "mode": {
                                 "type": "string",
-                                "enum": ["smart", "fast"],
+                                "enum": ["fast", "smart"],
                                 "description": (
-                                    "Response urgency. 'fast' uses a smaller model for speed — "
-                                    "prefer this for simple lookups. 'smart' (default) uses a "
-                                    "larger model when accuracy matters. Both are for small, "
-                                    "focused lookups only — never for broad investigations."
+                                    "Response urgency. 'fast' (default) uses a smaller model for speed — "
+                                    "prefer this for most live-call lookups. 'smart' uses a "
+                                    "larger model when accuracy matters more than latency. "
+                                    "Both are for small, focused lookups only — never for broad "
+                                    "investigations."
                                 ),
                             },
                         },
