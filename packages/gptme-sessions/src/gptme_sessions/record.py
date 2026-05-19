@@ -177,7 +177,9 @@ class SessionRecord:
 
     # Identity
     session_id: str = ""
-    timestamp: str = ""  # ISO 8601
+    timestamp: str = ""  # ISO 8601 — record-creation time
+    start_time: str | None = None  # ISO 8601 — session start (populated by post_session)
+    end_time: str | None = None  # ISO 8601 — session end (populated by post_session)
     session_name: str | None = None  # human-readable name (e.g. "dancing-blue-fish")
     project: str | None = None  # workspace/project path
 

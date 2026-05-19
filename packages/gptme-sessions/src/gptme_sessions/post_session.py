@@ -368,6 +368,20 @@ def post_session(
         )
         outcome = "productive"
 
+    # --- Compute start_time / end_time from duration ---
+    # The timestamp field is set by SessionRecord.__post_init__() at creation time.
+    # We derive start/end from duration_seconds so time-based filtering works.
+    if duration_seconds > 0:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        start_dt = now - timedelta(seconds=duration_seconds)
+        start_time_str = start_dt.isoformat()
+        end_time_str = now.isoformat()
+    else:
+        start_time_str = None
+        end_time_str = None
+
     # --- Category: inferred (actual) vs recommended (intended) ---
     inferred_category = signals.get("inferred_category") if signals else None
     # Actual category: explicit override > inferred from signals
@@ -381,6 +395,8 @@ def post_session(
         "outcome": outcome,
         "exit_code": exit_code,
         "duration_seconds": duration_seconds,
+        "start_time": start_time_str,
+        "end_time": end_time_str,
         "deliverables": deliverables,
     }
     if context_tier is not None:
