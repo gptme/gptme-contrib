@@ -368,7 +368,7 @@ class GptmeToolBridge:
             copies.append(copy)
         return copies
 
-    async def _run_subagent(self, task_id: str, task: str, mode: str = "smart") -> None:
+    async def _run_subagent(self, task_id: str, task: str, mode: str = "fast") -> None:
         """Run a subagent in the background and inject result when done."""
         pending = self._pending_tasks.get(task_id)
 
@@ -430,7 +430,7 @@ class GptmeToolBridge:
     async def _execute(
         self,
         task: str,
-        mode: str = "smart",
+        mode: str = "fast",
         on_started: Callable[[float], None] | None = None,
         on_progress: Callable[[str, float], None] | None = None,
         on_completed: Callable[[int, float], None] | None = None,
@@ -619,9 +619,9 @@ class GptmeToolBridge:
             if not task:
                 return {"error": "No task provided"}
 
-            mode = arguments.get("mode", "smart")
+            mode = arguments.get("mode", "fast")
             if mode not in ("fast", "smart"):
-                mode = "smart"
+                mode = "fast"
             model = self.model_fast if mode == "fast" else self.model_smart
 
             # Assign task ID and dispatch in background
