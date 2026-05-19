@@ -79,6 +79,14 @@ def save_lesson_draft(lesson_markdown: str, title: str, output_dir: Path) -> Pat
     return filepath
 
 
+def _format_lesson_location(filepath: Path, lessons_dir: Path) -> str:
+    """Format a lesson path relative to the lessons dir when possible."""
+    try:
+        return str(filepath.relative_to(lessons_dir))
+    except ValueError:
+        return str(filepath)
+
+
 def generate_lessons_with_evolution(
     analysis_file: Path,
     output_dir: Path,
@@ -141,11 +149,10 @@ def generate_lessons_with_evolution(
             existing_lessons_dir = Path("lessons")
 
         if not existing_lessons_dir.exists():
-            if verbose:
-                print(
-                    f"  Warning: Existing lessons directory not found: {existing_lessons_dir}"
-                )
-                print("  Skipping duplicate check.")
+            click.echo(
+                f"  Warning: Existing lessons directory not found: {existing_lessons_dir}"
+            )
+            click.echo("  Skipping duplicate check.")
             check_existing = False
 
     if verbose:
@@ -178,21 +185,18 @@ def generate_lessons_with_evolution(
             if similar_lessons:
                 top_match = similar_lessons[0]
                 similarity_pct = int(top_match["similarity"] * 100)
-                if verbose:
-                    print(
-                        f"  ⚠️  Similar lesson found ({similarity_pct}% match): {top_match['title']}"
-                    )
-                    print(
-                        "     Location: "
-                        f"{top_match['filepath'].relative_to(existing_lessons_dir)}"
-                    )
+                click.echo(
+                    f"  ⚠️  Similar lesson found ({similarity_pct}% match): {top_match['title']}"
+                )
+                click.echo(
+                    "     Location: "
+                    f"{_format_lesson_location(top_match['filepath'], existing_lessons_dir)}"
+                )
 
                 if skip_duplicates:
-                    if verbose:
-                        print("  ⏭️  Skipping (duplicate detection enabled)")
+                    click.echo("  ⏭️  Skipping (duplicate detection enabled)")
                     continue
-                elif verbose:
-                    print("  ⚠️  Generating anyway (--no-skip-duplicates)")
+                click.echo("  ⚠️  Generating anyway (--no-skip-duplicates)")
 
         # Run GEPA-lite evolution
         try:
@@ -346,7 +350,8 @@ def generate_lessons_from_analysis(
                     f"    ⚠️  Similar lesson found ({similarity_pct}% match): {top_match['title']}"
                 )
                 click.echo(
-                    f"       Location: {top_match['filepath'].relative_to(existing_lessons_dir)}"
+                    "       Location: "
+                    f"{_format_lesson_location(top_match['filepath'], existing_lessons_dir)}"
                 )
 
                 if skip_duplicates:
