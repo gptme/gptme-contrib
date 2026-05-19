@@ -415,9 +415,7 @@ def test_unavailable_kittentts_backend_prints_install_hint():
     module = _import_tts_server()
 
     with (
-        patch.object(
-            module.TTSBackendLoader, "get_available_backends", return_value=[]
-        ),
+        patch.object(module.TTSBackendLoader, "get_available_backends", return_value=[]),
         patch("click.echo") as echo,
         pytest.raises(SystemExit) as excinfo,
     ):
