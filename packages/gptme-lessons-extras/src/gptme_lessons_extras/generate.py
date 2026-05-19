@@ -135,6 +135,19 @@ def generate_lessons_with_evolution(
     if max_lessons:
         experiences = experiences[:max_lessons]
 
+    # Set up existing lessons directory if checking is enabled
+    if check_existing:
+        if existing_lessons_dir is None:
+            existing_lessons_dir = Path("lessons")
+
+        if not existing_lessons_dir.exists():
+            if verbose:
+                print(
+                    f"  Warning: Existing lessons directory not found: {existing_lessons_dir}"
+                )
+                print("  Skipping duplicate check.")
+            check_existing = False
+
     if verbose:
         print("\n📚 Generating lessons with GEPA-lite evolution")
         print(f"  Source: {analysis_file.name}")
@@ -151,8 +164,35 @@ def generate_lessons_with_evolution(
             print(f"Experience {i}/{len(experiences)}: {title}")
             print(f"{'=' * 60}")
 
-        # TODO: Add preliminary similarity check using check_against_existing_lessons()
-        # For now, let deduplication system handle similar lessons after generation
+        if check_existing and existing_lessons_dir is not None:
+            from .utils.similarity import check_against_existing_lessons
+
+            temp_lesson = {
+                "title": title,
+                "context": moment.get("context", ""),
+                "filepath": Path("temp"),
+            }
+            similar_lessons = check_against_existing_lessons(
+                temp_lesson, existing_lessons_dir, threshold=similarity_threshold
+            )
+            if similar_lessons:
+                top_match = similar_lessons[0]
+                similarity_pct = int(top_match["similarity"] * 100)
+                if verbose:
+                    print(
+                        f"  ⚠️  Similar lesson found ({similarity_pct}% match): {top_match['title']}"
+                    )
+                    print(
+                        "     Location: "
+                        f"{top_match['filepath'].relative_to(existing_lessons_dir)}"
+                    )
+
+                if skip_duplicates:
+                    if verbose:
+                        print("  ⏭️  Skipping (duplicate detection enabled)")
+                    continue
+                elif verbose:
+                    print("  ⚠️  Generating anyway (--no-skip-duplicates)")
 
         # Run GEPA-lite evolution
         try:
