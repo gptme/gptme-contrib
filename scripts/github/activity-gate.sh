@@ -228,11 +228,18 @@ GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-300}"
 #   $1 — cache key (filesystem-safe; will be normalized)
 #   $2 — TTL seconds (0 = no cache)
 #   $3 — producer command (eval'd in subshell)
+#   $4 — fallback stdout to emit on producer failure (optional; not cached)
 gh_cache_get_or_fetch() {
-    local key="$1" ttl="$2" producer="$3"
+    local key="$1" ttl="$2" producer="$3" fallback="${4-}"
     if [ "$ttl" -le 0 ]; then
-        eval "$producer"
-        return $?
+        if eval "$producer"; then
+            return 0
+        fi
+        if [ $# -ge 4 ]; then
+            printf '%s' "$fallback"
+            return 0
+        fi
+        return 1
     fi
     mkdir -p "$GH_CACHE_DIR" 2>/dev/null || true
     # Normalize key: replace slashes with `-`
@@ -250,13 +257,18 @@ gh_cache_get_or_fetch() {
         fi
     fi
     local out
-    out=$(eval "$producer")
-    local rc=$?
-    if [ $rc -eq 0 ] && [ -n "$out" ]; then
-        printf '%s' "$out" > "$cache_file"
+    if out=$(eval "$producer"); then
+        if [ -n "$out" ]; then
+            printf '%s' "$out" > "$cache_file"
+        fi
+        printf '%s' "$out"
+        return 0
     fi
-    printf '%s' "$out"
-    return $rc
+    if [ $# -ge 4 ]; then
+        printf '%s' "$fallback"
+        return 0
+    fi
+    return 1
 }
 
 # Fetch all PR data once per repo, with all fields needed by every check function.
@@ -269,7 +281,8 @@ fetch_pr_data() {
         "gh pr list --repo '$repo' --author '$AUTHOR' --state open \
             --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
             --jq '[.[] | select(.isDraft | not)]' \
-            2>/dev/null || echo '[]'"
+            2>/dev/null" \
+        "[]"
 }
 
 # Check whether the last activity on a PR was from someone worth responding to.
@@ -414,7 +427,8 @@ check_assigned_issues() {
     local issues
     issues=$(gh_cache_get_or_fetch "issue-${repo}" "$GH_CACHE_TTL_ISSUE" \
         "gh issue list --repo '$repo' --assignee '$AUTHOR' --state open \
-            --json number,title,updatedAt 2>/dev/null || echo '[]'")
+            --json number,title,updatedAt 2>/dev/null" \
+        "[]")
     [ "$issues" = "[]" ] || [ -z "$issues" ] && return 0
 
     echo "$issues" | jq -c '.[]' | while read -r issue_data; do
@@ -446,12 +460,14 @@ check_master_ci() {
     local runs
     runs=$(gh_cache_get_or_fetch "run-master-${repo}" "$GH_CACHE_TTL_RUN" \
         "gh run list --repo '$repo' --branch master --limit 3 \
-            --json databaseId,name,conclusion,createdAt 2>/dev/null || echo '[]'")
+            --json databaseId,name,conclusion,createdAt 2>/dev/null" \
+        "[]")
     # Also try 'main' if master returned nothing
     if [ "$runs" = "[]" ]; then
         runs=$(gh_cache_get_or_fetch "run-main-${repo}" "$GH_CACHE_TTL_RUN" \
             "gh run list --repo '$repo' --branch main --limit 3 \
-                --json databaseId,name,conclusion,createdAt 2>/dev/null || echo '[]'")
+                --json databaseId,name,conclusion,createdAt 2>/dev/null" \
+            "[]")
     fi
     [ "$runs" = "[]" ] || [ -z "$runs" ] && return 0
 
