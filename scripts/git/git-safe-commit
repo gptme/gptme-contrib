@@ -186,22 +186,114 @@ check_index_corruption() {
     fi
 }
 
+hook_allows_untracked_dirty_guard_relaxation() {
+    local hook_path
+
+    hook_path="${1:-}"
+
+    # No pre-commit hook means no stash/restore cycle to worry about.
+    if [ -z "$hook_path" ]; then
+        return 0
+    fi
+
+    # The bundled auto-stage hook captures the staged set and always runs
+    # prek/pre-commit with `--files <staged>`, which avoids pre-commit's
+    # repo-wide stash/restore path. Symlinked and copied installs both work
+    # because grep reads the target file contents.
+    if grep -Fq "Pre-commit hook with auto-staging and commit serialization." "$hook_path" 2>/dev/null && \
+       grep -Fq 'run --files "${ORIGINALLY_STAGED_FILES[@]}"' "$hook_path" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
 check_clean_worktree_for_hooks() {
-    local unstaged_files untracked_files dirty_count
+    local unstaged_files untracked_files unstaged_count untracked_count
+    local sample_count mode block block_reason pre_commit_hook
+    local unstaged_reason untracked_reason
+    local allow_untracked allow_untracked_reason
+
+    pre_commit_hook="${1:-}"
 
     unstaged_files="$(git diff --name-only --ignore-submodules -- 2>/dev/null)" || true
     untracked_files="$(git ls-files --others --exclude-standard 2>/dev/null)" || true
-    dirty_count=0
+    unstaged_count=0
+    untracked_count=0
+    sample_count=0
+    mode=""
+    block=0
+    block_reason=""
+    unstaged_reason=""
+    untracked_reason=""
+    allow_untracked=0
+    allow_untracked_reason=""
 
     if [ -n "$unstaged_files" ]; then
-        dirty_count=$((dirty_count + $(printf '%s\n' "$unstaged_files" | grep -c . || true)))
+        unstaged_count=$(printf '%s\n' "$unstaged_files" | grep -c . || true)
     fi
     if [ -n "$untracked_files" ]; then
-        dirty_count=$((dirty_count + $(printf '%s\n' "$untracked_files" | grep -c . || true)))
+        untracked_count=$(printf '%s\n' "$untracked_files" | grep -c . || true)
     fi
 
-    if [ "$dirty_count" -gt 0 ]; then
-        echo "🚫 Refusing to run pre-commit in a dirty worktree ($dirty_count unstaged/untracked paths)" >&2
+    # The catastrophic case from issue #642 was prek's stash/restore cycle losing
+    # tracked-file entries from the index. Untracked files are not stashed by
+    # default and don't trigger that failure mode. Repos whose pre-commit hook
+    # invokes prek with `--files <staged>` (the standard agent-template hook)
+    # also skip prek's stash entirely, making this guard mostly belt-and-suspenders.
+    #
+    # Default: block on unstaged-modified tracked files. Untracked files alone are
+    # allowed only when there is no pre-commit hook or the hook is the known
+    # auto-stage wrapper that scopes checks to the staged set. Unknown hooks stay
+    # strict because git-safe-commit runs whatever hook the repo installed.
+    # Override: GIT_SAFE_COMMIT_DIRTY_GUARD=strict restores the old "any dirt blocks" behavior.
+    # Override: GIT_SAFE_COMMIT_DIRTY_GUARD=off skips the guard entirely.
+    mode="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
+
+    if [ "$mode" = "off" ]; then
+        return 0
+    fi
+
+    if [ "$mode" = "default" ]; then
+        if hook_allows_untracked_dirty_guard_relaxation "$pre_commit_hook"; then
+            allow_untracked=1
+            if [ -z "$pre_commit_hook" ]; then
+                allow_untracked_reason="no pre-commit hook detected"
+            else
+                allow_untracked_reason="hook scopes pre-commit to staged files"
+            fi
+        fi
+    fi
+
+    if [ "$unstaged_count" -gt 0 ]; then
+        unstaged_reason="${unstaged_count} unstaged tracked modification"
+        if [ "$unstaged_count" -ne 1 ]; then
+            unstaged_reason="${unstaged_reason}s"
+        fi
+    fi
+    if [ "$untracked_count" -gt 0 ] && [ "$allow_untracked" -ne 1 ]; then
+        untracked_reason="${untracked_count} untracked path"
+        if [ "$untracked_count" -ne 1 ]; then
+            untracked_reason="${untracked_reason}s"
+        fi
+        if [ "$mode" = "strict" ]; then
+            untracked_reason="${untracked_reason} (strict mode)"
+        fi
+    fi
+
+    if [ -n "$unstaged_reason" ] && [ -n "$untracked_reason" ]; then
+        block=1
+        block_reason="${unstaged_reason} and ${untracked_reason}"
+    elif [ -n "$unstaged_reason" ]; then
+        block=1
+        block_reason="$unstaged_reason"
+    elif [ -n "$untracked_reason" ]; then
+        block=1
+        block_reason="$untracked_reason"
+    fi
+
+    if [ "$block" -eq 1 ]; then
+        echo "🚫 Refusing to run pre-commit in a dirty worktree: ${block_reason}" >&2
         echo "" >&2
         echo "   In this shared repo, prek/pre-commit may stash+restore unrelated files" >&2
         echo "   and corrupt the index (issue #642)." >&2
@@ -212,13 +304,23 @@ check_clean_worktree_for_hooks() {
         echo "   Sample dirty paths:" >&2
         {
             printf '%s\n' "$unstaged_files"
-            printf '%s\n' "$untracked_files"
+            [ -n "$untracked_reason" ] && printf '%s\n' "$untracked_files"
         } | grep -v '^$' | head -10 | sed 's/^/     /' >&2
-        if [ "$dirty_count" -gt 10 ]; then
-            echo "     ... and $((dirty_count - 10)) more" >&2
+        sample_count=$unstaged_count
+        if [ -n "$untracked_reason" ]; then
+            sample_count=$((sample_count + untracked_count))
+        fi
+        if [ "$sample_count" -gt 10 ]; then
+            echo "     ... and $((sample_count - 10)) more" >&2
         fi
         echo "" >&2
         exit 1
+    fi
+
+    # Default mode: untracked files alone are allowed. Warn so the operator knows
+    # the worktree isn't pristine but the commit can proceed.
+    if [ "$untracked_count" -gt 0 ] && [ "$allow_untracked" -eq 1 ]; then
+        echo "⚠️  worktree has ${untracked_count} untracked path(s); proceeding (${allow_untracked_reason}; set GIT_SAFE_COMMIT_DIRTY_GUARD=strict to block)" >&2
     fi
 }
 
@@ -264,9 +366,21 @@ check_index_corruption
 MANUAL_PRECOMMIT_RAN=0
 if [ "$NO_VERIFY" -ne 1 ]; then
     stage_explicit_pathspecs_for_hooks
-    check_clean_worktree_for_hooks
     PRE_COMMIT_HOOK=""
+    ALLOW_UNTRACKED_FOR_HOOK=0
     if PRE_COMMIT_HOOK="$(resolve_pre_commit_hook)"; then
+        DIRTY_GUARD_MODE="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
+        if [ "$DIRTY_GUARD_MODE" = "off" ] || \
+           { [ "$DIRTY_GUARD_MODE" = "default" ] && \
+             hook_allows_untracked_dirty_guard_relaxation "$PRE_COMMIT_HOOK"; }; then
+            ALLOW_UNTRACKED_FOR_HOOK=1
+        fi
+        :
+    else
+        PRE_COMMIT_HOOK=""
+    fi
+    check_clean_worktree_for_hooks "$PRE_COMMIT_HOOK"
+    if [ -n "$PRE_COMMIT_HOOK" ]; then
         # Run the tracked hook directly under the wrapper lock, then hand off to
         # git commit --no-verify. This avoids the hook-time missing-object bug
         # while preserving the same pre-commit behavior and auto-staging logic.
@@ -274,6 +388,7 @@ if [ "$NO_VERIFY" -ne 1 ]; then
             GIT_SAFE_COMMIT_LOCK_HELD=1 \
             GIT_SAFE_COMMIT_EXPECT_CLEAN=1 \
             GIT_SAFE_COMMIT_MANUAL_PRECOMMIT=1 \
+            GIT_SAFE_COMMIT_ALLOW_UNTRACKED="$ALLOW_UNTRACKED_FOR_HOOK" \
             "$PRE_COMMIT_HOOK"
         PRE_COMMIT_EXIT=$?
         if [ "$PRE_COMMIT_EXIT" -ne 0 ]; then
