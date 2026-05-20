@@ -8,8 +8,9 @@ instead of relying on LLM guessing.
 import json
 import logging
 import subprocess
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,21 @@ class CrossRepoPR:
 
 
 @dataclass
+class UserEvent:
+    """A single GitHub event from the events API (productivity signal)."""
+
+    type: str  # e.g. PullRequestReviewEvent
+    repo: str
+    timestamp: datetime
+    line: str  # pre-rendered single-line description
+
+
+# Event types from users/<user>/events/public that are noisy / non-productivity.
+# Excluded from the events block. Everything else is captured.
+EVENT_TYPES_DROPPED = frozenset({"WatchEvent", "CreateEvent", "DeleteEvent", "ForkEvent"})
+
+
+@dataclass
 class GitHubActivity:
     """Aggregated GitHub activity across repos."""
 
@@ -61,6 +77,7 @@ class GitHubActivity:
     repos: list[RepoActivity] = field(default_factory=list)
     reviews_received: list[PRReview] = field(default_factory=list)
     cross_repo_prs: list[CrossRepoPR] = field(default_factory=list)
+    events: list[UserEvent] = field(default_factory=list)
 
     @property
     def total_commits(self) -> int:
@@ -416,6 +433,122 @@ def get_user_commits(
         return 0
 
 
+def _render_event_line(event: dict) -> str | None:
+    """Render a single GitHub event as a one-line summary, or None to drop it.
+
+    Captures the productivity signals missing from search-based queries:
+    PR reviews, PR review comments, issue comments, and pushes. The full
+    `payload` schema is at https://docs.github.com/en/rest/activity/events.
+    """
+    etype = event.get("type", "")
+    if etype in EVENT_TYPES_DROPPED:
+        return None
+    payload = event.get("payload") or {}
+    repo = (event.get("repo") or {}).get("name", "?")
+
+    if etype == "PushEvent":
+        commits = payload.get("commits") or []
+        if not commits:
+            return None  # force-push or branch delete — no useful signal
+        ref = (payload.get("ref") or "").replace("refs/heads/", "")
+        msgs = [(c.get("message") or "").split("\n", 1)[0][:80] for c in commits[:3]]
+        return f"push {repo} ({ref}) — {len(commits)} commits: " + "; ".join(msgs)
+    if etype == "PullRequestEvent":
+        pr = payload.get("pull_request") or {}
+        action = payload.get("action", "?")
+        verb = "merged" if (action == "closed" and pr.get("merged")) else action
+        return f"PR {verb} {repo}#{pr.get('number')}: {(pr.get('title') or '')[:80]}"
+    if etype == "PullRequestReviewEvent":
+        pr = payload.get("pull_request") or {}
+        review = payload.get("review") or {}
+        return (
+            f"PR review ({review.get('state', '?')}) {repo}#{pr.get('number')}: "
+            f"{(pr.get('title') or '')[:80]}"
+        )
+    if etype == "PullRequestReviewCommentEvent":
+        pr = payload.get("pull_request") or {}
+        comment = payload.get("comment") or {}
+        body = (comment.get("body") or "").split("\n", 1)[0][:80]
+        return (
+            f"PR review-comment {repo}#{pr.get('number')}: {(pr.get('title') or '')[:60]} — {body}"
+        )
+    if etype == "IssueCommentEvent":
+        issue = payload.get("issue") or {}
+        comment = payload.get("comment") or {}
+        kind = "PR" if issue.get("pull_request") else "Issue"
+        body = (comment.get("body") or "").split("\n", 1)[0][:80]
+        return (
+            f"{kind} comment {repo}#{issue.get('number')}: "
+            f"{(issue.get('title') or '')[:60]} — {body}"
+        )
+    if etype == "IssuesEvent":
+        issue = payload.get("issue") or {}
+        return (
+            f"Issue {payload.get('action', '?')} {repo}#{issue.get('number')}: "
+            f"{(issue.get('title') or '')[:80]}"
+        )
+    if etype == "ReleaseEvent":
+        rel = payload.get("release") or {}
+        return (
+            f"Release {payload.get('action', '?')} {repo}: "
+            f"{rel.get('tag_name')} ({(rel.get('name') or '')[:60]})"
+        )
+    return f"{etype} {repo}"
+
+
+def get_user_events(start: date, end: date, username: str, pages: int = 3) -> list[UserEvent]:
+    """Fetch a user's public events and filter to the date range.
+
+    The events API returns the most recent ~300 events going back ~90 days,
+    so a few pages cover typical daily/weekly windows. Events are returned
+    in chronological order (oldest first).
+    """
+    raw: list[dict] = []
+    for page in range(1, pages + 1):
+        output = _run_command(
+            [
+                "gh",
+                "api",
+                f"users/{username}/events/public?per_page=100&page={page}",
+            ]
+        )
+        if output is None:
+            break
+        try:
+            page_events = json.loads(output)
+        except (json.JSONDecodeError, TypeError):
+            break
+        if not page_events:
+            break
+        raw.extend(page_events)
+
+    events: list[UserEvent] = []
+    for event in raw:
+        created_at = event.get("created_at")
+        if not created_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        event_date = ts.date()
+        if event_date < start or event_date > end:
+            continue
+        line = _render_event_line(event)
+        if not line:
+            continue
+        events.append(
+            UserEvent(
+                type=event.get("type", ""),
+                repo=(event.get("repo") or {}).get("name", "?"),
+                timestamp=ts.astimezone(timezone.utc),
+                line=line,
+            )
+        )
+    events.sort(key=lambda e: e.timestamp)
+    return events
+
+
 def fetch_activity(
     start: date,
     end: date,
@@ -540,6 +673,10 @@ def fetch_user_activity(
         else:
             activity.repos.append(RepoActivity(repo="github", commits=commit_count))
 
+    # Events API: captures PR reviews, review comments, issue comments, pushes
+    # — productivity signal that search APIs miss.
+    activity.events = get_user_events(start, end, username)
+
     return activity
 
 
@@ -555,6 +692,7 @@ def format_activity_for_prompt(activity: GitHubActivity) -> str:
         activity.total_commits == 0
         and activity.total_prs_merged == 0
         and activity.total_issues_closed == 0
+        and not activity.events
     ):
         return ""
 
@@ -579,6 +717,17 @@ def format_activity_for_prompt(activity: GitHubActivity) -> str:
             lines.append("- Closed Issues:")
             for issue in repo.closed_issues:
                 lines.append(f"  - #{issue['number']}: {issue['title']}")
+        lines.append("")
+
+    if activity.events:
+        counts = Counter(e.type for e in activity.events)
+        summary = ", ".join(f"{t}:{n}" for t, n in counts.most_common())
+        lines.append("### GitHub Events (extended signal)")
+        lines.append(
+            f"Captures PR reviews, comments, pushes missed by search APIs. Types: {summary}"
+        )
+        for ev in activity.events:
+            lines.append(f"- {ev.line}")
         lines.append("")
 
     return "\n".join(lines)

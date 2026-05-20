@@ -1,17 +1,21 @@
 """Tests for github_data module."""
 
-from datetime import date
+import json
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from gptme_activity_summary.github_data import (
     GitHubActivity,
     RepoActivity,
+    UserEvent,
+    _render_event_line,
     _run_command,
     fetch_user_activity,
     format_activity_for_prompt,
     get_cross_repo_prs,
     get_merged_prs,
     get_user_commits,
+    get_user_events,
     get_user_issues,
     get_user_prs,
 )
@@ -241,3 +245,263 @@ def test_fetch_user_activity():
     assert len(activity.repos) >= 1
     assert activity.repos[0].repo == "user/repo1"
     assert activity.repos[0].commits == 2
+
+
+# --- Event rendering ---
+
+
+def _make_event(etype: str, payload: dict, created_at: str = "2025-01-03T12:00:00Z") -> dict:
+    return {
+        "type": etype,
+        "repo": {"name": "owner/repo"},
+        "created_at": created_at,
+        "payload": payload,
+    }
+
+
+def test_render_event_pull_request_review():
+    line = _render_event_line(
+        _make_event(
+            "PullRequestReviewEvent",
+            {
+                "pull_request": {"number": 42, "title": "Add feature"},
+                "review": {"state": "approved"},
+            },
+        )
+    )
+    assert line == "PR review (approved) owner/repo#42: Add feature"
+
+
+def test_render_event_pull_request_review_comment_truncates_body():
+    body = "looks good but consider X" + " padding" * 30
+    line = _render_event_line(
+        _make_event(
+            "PullRequestReviewCommentEvent",
+            {
+                "pull_request": {"number": 7, "title": "Refactor X"},
+                "comment": {"body": body},
+            },
+        )
+    )
+    assert line is not None
+    assert "PR review-comment owner/repo#7" in line
+    assert "looks good but consider X" in line
+
+
+def test_render_event_issue_comment_distinguishes_pr_vs_issue():
+    pr_comment = _render_event_line(
+        _make_event(
+            "IssueCommentEvent",
+            {
+                # GitHub sets issue.pull_request to a non-empty dict when the
+                # issue is actually a PR.
+                "issue": {
+                    "number": 5,
+                    "title": "Bug",
+                    "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/5"},
+                },
+                "comment": {"body": "thanks"},
+            },
+        )
+    )
+    issue_comment = _render_event_line(
+        _make_event(
+            "IssueCommentEvent",
+            {
+                "issue": {"number": 6, "title": "Question"},
+                "comment": {"body": "see docs"},
+            },
+        )
+    )
+    assert pr_comment is not None and pr_comment.startswith("PR comment ")
+    assert issue_comment is not None and issue_comment.startswith("Issue comment ")
+
+
+def test_render_event_push_skips_empty_commits():
+    line = _render_event_line(
+        _make_event(
+            "PushEvent",
+            {"ref": "refs/heads/main", "commits": []},
+        )
+    )
+    assert line is None
+
+
+def test_render_event_push_renders_with_messages():
+    line = _render_event_line(
+        _make_event(
+            "PushEvent",
+            {
+                "ref": "refs/heads/main",
+                "commits": [
+                    {"message": "fix: bug A"},
+                    {"message": "feat: thing B"},
+                ],
+            },
+        )
+    )
+    assert line is not None
+    assert "push owner/repo (main) — 2 commits" in line
+    assert "fix: bug A" in line
+
+
+def test_render_event_pull_request_merged_uses_merged_verb():
+    line = _render_event_line(
+        _make_event(
+            "PullRequestEvent",
+            {
+                "action": "closed",
+                "pull_request": {"number": 11, "title": "Land it", "merged": True},
+            },
+        )
+    )
+    assert line == "PR merged owner/repo#11: Land it"
+
+
+def test_render_event_drops_noise_types():
+    for noisy in ("WatchEvent", "CreateEvent", "DeleteEvent", "ForkEvent"):
+        assert _render_event_line(_make_event(noisy, {})) is None
+
+
+# --- Event fetching ---
+
+
+def test_get_user_events_filters_by_date_range_and_sorts_chronologically():
+    events = [
+        _make_event(
+            "PullRequestReviewEvent",
+            {"pull_request": {"number": 1, "title": "A"}, "review": {"state": "approved"}},
+            created_at="2025-01-05T10:00:00Z",
+        ),
+        _make_event(
+            "PullRequestReviewEvent",
+            {"pull_request": {"number": 2, "title": "B"}, "review": {"state": "approved"}},
+            created_at="2025-01-03T09:00:00Z",
+        ),
+        # Outside window
+        _make_event(
+            "PullRequestReviewEvent",
+            {"pull_request": {"number": 3, "title": "C"}, "review": {"state": "approved"}},
+            created_at="2025-01-10T09:00:00Z",
+        ),
+    ]
+    with patch(
+        "gptme_activity_summary.github_data._run_command",
+        side_effect=[json.dumps(events), "[]"],
+    ):
+        result = get_user_events(date(2025, 1, 1), date(2025, 1, 7), "testuser")
+    assert [e.line for e in result] == [
+        "PR review (approved) owner/repo#2: B",
+        "PR review (approved) owner/repo#1: A",
+    ]
+
+
+def test_get_user_events_paginates_until_empty():
+    page1 = [
+        _make_event(
+            "IssueCommentEvent",
+            {"issue": {"number": 9, "title": "Q"}, "comment": {"body": "x"}},
+            created_at="2025-01-05T12:00:00Z",
+        )
+    ]
+    side_effects = [json.dumps(page1), "[]"]
+    with patch(
+        "gptme_activity_summary.github_data._run_command",
+        side_effect=side_effects,
+    ) as mock_cmd:
+        result = get_user_events(date(2025, 1, 1), date(2025, 1, 7), "testuser")
+    # One real page returned data, second page returned empty → stops
+    assert mock_cmd.call_count == 2
+    assert len(result) == 1
+
+
+def test_get_user_events_handles_none_response():
+    with patch(
+        "gptme_activity_summary.github_data._run_command",
+        return_value=None,
+    ):
+        result = get_user_events(date(2025, 1, 1), date(2025, 1, 7), "testuser")
+    assert result == []
+
+
+def test_fetch_user_activity_populates_events():
+    """fetch_user_activity should call get_user_events and attach results."""
+    review_event = _make_event(
+        "PullRequestReviewEvent",
+        {"pull_request": {"number": 1, "title": "X"}, "review": {"state": "approved"}},
+        created_at="2025-01-03T12:00:00Z",
+    )
+
+    def mock_run(cmd, timeout=30):
+        cmd_str = " ".join(cmd)
+        if "auth status" in cmd_str:
+            return "ok"
+        if "search prs" in cmd_str:
+            return "[]"
+        if "search issues" in cmd_str:
+            return "[]"
+        if "search commits" in cmd_str:
+            return "[]"
+        if "users/" in cmd_str and "events/public" in cmd_str:
+            # First page has data; subsequent pages empty.
+            # (Match "&page=1" not "page=1" to avoid colliding with per_page=100.)
+            if "&page=1" in cmd_str:
+                return json.dumps([review_event])
+            return "[]"
+        return None
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_user_activity(date(2025, 1, 1), date(2025, 1, 7), "testuser")
+
+    assert len(activity.events) == 1
+    assert activity.events[0].type == "PullRequestReviewEvent"
+    assert activity.events[0].line.startswith("PR review (approved)")
+
+
+# --- Formatting ---
+
+
+def test_format_activity_includes_events_block():
+    activity = GitHubActivity(
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 7),
+        repos=[RepoActivity(repo="owner/repo", commits=1)],
+        events=[
+            UserEvent(
+                type="PullRequestReviewEvent",
+                repo="owner/repo",
+                timestamp=datetime(2025, 1, 3, 12, 0, tzinfo=timezone.utc),
+                line="PR review (approved) owner/repo#1: X",
+            ),
+            UserEvent(
+                type="IssueCommentEvent",
+                repo="owner/repo",
+                timestamp=datetime(2025, 1, 4, 12, 0, tzinfo=timezone.utc),
+                line="PR comment owner/repo#2: Y — nice",
+            ),
+        ],
+    )
+    out = format_activity_for_prompt(activity)
+    assert "### GitHub Events (extended signal)" in out
+    assert "PullRequestReviewEvent:1" in out
+    assert "IssueCommentEvent:1" in out
+    assert "- PR review (approved) owner/repo#1: X" in out
+
+
+def test_format_activity_events_only_still_renders():
+    """If only events exist (no PRs/issues/commits), still emit the block."""
+    activity = GitHubActivity(
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 7),
+        events=[
+            UserEvent(
+                type="PullRequestReviewEvent",
+                repo="owner/repo",
+                timestamp=datetime(2025, 1, 3, 12, 0, tzinfo=timezone.utc),
+                line="PR review (approved) owner/repo#1: X",
+            ),
+        ],
+    )
+    out = format_activity_for_prompt(activity)
+    assert "GitHub Activity (Real Data)" in out
+    assert "### GitHub Events (extended signal)" in out
