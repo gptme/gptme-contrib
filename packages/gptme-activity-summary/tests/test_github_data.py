@@ -358,6 +358,41 @@ def test_render_event_drops_noise_types():
         assert _render_event_line(_make_event(noisy, {})) is None
 
 
+def test_render_event_release():
+    line = _render_event_line(
+        _make_event(
+            "ReleaseEvent",
+            {
+                "action": "published",
+                "release": {"tag_name": "v1.2.3", "name": "Spring release"},
+            },
+        )
+    )
+    assert line == "Release published owner/repo: v1.2.3 (Spring release)"
+
+
+def test_render_event_commit_comment():
+    line = _render_event_line(
+        _make_event(
+            "CommitCommentEvent",
+            {
+                "comment": {
+                    "commit_id": "abcdef1234567890",
+                    "body": "this changed behavior, see issue #5",
+                },
+            },
+        )
+    )
+    assert line == "Commit comment owner/repo@abcdef1: this changed behavior, see issue #5"
+
+
+def test_render_event_unknown_type_falls_back_to_generic():
+    # Defense: unknown event types should at least surface the type + repo
+    # rather than crash or silently drop.
+    line = _render_event_line(_make_event("SomeNewEventType", {}))
+    assert line == "SomeNewEventType owner/repo"
+
+
 # --- Event fetching ---
 
 
@@ -408,6 +443,34 @@ def test_get_user_events_paginates_until_empty():
     # One real page returned data, second page returned empty → stops
     assert mock_cmd.call_count == 2
     assert len(result) == 1
+
+
+def test_get_user_events_early_exit_when_page_predates_start():
+    """API returns newest-first; if oldest event on a page is before start,
+    later pages will only be older — stop paging early."""
+    # Page 1: all events are well before the start of our window (2025-02-01).
+    page1 = [
+        _make_event(
+            "PullRequestReviewEvent",
+            {"pull_request": {"number": 1, "title": "Old"}, "review": {"state": "approved"}},
+            created_at="2024-12-15T10:00:00Z",
+        ),
+        _make_event(
+            "PullRequestReviewEvent",
+            {"pull_request": {"number": 2, "title": "Older"}, "review": {"state": "approved"}},
+            created_at="2024-12-10T10:00:00Z",
+        ),
+    ]
+    # If pagination doesn't early-exit, side_effect would need more entries.
+    with patch(
+        "gptme_activity_summary.github_data._run_command",
+        side_effect=[json.dumps(page1)],
+    ) as mock_cmd:
+        result = get_user_events(date(2025, 2, 1), date(2025, 2, 7), "testuser")
+    # Should have stopped after page 1 (oldest event predates start).
+    assert mock_cmd.call_count == 1
+    # No events in window
+    assert result == []
 
 
 def test_get_user_events_handles_none_response():

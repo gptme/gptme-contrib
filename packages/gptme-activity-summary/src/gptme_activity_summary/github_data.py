@@ -487,6 +487,11 @@ def _render_event_line(event: dict) -> str | None:
             f"{kind} comment {repo}#{issue.get('number')}: "
             f"{(issue.get('title') or '')[:60]} — {body}"
         )
+    if etype == "CommitCommentEvent":
+        comment = payload.get("comment") or {}
+        sha = (comment.get("commit_id") or "")[:7]
+        body = (comment.get("body") or "").split("\n", 1)[0][:80]
+        return f"Commit comment {repo}@{sha}: {body}"
     if etype == "ReleaseEvent":
         rel = payload.get("release") or {}
         return (
@@ -521,6 +526,16 @@ def get_user_events(start: date, end: date, username: str, pages: int = 3) -> li
         if not page_events:
             break
         raw.extend(page_events)
+        # API returns newest-first. If the oldest event on this page is already
+        # before `start`, further pages will only be older — stop paging.
+        last_created = page_events[-1].get("created_at")
+        if last_created:
+            try:
+                last_date = datetime.fromisoformat(last_created.replace("Z", "+00:00")).date()
+                if last_date < start:
+                    break
+            except ValueError:
+                pass
 
     events: list[UserEvent] = []
     for event in raw:
