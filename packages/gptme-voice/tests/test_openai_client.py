@@ -101,6 +101,7 @@ def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
         assert "broad investigations" in description
         assert "post-call analysis" in description
         assert "wait for the real subagent result" in description
+        assert "promise a lookup without actually emitting the tool call" in description
         assert fake_ws.closed is True
 
     asyncio.run(_exercise())
@@ -289,6 +290,28 @@ def test_load_project_instructions_includes_post_call_follow_up_guard(
 
     # Acknowledging automatic post-call follow-up is still allowed.
     assert "happen automatically after" in instructions
+
+
+def test_load_project_instructions_blocks_fake_live_lookup_narration(
+    tmp_path: Path,
+) -> None:
+    """Live-call prompt must forbid fake 'I'm checking' narration without a tool call."""
+    (tmp_path / "gptme.toml").write_text(
+        '[prompt]\nfiles = ["ABOUT.md"]\n',
+    )
+    (tmp_path / "ABOUT.md").write_text("# ABOUT\nYou are Bob.\n")
+
+    instructions = _load_project_instructions(str(tmp_path))
+
+    assert "call the subagent tool in the same turn" in instructions
+    assert (
+        "Do NOT say you are checking, looking it up, or using the subagent"
+        in instructions
+    )
+    assert (
+        "answer from current context or say you cannot verify it live yet"
+        in instructions
+    )
 
 
 def test_send_audio_buffers_until_session_created() -> None:
