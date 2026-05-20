@@ -12,7 +12,7 @@ match:
   - "DROP TABLE"
   - "production change"
   session_categories: [code, infrastructure, cleanup]
-target_grade: trajectory_grade
+target_grade: alignment
 status: active
 ---
 
