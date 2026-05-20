@@ -35,6 +35,31 @@ from .store import SessionStore
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_traj_sha_prefixes(traj_deliverables: list[str]) -> set[str]:
+    """Extract 7-12 char lowercase SHA strings from trajectory commit entries.
+
+    Trajectory commits are formatted as ``"commit message (abc1234)"`` by
+    signals.py.  Returns a set of lowercase SHA strings for cross-validation
+    against full 40-char SHAs from git-range attribution.
+    """
+    shas: set[str] = set()
+    for entry in traj_deliverables:
+        if entry.endswith(")") and "(" in entry:
+            candidate = entry[entry.rfind("(") + 1 : -1]
+            if 7 <= len(candidate) <= 12 and all(
+                c in "0123456789abcdef" for c in candidate.lower()
+            ):
+                shas.add(candidate.lower())
+    return shas
+
+
+def _caller_sha_in_traj(sha: str, traj_sha_prefixes: set[str]) -> bool:
+    """Return True if a full 40-char SHA from the caller appears in trajectory commits."""
+    sha_lower = sha.lower().strip()
+    return any(sha_lower.startswith(prefix) for prefix in traj_sha_prefixes)
+
+
 #: Default path for grading weights config (Phase 3 multivariate grading).
 _GRADING_WEIGHTS_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent.parent.parent
@@ -207,8 +232,9 @@ def post_session(
     deliverables:
         Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``
         or empty, deliverables are extracted from the trajectory signals.
-        If non-empty, they are *merged* with trajectory-derived deliverables
-        (duplicates removed).
+        When a trajectory is available, it is authoritative: caller-supplied
+        SHAs are validated against trajectory SHAs; file-path-only trajectory
+        items cannot validate caller SHAs, so both sets are kept.
     journal_path:
         Path to the journal entry written during the session, if any.
         When ``None`` and a trajectory is available, auto-detected from
@@ -229,10 +255,10 @@ def post_session(
     4. ``exit_code == 124`` (timeout, no other evidence) → ``"unknown"``
     5. Default: ``"unknown"`` (no signal available — callers should not
        treat this as productive *or* penalize it in bandits)
-    6. Override: if step 2–5 yielded ``"noop"`` or ``"unknown"`` but
-       ``deliverables`` is
-       non-empty, upgrade to ``"productive"`` (trajectory may miss commits
-       detected by the caller via ``git diff``).
+    6. Override: if step 2–5 yielded ``"noop"`` but the caller supplied
+       explicit deliverables and the trajectory found no deliverables
+       of its own (i.e. the trajectory couldn't validate or contradict
+       the caller's evidence), upgrade to ``"productive"``.
     """
     if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
@@ -312,20 +338,67 @@ def post_session(
                 model = traj_model
 
     # --- Resolve deliverables ---
-    # Merge shell-provided deliverables (bare SHAs) with trajectory-derived
-    # ones (commit messages, file write paths).  The shell always passes a
-    # list (possibly empty), so we treat empty the same as None.
-    # Capture caller-supplied deliverables *before* the merge so the noop
-    # override below can check only caller-provided items (not traj-derived
-    # ones that is_productive() may have deliberately excluded).
+    # Trajectory is the authoritative source when available.  Git-range commits
+    # (caller-supplied via start_commit..HEAD) pick up commits from concurrent
+    # sessions on the same branch — using them as-is causes cross-session
+    # attribution inflation.
+    #
+    # Capture caller-supplied deliverables *before* any merge so the outcome
+    # override below (no-trajectory fallback) sees only pre-trajectory items.
     caller_deliverables: list[str] = list(deliverables) if deliverables else []
     traj_deliverables = signals.get("deliverables", []) if signals else []
+
     if not deliverables:
+        # No caller deliverables: use trajectory exclusively.
         deliverables = traj_deliverables
-    elif traj_deliverables:
-        # Add trajectory items not already present (e.g. file write paths)
-        existing = set(deliverables)
-        deliverables = deliverables + [d for d in traj_deliverables if d not in existing]
+    elif signals is not None:
+        # Trajectory was available — it is authoritative, but only for
+        # deliverables it can actually validate.  File paths in trajectory
+        # deliverables have no SHA to cross-check, so caller SHAs pass through.
+        if traj_deliverables:
+            traj_sha_prefixes = _extract_traj_sha_prefixes(traj_deliverables)
+            if traj_sha_prefixes:
+                # Trajectory has commit SHAs — validate caller SHAs against them.
+                validated = [
+                    d for d in caller_deliverables if _caller_sha_in_traj(d, traj_sha_prefixes)
+                ]
+                unvalidated = [d for d in caller_deliverables if d not in validated]
+                if unvalidated:
+                    logger.warning(
+                        "Dropping %d git-range commit(s) absent from trajectory "
+                        "(likely from a concurrent session): %s",
+                        len(unvalidated),
+                        unvalidated[:5],
+                    )
+                deliverables = list(dict.fromkeys(traj_deliverables + validated))
+            else:
+                # Trajectory has no SHAs (file paths only) — can't validate
+                # caller SHAs.  Keep both sets, caller items first to preserve
+                # the pre-existing deliverable ordering convention.
+                deliverables = list(dict.fromkeys(caller_deliverables + traj_deliverables))
+        else:
+            # Trajectory ran but found no deliverables.
+            if traj_productive is False:
+                # Trajectory explicitly says this was noop — caller SHAs are
+                # from concurrent sessions.
+                if caller_deliverables:
+                    logger.warning(
+                        "Dropping %d git-range commit(s): trajectory determined "
+                        "noop with no deliverables (SHAs from concurrent session)",
+                        len(caller_deliverables),
+                    )
+                deliverables = []
+            else:
+                # Trajectory didn't catalog deliverables but didn't rule out
+                # work.  Keep caller items as best evidence.
+                if caller_deliverables:
+                    logger.warning(
+                        "Trajectory ran but found no deliverables; keeping %d "
+                        "caller-supplied deliverable(s)",
+                        len(caller_deliverables),
+                    )
+                deliverables = list(dict.fromkeys(caller_deliverables))
+    # else: no trajectory (signals is None) — keep caller git-range as fallback.
 
     # --- Determine outcome ---
     # Priority order (highest → lowest):
@@ -355,14 +428,14 @@ def post_session(
     else:
         outcome = "unknown"
 
-    # Override noop/unknown → productive if *caller-supplied* deliverables exist.
-    # Trajectory signals may miss commits detected by the caller via git diff.
-    # Use caller_deliverables (pre-merge) so trajectory-derived items (e.g. a
-    # single file write that is_productive() deliberately classifies as noop)
-    # do not trigger this override.
-    if outcome in ("noop", "unknown") and caller_deliverables:
+    # Override noop → productive when caller-supplied deliverables exist AND
+    # no trajectory was available.  When a trajectory IS available it is
+    # authoritative: git-range commits may be from concurrent sessions, so we
+    # must not let them upgrade a trajectory-determined "noop" to "productive".
+    if outcome in ("noop", "unknown") and caller_deliverables and signals is None:
         logger.info(
-            "Overriding outcome %s→productive: %d caller-supplied deliverable(s)",
+            "Overriding outcome %s→productive (no trajectory deliverables): "
+            "%d caller-supplied deliverable(s)",
             outcome,
             len(caller_deliverables),
         )

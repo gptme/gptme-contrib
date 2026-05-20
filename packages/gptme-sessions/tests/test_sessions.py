@@ -3221,12 +3221,12 @@ def test_post_session_warns_on_duplicate_journal_path(tmp_path: Path, caplog):
     assert "first" in caplog.text
 
 
-def test_post_session_noop_overridden_by_deliverables(tmp_path: Path):
-    """Trajectory says noop but explicit deliverables exist → productive.
+def test_post_session_traj_noop_drops_unvalidated_deliverables(tmp_path: Path):
+    """Trajectory-authoritative noop drops caller commits absent from trajectory.
 
-    Regression test: trajectory signal extraction may miss commits that the
-    caller detected via git diff.  If deliverables are provided, the session
-    produced real work regardless of trajectory analysis.
+    Regression test: git-range deliverables can include commits from concurrent
+    sessions on the same branch. When trajectory extraction says noop and found
+    no deliverables of its own, caller-supplied SHAs must not override that.
     """
     import json as _json
 
@@ -3274,10 +3274,10 @@ def test_post_session_noop_overridden_by_deliverables(tmp_path: Path):
         trajectory_path=traj,
         deliverables=["abc123", "def456"],
     )
-    # Should be productive because deliverables exist, even though trajectory
-    # had no commits/writes
-    assert result.record.outcome == "productive"
-    assert result.record.deliverables == ["abc123", "def456"]
+    # Trajectory is authoritative here: noop + no trajectory deliverables means
+    # caller SHAs are treated as concurrent-session contamination.
+    assert result.record.outcome == "noop"
+    assert result.record.deliverables == []
 
 
 def test_post_session_single_file_write_stays_noop(tmp_path: Path):
