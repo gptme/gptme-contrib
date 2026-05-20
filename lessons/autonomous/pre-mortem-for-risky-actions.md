@@ -12,7 +12,7 @@ match:
   - "DROP TABLE"
   - "production change"
   session_categories: [code, infrastructure, cleanup]
-target_grade: harm
+target_grade: trajectory_grade
 status: active
 ---
 
