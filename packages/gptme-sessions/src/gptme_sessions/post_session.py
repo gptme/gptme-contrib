@@ -232,8 +232,9 @@ def post_session(
     deliverables:
         Explicit list of deliverables (commit SHAs, PR URLs).  If ``None``
         or empty, deliverables are extracted from the trajectory signals.
-        If non-empty, they are *merged* with trajectory-derived deliverables
-        (duplicates removed).
+        When a trajectory is available, it is authoritative: caller-supplied
+        SHAs are validated against trajectory SHAs; file-path-only trajectory
+        items cannot validate caller SHAs, so both sets are kept.
     journal_path:
         Path to the journal entry written during the session, if any.
         When ``None`` and a trajectory is available, auto-detected from
@@ -376,15 +377,27 @@ def post_session(
                 # the pre-existing deliverable ordering convention.
                 deliverables = list(dict.fromkeys(caller_deliverables + traj_deliverables))
         else:
-            # Trajectory ran but found no deliverables: caller items are our
-            # best evidence (trajectory simply didn't capture what caller found).
-            if caller_deliverables:
-                logger.warning(
-                    "Trajectory ran but found no deliverables; keeping %d "
-                    "caller-supplied deliverable(s)",
-                    len(caller_deliverables),
-                )
-            deliverables = list(dict.fromkeys(caller_deliverables))
+            # Trajectory ran but found no deliverables.
+            if traj_productive is False:
+                # Trajectory explicitly says this was noop — caller SHAs are
+                # from concurrent sessions.
+                if caller_deliverables:
+                    logger.warning(
+                        "Dropping %d git-range commit(s): trajectory determined "
+                        "noop with no deliverables (SHAs from concurrent session)",
+                        len(caller_deliverables),
+                    )
+                deliverables = []
+            else:
+                # Trajectory didn't catalog deliverables but didn't rule out
+                # work.  Keep caller items as best evidence.
+                if caller_deliverables:
+                    logger.warning(
+                        "Trajectory ran but found no deliverables; keeping %d "
+                        "caller-supplied deliverable(s)",
+                        len(caller_deliverables),
+                    )
+                deliverables = list(dict.fromkeys(caller_deliverables))
     # else: no trajectory (signals is None) — keep caller git-range as fallback.
 
     # --- Determine outcome ---
@@ -416,10 +429,10 @@ def post_session(
         outcome = "unknown"
 
     # Override noop → productive when caller-supplied deliverables exist AND
-    # trajectory couldn't validate them (no trajectory available, or trajectory
-    # ran but found no deliverables of its own).  When trajectory DID find
-    # deliverables, those may disagree with caller SHAs — trust the trajectory.
-    if outcome == "noop" and caller_deliverables and not traj_deliverables:
+    # no trajectory was available.  When a trajectory IS available it is
+    # authoritative: git-range commits may be from concurrent sessions, so we
+    # must not let them upgrade a trajectory-determined "noop" to "productive".
+    if outcome in ("noop", "unknown") and caller_deliverables and signals is None:
         logger.info(
             "Overriding outcome %s→productive (no trajectory deliverables): "
             "%d caller-supplied deliverable(s)",
