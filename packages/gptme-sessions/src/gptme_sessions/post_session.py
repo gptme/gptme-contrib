@@ -24,24 +24,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .deliverables import build_deliverable_detail, project_deliverable_details
 from .discovery import extract_project, extract_session_name
 from .record import SessionRecord
 from .signals import extract_from_path
 from .store import SessionStore
 
 logger = logging.getLogger(__name__)
-_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-
-
-def _looks_like_sha(value: str) -> bool:
-    """Return True for bare SHA-like hex strings used as deliverables."""
-    lowered = value.lower().strip()
-    return 7 <= len(lowered) <= 40 and all(c in "0123456789abcdef" for c in lowered)
 
 
 def _extract_traj_sha_prefixes(traj_deliverables: list[str]) -> set[str]:
@@ -68,41 +61,6 @@ def _caller_sha_in_traj(sha: str, traj_sha_prefixes: set[str]) -> bool:
     return any(sha_lower.startswith(prefix) for prefix in traj_sha_prefixes)
 
 
-def _deliverable_kind(value: str) -> str:
-    """Infer the deliverable kind for caller-supplied fallback values."""
-    stripped = value.strip()
-    lowered = stripped.lower()
-    if stripped.startswith("merge-commit (") and stripped.endswith(")"):
-        return "merge_commit"
-    if stripped.startswith("merge PR #") or stripped.startswith("PR #") or "/pull/" in stripped:
-        return "pull_request"
-    if _FULL_SHA_RE.fullmatch(lowered) or _looks_like_sha(stripped):
-        return "commit"
-    if stripped.endswith(")") and "(" in stripped:
-        candidate = stripped[stripped.rfind("(") + 1 : -1].lower()
-        if 7 <= len(candidate) <= 40 and all(c in "0123456789abcdef" for c in candidate):
-            return "commit"
-    return "file"
-
-
-def _build_deliverable_detail(
-    value: str,
-    *,
-    provenance_class: str,
-    evidence: dict[str, Any],
-) -> dict[str, Any]:
-    """Build one structured deliverable detail entry."""
-    compact_evidence = {
-        key: val for key, val in evidence.items() if val not in (None, "", [], {}, ())
-    }
-    return {
-        "value": value,
-        "kind": _deliverable_kind(value),
-        "provenance_class": provenance_class,
-        "evidence": compact_evidence,
-    }
-
-
 def _build_caller_deliverable_details(
     values: list[str],
     *,
@@ -117,7 +75,7 @@ def _build_caller_deliverable_details(
             continue
         seen.add(value)
         details.append(
-            _build_deliverable_detail(
+            build_deliverable_detail(
                 value,
                 provenance_class=provenance_class,
                 evidence=evidence,
@@ -142,16 +100,11 @@ def _merge_deliverable_details(
             continue
         detail_by_value[value] = raw
 
-    merged: list[dict[str, Any]] = []
-    for value in deliverables:
-        if value not in detail_by_value:
-            detail_by_value[value] = _build_deliverable_detail(
-                value,
-                provenance_class="fallback_observed",
-                evidence={"source": "projection_fallback"},
-            )
-        merged.append(detail_by_value[value])
-    return merged
+    return project_deliverable_details(
+        deliverables,
+        detail_by_value,
+        fallback_evidence={"source": "projection_fallback"},
+    )
 
 
 #: Default path for grading weights config (Phase 3 multivariate grading).

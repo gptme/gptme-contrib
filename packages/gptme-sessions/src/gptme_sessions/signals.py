@@ -23,6 +23,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from .deliverables import build_deliverable_detail, project_deliverable_details
+
 # Regex for git commit lines in shell output (works for both harnesses)
 _COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
 
@@ -71,25 +73,6 @@ _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 _GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
 
 
-def _build_deliverable_detail(
-    value: str,
-    *,
-    kind: str,
-    provenance_class: str,
-    evidence: dict[str, object],
-) -> dict[str, object]:
-    """Build one structured deliverable detail entry."""
-    compact_evidence = {
-        key: val for key, val in evidence.items() if val not in (None, "", [], {}, ())
-    }
-    return {
-        "value": value,
-        "kind": kind,
-        "provenance_class": provenance_class,
-        "evidence": compact_evidence,
-    }
-
-
 def _record_deliverable_detail(
     detail_by_value: dict[str, dict[str, object]],
     *,
@@ -101,7 +84,7 @@ def _record_deliverable_detail(
     """Record first-seen structured detail for a deliverable value."""
     if not value or value in detail_by_value:
         return
-    detail_by_value[value] = _build_deliverable_detail(
+    detail_by_value[value] = build_deliverable_detail(
         value,
         kind=kind,
         provenance_class=provenance_class,
@@ -113,8 +96,12 @@ def _ordered_deliverable_details(
     deliverables: list[str],
     detail_by_value: dict[str, dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Project structured details into the legacy deliverable order."""
-    return [detail_by_value[value] for value in deliverables if value in detail_by_value]
+    """Project structured details into legacy order and fill any missing entries."""
+    return project_deliverable_details(
+        deliverables,
+        detail_by_value,
+        fallback_evidence={"source": "projection_fallback"},
+    )
 
 
 def _as_int(value: object) -> int | None:
