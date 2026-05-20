@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .deliverables import build_deliverable_detail, project_deliverable_details
 from .discovery import extract_project, extract_session_name
 from .record import SessionRecord
 from .signals import extract_from_path
@@ -58,6 +59,52 @@ def _caller_sha_in_traj(sha: str, traj_sha_prefixes: set[str]) -> bool:
     """Return True if a full 40-char SHA from the caller appears in trajectory commits."""
     sha_lower = sha.lower().strip()
     return any(sha_lower.startswith(prefix) for prefix in traj_sha_prefixes)
+
+
+def _build_caller_deliverable_details(
+    values: list[str],
+    *,
+    provenance_class: str,
+    evidence: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build caller-side deliverable details in stable first-seen order."""
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        details.append(
+            build_deliverable_detail(
+                value,
+                provenance_class=provenance_class,
+                evidence=evidence,
+            )
+        )
+    return details
+
+
+def _merge_deliverable_details(
+    *,
+    deliverables: list[str],
+    trajectory_details: list[dict[str, Any]],
+    extra_details: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project trajectory + caller details into the final deliverable order."""
+    detail_by_value: dict[str, dict[str, Any]] = {}
+    for raw in trajectory_details + extra_details:
+        if not isinstance(raw, dict):
+            continue
+        value = raw.get("value")
+        if not isinstance(value, str) or not value or value in detail_by_value:
+            continue
+        detail_by_value[value] = raw
+
+    return project_deliverable_details(
+        deliverables,
+        detail_by_value,
+        fallback_evidence={"source": "projection_fallback"},
+    )
 
 
 #: Default path for grading weights config (Phase 3 multivariate grading).
@@ -347,6 +394,8 @@ def post_session(
     # override below (no-trajectory fallback) sees only pre-trajectory items.
     caller_deliverables: list[str] = list(deliverables) if deliverables else []
     traj_deliverables = signals.get("deliverables", []) if signals else []
+    traj_deliverable_details = signals.get("deliverable_details", []) if signals else []
+    extra_deliverable_details: list[dict[str, Any]] = []
 
     if not deliverables:
         # No caller deliverables: use trajectory exclusively.
@@ -371,11 +420,21 @@ def post_session(
                         unvalidated[:5],
                     )
                 deliverables = list(dict.fromkeys(traj_deliverables + validated))
+                extra_deliverable_details = _build_caller_deliverable_details(
+                    validated,
+                    provenance_class="session_committed",
+                    evidence={"source": "caller", "validation": "trajectory_sha_prefix"},
+                )
             else:
                 # Trajectory has no SHAs (file paths only) — can't validate
                 # caller SHAs.  Keep both sets, caller items first to preserve
                 # the pre-existing deliverable ordering convention.
                 deliverables = list(dict.fromkeys(caller_deliverables + traj_deliverables))
+                extra_deliverable_details = _build_caller_deliverable_details(
+                    caller_deliverables,
+                    provenance_class="fallback_observed",
+                    evidence={"source": "caller", "reason": "trajectory_has_no_sha"},
+                )
         else:
             # Trajectory ran but found no deliverables.
             if traj_productive is False:
@@ -398,7 +457,26 @@ def post_session(
                         len(caller_deliverables),
                     )
                 deliverables = list(dict.fromkeys(caller_deliverables))
+                extra_deliverable_details = _build_caller_deliverable_details(
+                    caller_deliverables,
+                    provenance_class="fallback_observed",
+                    evidence={"source": "caller", "reason": "trajectory_empty"},
+                )
     # else: no trajectory (signals is None) — keep caller git-range as fallback.
+    elif caller_deliverables:
+        extra_deliverable_details = _build_caller_deliverable_details(
+            caller_deliverables,
+            provenance_class="fallback_observed",
+            evidence={"source": "caller", "reason": "no_trajectory"},
+        )
+
+    deliverable_details = _merge_deliverable_details(
+        deliverables=deliverables,
+        trajectory_details=traj_deliverable_details
+        if isinstance(traj_deliverable_details, list)
+        else [],
+        extra_details=extra_deliverable_details,
+    )
 
     # --- Determine outcome ---
     # Priority order (highest → lowest):
@@ -471,6 +549,7 @@ def post_session(
         "start_time": start_time_str,
         "end_time": end_time_str,
         "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
     }
     if context_tier is not None:
         record_kwargs["context_tier"] = context_tier

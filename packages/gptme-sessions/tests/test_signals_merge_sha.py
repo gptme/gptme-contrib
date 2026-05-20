@@ -244,6 +244,18 @@ def test_extract_signals_cc_includes_resolved_merge_sha():
     assert any(
         FAKE_SHA in d for d in sigs["deliverables"]
     ), f"expected {FAKE_SHA} in deliverables, got {sigs['deliverables']}"
+    assert any(
+        detail["value"] == "merge PR #42"
+        and detail["kind"] == "pull_request"
+        and detail["provenance_class"] == "session_committed"
+        for detail in sigs["deliverable_details"]
+    )
+    assert any(
+        detail["value"] == f"merge-commit ({FAKE_SHA})"
+        and detail["kind"] == "merge_commit"
+        and detail["provenance_class"] == "server_generated"
+        for detail in sigs["deliverable_details"]
+    )
 
     # Exactly one gh-view call — for PR #42.
     mock_run.assert_called_once()
@@ -315,6 +327,12 @@ def test_extract_signals_cc_gh_failure_does_not_break_extraction():
     assert not any(FAKE_SHA in c for c in sigs["git_commits"])
     # deliverables still contains the human-readable "merge PR #42" entry.
     assert any("merge PR #42" in d for d in sigs["deliverables"])
+    assert any(
+        detail["value"] == "merge PR #42"
+        and detail["kind"] == "pull_request"
+        and detail["provenance_class"] == "session_committed"
+        for detail in sigs["deliverable_details"]
+    )
 
 
 def test_extract_signals_cc_no_pr_merges_no_gh_calls():

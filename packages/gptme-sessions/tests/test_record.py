@@ -33,6 +33,34 @@ def test_context_tier_roundtrip():
     assert r2.context_tier == "massive"
 
 
+def test_deliverable_details_roundtrip():
+    """deliverable_details survives to_dict/from_dict round-trip."""
+    r = SessionRecord(
+        deliverables=["src/app.py"],
+        deliverable_details=[
+            {
+                "value": "src/app.py",
+                "kind": "file",
+                "provenance_class": "tool_authored",
+                "evidence": {"source": "trajectory", "tool_name": "Edit"},
+            }
+        ],
+    )
+
+    d = r.to_dict()
+    assert d["deliverable_details"] == [
+        {
+            "value": "src/app.py",
+            "kind": "file",
+            "provenance_class": "tool_authored",
+            "evidence": {"source": "trajectory", "tool_name": "Edit"},
+        }
+    ]
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.deliverable_details == d["deliverable_details"]
+
+
 def test_context_tier_none_roundtrip():
     """context_tier=None round-trips correctly."""
     r = SessionRecord(model="sonnet")

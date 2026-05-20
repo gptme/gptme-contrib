@@ -219,6 +219,7 @@ class SessionRecord:
 
     # Artifacts
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
+    deliverable_details: list[dict[str, Any]] = field(default_factory=list)
     trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
     journal_path: str | None = None  # path to human-written journal entry
 
@@ -267,6 +268,8 @@ class SessionRecord:
         # Guard against JSON null for integer field
         if self.duration_seconds is None:
             self.duration_seconds = 0
+        if self.deliverable_details is None:
+            self.deliverable_details = []
         if self.grades is None:
             self.grades = {}
         if self.grade_reasons is None:

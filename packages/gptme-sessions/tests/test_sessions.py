@@ -3182,6 +3182,20 @@ def test_post_session_deliverables_from_trajectory(tmp_path: Path):
     )
     assert "/tmp/foo.py" in result.record.deliverables
     assert "/tmp/bar.py" in result.record.deliverables
+    assert result.record.deliverable_details == [
+        {
+            "value": "/tmp/foo.py",
+            "kind": "file",
+            "provenance_class": "tool_authored",
+            "evidence": {"source": "trajectory", "tool_name": "Write"},
+        },
+        {
+            "value": "/tmp/bar.py",
+            "kind": "file",
+            "provenance_class": "tool_authored",
+            "evidence": {"source": "trajectory", "tool_name": "Edit"},
+        },
+    ]
 
 
 def test_post_session_metadata_fields(tmp_path: Path):
