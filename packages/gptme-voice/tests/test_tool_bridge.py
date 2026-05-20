@@ -309,9 +309,7 @@ def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
         assert "--transcript-tail-turns" in args
         assert captured["tail_turns"] == "3"
         assert captured["tail_text"] == (
-            "Assistant: first answer\n"
-            "User: second question\n"
-            "Assistant: second answer"
+            "Assistant: first answer\nUser: second question\nAssistant: second answer"
         )
 
     asyncio.run(_exercise())
@@ -658,6 +656,43 @@ def test_subagent_status_lists_pending_dispatch() -> None:
             assert "spawn_to_first_output_seconds" not in entry["timings"]
 
             # Clean up the background task
+            await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_dispatch_defaults_to_fast_mode() -> None:
+    """Missing mode should still dispatch on the fast live-call path."""
+
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.sleep(5)
+                return 0
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "check one thing"}
+            )
+            assert dispatch["status"] == "dispatched"
+            task_id = dispatch["task_id"]
+
+            await asyncio.sleep(0)
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["status"] == "ok"
+            assert status["pending_count"] == 1
+            entry = status["pending"][0]
+            assert entry["task_id"] == task_id
+            assert entry["mode"] == "fast"
+            assert entry["model"] == bridge.model_fast
+
             await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
 
     asyncio.run(_exercise())

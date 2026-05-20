@@ -130,8 +130,13 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "- Use the subagent tool ONLY for small, specific lookups: a single task status, "
         "a recent journal entry, a quick file check. One focused question per call.\n"
         "- If you need a live lookup, you may say one short acknowledgement before "
-        "calling subagent (for example: 'One moment, checking that.'). After dispatch, "
-        "wait for the actual subagent result instead of narrating progress or guessing.\n"
+        "calling subagent (for example: 'One moment, checking that.'). That "
+        "acknowledgement is only allowed when you call the subagent tool in the same "
+        "turn. After dispatch, wait for the actual subagent result instead of "
+        "narrating progress or guessing.\n"
+        "- Do NOT say you are checking, looking it up, or using the subagent unless "
+        "you call the subagent tool in the same turn. If you are not calling the tool, "
+        "answer from current context or say you cannot verify it live yet.\n"
         "- Do NOT dispatch broad investigation tasks (e.g. 'investigate the whole system', "
         "'run a full review') — these always time out and leave the call hanging.\n"
         "- NEVER use the subagent tool to run post-call analysis, summarise the session, "
@@ -393,8 +398,9 @@ class OpenAIRealtimeClient:
                         "one recent fact. Do not use it for broad investigations, full "
                         "reviews, or post-call analysis. Say at most one brief "
                         "acknowledgement before calling it, then wait for the real "
-                        "subagent result instead of answering early. Describe one "
-                        "concrete request in natural language."
+                        "subagent result instead of answering early. Never narrate "
+                        "or promise a lookup without actually emitting the tool "
+                        "call. Describe one concrete request in natural language."
                     ),
                     "parameters": {
                         "type": "object",
