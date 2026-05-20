@@ -533,7 +533,10 @@ def test_post_session_trajectory_deliverables_take_precedence(tmp_path: Path):
             ],
         )
 
-    assert result.record.deliverables == [traj_deliverable]
+    # Validated caller SHA is now merged with trajectory deliverables
+    assert len(result.record.deliverables) == 2
+    assert result.record.deliverables[0] == traj_deliverable
+    assert result.record.deliverables[1] == "abc1234567890abcdef1234567890abcdef1234"
 
 
 def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path):
@@ -580,9 +583,12 @@ def test_post_session_caller_deliverables_no_outcome_override_when_traj_noop(tmp
     assert result.record.deliverables == []
 
 
-def test_post_session_trajectory_empty_deliverables_drops_caller(tmp_path: Path, caplog):
-    """When trajectory ran but found no deliverables, caller (git-range) commits
-    are DROPPED — they belong to concurrent sessions, not this one."""
+def test_post_session_trajectory_empty_deliverables_keeps_caller_when_productive(
+    tmp_path: Path, caplog
+):
+    """When trajectory ran but found no deliverables yet says productive,
+    caller (git-range) commits are KEPT — trajectory couldn't validate
+    or contradict the caller's evidence."""
     import logging
 
     store = SessionStore(sessions_dir=tmp_path)
@@ -606,8 +612,10 @@ def test_post_session_trajectory_empty_deliverables_drops_caller(tmp_path: Path,
                 deliverables=[caller_sha],
             )
 
-    assert result.record.deliverables == []
-    assert any("concurrent session" in r.message for r in caplog.records)
+    assert result.record.deliverables == [caller_sha]
+    assert any(
+        "Trajectory ran but found no deliverables; keeping" in r.message for r in caplog.records
+    )
 
 
 def test_extract_traj_sha_prefixes():
