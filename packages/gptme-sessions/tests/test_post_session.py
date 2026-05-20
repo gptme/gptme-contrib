@@ -561,6 +561,81 @@ def test_post_session_trajectory_deliverables_take_precedence(tmp_path: Path):
     ]
 
 
+def test_post_session_trajectory_commit_validation_keeps_non_sha_caller_deliverables(
+    tmp_path: Path,
+):
+    """Trajectory SHA validation should not drop caller PR/file deliverables."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    traj_deliverable = "fix: something this session did (abc1234)"
+    caller_pr = "https://github.com/gptme/gptme-contrib/pull/944"
+    caller_file = "packages/gptme-sessions/src/gptme_sessions/post_session.py"
+    concurrent_sha = "deadbeef" + "01234567" * 4
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [traj_deliverable],
+        "deliverable_details": [
+            {
+                "value": traj_deliverable,
+                "kind": "commit",
+                "provenance_class": "session_committed",
+                "evidence": {"source": "trajectory", "tool_name": "Bash"},
+            }
+        ],
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+            deliverables=[
+                "abc1234567890abcdef1234567890abcdef1234",
+                caller_pr,
+                caller_file,
+                concurrent_sha,
+            ],
+        )
+
+    assert result.record.deliverables == [
+        traj_deliverable,
+        "abc1234567890abcdef1234567890abcdef1234",
+        caller_pr,
+        caller_file,
+    ]
+    assert result.record.deliverable_details == [
+        {
+            "value": traj_deliverable,
+            "kind": "commit",
+            "provenance_class": "session_committed",
+            "evidence": {"source": "trajectory", "tool_name": "Bash"},
+        },
+        {
+            "value": "abc1234567890abcdef1234567890abcdef1234",
+            "kind": "commit",
+            "provenance_class": "session_committed",
+            "evidence": {"source": "caller", "validation": "trajectory_sha_prefix"},
+        },
+        {
+            "value": caller_pr,
+            "kind": "pull_request",
+            "provenance_class": "fallback_observed",
+            "evidence": {"source": "caller", "reason": "non_sha_passthrough"},
+        },
+        {
+            "value": caller_file,
+            "kind": "file",
+            "provenance_class": "fallback_observed",
+            "evidence": {"source": "caller", "reason": "non_sha_passthrough"},
+        },
+    ]
+
+
 def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path):
     """Without a trajectory, caller-supplied (git-range) deliverables are used
     as-is and upgrade outcome from noop/unknown to productive."""

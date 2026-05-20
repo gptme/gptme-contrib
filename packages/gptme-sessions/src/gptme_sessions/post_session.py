@@ -28,7 +28,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .deliverables import build_deliverable_detail, project_deliverable_details
+from .deliverables import (
+    build_deliverable_detail,
+    looks_like_sha,
+    project_deliverable_details,
+)
 from .discovery import extract_project, extract_session_name
 from .record import SessionRecord
 from .signals import extract_from_path
@@ -407,23 +411,35 @@ def post_session(
         if traj_deliverables:
             traj_sha_prefixes = _extract_traj_sha_prefixes(traj_deliverables)
             if traj_sha_prefixes:
-                # Trajectory has commit SHAs — validate caller SHAs against them.
-                validated = [
-                    d for d in caller_deliverables if _caller_sha_in_traj(d, traj_sha_prefixes)
+                # Trajectory has commit SHAs — validate caller SHAs against them
+                # and preserve non-SHA caller deliverables like PR URLs or files.
+                validated_shas = [
+                    d
+                    for d in caller_deliverables
+                    if looks_like_sha(d) and _caller_sha_in_traj(d, traj_sha_prefixes)
                 ]
-                unvalidated = [d for d in caller_deliverables if d not in validated]
-                if unvalidated:
+                unvalidated_shas = [
+                    d for d in caller_deliverables if looks_like_sha(d) and d not in validated_shas
+                ]
+                passthrough_non_sha = [d for d in caller_deliverables if not looks_like_sha(d)]
+                if unvalidated_shas:
                     logger.warning(
                         "Dropping %d git-range commit(s) absent from trajectory "
                         "(likely from a concurrent session): %s",
-                        len(unvalidated),
-                        unvalidated[:5],
+                        len(unvalidated_shas),
+                        unvalidated_shas[:5],
                     )
-                deliverables = list(dict.fromkeys(traj_deliverables + validated))
+                deliverables = list(
+                    dict.fromkeys(traj_deliverables + validated_shas + passthrough_non_sha)
+                )
                 extra_deliverable_details = _build_caller_deliverable_details(
-                    validated,
+                    validated_shas,
                     provenance_class="session_committed",
                     evidence={"source": "caller", "validation": "trajectory_sha_prefix"},
+                ) + _build_caller_deliverable_details(
+                    passthrough_non_sha,
+                    provenance_class="fallback_observed",
+                    evidence={"source": "caller", "reason": "non_sha_passthrough"},
                 )
             else:
                 # Trajectory has no SHAs (file paths only) — can't validate
