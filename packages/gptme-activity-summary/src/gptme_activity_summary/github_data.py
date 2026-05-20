@@ -63,9 +63,20 @@ class UserEvent:
     line: str  # pre-rendered single-line description
 
 
-# Event types from users/<user>/events/public that are noisy / non-productivity.
-# Excluded from the events block. Everything else is captured.
-EVENT_TYPES_DROPPED = frozenset({"WatchEvent", "CreateEvent", "DeleteEvent", "ForkEvent"})
+# Event types from users/<user>/events/public that are noisy / non-productivity,
+# or that duplicate data already captured by the search-based path (get_user_prs /
+# get_user_issues). Excluded from the events block.
+EVENT_TYPES_DROPPED = frozenset(
+    {
+        "WatchEvent",
+        "CreateEvent",
+        "DeleteEvent",
+        "ForkEvent",
+        # Duplicate the search-based PRs/issues data — drop to avoid double-counting.
+        "PullRequestEvent",
+        "IssuesEvent",
+    }
+)
 
 
 @dataclass
@@ -453,11 +464,6 @@ def _render_event_line(event: dict) -> str | None:
         ref = (payload.get("ref") or "").replace("refs/heads/", "")
         msgs = [(c.get("message") or "").split("\n", 1)[0][:80] for c in commits[:3]]
         return f"push {repo} ({ref}) — {len(commits)} commits: " + "; ".join(msgs)
-    if etype == "PullRequestEvent":
-        pr = payload.get("pull_request") or {}
-        action = payload.get("action", "?")
-        verb = "merged" if (action == "closed" and pr.get("merged")) else action
-        return f"PR {verb} {repo}#{pr.get('number')}: {(pr.get('title') or '')[:80]}"
     if etype == "PullRequestReviewEvent":
         pr = payload.get("pull_request") or {}
         review = payload.get("review") or {}
@@ -480,12 +486,6 @@ def _render_event_line(event: dict) -> str | None:
         return (
             f"{kind} comment {repo}#{issue.get('number')}: "
             f"{(issue.get('title') or '')[:60]} — {body}"
-        )
-    if etype == "IssuesEvent":
-        issue = payload.get("issue") or {}
-        return (
-            f"Issue {payload.get('action', '?')} {repo}#{issue.get('number')}: "
-            f"{(issue.get('title') or '')[:80]}"
         )
     if etype == "ReleaseEvent":
         rel = payload.get("release") or {}

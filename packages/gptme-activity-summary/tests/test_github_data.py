@@ -345,21 +345,16 @@ def test_render_event_push_renders_with_messages():
     assert "fix: bug A" in line
 
 
-def test_render_event_pull_request_merged_uses_merged_verb():
-    line = _render_event_line(
-        _make_event(
-            "PullRequestEvent",
-            {
-                "action": "closed",
-                "pull_request": {"number": 11, "title": "Land it", "merged": True},
-            },
-        )
-    )
-    assert line == "PR merged owner/repo#11: Land it"
-
-
 def test_render_event_drops_noise_types():
-    for noisy in ("WatchEvent", "CreateEvent", "DeleteEvent", "ForkEvent"):
+    # Noisy / non-productivity types, plus types that duplicate search-based data.
+    for noisy in (
+        "WatchEvent",
+        "CreateEvent",
+        "DeleteEvent",
+        "ForkEvent",
+        "PullRequestEvent",
+        "IssuesEvent",
+    ):
         assert _render_event_line(_make_event(noisy, {})) is None
 
 
