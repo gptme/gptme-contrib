@@ -518,6 +518,14 @@ def test_post_session_trajectory_deliverables_take_precedence(tmp_path: Path):
         "session_duration_s": 60,
         "productive": True,
         "deliverables": [traj_deliverable],
+        "deliverable_details": [
+            {
+                "value": traj_deliverable,
+                "kind": "commit",
+                "provenance_class": "session_committed",
+                "evidence": {"source": "trajectory", "tool_name": "Bash"},
+            }
+        ],
     }
     with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
         result = post_session(
@@ -537,6 +545,20 @@ def test_post_session_trajectory_deliverables_take_precedence(tmp_path: Path):
     assert len(result.record.deliverables) == 2
     assert result.record.deliverables[0] == traj_deliverable
     assert result.record.deliverables[1] == "abc1234567890abcdef1234567890abcdef1234"
+    assert result.record.deliverable_details == [
+        {
+            "value": traj_deliverable,
+            "kind": "commit",
+            "provenance_class": "session_committed",
+            "evidence": {"source": "trajectory", "tool_name": "Bash"},
+        },
+        {
+            "value": "abc1234567890abcdef1234567890abcdef1234",
+            "kind": "commit",
+            "provenance_class": "session_committed",
+            "evidence": {"source": "caller", "validation": "trajectory_sha_prefix"},
+        },
+    ]
 
 
 def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path):
@@ -554,6 +576,14 @@ def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path
 
     assert len(result.record.deliverables) == 1
     assert result.record.outcome == "productive"
+    assert result.record.deliverable_details == [
+        {
+            "value": "abc1234567890abcdef1234567890abcdef1234",
+            "kind": "commit",
+            "provenance_class": "fallback_observed",
+            "evidence": {"source": "caller", "reason": "no_trajectory"},
+        }
+    ]
 
 
 def test_post_session_caller_deliverables_no_outcome_override_when_traj_noop(tmp_path: Path):
@@ -581,6 +611,7 @@ def test_post_session_caller_deliverables_no_outcome_override_when_traj_noop(tmp
 
     assert result.record.outcome == "noop"
     assert result.record.deliverables == []
+    assert result.record.deliverable_details == []
 
 
 def test_post_session_trajectory_empty_deliverables_keeps_caller_when_productive(
@@ -613,6 +644,14 @@ def test_post_session_trajectory_empty_deliverables_keeps_caller_when_productive
             )
 
     assert result.record.deliverables == [caller_sha]
+    assert result.record.deliverable_details == [
+        {
+            "value": caller_sha,
+            "kind": "commit",
+            "provenance_class": "fallback_observed",
+            "evidence": {"source": "caller", "reason": "trajectory_empty"},
+        }
+    ]
     assert any(
         "Trajectory ran but found no deliverables; keeping" in r.message for r in caplog.records
     )

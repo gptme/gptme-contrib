@@ -94,6 +94,9 @@ def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool
         record, "duration_seconds", int(result.get("session_duration_s") or 0)
     )
     changed |= _assign_if_missing(record, "deliverables", result.get("deliverables", []))
+    changed |= _assign_if_missing(
+        record, "deliverable_details", result.get("deliverable_details", [])
+    )
     changed |= _assign_if_missing(record, "category", result.get("inferred_category"))
 
     usage = result.get("usage")
@@ -109,6 +112,7 @@ def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
     record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
     record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
     record_kwargs["deliverables"] = result.get("deliverables", [])
+    record_kwargs["deliverable_details"] = result.get("deliverable_details", [])
     if result.get("inferred_category"):
         record_kwargs["category"] = result["inferred_category"]
 

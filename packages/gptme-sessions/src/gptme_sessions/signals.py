@@ -71,6 +71,52 @@ _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 _GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
 
 
+def _build_deliverable_detail(
+    value: str,
+    *,
+    kind: str,
+    provenance_class: str,
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    """Build one structured deliverable detail entry."""
+    compact_evidence = {
+        key: val for key, val in evidence.items() if val not in (None, "", [], {}, ())
+    }
+    return {
+        "value": value,
+        "kind": kind,
+        "provenance_class": provenance_class,
+        "evidence": compact_evidence,
+    }
+
+
+def _record_deliverable_detail(
+    detail_by_value: dict[str, dict[str, object]],
+    *,
+    value: str,
+    kind: str,
+    provenance_class: str,
+    evidence: dict[str, object],
+) -> None:
+    """Record first-seen structured detail for a deliverable value."""
+    if not value or value in detail_by_value:
+        return
+    detail_by_value[value] = _build_deliverable_detail(
+        value,
+        kind=kind,
+        provenance_class=provenance_class,
+        evidence=evidence,
+    )
+
+
+def _ordered_deliverable_details(
+    deliverables: list[str],
+    detail_by_value: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project structured details into the legacy deliverable order."""
+    return [detail_by_value[value] for value in deliverables if value in detail_by_value]
+
+
 def _as_int(value: object) -> int | None:
     """Return integer token counters without accepting bools or lossy floats."""
     if isinstance(value, bool):
@@ -270,6 +316,7 @@ def extract_signals(msgs: list[dict]) -> dict:
     retry_candidates: list[str] = []
     timestamps: list[datetime] = []
     steps = 0  # number of assistant turns that yielded to await tool results
+    detail_by_value: dict[str, dict[str, object]] = {}
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -302,6 +349,13 @@ def extract_signals(msgs: list[dict]) -> dict:
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
                             sig = f"{tool}:{path}"
                             if sig in recent_sigs:
                                 retry_candidates.append(tool)
@@ -334,7 +388,15 @@ def extract_signals(msgs: list[dict]) -> dict:
             for commit_match in _COMMIT_RE.finditer(content[:500]):
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
-                git_commits.append(f"{commit_msg} ({commit_hash})")
+                commit_value = f"{commit_msg} ({commit_hash})"
+                git_commits.append(commit_value)
+                _record_deliverable_detail(
+                    detail_by_value,
+                    value=commit_value,
+                    kind="commit",
+                    provenance_class="session_committed",
+                    evidence={"source": "trajectory", "tool_name": "shell"},
+                )
 
     # Session duration
     duration_s = 0
@@ -343,6 +405,7 @@ def extract_signals(msgs: list[dict]) -> dict:
 
     # Combine deliverables: git commits + distinct file writes
     deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
     retry_count = len(retry_candidates)
 
     return {
@@ -355,6 +418,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "session_duration_s": duration_s,
         "retry_count": retry_count,
         "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
     }
 
 
@@ -547,6 +611,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # PR number extracted from `gh pr merge <N>` command (may be absent if the
     # command used `gh pr merge` without an explicit number). Keyed by tool_use_id.
     _pr_merge_num_by_tool_id: dict[str, int] = {}
+    detail_by_value: dict[str, dict[str, object]] = {}
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -591,6 +656,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
                             sig = f"{tool}:{path}"
                             if sig in recent_sigs:
                                 retry_candidates.append(tool)
@@ -767,8 +839,16 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         if commit_hash in _all_direct_commit_hashes:
                             continue  # already seen in an earlier tool result
                         commit_msg = commit_match.group(2).strip()
-                        git_commits.append(f"{commit_msg} ({commit_hash})")
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
                         _all_direct_commit_hashes.add(commit_hash)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": "Bash"},
+                        )
 
                     # Background bash tasks: when CC runs a command in background mode,
                     # the tool result only contains a pointer to an output file like:
@@ -784,8 +864,20 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                 if commit_hash in _all_direct_commit_hashes:
                                     continue  # already captured from a direct result
                                 commit_msg = commit_match.group(2).strip()
-                                git_commits.append(f"{commit_msg} ({commit_hash})")
+                                commit_value = f"{commit_msg} ({commit_hash})"
+                                git_commits.append(commit_value)
                                 _all_direct_commit_hashes.add(commit_hash)
+                                _record_deliverable_detail(
+                                    detail_by_value,
+                                    value=commit_value,
+                                    kind="commit",
+                                    provenance_class="session_committed",
+                                    evidence={
+                                        "source": "trajectory",
+                                        "tool_name": "Bash",
+                                        "background": True,
+                                    },
+                                )
                         except OSError:
                             pass  # File may not exist if session ran on a different host
 
@@ -805,6 +897,17 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                         for merge_match in _PR_MERGE_RE.finditer(result_str):
                             pr_num = merge_match.group(1)
                             pr_merges.append(f"PR #{pr_num}")
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=f"merge PR #{pr_num}",
+                                kind="pull_request",
+                                provenance_class="session_committed",
+                                evidence={
+                                    "source": "trajectory",
+                                    "tool_name": "Bash",
+                                    "action": "gh_pr_merge",
+                                },
+                            )
                             # Prefer repo extracted from the command itself;
                             # do NOT overwrite context captured earlier from
                             # the gh pr create URL output.
@@ -885,6 +988,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         commit_entry = f"merge-commit ({sha})"
         if commit_entry not in git_commits:
             git_commits.append(commit_entry)
+        _record_deliverable_detail(
+            detail_by_value,
+            value=commit_entry,
+            kind="merge_commit",
+            provenance_class="server_generated",
+            evidence={"source": "gh_api", "action": "gh_pr_merge"},
+        )
 
     # pr_merges entries in deliverables: "merge PR #N" format for readability.
     # git_commits now includes any resolved merge SHAs from the loop above, so
@@ -892,6 +1002,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     deliverables = list(
         dict.fromkeys(git_commits + [f"merge {m}" for m in pr_merges] + file_writes)
     )
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
 
     # Summarize per-tool-call timing: total and max per tool name.
     # Enables detection of slow tests, long pre-commit hooks, and stalled tools.
@@ -924,6 +1035,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "issues_created": issues_created,
         "ci_fixed": ci_fixed,
         "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
     }
 
 
@@ -1211,6 +1323,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     timestamps: list[datetime] = []
     steps = 0
     recent_sigs: list[str] = []
+    detail_by_value: dict[str, dict[str, object]] = {}
 
     # Track function_call ids for matching with their outputs
     call_id_to_name: dict[str, str] = {}
@@ -1254,6 +1367,13 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                             journal_paths.append(path)
                         else:
                             file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": "apply_patch"},
+                            )
                             sig = f"apply_patch:{path}"
                             if sig in recent_sigs:
                                 retry_candidates.append("apply_patch")
@@ -1293,6 +1413,16 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                                     journal_paths.append(path)
                                 else:
                                     file_writes.append(path)
+                                    _record_deliverable_detail(
+                                        detail_by_value,
+                                        value=path,
+                                        kind="file",
+                                        provenance_class="tool_authored",
+                                        evidence={
+                                            "source": "trajectory",
+                                            "tool_name": "exec_command",
+                                        },
+                                    )
                                     sig = f"exec_command:{path}"
                                     if sig in recent_sigs:
                                         retry_candidates.append("exec_command")
@@ -1322,7 +1452,15 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                     for commit_match in _COMMIT_RE.finditer(output[:8000]):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
-                        git_commits.append(f"{commit_msg} ({commit_hash})")
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": tool_name},
+                        )
 
     # Finalize the last turn (not followed by another turn_context)
     if current_turn_has_tool:
@@ -1333,6 +1471,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
 
     deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
     return {
         "tool_calls": tool_calls,
         "steps": steps,
@@ -1343,6 +1482,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
     }
 
 
@@ -1370,6 +1510,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
     timestamps: list[datetime] = []
     steps = 0
     recent_sigs: list[str] = []
+    detail_by_value: dict[str, dict[str, object]] = {}
 
     # Map toolCallId → tool name for filtering commit detection to bash only
     call_id_to_name: dict[str, str] = {}
@@ -1412,6 +1553,13 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                     if path:
                         if "/journal/" not in path:
                             file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
                             sig = f"{tool}:{path}"
                             if sig in recent_sigs:
                                 retry_candidates.append(tool)
@@ -1441,7 +1589,15 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                     for commit_match in _COMMIT_RE.finditer(content[:500]):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
-                        git_commits.append(f"{commit_msg} ({commit_hash})")
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": "bash"},
+                        )
 
         elif rec_type == "session.error":
             error_count += 1
@@ -1451,6 +1607,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
 
     deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
     return {
         "tool_calls": tool_calls,
         "steps": steps,
@@ -1461,6 +1618,7 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
         "session_duration_s": duration_s,
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
     }
 
 
