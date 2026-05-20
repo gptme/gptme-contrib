@@ -495,3 +495,146 @@ def test_post_session_cascade_intent(tmp_path: Path):
     records = store2.load_all()
     assert len(records) == 1
     assert records[0].cascade_intent == cascade_intent
+
+
+# ---------------------------------------------------------------------------
+# Trajectory-authoritative deliverable attribution (cross-session contamination)
+# ---------------------------------------------------------------------------
+
+
+def test_post_session_trajectory_deliverables_take_precedence(tmp_path: Path):
+    """When trajectory has deliverables, git-range commits absent from the
+    trajectory are dropped (cross-session contamination filter)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    traj_deliverable = "fix: something this session did (abc1234)"
+    # git-range supplies this session's commit plus two concurrent-session commits
+    concurrent_sha1 = "deadbeef" + "01234567" * 4
+    concurrent_sha2 = "cafebabe" + "01234567" * 4
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [traj_deliverable],
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+            deliverables=[
+                "abc1234567890abcdef1234567890abcdef1234",  # this session
+                concurrent_sha1,
+                concurrent_sha2,
+            ],
+        )
+
+    assert result.record.deliverables == [traj_deliverable]
+
+
+def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path):
+    """Without a trajectory, caller-supplied (git-range) deliverables are used
+    as-is and upgrade outcome from noop/unknown to productive."""
+    store = SessionStore(sessions_dir=tmp_path)
+
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="opus",
+        duration_seconds=60,
+        deliverables=["abc1234567890abcdef1234567890abcdef1234"],
+    )
+
+    assert len(result.record.deliverables) == 1
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_caller_deliverables_no_outcome_override_when_traj_noop(tmp_path: Path):
+    """Git-range commits must NOT upgrade outcome when trajectory determined noop.
+    Prevents concurrent-session commits from inflating session classification."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": False,
+        "deliverables": [],
+    }
+    concurrent_sha = "deadbeef" + "01234567" * 4
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="sonnet",
+            duration_seconds=0,
+            trajectory_path=fake_traj,
+            deliverables=[concurrent_sha],
+        )
+
+    assert result.record.outcome == "noop"
+    assert result.record.deliverables == []
+
+
+def test_post_session_trajectory_empty_deliverables_drops_caller(tmp_path: Path, caplog):
+    """When trajectory ran but found no deliverables, caller (git-range) commits
+    are DROPPED — they belong to concurrent sessions, not this one."""
+    import logging
+
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [],
+    }
+    caller_sha = "abc1234567890abcdef1234567890abcdef1234"
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        with caplog.at_level(logging.WARNING, logger="gptme_sessions.post_session"):
+            result = post_session(
+                store=store,
+                harness="gptme",
+                model="opus",
+                duration_seconds=0,
+                trajectory_path=fake_traj,
+                deliverables=[caller_sha],
+            )
+
+    assert result.record.deliverables == []
+    assert any("concurrent session" in r.message for r in caplog.records)
+
+
+def test_extract_traj_sha_prefixes():
+    """_extract_traj_sha_prefixes correctly parses trajectory commit strings."""
+    from gptme_sessions.post_session import _extract_traj_sha_prefixes
+
+    entries = [
+        "fix: something good (abc1234)",
+        "feat: another thing (dead123)",
+        "/some/file/path.py",
+        "plain text without parens",
+        "bad (notasha!)",
+        "PR merge (12345678abcd)",
+    ]
+    result = _extract_traj_sha_prefixes(entries)
+    assert "abc1234" in result
+    assert "dead123" in result
+    assert "12345678abcd" in result
+    assert len(result) == 3
+
+
+def test_caller_sha_in_traj():
+    """_caller_sha_in_traj matches full SHA against 7-char trajectory prefixes."""
+    from gptme_sessions.post_session import _caller_sha_in_traj
+
+    prefixes = {"abc1234", "dead123"}
+    assert _caller_sha_in_traj("abc1234567890abcdef1234567890abcdef1234", prefixes) is True
+    assert _caller_sha_in_traj("dead123456789abcdef0000000000000000000", prefixes) is True
+    assert _caller_sha_in_traj("cafe000000000000000000000000000000000", prefixes) is False
+    assert _caller_sha_in_traj("ABC1234567890ABCDEF", prefixes) is True  # case-insensitive
