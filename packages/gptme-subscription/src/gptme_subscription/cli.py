@@ -358,6 +358,121 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
     return 1
 
 
+def _execute_switch_decision(
+    sm: SubscriptionManager,
+    decision,
+    previous: str | None,
+    *,
+    emit_text: bool,
+) -> tuple[int, dict[str, object]]:
+    cfg = sm.config
+    target = decision.target
+    payload: dict[str, object] = {"executed": False}
+
+    if not target:
+        payload["reason"] = "malformed switch decision"
+        if emit_text:
+            print("Malformed switch decision", file=sys.stderr)
+        return 1, payload
+
+    if target == cfg.primary and previous and previous != cfg.primary:
+        cooldown = sm.seconds_since_last_primary_departure()
+        if cooldown is not None and cooldown < cfg.probe_primary_cooldown:
+            remaining = cfg.probe_primary_cooldown - cooldown
+            reason = (
+                f"cooldown active: switched away from {cfg.primary} {cooldown}s ago; "
+                f"wait {remaining}s before probing again"
+            )
+            payload["deferred"] = True
+            payload["reason"] = reason
+            if emit_text:
+                print(
+                    f"  Cooldown: switched away from {cfg.primary} {cooldown}s ago "
+                    f"(<{cfg.probe_primary_cooldown}s). Waiting {remaining}s before probing."
+                )
+            return 0, payload
+
+    ok = sm.switch_to(target, decision.reason)
+    if not ok:
+        if sm.last_switch_deferred:
+            payload["deferred"] = True
+            payload["reason"] = "switch deferred by active locks"
+            return 0, payload
+        payload["reason"] = "switch failed"
+        return 1, payload
+
+    payload["executed"] = True
+    if decision.mode in ("rebalance", "forward-routing", "capacity-rebalance"):
+        sm.save_rebalance_state(decision.to_dict())
+    else:
+        sm.clear_rebalance_state()
+
+    if emit_text:
+        print(f"\n→ Switched to {target}")
+
+    new_usage = sm.check_usage(no_cache=True)
+    payload["post_switch_usage"] = new_usage
+    if not new_usage:
+        payload["verified"] = False
+        if target == cfg.primary and previous and previous != cfg.primary:
+            if emit_text:
+                print(f"  WARNING: could not verify {cfg.primary}'s quota — reverting")
+            sm.switch_to(previous, "auto-revert: usage check failed")
+            payload["reverted_to"] = previous
+        return 0, payload
+
+    payload["verified"] = True
+    w = new_usage.get("seven_day", {}).get("utilization", 0)
+    f5 = new_usage.get("five_hour", {}).get("utilization", 0)
+    s = new_usage.get("seven_day_sonnet", {}).get("utilization", 0)
+    if emit_text:
+        print(f"  New usage: {w:.0%} weekly, {f5:.0%} 5h, {s:.0%} Sonnet")
+    weekly_resets = new_usage.get("seven_day", {}).get("resets_in_seconds")
+    if (
+        target != cfg.primary
+        and isinstance(weekly_resets, int | float)
+        and weekly_resets > 0
+    ):
+        sm.record_sub_reset_time(target, float(weekly_resets), new_usage)
+
+    if target == cfg.primary and previous and previous != cfg.primary:
+        blocked, reason = sm.is_subscription_blocked(new_usage, config=cfg)
+        payload["verification_reason"] = reason
+        if blocked:
+            if emit_text:
+                print(f"  {cfg.primary} blocked: {reason}")
+                print(f"  Reverting to {previous}")
+            sm.switch_to(previous, f"auto-revert: {reason}")
+            sm.check_usage(no_cache=True)
+            if cfg.rate_limit_file:
+                cfg.rate_limit_file.unlink(missing_ok=True)
+            payload["reverted_to"] = previous
+        else:
+            sm.clear_rebalance_state()
+            if emit_text:
+                print(f"  {cfg.primary} healthy: {reason}")
+    elif (
+        decision.mode in ("forward-routing", "capacity-rebalance")
+        and target != cfg.primary
+        and previous
+        and previous != target
+    ):
+        blocked, reason = sm.is_subscription_blocked(new_usage, config=cfg)
+        payload["verification_reason"] = reason
+        if blocked:
+            if emit_text:
+                print(f"  {target} already blocked: {reason}")
+                print(f"  Reverting to {previous}")
+            sm.clear_rebalance_state()
+            sm.switch_to(previous, f"auto-revert routing: {target} blocked")
+            sm.check_usage(no_cache=True)
+            payload["reverted_to"] = previous
+        else:
+            if emit_text:
+                print(f"  {target} healthy for routing: {reason}")
+    return 0, payload
+
+
 def _cmd_evaluate(args: argparse.Namespace, sm: SubscriptionManager) -> int:
     """Default behavior: print recommendation, optionally apply with --execute."""
     sm.detect_external_switch()
@@ -369,11 +484,13 @@ def _cmd_evaluate(args: argparse.Namespace, sm: SubscriptionManager) -> int:
     decision_dict = decision.to_dict()
 
     if args.json:
-        print(json.dumps(decision_dict, indent=2))
         if decision.action == "switch" and args.execute:
-            target = decision.target
-            if target:
-                sm.switch_to(target, decision.reason)
+            rc, payload = _execute_switch_decision(
+                sm, decision, active, emit_text=False
+            )
+            print(json.dumps({**decision_dict, **payload}, indent=2))
+            return rc
+        print(json.dumps(decision_dict, indent=2))
         return 0
 
     print(f"Active:   {active}")
@@ -399,79 +516,8 @@ def _cmd_evaluate(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         print(f"\n→ {prefix}Would switch to {target} (use --execute to apply)")
         return 0
 
-    # Probe cooldown for primary
-    cfg = sm.config
-    if target == cfg.primary and active != cfg.primary:
-        cooldown = sm.seconds_since_last_primary_departure()
-        if cooldown is not None and cooldown < cfg.probe_primary_cooldown:
-            remaining = cfg.probe_primary_cooldown - cooldown
-            print(
-                f"  Cooldown: switched away from {cfg.primary} {cooldown}s ago "
-                f"(<{cfg.probe_primary_cooldown}s). Waiting {remaining}s before probing."
-            )
-            return 0
-
-    previous = active
-    ok = sm.switch_to(target, decision.reason)
-    if not ok:
-        if sm.last_switch_deferred:
-            return 0  # deferred is fine
-        return 1
-
-    if decision.mode in ("rebalance", "forward-routing", "capacity-rebalance"):
-        sm.save_rebalance_state(decision_dict)
-    else:
-        sm.clear_rebalance_state()
-
-    print(f"\n→ Switched to {target}")
-    new_usage = sm.check_usage(no_cache=True)
-    if not new_usage:
-        if target == cfg.primary and previous and previous != cfg.primary:
-            print(f"  WARNING: could not verify {cfg.primary}'s quota — reverting")
-            sm.switch_to(previous, "auto-revert: usage check failed")
-        return 0
-
-    w = new_usage.get("seven_day", {}).get("utilization", 0)
-    f5 = new_usage.get("five_hour", {}).get("utilization", 0)
-    s = new_usage.get("seven_day_sonnet", {}).get("utilization", 0)
-    print(f"  New usage: {w:.0%} weekly, {f5:.0%} 5h, {s:.0%} Sonnet")
-    weekly_resets = new_usage.get("seven_day", {}).get("resets_in_seconds")
-    if (
-        target != cfg.primary
-        and isinstance(weekly_resets, int | float)
-        and weekly_resets > 0
-    ):
-        sm.record_sub_reset_time(target, float(weekly_resets), new_usage)
-
-    # Auto-revert on primary probe
-    if target == cfg.primary and previous and previous != cfg.primary:
-        blocked, reason = sm.is_subscription_blocked(new_usage, config=cfg)
-        if blocked:
-            print(f"  {cfg.primary} blocked: {reason}")
-            print(f"  Reverting to {previous}")
-            sm.switch_to(previous, f"auto-revert: {reason}")
-            sm.check_usage(no_cache=True)
-            if cfg.rate_limit_file:
-                cfg.rate_limit_file.unlink(missing_ok=True)
-        else:
-            sm.clear_rebalance_state()
-            print(f"  {cfg.primary} healthy: {reason}")
-    elif (
-        decision.mode in ("forward-routing", "capacity-rebalance")
-        and target != cfg.primary
-        and previous
-        and previous != target
-    ):
-        blocked, reason = sm.is_subscription_blocked(new_usage, config=cfg)
-        if blocked:
-            print(f"  {target} already blocked: {reason}")
-            print(f"  Reverting to {previous}")
-            sm.clear_rebalance_state()
-            sm.switch_to(previous, f"auto-revert routing: {target} blocked")
-            sm.check_usage(no_cache=True)
-        else:
-            print(f"  {target} healthy for routing: {reason}")
-    return 0
+    rc, _ = _execute_switch_decision(sm, decision, active, emit_text=True)
+    return rc
 
 
 # ---- Entry point ----

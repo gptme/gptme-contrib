@@ -101,6 +101,30 @@ def test_probe_credential_fails_on_missing_file(tmp_path: Path) -> None:
     assert info.status == "missing"
 
 
+def test_probe_credential_uses_target_slot_as_live_credential(tmp_path: Path) -> None:
+    path = tmp_path / "alice.json"
+    _write_credential(path, expires_at_ms=int((time.time() + 3600) * 1000))
+    script = tmp_path / "probe.py"
+    script.write_text(
+        """#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+live = Path.home() / ".claude" / ".credentials.json"
+target = live.resolve()
+text = target.read_text()
+sys.exit(0 if target.name == "alice.json" and "fake-refresh" in text else 7)
+"""
+    )
+    script.chmod(0o755)
+
+    info, ok, msg = probe_credential(path, "alice", usage_script=script)
+
+    assert info.status == "valid"
+    assert ok is True
+    assert msg == "probe ok"
+
+
 def test_format_reauth_instructions_includes_slot(tmp_path: Path) -> None:
     out = format_reauth_instructions("alice")
     assert ".credentials.json.alice" in out

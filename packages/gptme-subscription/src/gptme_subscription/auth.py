@@ -13,7 +13,9 @@ We expose the file-based check (fast, no network) and a probe variant
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,13 +144,23 @@ def probe_credential(
     if usage_script is None or not usage_script.exists():
         return info, True, "probe skipped (no usage_script configured)"
 
+    probe_path = path.expanduser().resolve()
+    env = os.environ.copy()
     try:
-        result = subprocess.run(
-            [str(usage_script), "--json", "--no-cache"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix=f"gptme-subscription-probe-{sub}-"
+        ) as tmp:
+            claude_dir = Path(tmp) / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            (claude_dir / ".credentials.json").symlink_to(probe_path)
+            env["HOME"] = tmp
+            result = subprocess.run(
+                [str(usage_script), "--json", "--no-cache"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
 
