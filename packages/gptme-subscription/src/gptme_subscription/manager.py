@@ -166,15 +166,25 @@ class SubscriptionManager:
             return None
         primary = self.config.primary
         try:
-            for line in reversed(log.read_text().strip().split("\n")):
+            previous_sub: str | None = None
+            last_departure: datetime | None = None
+            for line in log.read_text().strip().split("\n"):
                 if not line.strip():
                     continue
-                if f"switched to {primary}" in line:
-                    continue
                 ts_str = line.split(" ")[0]
+                match = re.search(r"switched to (\w+)\b", line)
+                if match is None:
+                    continue
                 ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                return int((datetime.now(timezone.utc) - ts).total_seconds())
-        except (ValueError, IndexError):
+                current_sub = match.group(1)
+                if previous_sub == primary and current_sub != primary:
+                    last_departure = ts
+                previous_sub = current_sub
+            if last_departure is not None:
+                return int(
+                    (datetime.now(timezone.utc) - last_departure).total_seconds()
+                )
+        except (OSError, ValueError, IndexError):
             pass
         return None
 
@@ -236,7 +246,7 @@ class SubscriptionManager:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode == 0 and result.stdout.strip():
                 return dict(json.loads(result.stdout))
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             pass
         return None
 
@@ -790,5 +800,5 @@ class SubscriptionManager:
                 self._log_switch(
                     active, "external switch detected (symlink changed outside script)"
                 )
-        except (ValueError, IndexError):
+        except (OSError, ValueError, IndexError):
             pass

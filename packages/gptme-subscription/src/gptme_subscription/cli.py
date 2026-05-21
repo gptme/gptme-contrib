@@ -41,7 +41,7 @@ Re-authenticating an expired slot
 If `check-auth --probe` reports a slot as broken (probe fails or status
 is missing/malformed), run:
 
-    gptme-subscription reauth-instructions <sub>
+    gptme-subscription --reauth-instructions <sub>
 
 …and follow the printed steps. The OAuth refresh token can also silently
 expire on the server side; only the --probe variant catches that.

@@ -125,6 +125,20 @@ sys.exit(0 if target.name == "alice.json" and "fake-refresh" in text else 7)
     assert msg == "probe ok"
 
 
+def test_probe_credential_reports_probe_os_error(tmp_path: Path) -> None:
+    path = tmp_path / "alice.json"
+    _write_credential(path, expires_at_ms=int((time.time() + 3600) * 1000))
+    script = tmp_path / "probe.py"
+    script.write_text("#!/usr/bin/env python3\nprint('ok')\n")
+    script.chmod(0o644)
+
+    info, ok, msg = probe_credential(path, "alice", usage_script=script)
+
+    assert info.status == "valid"
+    assert ok is False
+    assert msg.startswith("probe error:")
+
+
 def test_format_reauth_instructions_includes_slot(tmp_path: Path) -> None:
     out = format_reauth_instructions("alice")
     assert ".credentials.json.alice" in out

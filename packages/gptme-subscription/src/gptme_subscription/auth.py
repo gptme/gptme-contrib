@@ -144,16 +144,21 @@ def probe_credential(
     if usage_script is None or not usage_script.exists():
         return info, True, "probe skipped (no usage_script configured)"
 
-    probe_path = path.expanduser().resolve()
     env = os.environ.copy()
     try:
+        target_credential = path.expanduser().resolve()
         with tempfile.TemporaryDirectory(
             prefix=f"gptme-subscription-probe-{sub}-"
         ) as tmp:
             claude_dir = Path(tmp) / ".claude"
             claude_dir.mkdir(parents=True, exist_ok=True)
-            (claude_dir / ".credentials.json").symlink_to(probe_path)
+            live_credential = claude_dir / ".credentials.json"
+            # Make the requested slot appear as Claude's live credential so any
+            # normal usage probe reads ``path`` instead of the operator's real
+            # ~/.claude symlink.
+            live_credential.symlink_to(target_credential)
             env["HOME"] = tmp
+            env["CLAUDE_HOME"] = str(claude_dir)
             result = subprocess.run(
                 [str(usage_script), "--json", "--no-cache"],
                 capture_output=True,
@@ -163,6 +168,8 @@ def probe_credential(
             )
     except subprocess.TimeoutExpired:
         return info, False, f"probe timed out after {timeout}s"
+    except OSError as exc:
+        return info, False, f"probe error: {exc}"
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip().splitlines()[-1:] or [""]
