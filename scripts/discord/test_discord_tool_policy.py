@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import contextvars
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 SCRIPT_PATH = Path(__file__).with_name("discord_bot.py")
 
@@ -38,6 +42,7 @@ def _load_helpers(tmp_path: Path):
         "default_tools",
         "load_tools_for_allowlist",
         "get_prompt_tools_for_allowlist",
+        "get_prompt_tools_for_allowlist_async",
         "get_conversation",
     }
 
@@ -52,23 +57,29 @@ def _load_helpers(tmp_path: Path):
                 selected_nodes.append(node)
         elif isinstance(node, ast.FunctionDef) and node.name in names:
             selected_nodes.append(node)
+        elif isinstance(node, ast.AsyncFunctionDef) and node.name in names:
+            selected_nodes.append(node)
 
     module = ast.Module(body=selected_nodes, type_ignores=[])
 
     events: list[object] = []
     current_tools: list[SimpleNamespace] = []
     captured_prompts: list[list[str]] = []
+    tool_threads: list[int] = []
 
     def fake_clear_tools() -> None:
         events.append("clear")
+        tool_threads.append(threading.get_ident())
         current_tools.clear()
 
     def fake_init_tools(allowlist: list[str]) -> None:
         events.append(("init", tuple(allowlist)))
+        tool_threads.append(threading.get_ident())
         current_tools[:] = [SimpleNamespace(name=name) for name in allowlist]
 
     def fake_get_tools() -> list[SimpleNamespace]:
         events.append("get")
+        tool_threads.append(threading.get_ident())
         return list(current_tools)
 
     def fake_get_prompt(*, tools):
@@ -85,6 +96,7 @@ def _load_helpers(tmp_path: Path):
         "Log": FakeLog,
         "LogManager": FakeLogManager,
         "ToolSpec": object,
+        "asyncio": asyncio,
         "contextvars": contextvars,
         "clear_tools": fake_clear_tools,
         "copy": lambda items: list(items),
@@ -100,11 +112,13 @@ def _load_helpers(tmp_path: Path):
     return (
         namespace["load_tools_for_allowlist"],
         namespace["get_prompt_tools_for_allowlist"],
+        namespace["get_prompt_tools_for_allowlist_async"],
         namespace["get_conversation"],
         namespace["DEFAULT_TOOL_ALLOWLIST"],
         namespace,
         events,
         captured_prompts,
+        tool_threads,
     )
 
 
@@ -112,11 +126,13 @@ def test_load_tools_for_allowlist_resets_context_before_init(tmp_path: Path) -> 
     (
         load_tools_for_allowlist,
         _prompt_tools,
+        _prompt_tools_async,
         _get_conversation,
         _default_allowlist,
         _ns,
         events,
         _captured,
+        _tool_threads,
     ) = _load_helpers(tmp_path)
 
     tools = load_tools_for_allowlist(("read", "shell"))
@@ -131,11 +147,13 @@ def test_get_prompt_tools_uses_default_snapshot_without_mutating_context(
     (
         _load_tools,
         get_prompt_tools,
+        _prompt_tools_async,
         _get_conversation,
         default_allowlist,
         namespace,
         events,
         _captured,
+        _tool_threads,
     ) = _load_helpers(tmp_path)
     namespace["default_tools"] = [
         SimpleNamespace(name="read"),
@@ -154,11 +172,13 @@ def test_get_conversation_refreshes_stored_system_prompt_from_explicit_tools(
     (
         _load_tools,
         _prompt_tools,
+        _prompt_tools_async,
         get_conversation,
         _default_allowlist,
         _ns,
         _events,
         captured_prompts,
+        _tool_threads,
     ) = _load_helpers(tmp_path)
 
     first_tools = [SimpleNamespace(name="read"), SimpleNamespace(name="shell")]
@@ -171,3 +191,29 @@ def test_get_conversation_refreshes_stored_system_prompt_from_explicit_tools(
     assert second_log.messages[0].content == "tools:read"
     assert _ns["conversations"][42].log.messages[0].content == "tools:read"
     assert captured_prompts == [["read", "shell"], ["read"]]
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_tools_async_offloads_non_default_allowlist(
+    tmp_path: Path,
+) -> None:
+    (
+        _load_tools,
+        _prompt_tools,
+        get_prompt_tools_async,
+        _get_conversation,
+        _default_allowlist,
+        _ns,
+        events,
+        _captured,
+        tool_threads,
+    ) = _load_helpers(tmp_path)
+
+    main_thread_id = threading.get_ident()
+
+    prompt_tools = await get_prompt_tools_async(("read",))
+
+    assert [tool.name for tool in prompt_tools] == ["read"]
+    assert events == ["clear", ("init", ("read",)), "get"]
+    assert tool_threads
+    assert any(thread_id != main_thread_id for thread_id in tool_threads)

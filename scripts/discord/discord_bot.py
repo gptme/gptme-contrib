@@ -404,6 +404,20 @@ def get_prompt_tools_for_allowlist(tool_allowlist: tuple[str, ...]) -> list[Tool
     return ctx.run(load_tools_for_allowlist, tool_allowlist)
 
 
+async def get_prompt_tools_for_allowlist_async(
+    tool_allowlist: tuple[str, ...],
+) -> list[ToolSpec]:
+    """Resolve prompt tool descriptions without blocking the event loop."""
+    if default_tools and tool_allowlist == DEFAULT_TOOL_ALLOWLIST:
+        return list(default_tools)
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: get_prompt_tools_for_allowlist(tool_allowlist),
+    )
+
+
 def is_trusted_user_name(user_name: str) -> bool:
     """Return whether a Discord username currently has full bot access."""
     return user_name.lower() in {"erikbjare"}
@@ -1047,7 +1061,7 @@ async def on_message(message: discord.Message) -> None:
         content = content.replace(f"<@!{bot.user.id}>", "").strip()
 
     message_tool_allowlist = DEFAULT_TOOL_ALLOWLIST
-    prompt_tools = get_prompt_tools_for_allowlist(message_tool_allowlist)
+    prompt_tools = await get_prompt_tools_for_allowlist_async(message_tool_allowlist)
 
     # Initialize conversation
     channel_id = message.channel.id
