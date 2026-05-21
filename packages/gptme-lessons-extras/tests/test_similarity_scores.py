@@ -1,9 +1,9 @@
 """Tests for lesson similarity score parsing."""
 
-import tempfile
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 from gptme_lessons_extras.utils.similarity import (
     extract_lesson_info,
     get_lesson_scores,
@@ -152,6 +152,35 @@ class TestGetLessonScores:
         info = _info(fp)
         result = get_lesson_scores(info)
         assert result == {"correctness": 0.80, "brevity": 0.95}
+
+    def test_boolean_values_in_scores_are_ignored(self, tmp_path):
+        """Boolean values in scores are ignored (bool subclass of int trap)."""
+        fp = _write_lesson(
+            tmp_path,
+            "bool-scores.md",
+            """\
+            ---
+            scores:
+              correctness: 0.80
+              is_validated: true
+              brevity: 0.90
+              active: false
+            ---
+            # Boolean-in-Scores Lesson
+
+            ## Context
+            Should not coerce bool to 1.0/0.0.
+            """,
+        )
+        info = _info(fp)
+        result = get_lesson_scores(info)
+        # Only numeric values should survive; bool values are dropped
+        assert result == {"correctness": 0.80, "brevity": 0.90}
+        # Verify average is not skewed by bool -> 1.0 on is_validated
+        avg = sum(result.values()) / len(result)
+        assert avg == pytest.approx(
+            0.85
+        )  # (0.80 + 0.90) / 2, not (0.80 + 1.0 + 0.90 + 0.0) / 4
 
     def test_empty_scores_block_returns_empty(self, tmp_path):
         """A `scores:` block with no numeric children returns empty."""

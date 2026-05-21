@@ -148,7 +148,7 @@ def _coerce_numeric_scores(scores_dict: Dict) -> Dict[str, float]:
     """Extract only numeric score entries, dropping non-numeric ones."""
     result: Dict[str, float] = {}
     for key, value in scores_dict.items():
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             result[str(key)] = float(value)
     return result
 
@@ -174,7 +174,7 @@ def get_lesson_scores(lesson_info: Dict) -> Dict[str, float]:
         return {}
 
     # Parse YAML frontmatter
-    fm = {}
+    fm: dict = {}
     if content.startswith("---"):
         parts = content.split("---", 2)
         if len(parts) >= 3:
