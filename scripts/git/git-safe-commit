@@ -324,15 +324,22 @@ check_clean_worktree_for_hooks() {
     fi
 }
 
-stage_explicit_pathspecs_for_hooks() {
+stage_explicit_pathspecs() {
     if [ "${#PATHSPECS[@]}" -eq 0 ]; then
         return 0
     fi
 
     # The documented wrapper usage is `git-safe-commit file1 file2 -m ...`.
-    # Stage those explicit paths under the commit lock so the pre-commit dirty
-    # worktree guard still blocks unrelated files without forcing callers to
-    # remember a separate `git add`.
+    # Stage those explicit paths under the commit lock so callers don't need
+    # a separate `git add` step for untracked files, and so the pre-commit
+    # dirty worktree guard (when hooks run) sees the explicit set already
+    # staged.
+    #
+    # Runs unconditionally — including under --no-verify — because the
+    # convenience is mode-independent. Without unconditional staging,
+    # `git commit <path>` rejects untracked pathspecs with "did not match
+    # any file(s) known to git", which forces an awkward `git add` step
+    # exactly when the wrapper is supposed to remove it.
     git add -- "${PATHSPECS[@]}"
 }
 
@@ -363,9 +370,10 @@ fi
 
 check_index_corruption
 
+stage_explicit_pathspecs
+
 MANUAL_PRECOMMIT_RAN=0
 if [ "$NO_VERIFY" -ne 1 ]; then
-    stage_explicit_pathspecs_for_hooks
     PRE_COMMIT_HOOK=""
     ALLOW_UNTRACKED_FOR_HOOK=0
     if PRE_COMMIT_HOOK="$(resolve_pre_commit_hook)"; then
