@@ -47,6 +47,15 @@ _LANG_MAP: dict[str, str] = {
     ".rs": "rust",
 }
 
+_GRAMMAR_MODULES: dict[str, str] = {
+    "python": "tree_sitter_python",
+    "javascript": "tree_sitter_javascript",
+    "jsx": "tree_sitter_javascript",
+    "typescript": "tree_sitter_typescript",
+    "tsx": "tree_sitter_typescript",
+    "rust": "tree_sitter_rust",
+}
+
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
 _NOISE_PATH_PARTS: frozenset[str] = frozenset(
     {"__pycache__", "node_modules", ".git", "target"}
@@ -583,6 +592,68 @@ class FileParseResult:
 
     symbols: list[Symbol] = field(default_factory=list)
     imports: list[ImportInfo] = field(default_factory=list)
+    language: str | None = None
+    diagnostic: dict[str, str] | None = None
+
+
+@dataclass
+class _ParseAttempt:
+    """Internal parse result that preserves failure diagnostics."""
+
+    root: object | None = None
+    parser: object | None = None
+    diagnostic: dict[str, str] | None = None
+
+
+def _missing_grammar_diagnostic(lang_name: str) -> dict[str, str]:
+    """Describe how to fix a missing tree-sitter grammar."""
+    module_name = _GRAMMAR_MODULES.get(lang_name, "tree_sitter_<unknown>")
+    package_name = module_name.replace("_", "-")
+    return {
+        "code": "missing-grammar",
+        "language": lang_name,
+        "message": (
+            f"Missing tree-sitter grammar for {lang_name} ({module_name}). "
+            f"Install gptme-codegraph[treesitter] or add {package_name} to the environment."
+        ),
+    }
+
+
+def _tree_sitter_parse_attempt(code: bytes, lang_name: str = "python") -> _ParseAttempt:
+    """Parse source code with tree-sitter and preserve missing-dependency diagnostics."""
+    try:
+        from tree_sitter import Parser  # type: ignore[import-untyped,unused-ignore]
+    except ImportError:
+        return _ParseAttempt(
+            diagnostic={
+                "code": "missing-tree-sitter",
+                "language": lang_name,
+                "message": (
+                    "Missing tree-sitter runtime. Install gptme-codegraph[treesitter] "
+                    "or add tree-sitter plus the relevant language grammar to the environment."
+                ),
+            }
+        )
+
+    parser = Parser()
+    language = _load_language(lang_name)
+    if language is None:
+        diagnostic = None
+        if lang_name in _GRAMMAR_MODULES:
+            diagnostic = _missing_grammar_diagnostic(lang_name)
+        return _ParseAttempt(diagnostic=diagnostic)
+
+    parser.language = language
+    tree = parser.parse(code)
+    if tree is None:
+        return _ParseAttempt(
+            diagnostic={
+                "code": "parse-failed",
+                "language": lang_name,
+                "message": f"tree-sitter failed to parse {lang_name} source.",
+            }
+        )
+    return _ParseAttempt(root=tree.root_node, parser=parser)
 
 
 def _tree_sitter_parse(code: bytes, lang_name: str = "python"):
@@ -591,20 +662,8 @@ def _tree_sitter_parse(code: bytes, lang_name: str = "python"):
     Falls back gracefully if tree-sitter or the grammar is unavailable.
     Returns (root_node, parser) on success.
     """
-    try:
-        from tree_sitter import Parser  # type: ignore[import-untyped,unused-ignore]
-
-        parser = Parser()
-        language = _load_language(lang_name)
-        if language is None:
-            return None, None
-        parser.language = language
-        tree = parser.parse(code)
-        if tree is None:
-            return None, None
-        return tree.root_node, parser
-    except ImportError:
-        return None, None
+    attempt = _tree_sitter_parse_attempt(code, lang_name)
+    return attempt.root, attempt.parser
 
 
 def _text(node) -> str:
@@ -1141,9 +1200,10 @@ def parse_file(filepath: Path) -> FileParseResult:
     lang_name = _detect_language(filepath)
     if lang_name is None:
         return FileParseResult()
-    root, _parser = _tree_sitter_parse(code, lang_name)
+    attempt = _tree_sitter_parse_attempt(code, lang_name)
+    root = attempt.root
     if root is None:
-        return FileParseResult()
+        return FileParseResult(language=lang_name, diagnostic=attempt.diagnostic)
 
     filename = str(filepath)
     symbols: list[Symbol] = []
@@ -1166,7 +1226,7 @@ def parse_file(filepath: Path) -> FileParseResult:
     for imp in imports:
         imp.file = filename
 
-    return FileParseResult(symbols=symbols, imports=imports)
+    return FileParseResult(symbols=symbols, imports=imports, language=lang_name)
 
 
 def extract_symbols(filepath: Path) -> list[Symbol]:
@@ -1818,9 +1878,16 @@ def main():
     if not filepath.is_file():
         sys.exit(f"Not a file: {filepath}")
 
-    symbols = extract_symbols(filepath)
+    result = parse_file(filepath)
+    symbols = result.symbols
     if not symbols:
-        print("No symbols found.")
+        if result.diagnostic is not None:
+            if args.json:
+                print(format_json({"file": str(filepath), **result.diagnostic}))
+            else:
+                print(result.diagnostic["message"])
+        else:
+            print("No symbols found.")
         return
 
     name_map = {s.name: s for s in symbols}
