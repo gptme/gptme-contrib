@@ -78,6 +78,8 @@ SENSITIVE_PATH_PREFIXES = (
     "scripts/github/self-merge-check",
     "scripts/github/pr-greptile-trigger",
     "scripts/github/greptile-helper",
+    "scripts/session-bandit",
+    "scripts/state-delta",
     "infra/",
     "k8s/",
     "secrets/",
