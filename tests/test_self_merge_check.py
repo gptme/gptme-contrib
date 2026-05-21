@@ -228,6 +228,76 @@ def test_detect_workspace_repo_falls_back_when_cwd_remote_is_not_github() -> Non
     assert mock_run.call_count == 2
 
 
+def test_resolve_gate_helper_uses_workspace_sibling(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    script_path = (
+        workspace / "gptme-contrib" / "scripts" / "github" / "self-merge-check.py"
+    )
+    helper = workspace / "scripts" / "github-rate-limit-health.sh"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("#!/bin/sh\nexit 0\n")
+    helper.chmod(0o755)
+
+    with patch.dict("os.environ", {}, clear=True):
+        resolved = self_merge_check._resolve_gate_helper(script_path)
+
+    assert resolved == str(helper)
+
+
+def test_resolve_gate_helper_does_not_walk_arbitrary_ancestors(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    script_path = (
+        workspace / "gptme-contrib" / "scripts" / "github" / "self-merge-check.py"
+    )
+    unsafe_helper = workspace / "gptme-contrib" / "github-rate-limit-health.sh"
+    unsafe_helper.parent.mkdir(parents=True)
+    unsafe_helper.write_text("#!/bin/sh\nexit 0\n")
+    unsafe_helper.chmod(0o755)
+
+    with patch.dict("os.environ", {}, clear=True):
+        resolved = self_merge_check._resolve_gate_helper(script_path)
+
+    assert resolved is None
+
+
+def test_resolve_gate_helper_rejects_missing_explicit_path(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-helper.sh"
+
+    with patch.dict(
+        "os.environ",
+        {self_merge_check.GATE_HELPER_ENV: str(missing)},
+        clear=True,
+    ):
+        with pytest.raises(RuntimeError, match="points to a missing helper"):
+            self_merge_check._resolve_gate_helper()
+
+
+def test_main_returns_error_for_missing_explicit_gate_helper(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing-helper.sh"
+
+    with (
+        patch.dict(
+            "os.environ",
+            {self_merge_check.GATE_HELPER_ENV: str(missing)},
+            clear=True,
+        ),
+        patch.object(
+            self_merge_check.sys,
+            "argv",
+            ["self-merge-check.py", "--repo", "gptme/gptme-contrib", "123"],
+        ),
+    ):
+        rc = self_merge_check.main()
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert (
+        f"{self_merge_check.GATE_HELPER_ENV} points to a missing helper" in captured.err
+    )
+
+
 def test_fetch_pr_uses_paginated_rest_files_api() -> None:
     pr_metadata = {
         "number": 504,
