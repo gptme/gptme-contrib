@@ -273,15 +273,15 @@ async def async_step(
     # This is needed because run_in_executor doesn't propagate ContextVars to thread pool workers
     ctx = contextvars.copy_context()
 
+    # Rebuild the tool context once per request so narrower allowlists do not
+    # inherit tools from a broader startup context.
+    await loop.run_in_executor(
+        None,
+        lambda: ctx.run(load_tools_for_allowlist, tool_allowlist),
+    )
+
     while True:
         try:
-            # Rebuild the tool context for this request so narrower allowlists
-            # do not inherit tools from a broader startup context.
-            await loop.run_in_executor(
-                None,
-                lambda: ctx.run(load_tools_for_allowlist, tool_allowlist),
-            )
-
             # debug
             # print("\n---\n".join([f"{msg.role} - {msg.content[:20]}..." for msg in current_log]))
 

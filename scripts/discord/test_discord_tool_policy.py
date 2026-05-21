@@ -8,6 +8,7 @@ import contextvars
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import AsyncGenerator
 
 import pytest
 
@@ -17,6 +18,18 @@ SCRIPT_PATH = Path(__file__).with_name("discord_bot.py")
 class FakeLog:
     def __init__(self, messages):
         self.messages = list(messages)
+
+    def __len__(self):
+        return len(self.messages)
+
+    def __getitem__(self, index):
+        return self.messages[index]
+
+    def append(self, message):
+        return type(self)(self.messages + [message])
+
+    def replace(self, *, messages):
+        return type(self)(messages)
 
 
 class FakeLogManager:
@@ -122,6 +135,75 @@ def _load_helpers(tmp_path: Path):
     )
 
 
+def _load_async_step(tmp_path: Path):
+    tree = ast.parse(SCRIPT_PATH.read_text(), filename=str(SCRIPT_PATH))
+    async_step_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_step"
+    )
+    module = ast.Module(body=[async_step_node], type_ignores=[])
+
+    step_calls: list[list[str]] = []
+    tool_load_calls: list[tuple[str, ...]] = []
+    completion_events: list[dict[str, object]] = []
+
+    class FakeOperation:
+        def complete(self, **kwargs) -> None:
+            completion_events.append(kwargs)
+
+    class FakeMetrics:
+        def start_operation(self, *_args) -> FakeOperation:
+            return FakeOperation()
+
+    class FakeToolUse:
+        @staticmethod
+        def iter_from_content(content: str):
+            if content == "tool:run":
+                return [SimpleNamespace(is_runnable=True)]
+            return []
+
+    class FakeContext:
+        def run(self, fn, *args):
+            return fn(*args)
+
+    class FakeLogger:
+        def exception(self, _message: str) -> None:
+            return None
+
+    def fake_step(current_log, **_kwargs):
+        step_calls.append([msg.content for msg in current_log.messages])
+        if len(step_calls) == 1:
+            return [SimpleNamespace(role="assistant", content="tool:run")]
+        return [SimpleNamespace(role="assistant", content="done")]
+
+    async def fake_fetch_discord_history(_channel) -> str:
+        return ""
+
+    def fake_load_tools_for_allowlist(tool_allowlist: tuple[str, ...]):
+        tool_load_calls.append(tool_allowlist)
+        return [SimpleNamespace(name=name) for name in tool_allowlist]
+
+    namespace = {
+        "AsyncGenerator": AsyncGenerator,
+        "Log": FakeLog,
+        "Message": SimpleNamespace,
+        "ToolUse": FakeToolUse,
+        "asyncio": asyncio,
+        "contextvars": SimpleNamespace(copy_context=lambda: FakeContext()),
+        "discord": SimpleNamespace(abc=SimpleNamespace(Messageable=object)),
+        "fetch_discord_history": fake_fetch_discord_history,
+        "get_settings": lambda _channel_id: SimpleNamespace(model="test-model"),
+        "load_tools_for_allowlist": fake_load_tools_for_allowlist,
+        "logger": FakeLogger(),
+        "metrics": FakeMetrics(),
+        "step": fake_step,
+        "workspace_root": tmp_path,
+    }
+    exec(compile(module, str(SCRIPT_PATH), "exec"), namespace)
+    return namespace["async_step"], step_calls, tool_load_calls, completion_events
+
+
 def test_load_tools_for_allowlist_resets_context_before_init(tmp_path: Path) -> None:
     (
         load_tools_for_allowlist,
@@ -217,3 +299,26 @@ async def test_get_prompt_tools_async_offloads_non_default_allowlist(
     assert events == ["clear", ("init", ("read",)), "get"]
     assert tool_threads
     assert any(thread_id != main_thread_id for thread_id in tool_threads)
+
+
+@pytest.mark.asyncio
+async def test_async_step_reloads_tools_once_per_request(tmp_path: Path) -> None:
+    async_step, step_calls, tool_load_calls, completion_events = _load_async_step(
+        tmp_path
+    )
+
+    log = FakeLog([SimpleNamespace(role="user", content="hello")])
+    messages = [
+        msg
+        async for msg in async_step(
+            log,
+            42,
+            SimpleNamespace(),
+            ("read", "shell"),
+        )
+    ]
+
+    assert [msg.content for msg in messages] == ["tool:run", "done"]
+    assert step_calls == [["hello"], ["hello", "tool:run"]]
+    assert tool_load_calls == [("read", "shell")]
+    assert completion_events == [{"success": True}]
