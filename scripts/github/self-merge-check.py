@@ -1019,6 +1019,57 @@ def main() -> int:
     args = parser.parse_args()
     workspace_repos = _resolve_workspace_repos(args)
 
+    # GraphQL rate-limit gate. self-merge-check fires a multi-page GraphQL
+    # query (reviewThreads + commits + status checks) — easily 50-200
+    # points per invocation. When the GraphQL bucket is over the configured
+    # threshold, defer rather than dig the hole deeper.
+    #
+    # Gate is OPTIONAL — controlled by $BOB_GH_RATE_LIMIT_HELPER or by
+    # finding a sibling `github-rate-limit-health.sh` in the parent
+    # workspace. When the helper isn't present this code path is a no-op,
+    # so gptme-contrib remains standalone-usable.
+    #
+    # Operators who explicitly want to force-check can bypass with
+    # $BOB_FORCE_SELF_MERGE_CHECK=1.
+    if not os.environ.get("BOB_FORCE_SELF_MERGE_CHECK"):
+        gate_helper = os.environ.get("BOB_GH_RATE_LIMIT_HELPER")
+        if not gate_helper:
+            # Probe common locations relative to this script. Walk up to
+            # find a workspace-level helper without requiring an env var.
+            here = os.path.dirname(os.path.abspath(__file__))
+            for _ in range(4):
+                candidate = os.path.join(here, "github-rate-limit-health.sh")
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    gate_helper = candidate
+                    break
+                parent = os.path.dirname(here)
+                if parent == here:
+                    break
+                here = parent
+        if gate_helper and os.access(gate_helper, os.X_OK):
+            try:
+                gate = subprocess.run(
+                    [gate_helper, "--gate"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if gate.returncode == 76:
+                    msg = (
+                        "self-merge-check deferred: GitHub API rate limit "
+                        "over threshold (gate exit 76). Set "
+                        "BOB_FORCE_SELF_MERGE_CHECK=1 to override."
+                    )
+                    if args.json:
+                        print(json.dumps({"deferred": True, "reason": msg}))
+                    else:
+                        print(msg, file=sys.stderr)
+                    return 76
+            except (subprocess.TimeoutExpired, OSError):
+                # Gate itself failed — don't block the real check on a
+                # broken health helper. Fall through to the normal path.
+                pass
+
     try:
         repo, number = parse_pr_target(args.pr, args.repo, args.number)
         result = evaluate_pr(
