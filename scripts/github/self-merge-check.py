@@ -214,7 +214,9 @@ def _resolve_gate_helper(script_path: Path | None = None) -> str | None:
 def _maybe_defer_for_rate_limit(
     *, json_output: bool, script_path: Path | None = None
 ) -> int | None:
-    if os.environ.get(FORCE_SELF_MERGE_CHECK_ENV):
+    if os.environ.get(FORCE_SELF_MERGE_CHECK_ENV) or os.environ.get(
+        FORCE_SELF_MERGE_CHECK_ENV_LEGACY
+    ):
         return None
 
     gate_helper = _resolve_gate_helper(script_path)
@@ -238,7 +240,7 @@ def _maybe_defer_for_rate_limit(
     msg = (
         "self-merge-check deferred: GitHub API rate limit over threshold "
         f"(gate exit {GATE_DEFER_EXIT}). Set {FORCE_SELF_MERGE_CHECK_ENV}=1 "
-        "to override."
+        f"(or {FORCE_SELF_MERGE_CHECK_ENV_LEGACY}=1) to override."
     )
     if json_output:
         print(json.dumps({"deferred": True, "reason": msg}))

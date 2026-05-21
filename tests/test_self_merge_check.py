@@ -315,6 +315,50 @@ def test_resolve_gate_helper_rejects_non_executable_explicit_path(
             self_merge_check._resolve_gate_helper()
 
 
+def test_maybe_defer_for_rate_limit_honors_force_self_merge_check(
+    tmp_path: Path,
+) -> None:
+    """FORCE_SELF_MERGE_CHECK=1 should bypass the rate-limit gate entirely."""
+    # Set up a valid helper so the ONLY reason we skip is the force env var
+    helper = tmp_path / "gate-helper.sh"
+    helper.write_text("#!/bin/sh\necho 'rate limited'; exit 76\n")
+    helper.chmod(0o755)
+
+    with patch.dict(
+        "os.environ",
+        {
+            self_merge_check.FORCE_SELF_MERGE_CHECK_ENV: "1",
+            self_merge_check.GATE_HELPER_ENV: str(helper),
+        },
+        clear=True,
+    ):
+        result = self_merge_check._maybe_defer_for_rate_limit(json_output=False)
+
+    # The force bypass means the gate is never run — return None to proceed.
+    assert result is None
+
+
+def test_maybe_defer_for_rate_limit_honors_legacy_force_self_merge_check(
+    tmp_path: Path,
+) -> None:
+    """BOB_FORCE_SELF_MERGE_CHECK=1 (legacy name) should also bypass the gate."""
+    helper = tmp_path / "gate-helper.sh"
+    helper.write_text("#!/bin/sh\necho 'rate limited'; exit 76\n")
+    helper.chmod(0o755)
+
+    with patch.dict(
+        "os.environ",
+        {
+            self_merge_check.FORCE_SELF_MERGE_CHECK_ENV_LEGACY: "1",
+            self_merge_check.GATE_HELPER_ENV: str(helper),
+        },
+        clear=True,
+    ):
+        result = self_merge_check._maybe_defer_for_rate_limit(json_output=False)
+
+    assert result is None
+
+
 def test_fetch_pr_uses_paginated_rest_files_api() -> None:
     pr_metadata = {
         "number": 504,
