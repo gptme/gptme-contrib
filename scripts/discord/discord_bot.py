@@ -56,6 +56,7 @@ from gptme.telemetry import init_telemetry, shutdown_telemetry
 from gptme.tools import (
     ToolSpec,
     ToolUse,
+    clear_tools,
     get_tools,
     init_tools,
 )
@@ -96,10 +97,16 @@ conversation_tracker = ConversationTracker(state_dir)
 metrics = MetricsCollector()
 
 # Basic tools only for testing
-tool_allowlist = frozenset(["read", "save", "append", "patch", "shell"])
-# tool_allowlist = ["read", "save", "append", "patch", "shell", "ipython", "browser"]
+DEFAULT_TOOL_ALLOWLIST: tuple[str, ...] = (
+    "read",
+    "save",
+    "append",
+    "patch",
+    "shell",
+)
+# DEFAULT_TOOL_ALLOWLIST = ("read", "save", "append", "patch", "shell", "ipython", "browser")
 
-tools: list[ToolSpec] = []
+default_tools: list[ToolSpec] = []
 
 # Load environment variables
 env_files = [".env", ".env.discord"]
@@ -231,6 +238,7 @@ async def async_step(
     log: Log,
     channel_id: int,
     channel: discord.abc.Messageable,
+    tool_allowlist: tuple[str, ...],
 ) -> AsyncGenerator[Message, None]:
     """Async wrapper around gptme.chat.step that supports multiple tool executions."""
 
@@ -267,9 +275,11 @@ async def async_step(
 
     while True:
         try:
-            # init tools in async thread with copied context
+            # Rebuild the tool context for this request so narrower allowlists
+            # do not inherit tools from a broader startup context.
             await loop.run_in_executor(
-                None, lambda: ctx.run(init_tools, list(tool_allowlist))
+                None,
+                lambda: ctx.run(load_tools_for_allowlist, tool_allowlist),
             )
 
             # debug
@@ -373,9 +383,35 @@ def get_settings(channel_id: ChannelID) -> ChannelSettings:
     return channel_settings[channel_id]
 
 
-def get_conversation(channel_id: ChannelID) -> Log:
+def load_tools_for_allowlist(tool_allowlist: tuple[str, ...]) -> list[ToolSpec]:
+    """Return the exact tool set for an allowlist in the current context."""
+    clear_tools()
+    init_tools(list(tool_allowlist))
+    loaded_tools = list(get_tools())
+    if not loaded_tools:
+        raise RuntimeError(
+            f"No tools loaded for allowlist: {', '.join(tool_allowlist) or '(empty)'}"
+        )
+    return loaded_tools
+
+
+def get_prompt_tools_for_allowlist(tool_allowlist: tuple[str, ...]) -> list[ToolSpec]:
+    """Resolve prompt tool descriptions without mutating the caller's context."""
+    if default_tools and tool_allowlist == DEFAULT_TOOL_ALLOWLIST:
+        return list(default_tools)
+
+    ctx = contextvars.copy_context()
+    return ctx.run(load_tools_for_allowlist, tool_allowlist)
+
+
+def is_trusted_user_name(user_name: str) -> bool:
+    """Return whether a Discord username currently has full bot access."""
+    return user_name.lower() in {"erikbjare"}
+
+
+def get_conversation(channel_id: ChannelID, prompt_tools: list[ToolSpec]) -> Log:
     """Get or create a conversation for a channel."""
-    initial_msgs = get_prompt(tools=tools)
+    initial_msgs = get_prompt(tools=prompt_tools)
     assert initial_msgs
 
     # Initialize a new conversation
@@ -793,7 +829,11 @@ async def status(ctx: commands.Context) -> None:
         assistant_msgs = sum(1 for m in log if m.role == "assistant")
 
         # Get current tools
-        tools_str = ", ".join(t.name for t in tools) if tools else "No tools loaded"
+        tools_str = (
+            ", ".join(t.name for t in default_tools)
+            if default_tools
+            else "No tools loaded"
+        )
 
         await ctx.send(
             f"Conversation status:\n"
@@ -924,6 +964,7 @@ async def handle_new_dm(message: discord.Message) -> None:
 async def process_conversation_step(
     message: discord.Message,
     channel_id: int,
+    tool_allowlist: tuple[str, ...],
     current_response: discord.Message | None = None,
 ) -> tuple[discord.Message | None, bool]:
     """Process a single conversation step."""
@@ -931,7 +972,10 @@ async def process_conversation_step(
     accumulated_content = ""
 
     async for msg in async_step(
-        conversations[channel_id].log, channel_id, message.channel
+        conversations[channel_id].log,
+        channel_id,
+        message.channel,
+        tool_allowlist,
     ):
         logger.info(f"Processing response msg: {msg}")
         (
@@ -983,7 +1027,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # Only allow trusted users (temporary security measure)
-    is_trusted = message.author.name.lower() in ["erikbjare"]
+    is_trusted = is_trusted_user_name(message.author.name)
     if not is_trusted:
         if is_mentioned:
             await message.channel.send(
@@ -1001,9 +1045,12 @@ async def on_message(message: discord.Message) -> None:
         content = content.replace(f"<@{bot.user.id}>", "").strip()
         content = content.replace(f"<@!{bot.user.id}>", "").strip()
 
+    message_tool_allowlist = DEFAULT_TOOL_ALLOWLIST
+    prompt_tools = get_prompt_tools_for_allowlist(message_tool_allowlist)
+
     # Initialize conversation
     channel_id = message.channel.id
-    log = get_conversation(channel_id)
+    log = get_conversation(channel_id, prompt_tools)
     logger.info(f"Lenght of log: {len(log)}")
 
     # Check if this is a new DM conversation by looking at message history
@@ -1034,7 +1081,10 @@ async def on_message(message: discord.Message) -> None:
         current_response = None
         async with message.channel.typing():
             current_response, had_error = await process_conversation_step(
-                message, channel_id, current_response
+                message,
+                channel_id,
+                message_tool_allowlist,
+                current_response,
             )
 
         # Update reaction based on result
@@ -1087,27 +1137,28 @@ def main() -> None:
 
     # Initialize gptme
     try:
-        # Restrict tools
-        # TODO: do this in a non-global way
-        global tools
+        global default_tools
 
-        # Initialize gptme and tools
+        # Bootstrap the default tool context; per-request tool policies are
+        # rebuilt in async_step() so future trust tiers can narrow tools safely.
         init(
             model=MODEL,
             interactive=False,
-            tool_allowlist=list(tool_allowlist),
+            tool_allowlist=list(DEFAULT_TOOL_ALLOWLIST),
             tool_format="markdown",
         )
-        tools = init_tools(list(tool_allowlist))
-        tools = get_tools()
-        if not tools:
+        default_tools = list(get_tools())
+        if not default_tools:
             logger.error("No tools loaded in gptme")
             return
         logger.info(
-            f"Loaded {len(tools)} gptme tools: {', '.join(t.name for t in tools)}"
+            "Loaded %d gptme tools: %s",
+            len(default_tools),
+            ", ".join(t.name for t in default_tools),
         )
         logger.info(
-            f"Successfully initialized gptme with tools ({', '.join(tool_allowlist)})"
+            "Successfully initialized gptme with tools (%s)",
+            ", ".join(DEFAULT_TOOL_ALLOWLIST),
         )
     except Exception as e:
         logger.error(f"Failed to initialize gptme tools: {e}")
