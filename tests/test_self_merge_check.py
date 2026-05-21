@@ -366,6 +366,22 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
     assert self_merge_check.is_sensitive_path(path) is expected
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/session-bandit.py",
+        "scripts/session-bandit-v2.py",
+        "scripts/session_bandit.py",
+        "scripts/state-delta.py",
+        "scripts/state_delta.py",
+    ],
+)
+def test_classify_loop_control_paths_blocked(path: str) -> None:
+    category, reasons = self_merge_check.classify_category([path])
+    assert category is None
+    assert any("sensitive" in reason.lower() for reason in reasons)
+
+
 def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
     """Explicit opt-out (workspace_repos=[]) emits a warning but does not disqualify."""
     pr_data = {

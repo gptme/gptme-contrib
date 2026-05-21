@@ -78,8 +78,13 @@ SENSITIVE_PATH_PREFIXES = (
     "scripts/github/self-merge-check",
     "scripts/github/pr-greptile-trigger",
     "scripts/github/greptile-helper",
+    # Downstream agent workspaces commonly use these loop-control entrypoints.
+    # Guard both hyphenated and underscored spellings so naming drift still
+    # forces human review.
     "scripts/session-bandit",
+    "scripts/session_bandit",
     "scripts/state-delta",
+    "scripts/state_delta",
     "infra/",
     "k8s/",
     "secrets/",
