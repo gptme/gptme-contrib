@@ -130,6 +130,43 @@ class TestGetLessonScores:
         result = get_lesson_scores(info)
         assert result == {"effectiveness": 0.65}
 
+    def test_effectiveness_average_boolean_is_ignored(self, tmp_path):
+        """Boolean `effectiveness.average` should not coerce to 1.0/0.0."""
+        fp = _write_lesson(
+            tmp_path,
+            "eff-bool-average.md",
+            """\
+            ---
+            effectiveness:
+              average: true
+            ---
+            # Effective Bool Average
+
+            ## Context
+            Invalid numeric signal.
+            """,
+        )
+        info = _info(fp)
+        assert get_lesson_scores(info) == {}
+
+    def test_effectiveness_direct_boolean_is_ignored(self, tmp_path):
+        """Boolean `effectiveness` should not coerce to 1.0/0.0."""
+        fp = _write_lesson(
+            tmp_path,
+            "eff-bool-direct.md",
+            """\
+            ---
+            effectiveness: false
+            ---
+            # Effective Bool Direct
+
+            ## Context
+            Invalid numeric signal.
+            """,
+        )
+        info = _info(fp)
+        assert get_lesson_scores(info) == {}
+
     def test_non_numeric_scores_are_ignored(self, tmp_path):
         """Non-numeric score values are dropped, not treated as zero."""
         fp = _write_lesson(

@@ -7,7 +7,7 @@ Uses text-based similarity (title + context) for fast comparison.
 
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, TypeGuard
 
 
 def extract_lesson_info(filepath: Path) -> Dict:
@@ -144,11 +144,16 @@ def find_similar_lessons(lesson_dir: Path, threshold: float = 0.7) -> List[List[
     return result
 
 
+def _is_numeric_score_value(value: object) -> TypeGuard[int | float]:
+    """Return True only for real numeric score values, not booleans."""
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
 def _coerce_numeric_scores(scores_dict: Dict) -> Dict[str, float]:
     """Extract only numeric score entries, dropping non-numeric ones."""
     result: Dict[str, float] = {}
     for key, value in scores_dict.items():
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if _is_numeric_score_value(value):
             result[str(key)] = float(value)
     return result
 
@@ -206,9 +211,9 @@ def get_lesson_scores(lesson_info: Dict) -> Dict[str, float]:
     effectiveness = fm.get("effectiveness")
     if isinstance(effectiveness, dict):
         avg = effectiveness.get("average")
-        if isinstance(avg, (int, float)):
+        if _is_numeric_score_value(avg):
             return {"effectiveness": float(avg)}
-    elif isinstance(effectiveness, (int, float)):
+    elif _is_numeric_score_value(effectiveness):
         return {"effectiveness": float(effectiveness)}
 
     return {}
