@@ -179,9 +179,10 @@ emit_item() {
 }
 
 discover_repos() {
-    # Cache repo list for 1 hour — org membership rarely changes
+    # Cache repo list for 1 hour by default — org membership rarely changes.
+    # Override with GH_CACHE_TTL_REPO (seconds).
     local cache_file="$STATE_DIR/repo-list-${ORG}.cache"
-    local cache_max_age=3600  # seconds
+    local cache_max_age="${GH_CACHE_TTL_REPO:-3600}"
 
     if [ -f "$cache_file" ]; then
         local cache_age
@@ -209,18 +210,22 @@ discover_repos() {
     for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
 }
 
-# Per-repo GraphQL response cache. Default cadence is every 2 minutes across 50
-# repos × 3 gh calls = 150 GraphQL ops/run → 4,500/hr. With a 4-min TTL on
-# PR data (the most time-critical) and 5-min TTLs on issues/master-CI, we serve
-# from cache on every other run and refresh in the next, cutting load by ~50%
-# without changing cadence.
+# Per-repo GraphQL response cache. Project monitoring runs every 2 minutes
+# across 50 repos, so the old defaults implied roughly 750 PR-data fetches/hr
+# plus 500/hr each for assigned-issue and master-CI fetches (~1,750/hr total).
+# Raising the defaults to 480s / 600s / 600s drops those lanes to ~375 / 300 /
+# 300 fetches/hr (~975/hr total) without changing cadence.
 #
 # Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN (seconds).
 # Set any to 0 to bypass the cache (useful for diagnostics).
 GH_CACHE_DIR="${GH_CACHE_DIR:-$STATE_DIR/gh-cache}"
-GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-240}"
-GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-300}"
-GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-300}"
+# Increased from 240→480 and 300→600 (2026-05-21) after GraphQL rate-limit regression.
+# At a 2-minute cadence, the PR-data lane drops from ~750 fetches/hr to ~375/hr
+# (75% cache hit instead of 50%).
+# See: tasks/github-graphql-rate-limit-regression.md
+GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-480}"
+GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-600}"
+GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
 
 # Read cached value if fresh enough, else run the producer command and cache its
 # stdout. The producer is passed as a single shell-evaluated string so callers
