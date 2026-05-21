@@ -431,7 +431,8 @@ def get_conversation(channel_id: ChannelID, prompt_tools: list[ToolSpec]) -> Log
         msgs.insert(0, msg)
 
     assert msgs
-    return Log(msgs)
+    conversations[channel_id].log = Log(msgs)
+    return conversations[channel_id].log
 
 
 def check_rate_limit(

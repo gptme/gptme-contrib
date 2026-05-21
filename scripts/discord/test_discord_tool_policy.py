@@ -148,7 +148,7 @@ def test_get_prompt_tools_uses_default_snapshot_without_mutating_context(
     assert events == []
 
 
-def test_get_conversation_refreshes_system_prompt_from_explicit_tools(
+def test_get_conversation_refreshes_stored_system_prompt_from_explicit_tools(
     tmp_path: Path,
 ) -> None:
     (
@@ -169,4 +169,5 @@ def test_get_conversation_refreshes_system_prompt_from_explicit_tools(
 
     assert first_log.messages[0].content == "tools:read,shell"
     assert second_log.messages[0].content == "tools:read"
+    assert _ns["conversations"][42].log.messages[0].content == "tools:read"
     assert captured_prompts == [["read", "shell"], ["read"]]
