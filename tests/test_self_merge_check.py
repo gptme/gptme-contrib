@@ -298,6 +298,23 @@ def test_main_returns_error_for_missing_explicit_gate_helper(
     )
 
 
+def test_resolve_gate_helper_rejects_non_executable_explicit_path(
+    tmp_path: Path,
+) -> None:
+    """A configured GATE_HELPER_ENV pointing to a non-executable file must fail."""
+    non_exec = tmp_path / "not-executable.sh"
+    non_exec.write_text("#!/bin/sh\nexit 0\n")
+    non_exec.chmod(0o644)  # readable but not executable
+
+    with patch.dict(
+        "os.environ",
+        {self_merge_check.GATE_HELPER_ENV: str(non_exec)},
+        clear=True,
+    ):
+        with pytest.raises(RuntimeError, match="is not executable"):
+            self_merge_check._resolve_gate_helper()
+
+
 def test_fetch_pr_uses_paginated_rest_files_api() -> None:
     pr_metadata = {
         "number": 504,

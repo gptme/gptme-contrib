@@ -27,13 +27,15 @@ Usage:
     python3 scripts/github/self-merge-check.py --json <pr-url>
 
 Environment:
-    BOB_GH_RATE_LIMIT_HELPER
+    GH_RATE_LIMIT_HELPER
                     Optional explicit path to a GitHub API rate-limit gate
                     helper. When set, it must point to an executable helper or
                     the script exits with code 2 instead of silently bypassing
                     the gate.
-    BOB_FORCE_SELF_MERGE_CHECK
+                    Falls back to BOB_GH_RATE_LIMIT_HELPER for compatibility.
+    FORCE_SELF_MERGE_CHECK
                     Set to bypass the optional GitHub API rate-limit gate.
+                    Falls back to BOB_FORCE_SELF_MERGE_CHECK for compatibility.
     WORKSPACE_REPO  Allowlist of workspace repos (owner/name), comma- or
                     whitespace-separated. Auto-detected single repo used when
                     unset. Set to empty string to disable the cross-repo
@@ -137,8 +139,10 @@ BOT_CONFIG_FILES = {
 }
 BOT_CONFIG_PREFIXES = (".github/",)
 SELF_MERGE_ALLOWED_PATHS_ENV = "SELF_MERGE_ALLOWED_PATHS"
-GATE_HELPER_ENV = "BOB_GH_RATE_LIMIT_HELPER"
-FORCE_SELF_MERGE_CHECK_ENV = "BOB_FORCE_SELF_MERGE_CHECK"
+GATE_HELPER_ENV = "GH_RATE_LIMIT_HELPER"
+GATE_HELPER_ENV_LEGACY = "BOB_GH_RATE_LIMIT_HELPER"
+FORCE_SELF_MERGE_CHECK_ENV = "FORCE_SELF_MERGE_CHECK"
+FORCE_SELF_MERGE_CHECK_ENV_LEGACY = "BOB_FORCE_SELF_MERGE_CHECK"
 GATE_DEFER_EXIT = 76
 
 
@@ -181,7 +185,9 @@ def get_gh_user() -> str:
 def _resolve_gate_helper(script_path: Path | None = None) -> str | None:
     """Resolve the optional GitHub API rate-limit gate helper."""
 
-    explicit_helper = os.environ.get(GATE_HELPER_ENV)
+    explicit_helper = os.environ.get(GATE_HELPER_ENV) or os.environ.get(
+        GATE_HELPER_ENV_LEGACY
+    )
     if explicit_helper:
         helper = Path(explicit_helper).expanduser()
         if not helper.is_file():
