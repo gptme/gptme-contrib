@@ -375,6 +375,19 @@ def _execute_switch_decision(
             print("Malformed switch decision", file=sys.stderr)
         return 1, payload
 
+    def _attempt_revert(previous_slot: str, reason: str) -> bool:
+        reverted = sm.switch_to(previous_slot, reason)
+        if reverted:
+            payload["reverted_to"] = previous_slot
+            return True
+        payload["revert_failed"] = True
+        if sm.last_switch_deferred:
+            payload["revert_deferred"] = True
+            payload["revert_reason"] = "revert deferred by active locks"
+        else:
+            payload["revert_reason"] = "revert failed"
+        return False
+
     if target == cfg.primary and previous and previous != cfg.primary:
         cooldown = sm.seconds_since_last_primary_departure()
         if cooldown is not None and cooldown < cfg.probe_primary_cooldown:
@@ -417,8 +430,7 @@ def _execute_switch_decision(
         if target == cfg.primary and previous and previous != cfg.primary:
             if emit_text:
                 print(f"  WARNING: could not verify {cfg.primary}'s quota — reverting")
-            sm.switch_to(previous, "auto-revert: usage check failed")
-            payload["reverted_to"] = previous
+            _attempt_revert(previous, "auto-revert: usage check failed")
         return 0, payload
 
     payload["verified"] = True
@@ -442,11 +454,10 @@ def _execute_switch_decision(
             if emit_text:
                 print(f"  {cfg.primary} blocked: {reason}")
                 print(f"  Reverting to {previous}")
-            sm.switch_to(previous, f"auto-revert: {reason}")
+            reverted = _attempt_revert(previous, f"auto-revert: {reason}")
             sm.check_usage(no_cache=True)
-            if cfg.rate_limit_file:
+            if reverted and cfg.rate_limit_file:
                 cfg.rate_limit_file.unlink(missing_ok=True)
-            payload["reverted_to"] = previous
         else:
             sm.clear_rebalance_state()
             if emit_text:
@@ -464,9 +475,8 @@ def _execute_switch_decision(
                 print(f"  {target} already blocked: {reason}")
                 print(f"  Reverting to {previous}")
             sm.clear_rebalance_state()
-            sm.switch_to(previous, f"auto-revert routing: {target} blocked")
+            _attempt_revert(previous, f"auto-revert routing: {target} blocked")
             sm.check_usage(no_cache=True)
-            payload["reverted_to"] = previous
         else:
             if emit_text:
                 print(f"  {target} healthy for routing: {reason}")
