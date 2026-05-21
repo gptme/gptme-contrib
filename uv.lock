@@ -1780,6 +1780,9 @@ provides-extras = ["dev", "test"]
 name = "gptme-subscription"
 version = "0.1.0"
 source = { editable = "packages/gptme-subscription" }
+dependencies = [
+    { name = "credential-slots" },
+]
 
 [package.optional-dependencies]
 test = [
@@ -1789,6 +1792,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "credential-slots", editable = "packages/credential-slots" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
 ]

@@ -1,9 +1,20 @@
-"""gptme-subscription: subscription observation, pressure scoring, and capacity-aware routing.
+"""gptme-subscription: subscription observation, pressure scoring, capacity-aware routing, and CLI.
 
 Extracted from Bob's manage-subscription.py to be reusable by any agent.
 See https://github.com/gptme/gptme-contrib/issues/831
 """
 
+from gptme_subscription.auth import (
+    CredentialInfo,
+    check_credential_file,
+    format_reauth_instructions,
+    probe_credential,
+)
+from gptme_subscription.config import Config
+from gptme_subscription.manager import (
+    Decision,
+    SubscriptionManager,
+)
 from gptme_subscription.observation import (
     SubscriptionObservation,
     format_duration,
@@ -46,4 +57,13 @@ __all__ = [
     "save_rebalance_state",
     "clear_rebalance_state",
     "RebalanceState",
+    # Config / manager / CLI
+    "Config",
+    "SubscriptionManager",
+    "Decision",
+    # Auth
+    "CredentialInfo",
+    "check_credential_file",
+    "probe_credential",
+    "format_reauth_instructions",
 ]
