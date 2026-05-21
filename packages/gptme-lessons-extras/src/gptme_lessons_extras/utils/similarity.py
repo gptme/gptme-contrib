@@ -144,13 +144,73 @@ def find_similar_lessons(lesson_dir: Path, threshold: float = 0.7) -> List[List[
     return result
 
 
+def _coerce_numeric_scores(scores_dict: Dict) -> Dict[str, float]:
+    """Extract only numeric score entries, dropping non-numeric ones."""
+    result: Dict[str, float] = {}
+    for key, value in scores_dict.items():
+        if isinstance(value, (int, float)):
+            result[str(key)] = float(value)
+    return result
+
+
 def get_lesson_scores(lesson_info: Dict) -> Dict[str, float]:
     """Extract judge scores from lesson content if available.
 
+    Supports three score formats (checked in order):
+    1. Frontmatter `scores:` block with numeric values per dimension
+    2. Frontmatter `quality:` block with `scores:` sub-block
+    3. LOO-style effectiveness score under `effectiveness:`
+
+    Each score value must be numeric (int or float). Non-numeric values are
+    silently ignored so a malformed single dimension doesn't poison the
+    entire selection.
+
     Returns empty dict if no scores found.
     """
-    # TODO: Parse judge scores from lesson content or metadata
-    # For now, return empty dict (implement when we have score storage)
+    import yaml
+
+    content = lesson_info.get("content", "")
+    if not content:
+        return {}
+
+    # Parse YAML frontmatter
+    fm = {}
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            try:
+                fm = yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError:
+                pass
+
+    if not isinstance(fm, dict):
+        return {}
+
+    # Format 1: direct `scores:` block
+    scores_raw = fm.get("scores")
+    if isinstance(scores_raw, dict):
+        result = _coerce_numeric_scores(scores_raw)
+        if result:
+            return result
+
+    # Format 2: `quality:` block with nested `scores:`
+    quality_raw = fm.get("quality")
+    if isinstance(quality_raw, dict):
+        scores_raw = quality_raw.get("scores")
+        if isinstance(scores_raw, dict):
+            result = _coerce_numeric_scores(scores_raw)
+            if result:
+                return result
+
+    # Format 3: LOO-style `effectiveness:` with an `average:` or numeric value
+    effectiveness = fm.get("effectiveness")
+    if isinstance(effectiveness, dict):
+        avg = effectiveness.get("average")
+        if isinstance(avg, (int, float)):
+            return {"effectiveness": float(avg)}
+    elif isinstance(effectiveness, (int, float)):
+        return {"effectiveness": float(effectiveness)}
+
     return {}
 
 
