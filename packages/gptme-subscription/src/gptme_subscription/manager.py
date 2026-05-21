@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from credential_slots import SlotManager  # type: ignore[import-not-found]
+from credential_slots import SlotManager
 
 from gptme_subscription.config import Config
 from gptme_subscription.observation import (
