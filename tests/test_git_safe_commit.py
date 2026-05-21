@@ -336,6 +336,50 @@ def test_safe_commit_allows_dirty_worktree_with_no_verify(git_repo: Path):
     assert "test: dirty worktree allowed" in log.stdout
 
 
+def test_safe_commit_stages_untracked_pathspecs_under_no_verify(git_repo: Path):
+    """--no-verify with an untracked pathspec should auto-stage and commit.
+
+    Regression for the case where `git-safe-commit foo.md --no-verify -m ...`
+    on a fresh untracked file failed with "pathspec did not match any file(s)
+    known to git" because the auto-stage step was gated on hooks-run mode.
+    """
+    fresh = git_repo / "fresh.txt"
+    fresh.write_text("brand new\n")
+
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "fresh.txt",
+            "--no-verify",
+            "-m",
+            "test: untracked under --no-verify",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "test: untracked under --no-verify" in log.stdout
+
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+
 def test_safe_commit_allows_untracked_worktree_by_default_with_auto_stage_hook(
     git_repo: Path,
 ):
