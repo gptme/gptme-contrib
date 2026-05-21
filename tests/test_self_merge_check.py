@@ -315,6 +315,65 @@ def test_resolve_gate_helper_rejects_non_executable_explicit_path(
             self_merge_check._resolve_gate_helper()
 
 
+def test_resolve_gate_helper_rejects_missing_explicit_path_legacy_env(
+    tmp_path: Path,
+) -> None:
+    """A legacy BOB_GH_RATE_LIMIT_HELPER pointing to a missing file must name the legacy var in its error."""
+    missing = tmp_path / "missing-helper.sh"
+
+    with patch.dict(
+        "os.environ",
+        {self_merge_check.GATE_HELPER_ENV_LEGACY: str(missing)},
+        clear=True,
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match=f"{self_merge_check.GATE_HELPER_ENV_LEGACY} points to a missing helper",
+        ):
+            self_merge_check._resolve_gate_helper()
+
+
+def test_resolve_gate_helper_rejects_non_executable_legacy_env(
+    tmp_path: Path,
+) -> None:
+    """A legacy BOB_GH_RATE_LIMIT_HELPER pointing to a non-executable file must name the legacy var in its error."""
+    non_exec = tmp_path / "not-executable.sh"
+    non_exec.write_text("#!/bin/sh\nexit 0\n")
+    non_exec.chmod(0o644)
+
+    with patch.dict(
+        "os.environ",
+        {self_merge_check.GATE_HELPER_ENV_LEGACY: str(non_exec)},
+        clear=True,
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match=f"{self_merge_check.GATE_HELPER_ENV_LEGACY} is not executable",
+        ):
+            self_merge_check._resolve_gate_helper()
+
+
+def test_resolve_gate_helper_primary_env_takes_precedence_in_error_message(
+    tmp_path: Path,
+) -> None:
+    """When both GATE_HELPER_ENV and BOB_GH_RATE_LIMIT_HELPER are set, only the primary var is named in error."""
+    missing = tmp_path / "missing-helper.sh"
+
+    with patch.dict(
+        "os.environ",
+        {
+            self_merge_check.GATE_HELPER_ENV: str(missing),
+            self_merge_check.GATE_HELPER_ENV_LEGACY: "/some/other/path",
+        },
+        clear=True,
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match=f"{self_merge_check.GATE_HELPER_ENV} points to a missing helper",
+        ):
+            self_merge_check._resolve_gate_helper()
+
+
 def test_maybe_defer_for_rate_limit_honors_force_self_merge_check(
     tmp_path: Path,
 ) -> None:

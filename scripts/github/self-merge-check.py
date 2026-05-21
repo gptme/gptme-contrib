@@ -190,12 +190,17 @@ def _resolve_gate_helper(script_path: Path | None = None) -> str | None:
     )
     if explicit_helper:
         helper = Path(explicit_helper).expanduser()
+        # Determine which env var actually supplied the value for error messages
+        source_env = (
+            GATE_HELPER_ENV
+            if GATE_HELPER_ENV in os.environ
+            and os.environ[GATE_HELPER_ENV] == explicit_helper
+            else GATE_HELPER_ENV_LEGACY
+        )
         if not helper.is_file():
-            raise RuntimeError(
-                f"{GATE_HELPER_ENV} points to a missing helper: {helper}"
-            )
+            raise RuntimeError(f"{source_env} points to a missing helper: {helper}")
         if not os.access(helper, os.X_OK):
-            raise RuntimeError(f"{GATE_HELPER_ENV} is not executable: {helper}")
+            raise RuntimeError(f"{source_env} is not executable: {helper}")
         return str(helper)
 
     script = (script_path or Path(__file__)).resolve()
