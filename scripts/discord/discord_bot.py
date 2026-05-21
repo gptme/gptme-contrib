@@ -442,7 +442,8 @@ async def handle_rate_limit(message: discord.Message) -> bool:
 
 
 def split_on_codeblocks(content: str, max_length: int = DISCORD_MSG_LIMIT) -> list[str]:
-    """Split content into parts, trying to keep code blocks intact."""
+    """Split content into parts, trying to keep code blocks intact and
+    respecting paragraph (double-newline) boundaries outside code blocks."""
     if len(content) <= max_length:
         return [content]
 
@@ -454,17 +455,27 @@ def split_on_codeblocks(content: str, max_length: int = DISCORD_MSG_LIMIT) -> li
     for i, block in enumerate(blocks):
         is_codeblock = i % 2 == 1
 
-        # Add code block markers
         if is_codeblock:
-            block = f"```{block}```"
-
-        # If adding this block would exceed limit, start new part
-        if len(current) + len(block) > max_length:
-            if current:
-                parts.append(current)
-            current = block
+            # Code block: keep intact with markers
+            sub_blocks = [f"```{block}```"]
         else:
-            current += block
+            # Text block: further split on paragraph boundaries (\n\n)
+            # to avoid single oversized text segments
+            paras = [p for p in block.split("\n\n") if p]
+            sub_blocks = []
+            for j, para in enumerate(paras):
+                if j == 0:
+                    sub_blocks.append(para)
+                else:
+                    sub_blocks.append(f"\n\n{para}")
+
+        for sub in sub_blocks:
+            if len(current) + len(sub) > max_length:
+                if current:
+                    parts.append(current)
+                current = sub
+            else:
+                current += sub
 
     if current:
         parts.append(current)
@@ -504,7 +515,6 @@ async def send_discord_message(
 
         # Split long messages
         if len(content) > DISCORD_MSG_LIMIT:
-            # TODO: split on codeblocks, and on \n\n outside codeblocks
             parts = split_on_codeblocks(content)
             for i, part in enumerate(parts):
                 logger.info(f"Sending part {i + 1}/{len(parts)} ({len(part)} chars)")
