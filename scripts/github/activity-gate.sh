@@ -218,9 +218,14 @@ discover_repos() {
 # Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN (seconds).
 # Set any to 0 to bypass the cache (useful for diagnostics).
 GH_CACHE_DIR="${GH_CACHE_DIR:-$STATE_DIR/gh-cache}"
-GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-240}"
-GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-300}"
-GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-300}"
+# Increased from 240→480 and 300→600 (2026-05-21) after GraphQL rate-limit regression.
+# Project-monitoring runs every 2 minutes across 50 repos. At 4-min TTL, every
+# other run re-fetches (50% cache hit). At 8-min TTL: 3 out of 4 runs serve from
+# cache (75% hit), cutting GraphQL budget burn from ~$burn_rate to ~half.
+# See: tasks/github-graphql-rate-limit-regression.md
+GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-480}"
+GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-600}"
+GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
 
 # Read cached value if fresh enough, else run the producer command and cache its
 # stdout. The producer is passed as a single shell-evaluated string so callers
