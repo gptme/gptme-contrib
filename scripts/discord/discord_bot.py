@@ -461,13 +461,22 @@ def split_on_codeblocks(content: str, max_length: int = DISCORD_MSG_LIMIT) -> li
         else:
             # Text block: further split on paragraph boundaries (\n\n)
             # to avoid single oversized text segments
-            paras = [p for p in block.split("\n\n") if p]
+            tokens = re.split(r"(\n\n)", block)
             sub_blocks = []
-            for j, para in enumerate(paras):
-                if j == 0:
-                    sub_blocks.append(para)
+            pending_sep = ""
+            for token in tokens:
+                if token == "":
+                    continue
+                if token == "\n\n":
+                    pending_sep += "\n\n"
                 else:
-                    sub_blocks.append(f"\n\n{para}")
+                    sub_blocks.append(f"{pending_sep}{token}")
+                    pending_sep = ""
+            if pending_sep:
+                if sub_blocks:
+                    sub_blocks[-1] += pending_sep
+                else:
+                    sub_blocks.append(pending_sep)
 
         for sub in sub_blocks:
             if len(current) + len(sub) > max_length:
@@ -507,15 +516,22 @@ async def send_discord_message(
 
         # Handle messages that exceed Discord's limit
         if len(content) > DISCORD_MSG_LIMIT:
-            logger.warning(f"Message too long ({len(content)} chars), truncating")
-            await channel.send(
-                f"```diff\n- Message too long, truncating to {DISCORD_MSG_LIMIT} chars\n```"
-            )
-            content = content[:1997] + "..."
-
-        # Split long messages
-        if len(content) > DISCORD_MSG_LIMIT:
+            # Try splitting first (respects codeblock/paragraph boundaries)
             parts = split_on_codeblocks(content)
+            if any(len(part) > DISCORD_MSG_LIMIT for part in parts):
+                # Oversized chunks can still happen for single huge codeblocks or paragraphs.
+                logger.warning(
+                    f"Message too long ({len(content)} chars) contains oversized chunks, truncating those chunks"
+                )
+                await channel.send(
+                    f"```diff\n- Message too long, truncating oversized chunks to {DISCORD_MSG_LIMIT} chars\n```"
+                )
+                parts = [
+                    part
+                    if len(part) <= DISCORD_MSG_LIMIT
+                    else part[: DISCORD_MSG_LIMIT - 3] + "..."
+                    for part in parts
+                ]
             for i, part in enumerate(parts):
                 logger.info(f"Sending part {i + 1}/{len(parts)} ({len(part)} chars)")
                 if current_response and i == 0:
