@@ -108,12 +108,17 @@ def test_failed_pr_fetch_does_not_seed_cache() -> None:
 
         first, first_count = _run_gate(tmp, state_dir, fail_pr_list=True)
         assert first.returncode in (0, 1), first.stderr
-        assert first_count == 2
+        # Failed cached fetch returns the empty fallback, so the live merge-status
+        # fetch is skipped (re-calling a failing API would only burn another
+        # GraphQL call). One PR-list call total this run.
+        assert first_count == 1
         assert not cache_file.exists(), "failed gh pr list must not populate cache"
 
         second, second_count = _run_gate(tmp, state_dir, fail_pr_list=False)
         assert second.returncode in (0, 1), second.stderr
-        assert second_count == 4, "second run should re-fetch after prior failure"
+        # Re-fetch succeeds and seeds the cache; the result is an empty PR list,
+        # so the live fetch is still skipped (no open PRs to check). +1 call.
+        assert second_count == 2, "second run should re-fetch after prior failure"
         assert cache_file.exists(), "successful gh pr list should populate cache"
 
 
@@ -235,3 +240,58 @@ def test_merge_conflict_check_bypasses_pr_cache() -> None:
             second_count == 3
         ), "second run should skip cached producer but still do one live PR fetch"
         assert '"type":"merge_conflict"' in second.stdout, second.stdout
+
+
+# Empty-repo stub: no open author PRs. The cached PR-list fetch returns [],
+# so the live merge-status fetch must be skipped (it could only return [] too).
+FAKE_GH_EMPTY_PRS = r"""#!/usr/bin/env python3
+from __future__ import annotations
+import os, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+count_file = Path(os.environ["GH_PR_LIST_CALL_COUNT"])
+
+def bump() -> int:
+    n = int(count_file.read_text().strip()) if count_file.exists() else 0
+    n += 1
+    count_file.write_text(str(n))
+    return n
+
+if not argv:
+    sys.exit(2)
+
+if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
+    bump()
+    print("[]")
+    sys.exit(0)
+
+if argv[0] in ("issue", "run") and len(argv) > 1 and argv[1] == "list":
+    print("[]")
+    sys.exit(0)
+
+# repo list / api / anything else: succeed silently.
+sys.exit(0)
+"""
+
+
+def test_empty_repo_skips_live_pr_fetch() -> None:
+    """A repo with no open author PRs should do exactly one PR-list fetch
+    per run (the cached lane). The live merge-status fetch is skipped because
+    it could only re-fetch the same empty set — this removes the dominant
+    idle-time GraphQL burner. See github-graphql-rate-limit-regression."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        first, first_count = _run_gate_jsonl(tmp, state_dir, FAKE_GH_EMPTY_PRS)
+        assert first.returncode in (0, 1), first.stderr
+        # Only the cached fetch fires; live fetch is skipped (was 2 before).
+        assert first_count == 1, "empty repo should do one PR fetch, not two"
+
+        # Second run: cached [] is still fresh, live still skipped -> no calls.
+        second, second_count = _run_gate_jsonl(tmp, state_dir, FAKE_GH_EMPTY_PRS)
+        assert second.returncode in (0, 1), second.stderr
+        assert second_count == 1, "second run should add no PR fetches for empty repo"
+        assert "merge_conflict" not in second.stdout, second.stdout
