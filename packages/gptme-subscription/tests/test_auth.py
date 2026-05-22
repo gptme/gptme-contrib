@@ -146,6 +146,21 @@ def test_format_reauth_instructions_includes_slot(tmp_path: Path) -> None:
     assert "/login" in out
 
 
+def test_format_reauth_instructions_relinks_after_login() -> None:
+    """The ln -sf step must come AFTER /login.
+
+    /login (and routine token refresh) replaces the live symlink with a regular
+    file, so re-linking before /login is clobbered and leaves credential drift.
+    The symlink restore must be the last filesystem step. Regression guard for
+    the 2026-05-22 reauth-order fix.
+    """
+    out = format_reauth_instructions("bob")
+    login_idx = out.index("/login")
+    relink_idx = out.index("ln -sf .credentials.json.bob ~/.claude/.credentials.json")
+    cp_idx = out.index("cp ~/.claude/.credentials.json ~/.claude/.credentials.json.bob")
+    assert login_idx < cp_idx < relink_idx
+
+
 def test_to_dict_omits_none_fields(tmp_path: Path) -> None:
     info = check_credential_file(tmp_path / "missing.json", "alice")
     d = info.to_dict()
