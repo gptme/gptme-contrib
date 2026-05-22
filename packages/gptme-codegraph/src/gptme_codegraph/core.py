@@ -1641,9 +1641,14 @@ def build_repo_map(
                 "missing-grammar",
                 "missing-tree-sitter",
             ):
+                code = str(diag.get("code", "unknown"))
                 lang = str(diag.get("language", "unknown"))
+                # "missing-tree-sitter" is an environment-level problem with a single
+                # fix regardless of how many languages are affected, so key by code to
+                # deduplicate. "missing-grammar" is per-language, so key by lang.
+                key = lang if code == "missing-grammar" else code
                 entry = missing_grammars.setdefault(
-                    lang,
+                    key,
                     {
                         "language": lang,
                         "code": diag.get("code"),

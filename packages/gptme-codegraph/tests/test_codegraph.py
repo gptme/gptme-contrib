@@ -1041,6 +1041,35 @@ def test_build_repo_map_reports_missing_grammar(monkeypatch, tmp_path: Path):
     assert "2 file(s) skipped" in output
 
 
+def test_build_repo_map_deduplicates_missing_tree_sitter(monkeypatch, tmp_path: Path):
+    """missing-tree-sitter entries collapse to one regardless of how many languages fail."""
+    (tmp_path / "a.py").write_text("def one(): pass\n")
+    (tmp_path / "b.rs").write_text("pub fn two() {}\n")
+
+    monkeypatch.setattr(
+        core_module,
+        "_tree_sitter_parse_attempt",
+        lambda code, lang_name="python": core_module._ParseAttempt(
+            diagnostic={
+                "code": "missing-tree-sitter",
+                "language": lang_name,
+                "message": "Missing tree-sitter runtime. Install gptme-codegraph[treesitter].",
+            }
+        ),
+    )
+
+    repo_map = build_repo_map(tmp_path, max_files=10, max_symbols_per_file=10)
+
+    missing = cast(list[dict[str, object]], repo_map["missing_grammars"])
+    assert len(missing) == 1, "All missing-tree-sitter entries should collapse into one"
+    assert missing[0]["code"] == "missing-tree-sitter"
+    assert cast(int, missing[0]["files_skipped"]) == 2
+
+    output = format_repo_map(repo_map)
+    assert "2 file(s) skipped" in output
+    assert output.count("Missing tree-sitter") == 1
+
+
 def test_build_repo_map_no_missing_grammars_when_all_parse(multi_file_project: Path):
     """A healthy repo map reports an empty missing-grammars list."""
     repo_map = build_repo_map(multi_file_project, max_files=10, max_symbols_per_file=10)
