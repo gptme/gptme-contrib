@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -239,6 +241,33 @@ def test_edit_clears_assigned_to_with_none(workspace: Path) -> None:
     assert result.exit_code == 0, result.output
     meta = load_meta(path)
     assert "assigned_to" not in meta
+
+
+def test_edit_warns_when_reopening_recent_coordination_work(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_task(workspace, "done-task", state="done", created="2026-04-26T00:00:00+00:00")
+    warning = SimpleNamespace(
+        task_id="cascade:task:done-task",
+        status="completed",
+        claimer="bob-autonomous-1234",
+        event_at=datetime(2026, 5, 22, 12, 0, 0),
+        expires_at=None,
+        result="PR #42 merged",
+    )
+
+    monkeypatch.setattr(
+        "gptodo.cli._load_coordination_reopen_warnings",
+        lambda **kwargs: [warning],
+    )
+
+    result = CliRunner().invoke(cli, ["edit", "done-task", "--set", "state", "active"])
+
+    assert result.exit_code == 0, result.output
+    assert "Coordination reopen warning" in result.output
+    assert "bob-autonomous-1234" in result.output
+    assert "PR #42 merged" in result.output
+    assert load_meta(path)["state"] == "active"
 
 
 def test_claim_unknown_task_fails(workspace: Path) -> None:

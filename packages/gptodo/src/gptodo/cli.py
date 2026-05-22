@@ -1337,6 +1337,78 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     console.print("[dim]Watch stopped[/]")
 
 
+def _final_state_after_changes(
+    current_state: str | None,
+    changes: list[tuple[str, str, str | None]],
+) -> str:
+    """Return the final normalized state after a prepared edit operation."""
+    final_state = normalize_state(current_state or "backlog", warn=False)
+    for op, field, value in changes:
+        if op == "set" and field == "state" and value is not None:
+            final_state = normalize_state(value, warn=False)
+    return final_state
+
+
+def _load_coordination_reopen_warnings(
+    *,
+    repo_root: Path,
+    task: TaskInfo,
+    previous_state: str,
+    new_state: str,
+    actor_id: str | None,
+) -> list[Any]:
+    """Load advisory coordination warnings if Bob's coordination package exists."""
+    try:
+        from coordination.db import CoordinationDB, resolve_coordination_db_path
+        from coordination.work import WorkClaimManager
+    except Exception:
+        return []
+
+    upstream_coordination_id = str(task.metadata.get("upstream_coordination_id") or "").strip()
+
+    try:
+        db_path = resolve_coordination_db_path(repo_root=repo_root)
+        with CoordinationDB(db_path) as db:
+            work = WorkClaimManager(db)
+            warnings: list[Any] = work.reopen_warnings_for_task(
+                task.id,
+                previous_state=previous_state,
+                new_state=new_state,
+                actor_id=actor_id,
+                coordination_ids=[upstream_coordination_id] if upstream_coordination_id else [],
+            )
+            return warnings
+    except Exception:
+        return []
+
+
+def _format_coordination_reopen_warning(task: TaskInfo, warning: Any) -> str:
+    """Return a compact human-readable reopen warning."""
+    claimer = getattr(warning, "claimer", None) or "another agent"
+    status = getattr(warning, "status", "claimed")
+    task_id = getattr(warning, "task_id", task.id)
+    event_at = getattr(warning, "event_at", None)
+    expires_at = getattr(warning, "expires_at", None)
+    result = getattr(warning, "result", None)
+
+    if status == "completed":
+        timestamp = event_at.isoformat(sep=" ", timespec="seconds") if event_at else "unknown time"
+        detail = f"completed by {claimer} at {timestamp}"
+    elif status == "claimed":
+        timestamp = (
+            expires_at.isoformat(sep=" ", timespec="seconds") if expires_at else "unknown expiry"
+        )
+        detail = f"currently claimed by {claimer} until {timestamp}"
+    else:
+        detail = f"{status} by {claimer}"
+
+    result_text = f" ({result})" if result else ""
+    return (
+        f"Coordination reopen warning: {task.id} is being reopened, but "
+        f"{task_id} was {detail}{result_text}. Check existing work before reimplementing."
+    )
+
+
 # Add priority ranking to the top of the file, after imports
 @cli.command("edit")
 @click.argument("task_ids", nargs=-1, required=True)
@@ -1621,6 +1693,27 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             console.print(f"  {task.name}:")
             for change in task_changes:
                 console.print(f"    {change}")
+
+    if any(op == "set" and field == "state" for op, field, _ in changes):
+        actor_id = (
+            os.environ.get("GPTODO_AGENT_ID")
+            or os.environ.get("AGENT_ID")
+            or os.environ.get("BOB_SESSION_ID")
+        )
+        warning_console = Console(stderr=True)
+        for task in target_tasks:
+            previous_state = normalize_state(task.metadata.get("state", "backlog"), warn=False)
+            new_state = _final_state_after_changes(task.metadata.get("state"), changes)
+            for warning in _load_coordination_reopen_warnings(
+                repo_root=repo_root,
+                task=task,
+                previous_state=previous_state,
+                new_state=new_state,
+                actor_id=actor_id,
+            ):
+                warning_console.print(
+                    f"[bold yellow]WARNING:[/] {markup_escape(_format_coordination_reopen_warning(task, warning))}"
+                )
 
     # Apply changes
     for task in target_tasks:
