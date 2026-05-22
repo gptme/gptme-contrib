@@ -182,21 +182,24 @@ REAUTH_INSTRUCTIONS = """\
 Re-authenticate a Claude Code slot
 ==================================
 
-1. Make the broken slot the live credential:
-
-       ln -sf .credentials.json.{sub} ~/.claude/.credentials.json
-
-2. Launch Claude Code interactively and run /login:
+1. Launch Claude Code interactively and run /login:
 
        claude
        > /login
 
-   This opens a browser, runs the OAuth flow, and writes the new tokens
-   to ~/.claude/.credentials.json.
+   This opens a browser, runs the OAuth flow, and writes fresh tokens to
+   ~/.claude/.credentials.json. Note: /login (and routine token refresh)
+   REPLACES the live symlink with a regular file, so the symlink must be
+   restored at the end (step 3) — don't put `ln -sf` before /login, it just
+   gets clobbered.
 
-3. Persist the refreshed tokens back into the named slot:
+2. Persist the fresh tokens into the named slot:
 
        cp ~/.claude/.credentials.json ~/.claude/.credentials.json.{sub}
+
+3. Restore the live symlink to the slot (do this LAST):
+
+       ln -sf .credentials.json.{sub} ~/.claude/.credentials.json
 
 4. (Optional, if you use identity drift detection) re-baseline the slot:
 
@@ -205,7 +208,8 @@ Re-authenticate a Claude Code slot
 Common failure modes:
   - "Login failed" / "rate limited":   wait 5 min, retry
   - browser does not open:             use --headless or copy the URL manually
-  - slot accepts login but probes 401: another slot is symlinked; redo step 1
+  - slot accepts login but probes 401: another slot is symlinked; restore the
+                                       slot symlink (step 3) and re-probe
 """
 
 
