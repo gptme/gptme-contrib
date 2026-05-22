@@ -5,11 +5,13 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
+import sys
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
 from typing import cast
 
+import gptme_codegraph.core as core_module
 import pytest
 from gptme_codegraph.core import (
     IndexEntry,
@@ -29,6 +31,7 @@ from gptme_codegraph.core import (
     format_repo_map,
     format_symbols,
     impact_radius,
+    main,
     parse_file,
 )
 
@@ -963,6 +966,53 @@ def test_parse_file_returns_imports(tmp_path: Path):
     assert result.symbols[0].name == "helper"
     assert len(result.imports) == 1
     assert result.imports[0].name == "json"
+
+
+def test_parse_file_reports_missing_grammar(monkeypatch, tmp_path: Path):
+    """parse_file distinguishes missing grammars from empty parses."""
+    f = tmp_path / "component.tsx"
+    f.write_text("export function Button() { return <button /> }\n")
+
+    original = core_module._load_language
+    monkeypatch.setattr(
+        core_module,
+        "_load_language",
+        lambda name: None if name == "tsx" else original(name),
+    )
+
+    result = parse_file(f)
+
+    assert result.symbols == []
+    assert result.language == "tsx"
+    assert result.diagnostic is not None
+    assert result.diagnostic["code"] == "missing-grammar"
+    assert "tree_sitter_typescript" in result.diagnostic["message"]
+
+
+def test_main_parse_json_reports_missing_grammar(monkeypatch, tmp_path: Path, capsys):
+    """CLI parse --json emits an explicit diagnostic for missing grammars."""
+    f = tmp_path / "lib.rs"
+    f.write_text("pub fn greet() {}\n")
+
+    original = core_module._load_language
+    monkeypatch.setattr(
+        core_module,
+        "_load_language",
+        lambda name: None if name == "rust" else original(name),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-codegraph", str(f), "parse", "--json"],
+    )
+
+    main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["file"] == str(f)
+    assert payload["language"] == "rust"
+    assert payload["code"] == "missing-grammar"
+    assert "tree_sitter_rust" in payload["message"]
 
 
 def test_parse_file_includes_decorated_python_definitions(tmp_path: Path):
