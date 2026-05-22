@@ -94,6 +94,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gptme/gptme-contrib
+          ref: ${{ github.workflow_sha }}
           path: ${{ runner.temp }}/gptme-resolver
           sparse-checkout: |
             scripts/github_resolver
