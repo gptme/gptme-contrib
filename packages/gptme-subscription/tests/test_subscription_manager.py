@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from gptme_subscription.config import Config
 from gptme_subscription.manager import SubscriptionManager
 
@@ -137,6 +138,29 @@ def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:
 
     assert decision.action == "switch"
     assert decision.target == "erik"
+
+
+def test_evaluate_stale_urgency_top_pick_reports_staleness_not_pressure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P1: urgency reorders to put erik first, but erik is stale → alice is picked.
+    # The reason should say "erik stale", not "(lower pressure / expiry-aware)".
+    sm = _make_manager(tmp_path)
+    monkeypatch.setattr(
+        sm, "capacity_aware_fallback_order", lambda now=None: ["erik", "alice"]
+    )
+    _write_cred(sm, "alice", age_days=1)
+    # erik has no cred file → missing → stale
+    usage = _exhausted_usage()
+    now = datetime.now(timezone.utc)
+
+    decision = sm.evaluate(usage, "bob", now=now)
+
+    assert decision.action == "switch"
+    assert decision.target == "alice"
+    assert "erik" in decision.reason
+    assert "stale" in decision.reason
+    assert "lower pressure" not in decision.reason
 
 
 def test_evaluate_all_fallbacks_stale_stays(tmp_path: Path) -> None:

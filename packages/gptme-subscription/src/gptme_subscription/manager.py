@@ -714,7 +714,14 @@ class SubscriptionManager:
                 if fresh_order:
                     d.action = "switch"
                     d.target = fresh_order[0]
-                    if urgency_order[0] != cfg.fallback_order[0]:
+                    urgency_top = urgency_order[0]
+                    if urgency_top not in fresh_order:
+                        # urgency top-pick was stale; staleness drove the selection
+                        d.reason += (
+                            f" → {urgency_top} stale; selecting {fresh_order[0]}"
+                        )
+                    elif urgency_top != cfg.fallback_order[0]:
+                        # purely urgency-driven reordering (no stale filtering)
                         d.reason += (
                             f" → preferring {fresh_order[0]} "
                             f"(lower pressure / expiry-aware)"
