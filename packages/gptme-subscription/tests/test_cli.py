@@ -145,7 +145,7 @@ def test_cmd_evaluate_json_execute_returns_failure_on_switch_error(capsys) -> No
     assert sm.switch_calls == [("alice", "rebalance to fresher slot")]
     payload = json.loads(capsys.readouterr().out)
     assert payload["executed"] is False
-    assert payload["reason"] == "switch failed"
+    assert payload["reason"] == "switch refused"
 
 
 def test_execute_switch_decision_does_not_claim_revert_when_usage_check_revert_fails() -> (
@@ -252,3 +252,57 @@ def test_execute_switch_decision_does_not_claim_revert_for_blocked_forward_routi
         ("alice", "rebalance to fresher slot"),
         ("bob", "auto-revert routing: alice blocked"),
     ]
+
+
+def test_execute_switch_decision_emits_alert_on_refused_switch(capsys) -> None:
+    """A refused (not deferred) switch should print [ALERT] to stderr."""
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, False)],  # refused, not deferred
+        decision=Decision(
+            active="bob",
+            action="switch",
+            target="alice",
+            reason="weekly exhausted",
+        ),
+    )
+
+    rc, payload = _execute_switch_decision(
+        cast(SubscriptionManager, sm),
+        sm._decision,
+        "bob",
+        emit_text=True,
+    )
+
+    assert rc == 1
+    assert payload["reason"] == "switch refused"
+    captured = capsys.readouterr()
+    assert "[ALERT]" in captured.err
+    assert "alice" in captured.err
+    assert "reauth" in captured.err.lower()
+
+
+def test_execute_switch_decision_no_alert_on_deferred_switch(capsys) -> None:
+    """A deferred switch (active locks) must NOT emit [ALERT]."""
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, True)],  # deferred by locks
+        decision=Decision(
+            active="bob",
+            action="switch",
+            target="alice",
+            reason="weekly exhausted",
+        ),
+    )
+
+    rc, payload = _execute_switch_decision(
+        cast(SubscriptionManager, sm),
+        sm._decision,
+        "bob",
+        emit_text=True,
+    )
+
+    assert rc == 0
+    assert payload.get("deferred") is True
+    captured = capsys.readouterr()
+    assert "[ALERT]" not in captured.err
