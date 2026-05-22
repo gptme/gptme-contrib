@@ -65,3 +65,102 @@ def test_detect_external_switch_ignores_unreadable_log(tmp_path: Path) -> None:
     sm.get_active_subscription = lambda: "alice"  # type: ignore[method-assign]
 
     sm.detect_external_switch()
+
+
+# ---- slot_credential_is_stale ----
+
+
+def test_slot_credential_is_stale_missing_file(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    # No credential file written → missing
+    stale, msg = sm.slot_credential_is_stale("alice")
+    assert stale
+    assert "missing" in msg
+
+
+def test_slot_credential_is_stale_old_file(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    cred = sm.config.slot_path("alice")
+    cred.write_text("{}")
+    # Backdate mtime to 10 days ago
+    import os
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).timestamp()
+    os.utime(cred, (old_ts, old_ts))
+    now = datetime.now(timezone.utc)
+    stale, msg = sm.slot_credential_is_stale("alice", now=now)
+    assert stale
+    assert "10." in msg or "d old" in msg
+
+
+def test_slot_credential_is_stale_fresh_file(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    cred = sm.config.slot_path("alice")
+    cred.write_text("{}")
+    # File just written → fresh
+    now = datetime.now(timezone.utc)
+    stale, msg = sm.slot_credential_is_stale("alice", now=now)
+    assert not stale
+    assert "d old" in msg
+
+
+# ---- evaluate() stale-slot filtering ----
+
+
+def _exhausted_usage() -> dict:
+    return {
+        "seven_day": {"utilization": 0.95, "resets_in_seconds": 3 * 24 * 3600},
+        "five_hour": {"utilization": 0.95, "resets_in_seconds": 3 * 3600},
+        "seven_day_sonnet": {"utilization": 0.20},
+    }
+
+
+def _write_cred(sm: SubscriptionManager, slot: str, *, age_days: float) -> None:
+    """Write a slot credential file with a backdated mtime."""
+    import os
+
+    path = sm.config.slot_path(slot)
+    path.write_text("{}")
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=age_days)).timestamp()
+    os.utime(path, (old_ts, old_ts))
+
+
+def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    # alice is stale (17 days), erik is fresh
+    _write_cred(sm, "alice", age_days=17)
+    _write_cred(sm, "erik", age_days=1)
+    usage = _exhausted_usage()
+    now = datetime.now(timezone.utc)
+
+    decision = sm.evaluate(usage, "bob", now=now)
+
+    assert decision.action == "switch"
+    assert decision.target == "erik"
+
+
+def test_evaluate_all_fallbacks_stale_stays(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    # Both fallbacks are stale (no file written → missing)
+    usage = _exhausted_usage()
+    now = datetime.now(timezone.utc)
+
+    decision = sm.evaluate(usage, "bob", now=now)
+
+    assert decision.action == "stay"
+    assert "all fallbacks stale" in decision.reason
+    assert "reauth needed" in decision.reason
+
+
+def test_evaluate_fresh_fallback_selected_normally(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    # Both fallbacks are fresh
+    _write_cred(sm, "alice", age_days=1)
+    _write_cred(sm, "erik", age_days=2)
+    usage = _exhausted_usage()
+    now = datetime.now(timezone.utc)
+
+    decision = sm.evaluate(usage, "bob", now=now)
+
+    assert decision.action == "switch"
+    assert decision.target in ("alice", "erik")

@@ -411,7 +411,16 @@ def _execute_switch_decision(
             payload["deferred"] = True
             payload["reason"] = "switch deferred by active locks"
             return 0, payload
-        payload["reason"] = "switch failed"
+        payload["reason"] = "switch refused"
+        # Refused switch (not deferred) is a capacity signal — emit a visible
+        # alert so a stale or broken fallback slot doesn't silently strand the
+        # system on the exhausted primary. See the 2026-05-22 incident.
+        if emit_text:
+            print(
+                f"\n[ALERT] switch to {target!r} refused — credential check failed. "
+                f"Reauth: gptme-subscription --reauth-instructions {target}",
+                file=sys.stderr,
+            )
         return 1, payload
 
     payload["executed"] = True

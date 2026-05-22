@@ -222,6 +222,27 @@ class SubscriptionManager:
         )
         return result
 
+    def slot_credential_is_stale(
+        self, sub: str, stale_days: float = 7.0, *, now: datetime | None = None
+    ) -> tuple[bool, str]:
+        """True if the slot's credential file is missing or not refreshed recently.
+
+        A slot is considered stale when its credential file hasn't been written
+        in ``stale_days`` days — a healthy in-use slot gets its token rewritten
+        regularly by Claude Code. Missing files are always stale. Pure / no
+        network calls.
+        """
+        path = self.config.slot_path(sub)
+        current_ts = (now or datetime.now(timezone.utc)).timestamp()
+        try:
+            mtime = path.stat().st_mtime
+            age_days = (current_ts - mtime) / 86400.0
+        except OSError:
+            return True, "credential file missing"
+        if age_days > stale_days:
+            return True, f"{age_days:.1f}d old (>{stale_days:.0f}d threshold)"
+        return False, f"{age_days:.1f}d old"
+
     def detect_live_slot_drift(self) -> dict[str, Any] | None:
         drift = self._slot_manager.detect_live_slot_drift()
         return None if drift is None else dict(drift)
@@ -682,12 +703,28 @@ class SubscriptionManager:
         if exhausted:
             if cfg.fallback_order:
                 urgency_order = self.capacity_aware_fallback_order(now=current_time)
-                d.action = "switch"
-                d.target = urgency_order[0]
-                if urgency_order[0] != cfg.fallback_order[0]:
-                    d.reason += (
-                        f" → preferring {urgency_order[0]} "
-                        f"(lower pressure / expiry-aware)"
+                fresh_order: list[str] = []
+                stale_msgs: list[str] = []
+                for s in urgency_order:
+                    stale, msg = self.slot_credential_is_stale(s, now=current_time)
+                    if stale:
+                        stale_msgs.append(f"{s}: {msg}")
+                    else:
+                        fresh_order.append(s)
+                if fresh_order:
+                    d.action = "switch"
+                    d.target = fresh_order[0]
+                    if urgency_order[0] != cfg.fallback_order[0]:
+                        d.reason += (
+                            f" → preferring {fresh_order[0]} "
+                            f"(lower pressure / expiry-aware)"
+                        )
+                else:
+                    d.action = "stay"
+                    d.target = active
+                    d.reason = (
+                        f"{d.reason} — all fallbacks stale "
+                        f"({'; '.join(stale_msgs)}); reauth needed before switching"
                     )
             else:
                 d.reason += " — no fallback defined"
@@ -723,9 +760,14 @@ class SubscriptionManager:
             hold_seconds = self.compute_rebalance_hold_seconds(pace_overage)
             hold_until = current_time + timedelta(seconds=hold_seconds)
             urgency_order = self.capacity_aware_fallback_order(now=current_time)
-            if urgency_order:
+            fresh_rebalance = [
+                s
+                for s in urgency_order
+                if not self.slot_credential_is_stale(s, now=current_time)[0]
+            ]
+            if fresh_rebalance:
                 d.action = "switch"
-                d.target = urgency_order[0]
+                d.target = fresh_rebalance[0]
                 d.reason = (
                     f"rebalance: primary ahead of {label} pace by "
                     f"{pace_overage:.0%} "
@@ -750,6 +792,8 @@ class SubscriptionManager:
                 and cfg.fallback_order
             ):
                 for sub in cfg.fallback_order:
+                    if self.slot_credential_is_stale(sub, now=current_time)[0]:
+                        continue  # skip stale slots in forward routing
                     last_s = self.seconds_since_last_switch_to(sub)
                     if last_s is None or last_s > idle_threshold_s:
                         hold_until_ts = current_time + timedelta(
