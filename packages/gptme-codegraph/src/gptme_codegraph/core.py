@@ -1626,10 +1626,32 @@ def build_repo_map(
     files = _iter_source_files(root)
     file_rows: list[dict[str, object]] = []
     total_symbols = 0
+    # Languages whose grammar is unavailable parse to zero symbols for an
+    # environment reason, not a real "no symbols" miss. Keyed by language so the
+    # repo map surfaces one diagnostic per language instead of silently
+    # reporting an empty skeleton (e.g. a Rust repo with no rust grammar would
+    # otherwise look identical to a repo with no extractable symbols).
+    missing_grammars: dict[str, dict[str, object]] = {}
 
     for fp in files:
         result = parse_file(fp)
         if not result.symbols:
+            diag = result.diagnostic
+            if diag is not None and diag.get("code") in (
+                "missing-grammar",
+                "missing-tree-sitter",
+            ):
+                lang = str(diag.get("language", "unknown"))
+                entry = missing_grammars.setdefault(
+                    lang,
+                    {
+                        "language": lang,
+                        "code": diag.get("code"),
+                        "message": diag.get("message"),
+                        "files_skipped": 0,
+                    },
+                )
+                entry["files_skipped"] = cast(int, entry["files_skipped"]) + 1
             continue
 
         outline = _build_file_outline(result.symbols)
@@ -1683,6 +1705,10 @@ def build_repo_map(
         "max_files": max_files,
         "max_symbols_per_file": max_symbols_per_file,
         "files": files_payload,
+        "missing_grammars": sorted(
+            missing_grammars.values(),
+            key=lambda d: str(d["language"]),
+        ),
     }
 
 
@@ -1726,6 +1752,18 @@ def format_repo_map(repo_map: dict[str, object]) -> str:
             f"Symbols shown: {repo_map['symbols_shown']}/{repo_map['symbols_total']}"
         ),
     ]
+
+    # Surface missing-grammar diagnostics so an empty skeleton caused by an
+    # absent tree-sitter grammar is distinguishable from a real empty parse.
+    missing = repo_map.get("missing_grammars")
+    if isinstance(missing, list):
+        for entry_obj in missing:
+            if not isinstance(entry_obj, dict):
+                continue
+            entry = cast(dict[str, object], entry_obj)
+            skipped = entry.get("files_skipped", "?")
+            message = entry.get("message", "missing grammar")
+            lines.append(f"⚠ {skipped} file(s) skipped: {message}")
 
     files = repo_map.get("files")
     if not isinstance(files, list):

@@ -1015,6 +1015,39 @@ def test_main_parse_json_reports_missing_grammar(monkeypatch, tmp_path: Path, ca
     assert "tree_sitter_rust" in payload["message"]
 
 
+def test_build_repo_map_reports_missing_grammar(monkeypatch, tmp_path: Path):
+    """Repo map surfaces missing grammars instead of a silent empty skeleton."""
+    (tmp_path / "a.rs").write_text("pub fn one() {}\n")
+    (tmp_path / "b.rs").write_text("pub fn two() {}\n")
+
+    original = core_module._load_language
+    monkeypatch.setattr(
+        core_module,
+        "_load_language",
+        lambda name: None if name == "rust" else original(name),
+    )
+
+    repo_map = build_repo_map(tmp_path, max_files=10, max_symbols_per_file=10)
+
+    assert repo_map["files_with_symbols"] == 0
+    missing = cast(list[dict[str, object]], repo_map["missing_grammars"])
+    assert len(missing) == 1
+    assert missing[0]["language"] == "rust"
+    assert missing[0]["code"] == "missing-grammar"
+    assert missing[0]["files_skipped"] == 2
+
+    output = format_repo_map(repo_map)
+    assert "tree_sitter_rust" in output
+    assert "2 file(s) skipped" in output
+
+
+def test_build_repo_map_no_missing_grammars_when_all_parse(multi_file_project: Path):
+    """A healthy repo map reports an empty missing-grammars list."""
+    repo_map = build_repo_map(multi_file_project, max_files=10, max_symbols_per_file=10)
+    assert repo_map["missing_grammars"] == []
+    assert "skipped" not in format_repo_map(repo_map)
+
+
 def test_parse_file_includes_decorated_python_definitions(tmp_path: Path):
     """parse_file preserves decorated Python functions and methods."""
     f = tmp_path / "decorated.py"
