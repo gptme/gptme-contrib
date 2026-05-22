@@ -1077,7 +1077,6 @@ def test_build_repo_map_no_missing_grammars_when_all_parse(multi_file_project: P
     assert "skipped" not in format_repo_map(repo_map)
 
 
-
 def test_parse_file_includes_decorated_python_definitions(tmp_path: Path):
     """parse_file preserves decorated Python functions and methods."""
     f = tmp_path / "decorated.py"
