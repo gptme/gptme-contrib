@@ -80,12 +80,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch resolver scripts from gptme-contrib
-        # Always fetch from gptme-contrib so this workflow works both when
-        # triggered directly inside gptme-contrib AND when called as a
-        # reusable workflow (workflow_call) from an external repo. Without
-        # this step, `scripts/github_resolver/` would not exist in a
-        # caller's checkout.
+      - name: Fetch resolver scripts from reusable workflow repo
+        # In reusable workflows, `github.*` stays bound to the caller repo.
+        # Use `job.workflow_*` so we fetch the scripts that live alongside
+        # the workflow definition itself, from the exact commit SHA that is
+        # executing this job.
         #
         # Use runner.temp (outside the workspace) so the fetched scripts
         # are never inside the target repo's working tree. This prevents
@@ -93,8 +92,8 @@ jobs:
         # as a broken submodule reference.
         uses: actions/checkout@v4
         with:
-          repository: gptme/gptme-contrib
-          ref: ${{ github.workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: ${{ runner.temp }}/gptme-resolver
           sparse-checkout: |
             scripts/github_resolver
