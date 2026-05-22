@@ -66,7 +66,7 @@ test-plugins:  ## Run tests for all plugins with test directories
 	for plugin in $(PLUGIN_DIRS); do \
 		if [ -d "$$plugin/tests" ]; then \
 			echo "\n=== Testing $$(basename $$plugin) ==="; \
-			uv run --with pytest pytest "$$plugin/tests" -v -m "not slow" --timeout=30 || failed=1; \
+			uv run --with pytest --with pytest-timeout --with "./$$plugin[test]" pytest "$$plugin/tests" -v -m "not slow" --timeout=30 || failed=1; \
 		fi \
 	done; \
 	if [ -n "$$failed" ]; then exit 1; fi
