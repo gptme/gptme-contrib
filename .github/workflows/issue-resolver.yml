@@ -13,6 +13,17 @@ name: Issue Resolver (opt-in draft PR)
 #   - Idempotent: re-triggering updates the existing attempt branch.
 #   - Uploads gptme session log as an artifact for post-hoc inspection.
 #
+# Cross-repo usage (Phase 2): call this as a reusable workflow from any repo:
+#
+#   jobs:
+#     resolve:
+#       uses: gptme/gptme-contrib/.github/workflows/issue-resolver.yml@master
+#       secrets:
+#         gptme-provider-key: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# The workflow fetches its own resolver scripts from gptme-contrib so the
+# calling repo does not need to include any gptme-contrib files.
+#
 # Source script: scripts/github_resolver/resolve_issue.py
 # Research note: knowledge/research/2026-04-23-openhands-resolver-runtime-patterns.md
 #                (lives in Bob's private brain repo; public summary in PR body)
@@ -64,9 +75,30 @@ jobs:
         && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
       || github.event_name == 'workflow_call'
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout target repo
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Fetch resolver scripts from gptme-contrib
+        # Always fetch from gptme-contrib so this workflow works both when
+        # triggered directly inside gptme-contrib AND when called as a
+        # reusable workflow (workflow_call) from an external repo. Without
+        # this step, `scripts/github_resolver/` would not exist in a
+        # caller's checkout.
+        #
+        # Use runner.temp (outside the workspace) so the fetched scripts
+        # are never inside the target repo's working tree. This prevents
+        # `git add -A` in the resolver from staging the scripts directory
+        # as a broken submodule reference.
+        uses: actions/checkout@v4
+        with:
+          repository: gptme/gptme-contrib
+          path: ${{ runner.temp }}/gptme-resolver
+          sparse-checkout: |
+            scripts/github_resolver
+            scripts/github_actions_common
+          sparse-checkout-cone-mode: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -93,7 +125,7 @@ jobs:
           fi
 
           mkdir -p output
-          uv run python scripts/github_resolver/resolve_issue.py \
+          python "$RUNNER_TEMP/gptme-resolver/scripts/github_resolver/resolve_issue.py" \
             --repo "$GITHUB_REPOSITORY" \
             --issue "$ISSUE_NUMBER" \
             --output-dir output

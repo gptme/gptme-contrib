@@ -12,6 +12,30 @@ This is distinct from the warning-only issue-hygiene Action: hygiene never
 touches code, resolver is authorised to make edits but deliberately never
 auto-merges.
 
+## Using in your own repo (reusable workflow)
+
+Call the workflow from any repo without copying any scripts:
+
+```yaml
+# .github/workflows/issue-resolver.yml in your repo
+name: Issue Resolver
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  resolve:
+    uses: gptme/gptme-contrib/.github/workflows/issue-resolver.yml@master
+    secrets:
+      gptme-provider-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+The reusable workflow fetches its own resolver scripts from gptme-contrib at
+runtime (into `$RUNNER_TEMP`, outside your workspace), so your repo stays
+clean.
+
 ## Design invariants (Phase 1)
 
 - **Opt-in only.** The workflow's `if:` gate only fires on an explicit
