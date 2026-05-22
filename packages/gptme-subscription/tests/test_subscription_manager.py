@@ -164,3 +164,32 @@ def test_evaluate_fresh_fallback_selected_normally(tmp_path: Path) -> None:
 
     assert decision.action == "switch"
     assert decision.target in ("alice", "erik")
+
+
+def _rebalancing_usage() -> dict:
+    """Usage that is healthy but overusing pace — triggers the rebalance path."""
+    return {
+        "seven_day": {"utilization": 0.75, "resets_in_seconds": 0},
+        "five_hour": {"utilization": 0.50, "resets_in_seconds": 3 * 3600},
+        "seven_day_sonnet": {"utilization": 0.20},
+        "_pacing": {
+            "actual_utilization": 0.75,
+            "target_utilization": 0.60,
+            "status": "overusing",
+        },
+    }
+
+
+def test_evaluate_rebalance_skipped_annotates_reason_when_all_fallbacks_stale(
+    tmp_path: Path,
+) -> None:
+    sm = _make_manager(tmp_path)
+    # No credential files written → all fallbacks stale (missing)
+    usage = _rebalancing_usage()
+    now = datetime.now(timezone.utc)
+
+    decision = sm.evaluate(usage, "bob", now=now)
+
+    assert decision.action == "stay"
+    assert "rebalance skipped" in decision.reason
+    assert "all fallbacks stale" in decision.reason

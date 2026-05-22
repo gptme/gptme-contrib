@@ -731,6 +731,7 @@ class SubscriptionManager:
             return d
 
         # Healthy primary — check pacing for rebalance / forward-routing.
+        rebalance_stale_note: str | None = None
         candidates: list[tuple[str, float, float]] = []
         pacing = usage.get("_pacing", {})
         actual_overall = float(pacing.get("actual_utilization", weekly))
@@ -779,6 +780,10 @@ class SubscriptionManager:
                 d.pace_overage = round(pace_overage, 3)
                 d.rebalance_trigger = label
                 return d
+            else:
+                rebalance_stale_note = (
+                    "rebalance skipped — all fallbacks stale, reauth needed"
+                )
 
         # Forward routing on healthy primary
         resets_in_weekly = usage.get("seven_day", {}).get("resets_in_seconds", 0)
@@ -819,6 +824,8 @@ class SubscriptionManager:
             f"primary quota healthy: {weekly:.0%} weekly, "
             f"{five_hour:.0%} 5h, {sonnet_weekly:.0%} Sonnet"
         )
+        if rebalance_stale_note:
+            d.reason += f"; {rebalance_stale_note}"
         return d
 
     # ---- External-switch detection (logs out-of-band symlink flips) ----
