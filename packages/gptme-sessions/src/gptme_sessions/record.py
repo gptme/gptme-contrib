@@ -243,11 +243,6 @@ class SessionRecord:
     # One of HARM_CATEGORY_LABELS, or None when not classified.
     harm_category: str | None = None
 
-    # Dropout selection flag (idea #793): when True, this session was randomly
-    # selected for deeper post-hoc review (random dropout sampling). Allows
-    # retrospective quality analysis independent of the regular judge queue.
-    dropout_selection: bool | None = None
-
     # Random dropout sampling (ErikBjare/bob#793)
     # Flag set by the autonomous-run.sh reconcile pass when the session is
     # drawn for deeper post-hoc review. Dropout sessions get a richer secondary
