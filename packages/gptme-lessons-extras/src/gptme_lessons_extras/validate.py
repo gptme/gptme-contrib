@@ -205,6 +205,12 @@ class LessonValidator:
                 "archived_reason",
                 "archived_date",
                 "confound_note",
+                # Used by hybrid semantic matcher (gptme#2469) for description-
+                # based lesson retrieval — removing it silently degrades matching.
+                "description",
+                # Structural categorisation (e.g. metadata.tags) — not a score,
+                # not operational state; safe to keep in frontmatter.
+                "metadata",
             }
             extra_fields = set(frontmatter.keys()) - allowed_fields
             if extra_fields:
