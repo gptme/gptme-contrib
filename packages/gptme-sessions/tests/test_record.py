@@ -648,3 +648,20 @@ def test_dropout_depth_corrupt_jsonl_roundtrip():
     raw = {"session_id": "abc123", "dropout_depth": "depp"}
     r = SessionRecord.from_dict(raw)
     assert r.dropout_depth is None
+
+
+def test_dropout_selection_migration():
+    """Legacy dropout_selection=True is migrated to dropout_selected + reason."""
+    raw = {"session_id": "abc123", "dropout_selection": True}
+    r = SessionRecord.from_dict(raw)
+    assert r.dropout_selected is True
+    assert r.dropout_reason == "random_sampling"
+    assert "dropout_selection" not in r._legacy_fields
+
+
+def test_dropout_selection_false_not_migrated():
+    """Legacy dropout_selection=False does not set dropout_selected."""
+    raw = {"session_id": "abc123", "dropout_selection": False}
+    r = SessionRecord.from_dict(raw)
+    assert r.dropout_selected is None
+    assert r.dropout_reason is None

@@ -452,6 +452,14 @@ class SessionRecord:
             and not filtered["journal_path"].endswith(".md")
         ):
             filtered["trajectory_path"] = filtered.pop("journal_path")
+        # Migrate legacy records: dropout_selection (bool, added in #963) was
+        # replaced by dropout_selected/dropout_reason/dropout_depth in #965.
+        # Forward the flag so records written between the two deploys aren't silently lost.
+        if "dropout_selection" in legacy and "dropout_selected" not in filtered:
+            if legacy["dropout_selection"]:
+                filtered["dropout_selected"] = True
+                filtered["dropout_reason"] = "random_sampling"
+            del legacy["dropout_selection"]
         if legacy:
             filtered["_legacy_fields"] = legacy
         return cls(**filtered)
