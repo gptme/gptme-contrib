@@ -24,7 +24,7 @@ HARM_CATEGORY_TAXONOMY: dict[str, str] = {
 HARM_CATEGORY_LABELS: list[str] = list(HARM_CATEGORY_TAXONOMY.keys())
 
 # Valid values for the dropout_depth field.
-DROPOUT_DEPTH_VALUES: list[str] = ["shallow", "deep"]
+DROPOUT_DEPTH_VALUES: frozenset[str] = frozenset(["shallow", "deep"])
 
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
@@ -243,11 +243,6 @@ class SessionRecord:
     # One of HARM_CATEGORY_LABELS, or None when not classified.
     harm_category: str | None = None
 
-    # Dropout selection flag (idea #793): when True, this session was randomly
-    # selected for deeper post-hoc review (random dropout sampling). Allows
-    # retrospective quality analysis independent of the regular judge queue.
-    dropout_selection: bool | None = None
-
     # Random dropout sampling (ErikBjare/bob#793)
     # Flag set by the autonomous-run.sh reconcile pass when the session is
     # drawn for deeper post-hoc review. Dropout sessions get a richer secondary
@@ -299,6 +294,12 @@ class SessionRecord:
             self.harm_category = None
         # Discard unrecognized dropout_depth values so typos don't silently reach consumers.
         if self.dropout_depth is not None and self.dropout_depth not in DROPOUT_DEPTH_VALUES:
+            self.dropout_depth = None
+        # Cross-field consistency: when explicitly not selected (False), the detail fields
+        # have no meaning — clear them to prevent downstream consumers from reading an
+        # inconsistent combination (e.g. dropout_selected=False, dropout_depth="deep").
+        if self.dropout_selected is False:
+            self.dropout_reason = None
             self.dropout_depth = None
 
     def set_productivity_grade(self, score: float) -> None:
@@ -457,6 +458,14 @@ class SessionRecord:
             and not filtered["journal_path"].endswith(".md")
         ):
             filtered["trajectory_path"] = filtered.pop("journal_path")
+        # Migrate legacy records: dropout_selection (bool, added in #963) was
+        # replaced by dropout_selected/dropout_reason/dropout_depth in #965.
+        # Forward the flag so records written between the two deploys aren't silently lost.
+        if "dropout_selection" in legacy and "dropout_selected" not in filtered:
+            if legacy["dropout_selection"]:
+                filtered["dropout_selected"] = True
+                filtered["dropout_reason"] = "random_sampling"
+            del legacy["dropout_selection"]
         if legacy:
             filtered["_legacy_fields"] = legacy
         return cls(**filtered)
