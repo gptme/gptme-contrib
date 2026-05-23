@@ -245,6 +245,14 @@ class SessionRecord:
     # retrospective quality analysis independent of the regular judge queue.
     dropout_selection: bool | None = None
 
+    # Random dropout sampling (ErikBjare/bob#793)
+    # Flag set by the autonomous-run.sh reconcile pass when the session is
+    # drawn for deeper post-hoc review. Dropout sessions get a richer secondary
+    # analysis beyond the standard LLM judge run.
+    dropout_selected: bool | None = None
+    dropout_reason: str | None = None  # "random_sampling" for selected sessions; None otherwise
+    dropout_depth: str | None = None  # "shallow" (standard judge) or "deep" (extra analysis)
+
     # Per-tool-call span aggregates (Phase 3 of span-level tracing, idea #158).
     # Dict shape mirrors SpanAggregates fields (total_spans, error_spans,
     # error_rate, dominant_tool, avg_duration_ms, max_duration_ms,
