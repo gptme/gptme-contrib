@@ -24,7 +24,7 @@ HARM_CATEGORY_TAXONOMY: dict[str, str] = {
 HARM_CATEGORY_LABELS: list[str] = list(HARM_CATEGORY_TAXONOMY.keys())
 
 # Valid values for the dropout_depth field.
-DROPOUT_DEPTH_VALUES: list[str] = ["shallow", "deep"]
+DROPOUT_DEPTH_VALUES: frozenset[str] = frozenset(["shallow", "deep"])
 
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
@@ -294,6 +294,12 @@ class SessionRecord:
             self.harm_category = None
         # Discard unrecognized dropout_depth values so typos don't silently reach consumers.
         if self.dropout_depth is not None and self.dropout_depth not in DROPOUT_DEPTH_VALUES:
+            self.dropout_depth = None
+        # Cross-field consistency: when explicitly not selected (False), the detail fields
+        # have no meaning — clear them to prevent downstream consumers from reading an
+        # inconsistent combination (e.g. dropout_selected=False, dropout_depth="deep").
+        if self.dropout_selected is False:
+            self.dropout_reason = None
             self.dropout_depth = None
 
     def set_productivity_grade(self, score: float) -> None:

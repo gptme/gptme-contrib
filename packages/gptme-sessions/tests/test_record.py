@@ -665,3 +665,36 @@ def test_dropout_selection_false_not_migrated():
     r = SessionRecord.from_dict(raw)
     assert r.dropout_selected is None
     assert r.dropout_reason is None
+
+
+def test_dropout_cross_field_consistency_not_selected():
+    """dropout_reason and dropout_depth are cleared when dropout_selected=False."""
+    r = SessionRecord(
+        session_id="abc123",
+        dropout_selected=False,
+        dropout_reason="random_sampling",
+        dropout_depth="deep",
+    )
+    assert r.dropout_selected is False
+    assert r.dropout_reason is None
+    assert r.dropout_depth is None
+
+
+def test_dropout_cross_field_consistency_selected():
+    """dropout_reason and dropout_depth are preserved when dropout_selected=True."""
+    r = SessionRecord(
+        session_id="abc123",
+        dropout_selected=True,
+        dropout_reason="random_sampling",
+        dropout_depth="deep",
+    )
+    assert r.dropout_selected is True
+    assert r.dropout_reason == "random_sampling"
+    assert r.dropout_depth == "deep"
+
+
+def test_dropout_cross_field_consistency_none():
+    """dropout_reason and dropout_depth are preserved when dropout_selected=None (pending)."""
+    r = SessionRecord(session_id="abc123", dropout_selected=None, dropout_depth="shallow")
+    assert r.dropout_selected is None
+    assert r.dropout_depth == "shallow"
