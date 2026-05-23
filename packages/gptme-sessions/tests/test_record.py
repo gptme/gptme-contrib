@@ -641,3 +641,10 @@ def test_dropout_fields_null_roundtrip():
     assert parsed["dropout_selected"] is None
     assert parsed["dropout_reason"] is None
     assert parsed["dropout_depth"] is None
+
+
+def test_dropout_depth_corrupt_jsonl_roundtrip():
+    """Unrecognized dropout_depth from JSONL is silently dropped on load."""
+    raw = {"session_id": "abc123", "dropout_depth": "depp"}
+    r = SessionRecord.from_dict(raw)
+    assert r.dropout_depth is None
