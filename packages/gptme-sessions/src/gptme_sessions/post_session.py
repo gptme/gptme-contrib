@@ -111,6 +111,33 @@ def _merge_deliverable_details(
     )
 
 
+def _trajectory_duration_reliable(
+    signals: dict[str, Any] | None,
+    duration_seconds: int,
+    *,
+    min_coverage: float = 0.5,
+) -> bool:
+    """Whether the assigned trajectory plausibly covers the whole session.
+
+    Two concurrent same-backend sessions can resolve to the same gptme log
+    directory, so a session's assigned trajectory may actually belong to a
+    different (shorter) run. When the trajectory's message timestamps span far
+    less wall-clock than the caller-reported duration, the trajectory is not a
+    trustworthy productivity oracle: trusting it drops real
+    ``start_commit..HEAD`` deliverables and records a false noop (see
+    ErikBjare/bob "gptme false noop detection").
+
+    Returns ``True`` when there is no basis to doubt coverage (no signals, no
+    caller duration, or a missing/invalid trajectory span).
+    """
+    if not signals or duration_seconds <= 0:
+        return True
+    traj_span = signals.get("session_duration_s")
+    if not isinstance(traj_span, (int, float)) or traj_span <= 0:
+        return True
+    return traj_span >= min_coverage * duration_seconds
+
+
 #: Default path for grading weights config (Phase 3 multivariate grading).
 _GRADING_WEIGHTS_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent.parent.parent
@@ -310,6 +337,15 @@ def post_session(
        explicit deliverables and the trajectory found no deliverables
        of its own (i.e. the trajectory couldn't validate or contradict
        the caller's evidence), upgrade to ``"productive"``.
+    7. Unreliable-trajectory guard: a trajectory whose covered wall-clock is
+       far below the caller-reported ``duration_seconds`` is likely truncated
+       or misattributed (two concurrent same-backend sessions resolving to the
+       same log dir). When such a trajectory says ``"noop"``:
+       - If the caller supplied git-range deliverables, those commits are kept
+         and the outcome is ``"productive"`` instead of a false ``"noop"``.
+       - If the caller has no deliverables either, the outcome is ``"unknown"``
+         (recording ``"noop"`` would unfairly penalize the backend's bandit
+         weight for a session whose real work can't be observed).
     """
     if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
@@ -388,6 +424,13 @@ def post_session(
             if traj_model:
                 model = traj_model
 
+    # Whether the assigned trajectory plausibly covers the whole session. A
+    # trajectory spanning far less wall-clock than the caller's duration is
+    # likely truncated or misattributed (two concurrent same-backend sessions
+    # resolving to the same gptme log dir), so it must not be allowed to drop
+    # real git-range deliverables and record a false noop.
+    trajectory_reliable = _trajectory_duration_reliable(signals, duration_seconds)
+
     # --- Resolve deliverables ---
     # Trajectory is the authoritative source when available.  Git-range commits
     # (caller-supplied via start_commit..HEAD) pick up commits from concurrent
@@ -453,7 +496,7 @@ def post_session(
                 )
         else:
             # Trajectory ran but found no deliverables.
-            if traj_productive is False:
+            if traj_productive is False and trajectory_reliable:
                 # Trajectory explicitly says this was noop — caller SHAs are
                 # from concurrent sessions.
                 if caller_deliverables:
@@ -464,19 +507,24 @@ def post_session(
                     )
                 deliverables = []
             else:
-                # Trajectory didn't catalog deliverables but didn't rule out
-                # work.  Keep caller items as best evidence.
+                # Either the trajectory didn't rule out work, or it is
+                # unreliable (covers far less wall-clock than the session ran,
+                # so it is likely truncated or misattributed). Keep caller items
+                # as best evidence.
+                reason = "trajectory_unreliable" if traj_productive is False else "trajectory_empty"
                 if caller_deliverables:
                     logger.warning(
-                        "Trajectory ran but found no deliverables; keeping %d "
-                        "caller-supplied deliverable(s)",
+                        "Trajectory %s; keeping %d caller-supplied deliverable(s)",
+                        "is unreliable (duration mismatch)"
+                        if reason == "trajectory_unreliable"
+                        else "ran but found no deliverables",
                         len(caller_deliverables),
                     )
                 deliverables = list(dict.fromkeys(caller_deliverables))
                 extra_deliverable_details = _build_caller_deliverable_details(
                     caller_deliverables,
                     provenance_class="fallback_observed",
-                    evidence={"source": "caller", "reason": "trajectory_empty"},
+                    evidence={"source": "caller", "reason": reason},
                 )
     # else: no trajectory (signals is None) — keep caller git-range as fallback.
     elif caller_deliverables:
@@ -507,7 +555,27 @@ def post_session(
     if exit_code not in (0, 124):
         outcome = "failed"
     elif traj_productive is not None:
-        outcome = "productive" if traj_productive else "noop"
+        if traj_productive:
+            outcome = "productive"
+        elif not trajectory_reliable and caller_deliverables:
+            # Trajectory says noop but is unreliable (covers far less wall-clock
+            # than the session ran — likely truncated or misattributed) and the
+            # caller observed real git-range commits. Trust the commits.
+            outcome = "productive"
+        elif not trajectory_reliable and not caller_deliverables:
+            # Trajectory is unreliable (truncated/misattributed) and no caller
+            # deliverables exist — outcome is genuinely unknown.  Recording noop
+            # here would penalize the backend in bandit scoring for a session
+            # whose real work we can't observe.
+            assert signals is not None  # implied by traj_productive is not None
+            logger.warning(
+                "Trajectory says noop but is unreliable (%d%% coverage); "
+                "no caller deliverables — recording unknown",
+                int(100 * (signals.get("session_duration_s", 0) / max(duration_seconds, 1))),
+            )
+            outcome = "unknown"
+        else:
+            outcome = "noop"
     elif start_commit is not None and end_commit is not None:
         outcome = "productive" if start_commit != end_commit else "noop"
     elif (start_commit is None) != (end_commit is None):
