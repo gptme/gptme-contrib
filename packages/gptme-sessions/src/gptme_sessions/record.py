@@ -240,6 +240,11 @@ class SessionRecord:
     # One of HARM_CATEGORY_LABELS, or None when not classified.
     harm_category: str | None = None
 
+    # Dropout selection flag (idea #793): when True, this session was randomly
+    # selected for deeper post-hoc review (random dropout sampling). Allows
+    # retrospective quality analysis independent of the regular judge queue.
+    dropout_selection: bool | None = None
+
     # Per-tool-call span aggregates (Phase 3 of span-level tracing, idea #158).
     # Dict shape mirrors SpanAggregates fields (total_spans, error_spans,
     # error_rate, dominant_tool, avg_duration_ms, max_duration_ms,
