@@ -340,9 +340,12 @@ def post_session(
     7. Unreliable-trajectory guard: a trajectory whose covered wall-clock is
        far below the caller-reported ``duration_seconds`` is likely truncated
        or misattributed (two concurrent same-backend sessions resolving to the
-       same log dir). When such a trajectory says ``"noop"`` but the caller
-       supplied git-range deliverables, those commits are kept and the outcome
-       is ``"productive"`` instead of a false ``"noop"``.
+       same log dir). When such a trajectory says ``"noop"``:
+       - If the caller supplied git-range deliverables, those commits are kept
+         and the outcome is ``"productive"`` instead of a false ``"noop"``.
+       - If the caller has no deliverables either, the outcome is ``"unknown"``
+         (recording ``"noop"`` would unfairly penalize the backend's bandit
+         weight for a session whose real work can't be observed).
     """
     if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
@@ -559,6 +562,18 @@ def post_session(
             # than the session ran — likely truncated or misattributed) and the
             # caller observed real git-range commits. Trust the commits.
             outcome = "productive"
+        elif not trajectory_reliable and not caller_deliverables:
+            # Trajectory is unreliable (truncated/misattributed) and no caller
+            # deliverables exist — outcome is genuinely unknown.  Recording noop
+            # here would penalize the backend in bandit scoring for a session
+            # whose real work we can't observe.
+            assert signals is not None  # implied by traj_productive is not None
+            logger.warning(
+                "Trajectory says noop but is unreliable (%d%% coverage); "
+                "no caller deliverables — recording unknown",
+                int(100 * (signals.get("session_duration_s", 0) / max(duration_seconds, 1))),
+            )
+            outcome = "unknown"
         else:
             outcome = "noop"
     elif start_commit is not None and end_commit is not None:

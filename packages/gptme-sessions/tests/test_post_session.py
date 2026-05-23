@@ -732,6 +732,40 @@ def test_post_session_unreliable_trajectory_keeps_caller_deliverables(tmp_path: 
     ]
 
 
+def test_post_session_unreliable_trajectory_no_caller_deliverables_records_unknown(
+    tmp_path: Path, caplog
+):
+    """When trajectory is unreliable (truncated/misattributed) and says noop,
+    but no caller deliverables exist either, record unknown — don't penalize
+    the backend with a false noop."""
+    import logging
+
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 214,  # 3.5 minutes
+        "productive": False,
+        "deliverables": [],
+    }
+    with (
+        patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals),
+        caplog.at_level(logging.INFO),
+    ):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            model="opus",
+            duration_seconds=1158,  # 19 min real session
+            trajectory_path=fake_traj,
+            deliverables=[],  # no caller commits either
+        )
+
+    assert result.record.outcome == "unknown"
+    assert result.record.deliverables == []
+
+
 def test_post_session_reliable_trajectory_still_drops_concurrent_commits(tmp_path: Path):
     """Guard regression: when the trajectory span matches the session duration,
     a trajectory-determined noop still drops caller git-range commits, so the
