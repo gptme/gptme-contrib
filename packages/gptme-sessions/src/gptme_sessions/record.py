@@ -23,6 +23,9 @@ HARM_CATEGORY_TAXONOMY: dict[str, str] = {
 }
 HARM_CATEGORY_LABELS: list[str] = list(HARM_CATEGORY_TAXONOMY.keys())
 
+# Valid values for the dropout_depth field.
+DROPOUT_DEPTH_VALUES: list[str] = ["shallow", "deep"]
+
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
     # Anthropic Claude models (bare) — dash and dot variants
@@ -245,6 +248,14 @@ class SessionRecord:
     # retrospective quality analysis independent of the regular judge queue.
     dropout_selection: bool | None = None
 
+    # Random dropout sampling (ErikBjare/bob#793)
+    # Flag set by the autonomous-run.sh reconcile pass when the session is
+    # drawn for deeper post-hoc review. Dropout sessions get a richer secondary
+    # analysis beyond the standard LLM judge run.
+    dropout_selected: bool | None = None
+    dropout_reason: str | None = None  # "random_sampling" for selected sessions; None otherwise
+    dropout_depth: str | None = None  # "shallow" (standard judge) or "deep" (extra analysis)
+
     # Per-tool-call span aggregates (Phase 3 of span-level tracing, idea #158).
     # Dict shape mirrors SpanAggregates fields (total_spans, error_spans,
     # error_rate, dominant_tool, avg_duration_ms, max_duration_ms,
@@ -286,6 +297,9 @@ class SessionRecord:
         # so downstream --by-category consumers never see unexpected keys.
         if self.harm_category is not None and self.harm_category not in HARM_CATEGORY_LABELS:
             self.harm_category = None
+        # Discard unrecognized dropout_depth values so typos don't silently reach consumers.
+        if self.dropout_depth is not None and self.dropout_depth not in DROPOUT_DEPTH_VALUES:
+            self.dropout_depth = None
 
     def set_productivity_grade(self, score: float) -> None:
         """Store the productivity dimension alongside the legacy scalar field."""
