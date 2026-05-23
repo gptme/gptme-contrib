@@ -3,7 +3,10 @@ match:
   keywords:
     - "greptile score"
     - "trigger greptile"
+    - "fresh greptile review"
+    - "greptile after fixing"
   session_categories: [cross-repo, code]
+description: "Trigger a fresh Greptile score after fixing P1 issues — use greptile-helper.sh to retrigger idempotently and avoid duplicate review spam"
 status: active
 ---
 
