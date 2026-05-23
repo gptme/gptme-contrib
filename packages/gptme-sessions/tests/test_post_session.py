@@ -689,6 +689,77 @@ def test_post_session_caller_deliverables_no_outcome_override_when_traj_noop(tmp
     assert result.record.deliverable_details == []
 
 
+def test_post_session_unreliable_trajectory_keeps_caller_deliverables(tmp_path: Path):
+    """A trajectory covering far less wall-clock than the session duration is
+    treated as unreliable (truncated/misattributed). Its noop verdict must NOT
+    drop the caller's real git-range commits or record a false noop.
+
+    Reproduces ErikBjare/bob session 36d9: two concurrent gptme sessions
+    resolved to the same log dir, so 36d9's 1158s run was assigned 026d's 214s
+    noop trajectory, dropping 36d9's real commits and recording a false noop.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    # Trajectory says noop and covers only 214s of wall-clock...
+    fake_signals = {
+        "session_duration_s": 214,
+        "productive": False,
+        "deliverables": [],
+    }
+    real_sha = "abc1234567890abcdef1234567890abcdef1234"
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            model="deepseek-v4-flash",
+            # ...but the session actually ran 1158s and made a real commit.
+            duration_seconds=1158,
+            trajectory_path=fake_traj,
+            deliverables=[real_sha],
+        )
+
+    assert result.record.outcome == "productive"
+    assert result.record.deliverables == [real_sha]
+    assert result.record.deliverable_details == [
+        {
+            "value": real_sha,
+            "kind": "commit",
+            "provenance_class": "fallback_observed",
+            "evidence": {"source": "caller", "reason": "trajectory_unreliable"},
+        }
+    ]
+
+
+def test_post_session_reliable_trajectory_still_drops_concurrent_commits(tmp_path: Path):
+    """Guard regression: when the trajectory span matches the session duration,
+    a trajectory-determined noop still drops caller git-range commits, so the
+    concurrent-session contamination filter stays intact."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 600,
+        "productive": False,
+        "deliverables": [],
+    }
+    concurrent_sha = "deadbeef" + "01234567" * 4
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            model="opus",
+            duration_seconds=620,  # trajectory covers ~97% — reliable
+            trajectory_path=fake_traj,
+            deliverables=[concurrent_sha],
+        )
+
+    assert result.record.outcome == "noop"
+    assert result.record.deliverables == []
+
+
 def test_post_session_trajectory_empty_deliverables_keeps_caller_when_productive(
     tmp_path: Path, caplog
 ):
