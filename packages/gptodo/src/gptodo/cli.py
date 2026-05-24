@@ -162,7 +162,40 @@ console = Console()
     help="Path to tasks directory (overrides auto-detection). Can also be set via GPTODO_TASKS_DIR env var.",
 )
 def cli(verbose, tasks_dir):
-    """Task verification and status CLI."""
+    """gptodo — task management CLI for gptme agent workspaces.
+
+    Features:
+    - Status views (list, show, status, next, ready)
+    - Task metadata editing (edit): state, priority, tags, dependencies, and more
+    - Recurring tasks (recur: 7d, weekly, monthly, or cron expressions)
+    - Dependency validation and blocking analysis (effective, check-waiting, dep)
+    - Sub-agent spawning and management (spawn, sessions, run)
+    - GitHub/Linear issue import and syncing (import, fetch, sync)
+    - Task locking, claims, and stale detection
+    - Link checking and task integrity verification
+
+    Frontmatter fields (set via `gptodo edit TASK --set field value`):
+        state: backlog|todo|active|waiting|ready_for_review|done|cancelled|someday
+        priority: high|medium|low
+        task_type: project|action
+        assigned_to: bob|erik|alice|gordon (or any string)
+        created: ISO 8601 date/datetime
+        recur: 7d|14d|24h|weekly|monthly|cron-expression (recurring tasks)
+        wait: ISO 8601 date/datetime (hide from queue until this date)
+        next_action: string (GTD)
+        waiting_for: string (GTD)
+        waiting_since: date (GTD)
+        parent: string (parent task ID)
+        success_criterion: string (verifiable "done" gate)
+        depends: list (deprecated, use requires)
+        requires: list (dependency references)
+        tags: list
+        tracking: list (external issue/PR URLs)
+        related: list
+        output_types: list
+
+    See https://github.com/gptme/gptme-contrib for full documentation.
+    """
     log_level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=log_level)
 
@@ -1370,14 +1403,33 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
 def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
     """Edit task metadata.
 
+    Recurring tasks:
+        Set `recur` on any task to make it repeating. When you mark a recurring
+        task as `done`, it auto-resets to `todo` with an updated `wait` date
+        computed from the current time + the recur interval. The task stays
+        hidden from `ready`/`next` until `wait` expires.
+
+        Supported recur values:
+            Nd      N days (e.g. 7d, 14d, 1d)
+            Nh      N hours (e.g. 24h, 6h)
+            weekly  7 days
+            monthly 30 days (calendar-approximate)
+            cron    Any 5/6-field cron expression (parsed but not evaluated
+                    by gptodo — accepted for compatibility with external tools)
+
+        Examples:
+            gptodo edit weekly-review --set recur 7d
+            gptodo edit daily-standup --set recur 24h
+            gptodo edit monthly-report --set recur monthly
+
     Examples:
         tasks edit task-123 --set state active
         tasks edit task-123 --set priority high
         tasks edit task-123 --set created 2025-05-05T10:00:00+02:00
-        tasks edit task-123 --add depends other-task
+        tasks edit task-123 --add requires other-task
         tasks edit task-123 --add tag feature
         tasks edit task-123 --remove tag wip
-        tasks edit task-123 --set state active --add tag feature --add depends other-task
+        tasks edit task-123 --set state active --add tag feature --add requires other-task
         tasks edit task-123 --set-subtask "Handle simple responses" done
 
     Clearing optional fields:
