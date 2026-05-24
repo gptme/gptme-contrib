@@ -1,4 +1,5 @@
 ---
+description: "After `git worktree add -b BRANCH origin/master`, always push with explicit `git push -u origin BRANCH` not bare `git push`"
 match:
   keywords:
     - "git worktree add"

@@ -1,4 +1,5 @@
 ---
+description: "Before creating an issue, verify it doesn't already exist and that it's clearly scoped and actionable"
 match:
   keywords:
     - "duplicate prevention"

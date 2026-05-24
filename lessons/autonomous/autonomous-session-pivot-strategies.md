@@ -1,4 +1,5 @@
 ---
+description: "When technical blockers appear in autonomous mode, pivot quickly to alternative work instead of spending time debugging"
 match:
   keywords:
   - pivot when blocked

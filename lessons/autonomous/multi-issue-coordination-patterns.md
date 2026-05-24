@@ -1,4 +1,5 @@
 ---
+description: "When working across multiple issues/PRs, claim one issue at a time to avoid coordination failures"
 match:
   keywords:
   - multiple tasks blocked

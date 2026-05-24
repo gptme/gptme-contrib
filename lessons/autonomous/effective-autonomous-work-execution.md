@@ -1,4 +1,5 @@
 ---
+description: "Execute autonomous work by completing real deliverables rather than spending time on meta-analysis or planning"
 match:
   keywords:
   - "autonomous session"

@@ -1,4 +1,5 @@
 ---
+description: "Measure actual performance or behavior before optimizing — don't optimize based on assumptions or guesses"
 match:
   keywords:
   - "should drop to"

@@ -1,4 +1,5 @@
 ---
+description: "When improving gptme-contrib, create a feature branch, PR, wait for merge, then advance the submodule pointer"
 match:
   keywords: ["contrib PR"]
   session_categories: [cross-repo, code]

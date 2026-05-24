@@ -1,4 +1,5 @@
 ---
+description: "When you state an intention (I will do X), follow through on it in the same session — unmet stated intentions erode trust"
 status: active
 match:
   keywords:

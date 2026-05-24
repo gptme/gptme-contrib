@@ -1,4 +1,5 @@
 ---
+description: "When a message contains a factual error or misunderstanding, correct it immediately rather than letting it propagate"
 status: active
 tags: [inter-agent, correction, orchestration, epistemic-integrity, communication]
 match:

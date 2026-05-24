@@ -1,4 +1,5 @@
 ---
+description: "When uncertain whether an action requires human approval, apply the reversibility and blast-radius tests before proceeding"
 match:
   keywords:
   - "should I ask the user or proceed autonomously"

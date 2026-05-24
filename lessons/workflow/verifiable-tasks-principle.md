@@ -1,4 +1,5 @@
 ---
+description: "Prefer tasks with strong verification (tests, CI, benchmarks) over subjective tasks where success is ambiguous"
 match:
   keywords:
   - "how do I know when this is done"

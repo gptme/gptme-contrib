@@ -1,4 +1,5 @@
 ---
+description: "At session start, review recent commits and active tasks to avoid duplicating parallel session work"
 match:
   keywords:
     - "skipped recent actions review"

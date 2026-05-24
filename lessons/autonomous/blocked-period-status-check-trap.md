@@ -1,4 +1,5 @@
 ---
+description: "When blocked for extended periods, stop creating repetitive status-check commits — do real work or write a lesson"
 match:
   keywords:
     - blocked period

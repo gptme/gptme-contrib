@@ -1,4 +1,5 @@
 ---
+description: "Apply safe operation defaults (claim before execute, verify before delete, prefer reversible) in all autonomous work"
 match:
   keywords:
   - "classify operation before executing"

@@ -1,4 +1,5 @@
 ---
+description: "Before opening a new PR, check for existing open PRs on the same branch or topic to avoid duplicates"
 match:
   keywords:
   - gh api graphql

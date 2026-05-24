@@ -1,4 +1,5 @@
 ---
+description: "Rebase a PR only when its branch is behind master and conflicts prevent merge — don't rebase for aesthetic reasons"
 match:
   keywords:
     - commits behind
