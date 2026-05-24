@@ -2,6 +2,7 @@
 match:
   keywords: ["cross-agent review", "workspace review patterns", "reviewing other agent's work"]
 status: active
+description: "Conduct mutual workspace reviews between agents to identify improvement opportunities and share proven patterns."
 ---
 
 # Cross-Agent Workspace Review

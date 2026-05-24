@@ -7,6 +7,7 @@ match:
     - "import-untyped"
     - "Cannot find implementation or library stub"
 status: active
+description: "Match mypy error codes to the actual error type when using `type: ignore` comments."
 ---
 
 # Match mypy Error Codes to Actual Error Type

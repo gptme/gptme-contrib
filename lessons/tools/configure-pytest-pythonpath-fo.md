@@ -7,6 +7,7 @@ match:
     - "workspace package not found"
     - "cannot import in tests"
 status: active
+description: "Configure pytest pythonpath in pyproject."
 ---
 
 # Configure pytest pythonpath for Monorepo

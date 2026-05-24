@@ -9,6 +9,7 @@ match:
     - "NOTION_TOKEN"
 category: tools
 status: active
+description: "Use mcp-cli with the Notion MCP server for reading and writing Notion content."
 ---
 # Notion MCP Integration
 

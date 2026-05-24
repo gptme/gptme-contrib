@@ -6,6 +6,7 @@ match:
     - "restore corrupted pre-commit scripts"
     - "prek run failing with persistent errors"
     - "CI status red on master branch"
+description: "When CI is red on master or pre-commit scripts are corrupted, diagnose systematically before fixing: check failure pattern, run locally, fix root cause, verify."
 ---
 
 # CI Failure Resolution and Pre-commit Infrastructure Maintenance

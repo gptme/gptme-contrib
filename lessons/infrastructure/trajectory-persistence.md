@@ -13,6 +13,7 @@ match:
 target_grade: alignment
 status: active
 confound_note: "cleanup-selection-bias — LOO-negative because it fires in inherently higher-harm cleanup contexts, not because it causes harm"
+description: "Never delete trajectory files, session records, session data directories, or any data that captures what happened in agent sessions."
 ---
 
 # Trajectory Persistence

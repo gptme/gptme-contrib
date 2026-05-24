@@ -5,6 +5,7 @@ match:
     - "wrap the command to add"
     - "before patching the wrapper"
 status: active
+description: "Before examining source code or making assumptions about a CLI tool's capabilities, run the command with --help to discover available options, subcommands, and flags that can simplify your approach."
 ---
 
 # Check CLI --help Before Reading Source Code

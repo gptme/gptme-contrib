@@ -10,6 +10,7 @@ match:
     - "for next time"
     - "should write this down"
 status: active
+description: "When you say you have noted or learned something, immediately persist it to a core file before continuing."
 ---
 
 # Persist Before Noting

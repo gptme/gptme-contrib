@@ -5,6 +5,7 @@ match:
     - "5+ chains on prerequisites"
     - "need to understand full pipeline before testing"
 status: active
+description: "If you spend >5 chains on prerequisites (finding files, understanding pipelines, setting up dependencies), stop and identify a minimal test case."
 ---
 
 # Avoid Excessive Setup When Testing Components

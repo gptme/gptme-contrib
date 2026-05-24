@@ -5,6 +5,7 @@ match:
     - "llmlingua compression"
     - "prompt compression technique"
 status: deprecated
+description: "**LLMLingua**: LLM-based prompt compression technique."
 ---
 # LLMLingua (Compression Technique)
 

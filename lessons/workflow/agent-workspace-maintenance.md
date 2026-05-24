@@ -6,6 +6,7 @@ match:
     - "submodule is behind"
   session_categories: [cleanup]
 status: active
+description: "When doing periodic workspace maintenance, update the gptme-contrib submodule and verify that shared infrastructure symlinks are intact."
 ---
 
 # Agent Workspace Maintenance

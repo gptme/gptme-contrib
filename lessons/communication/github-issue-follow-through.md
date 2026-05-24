@@ -9,6 +9,7 @@ match:
     - missing follow-up response
     - broken communication loop
 status: deprecated
+description: "ALWAYS respond in the original issue thread when completing any action requested in that thread."
 ---
 
 # GitHub Issue Follow-Through Pattern

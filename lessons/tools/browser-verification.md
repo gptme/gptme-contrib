@@ -7,6 +7,7 @@ match:
   - "javascript fix without testing"
   session_categories: [code]
 status: active
+description: "Always verify web changes by checking console outputs and visual rendering before declaring them fixed."
 ---
 
 # Browser Verification for Web Changes

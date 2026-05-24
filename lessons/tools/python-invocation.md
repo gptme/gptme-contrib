@@ -13,6 +13,7 @@ match:
   - "python not installed"
   - "use python3"
 status: active
+description: "Always use `python3` explicitly instead of `python` in shell commands and scripts."
 ---
 
 # Python Invocation

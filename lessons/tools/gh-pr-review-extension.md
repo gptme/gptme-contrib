@@ -8,6 +8,7 @@ match:
     - "close conversation thread"
     - "mark thread resolved"
 status: archived
+description: "Use the `gh-pr-review` extension to manage PR review threads: **comment + resolve** when the issue is resolved (pushed fix OR explained why it's not an issue), **comment only** when seeking."
 ---
 
 # gh-pr-review Extension for Review Thread Management

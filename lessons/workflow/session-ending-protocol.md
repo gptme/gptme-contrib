@@ -3,6 +3,7 @@ match:
   keywords: ["session complete", "ending a session", "wrap up the session", "land the plane", "session ending checklist", "before completing"]
   session_categories: [code, cross-repo, infrastructure, cleanup]
 status: archived
+description: "Before completing any session, follow the Land the Plane checklist to ensure clean handoff."
 ---
 
 # Session Ending Protocol

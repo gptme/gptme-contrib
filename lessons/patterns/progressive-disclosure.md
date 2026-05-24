@@ -6,6 +6,7 @@ match:
     - "context budget consumed by rarely-needed content"
   session_categories: [knowledge, cleanup]
 status: active
+description: "Restructure large documentation files (>500 lines, >5k tokens) into slim indexes with on-demand detail directories."
 ---
 
 # Progressive Disclosure for Documentation

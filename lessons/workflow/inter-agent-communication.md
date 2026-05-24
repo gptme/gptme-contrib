@@ -2,6 +2,7 @@
 match:
   keywords: ["inter-agent communication", "agent-to-agent messaging", "cross-agent coordination", "communicate with other agent", "message another agent"]
 status: active
+description: "Use a channel that the other agent can actually read."
 ---
 
 # Inter-Agent Communication

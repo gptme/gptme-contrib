@@ -7,6 +7,7 @@ match:
     - "prek shows old errors"
     - "commit untracked file"
 status: active
+description: "Always `git add <files>` before committing or running prek."
 ---
 
 # Stage Files with git add Before Commit/prek

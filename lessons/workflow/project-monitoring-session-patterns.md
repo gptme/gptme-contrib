@@ -15,6 +15,7 @@ match:
     - "act vs defer"
   session_categories: [monitoring, triage]
 status: active
+description: "Use systematic classification and time-boxed execution for monitoring sessions: classify notifications as ACT (action required) vs DEF (deferred), then execute only ACT items."
 ---
 
 # Project Monitoring Session Patterns

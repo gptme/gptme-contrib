@@ -6,6 +6,7 @@ match:
     - "gh pr view --comments"
   session_categories: [cross-repo, code]
 status: active
+description: "NEVER truncate GitHub comment output."
 ---
 
 # Read Full GitHub Context

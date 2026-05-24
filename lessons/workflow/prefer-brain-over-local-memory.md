@@ -5,6 +5,7 @@ match:
     - brain repo
   session_categories: [self-review, infrastructure]
 status: active
+description: "When an agent has a brain repo (git workspace), persist knowledge there — not in runtime-local memory systems like Claude Code's `~/."
 ---
 
 # Prefer Brain Repo Over Local Machine Memory

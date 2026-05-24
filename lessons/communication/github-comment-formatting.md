@@ -10,6 +10,7 @@ tags:
 - file-references
 - formatting
 status: active
+description: "Always format file references in GitHub comments as clickable links using proper markdown syntax for the repository context."
 ---
 
 # GitHub Comment Formatting for File References

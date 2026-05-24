@@ -14,6 +14,7 @@ match:
   - "check if already commented"
   - "before posting any comment"
 status: active
+description: "Always search for existing issues/PRs before creating new ones, read full context before engaging, check your own previous comments before posting, and update issues/PRs after completing work."
 ---
 
 # GitHub Issue and PR Engagement

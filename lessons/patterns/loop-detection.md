@@ -6,6 +6,7 @@ match:
     - "repeating failed action without progress"
     - "detected repetitive tool calls"
 status: active
+description: "Detect when performing the same action repeatedly (3+ times) and break the loop."
 ---
 
 # Detect and Break Repetitive Action Loops

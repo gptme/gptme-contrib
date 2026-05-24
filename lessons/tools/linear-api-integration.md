@@ -7,6 +7,7 @@ match:
   session_categories: [triage, infrastructure]
 category: tools
 status: active
+description: "Use `linear-activity."
 ---
 # Linear API Integration
 

@@ -9,6 +9,7 @@ match:
   - "file ended up in wrong"
   - "journal created in external repo"
 status: active
+description: "Always use absolute paths when saving/appending to workspace files."
 ---
 
 # Always Use Absolute Paths for Workspace Files

@@ -7,6 +7,7 @@ match:
   - seems like a good idea without requester
   - building before validating need
 status: active
+description: "Before implementing any feature, validate: WHO requested it, WHAT problem it solves, HOW to measure success, and WHAT'S the minimal solution."
 ---
 
 # Requirement Validation Before Implementation

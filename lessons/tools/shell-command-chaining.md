@@ -6,6 +6,7 @@ match:
   - "chain shell commands"
   - "command chaining"
 status: active
+description: "Chain related shell commands in a single block instead of multiple separate executions."
 ---
 
 # Shell Command Chaining

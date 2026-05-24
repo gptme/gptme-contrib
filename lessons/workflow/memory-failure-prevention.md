@@ -12,6 +12,7 @@ match:
   - issue creation
   - memory follow-through
 status: archived
+description: "Always close communication loops by responding in the original thread after completing requested actions, and check for previous work before creating new issues."
 ---
 
 # Memory Failure Prevention
