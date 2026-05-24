@@ -31,16 +31,16 @@ No agent workspace or journal required — works for any human user.
 gptme-activity-summary daily --mode human --date yesterday
 
 # Daily with GitHub activity overlaid
-gptme-activity-summary daily --mode human --date yesterday --github-user ErikBjare
+gptme-activity-summary daily --mode human --date yesterday --github-user your-github-username
 
 # Weekly report (AW + GitHub)
-gptme-activity-summary weekly --mode human --week last --github-user ErikBjare
+gptme-activity-summary weekly --mode human --week last --github-user your-github-username
 
 # Monthly report
-gptme-activity-summary monthly --mode human --month last --github-user ErikBjare
+gptme-activity-summary monthly --mode human --month last --github-user your-github-username
 
 # Raw data — skip LLM summarization, print source data only
-gptme-activity-summary weekly --mode human --week last --github-user ErikBjare --raw
+gptme-activity-summary weekly --mode human --week last --github-user your-github-username --raw
 ```
 
 **ActivityWatch is the primary data source.** Install and run [ActivityWatch](https://activitywatch.net) on your machine for time-tracking data. If AW is not running, AW data is skipped gracefully and GitHub-only reports still work.
