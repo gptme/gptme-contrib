@@ -5,7 +5,7 @@ match:
   - pivot when blocked
   - switch tasks when stuck
   - alternative value-creation
-  - autonomous session pivot
+  - session pivot lesson
 status: active
 ---
 

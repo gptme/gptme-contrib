@@ -1,10 +1,7 @@
 ---
 match:
   keywords:
-    - "notion"
     - "notion mcp"
-    - "notion integration"
-    - "notion api"
     - "notion token"
     - "NOTION_TOKEN"
 category: tools

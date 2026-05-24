@@ -8,15 +8,14 @@ tags:
 - focus
 match:
   keywords:
-  - strategic focus discipline
-  - darwinian trap avoidance
-  - "strategic focus"
-  - "productivity trap"
-  - "darwinian trap"
-  - "busy work"
-  - "productivity theater"
-  - "anti-monotony guard"
-  - "category_monotony"
+
+
+  - straying from highest-leverage
+  - trapped in maintenance loops
+  - self-reinforcing bad behavior
+  - churning on low-value tasks
+  - looking busy without shipping
+  - plateau detector says category_monotony
   - "idea backlog"
   session_categories: [strategic, self-review]
 status: active
