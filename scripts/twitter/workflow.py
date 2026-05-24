@@ -276,9 +276,7 @@ class TweetDraft:
 
         # Unescape literal \\n sequences that some LLMs emit in JSON/YAML.
         # This fixes tweets that leak escape sequences like "line1\\nline2".
-        def _fix(text: str | None) -> str | None:
-            if text is None:
-                return None
+        def _fix(text: str) -> str:
             return text.replace("\\n", "\n")
 
         raw_text = data.get("text", data.get("content", ""))
