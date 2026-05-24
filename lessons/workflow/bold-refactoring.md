@@ -7,6 +7,7 @@ match:
     - "PR adds code without removing old"
     - "refactor when adding abstraction"
 status: active
+description: "When creating shared modules or abstractions, immediately refactor existing code to use them."
 ---
 
 # Bold Refactoring

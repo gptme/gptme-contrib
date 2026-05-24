@@ -11,6 +11,7 @@ match:
     - "standup report"
     - "inference spend"
   session_categories: [monitoring, cross-repo]
+description: "As agent orchestrator, your job is to keep the agent team healthy — surfacing blockers and utilization issues before they compound, not doing reactive status checks."
 ---
 
 # Agent Orchestrator Patterns

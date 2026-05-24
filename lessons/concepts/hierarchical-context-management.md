@@ -5,6 +5,7 @@ match:
   - organize context across steps
   - prune older conversation context
 status: active
+description: "**Hierarchical Context Management**: Context architecture pattern used in advanced agent systems like Factory's Droid."
 ---
 
 # Hierarchical Context Management (Droid Architecture)

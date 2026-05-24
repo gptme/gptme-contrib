@@ -5,6 +5,7 @@ match:
   - ast-grep structural search
   - code refactoring across files
 status: active
+description: "Use ast-grep (sg) for structural code search and refactoring when patterns are complex or language-specific."
 ---
 
 # Using ast-grep for Code Refactoring

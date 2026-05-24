@@ -7,6 +7,7 @@ match:
   - "pytest coverage"
   - "missing tests"
 status: archived
+description: "Pursue code coverage improvements strategically, focusing on bug prevention and refactoring safety, not metric improvement."
 ---
 
 # Code Coverage Principle

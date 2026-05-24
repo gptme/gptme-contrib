@@ -8,6 +8,7 @@ match:
     - "mutate lesson"
   session_categories: [monitoring]
 status: active
+description: "Use GEPA-inspired mutation to fix underperforming lessons: diagnose first, mutate content/keywords, validate with LLM-as-judge before applying."
 ---
 
 # GEPA-Based Lesson Optimization

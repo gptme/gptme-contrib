@@ -7,6 +7,7 @@ match:
     - "maintainer says you didn't address review comments"
     - "unresolved review threads on PR"
 status: active
+description: "Always read ALL review sources without truncation using jq for compact output, and reply to individual review comment threads when acknowledging fixes."
 ---
 
 # Read PR Reviews Comprehensively

@@ -4,6 +4,7 @@ match:
   - "deeply nested"
   - "early return"
 status: active
+description: "Refactor code when nesting exceeds 3-4 levels using guard clauses, function extraction, or condition inversion."
 ---
 
 # Avoid Deeply Nested Code Structures

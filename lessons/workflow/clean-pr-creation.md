@@ -7,6 +7,7 @@ match:
     - cherry-pick commits
     - PR hygiene
 status: active
+description: "Always create feature branches from `origin/master`, not from local branches that may have accumulated other work."
 ---
 
 # Clean PR Creation

@@ -9,6 +9,7 @@ match:
     - "TODOIST_API_TOKEN"
 category: tools
 status: active
+description: "Use mcp-cli with the Todoist MCP server for task management."
 ---
 # Todoist MCP Integration
 

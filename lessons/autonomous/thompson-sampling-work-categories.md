@@ -13,6 +13,7 @@ match:
   - category selection explore exploit
   - work category bandit setup
   session_categories: [monitoring, self-review]
+description: "Use Thompson sampling over *work categories* (code, triage, infrastructure, content), not *session modes* (autonomous, monitoring, email)."
 ---
 
 # Thompson Sampling for Work Category Optimization

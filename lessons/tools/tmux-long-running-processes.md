@@ -8,6 +8,7 @@ match:
   - "120-second shell timeout"
   - "long-running command needs tmux"
 status: active
+description: "Always use tmux (not shell tool) for processes exceeding 120-second shell timeout."
 ---
 
 # Tmux for Long-Running Processes

@@ -3,6 +3,7 @@ match:
   keywords: ["create branch", "git checkout -b"]
   session_categories: [code, cross-repo, infrastructure]
 status: active
+description: "Create new branches from `origin/master`, never from local HEAD with uncommitted work."
 ---
 
 # Always Branch From Remote Master

@@ -14,6 +14,7 @@ match:
     - "waiting for human input"
     - "human bottleneck"
 status: active
+description: "Every point where an agent would stop and wait for human input is an opportunity for automation."
 ---
 
 # Close the Loop

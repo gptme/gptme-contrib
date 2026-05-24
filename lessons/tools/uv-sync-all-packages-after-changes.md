@@ -8,6 +8,7 @@ match:
     - "uv sync all packages after changes"
   session_categories: [code, infrastructure]
 status: active
+description: "After modifying workspace structure (adding dependencies or creating new packages), run 'uv sync --all-packages' to install all workspace packages and make them importable."
 ---
 
 # Run uv sync --all-packages After Workspace Changes

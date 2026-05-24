@@ -8,6 +8,7 @@ match:
     - "lazy MCP"
 category: tools
 status: active
+description: "Use `mcp-cli` to interact with MCP servers on-demand instead of loading all tool schemas into context at startup."
 ---
 # mcp-cli for Token-Efficient MCP Interactions
 

@@ -13,6 +13,7 @@ match:
   session_categories: [code, infrastructure]
 status: active
 target_grade: alignment
+description: "Always simplify a system BEFORE optimizing it."
 ---
 
 # Simplify Before Optimize

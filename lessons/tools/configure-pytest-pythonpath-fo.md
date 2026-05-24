@@ -7,6 +7,7 @@ match:
     - "workspace package not found"
     - "cannot import in tests"
 status: active
+description: "Configure pytest pythonpath in pyproject.toml to include all workspace package source directories when working in a monorepo structure."
 ---
 
 # Configure pytest pythonpath for Monorepo

@@ -10,6 +10,7 @@ match:
   - "wrap in try"
   session_categories: [code]
 status: active
+description: "Keep try blocks focused on single operations (≤10 lines) to make errors identifiable and patches manageable."
 ---
 
 # Avoid Long Try/Catch Blocks

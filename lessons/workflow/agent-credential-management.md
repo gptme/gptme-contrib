@@ -6,6 +6,7 @@ match:
     - "API key for agent workspace"
     - "store credentials in .env"
 status: active
+description: "When needing to store or retrieve credentials, use a GPG-encrypted credential system in the agent's `secrets/` directory."
 ---
 
 # Agent Credential Management

@@ -9,6 +9,7 @@ match:
   - "review feedback needs response"
   - "address review feedback"
 status: active
+description: "Respond promptly and constructively to code review feedback, providing clear action plans and seeking clarification when feedback is ambiguous."
 ---
 
 # Responding to Code Review Feedback

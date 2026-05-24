@@ -6,6 +6,7 @@ match:
   - large output 1000+ lines
   - token efficiency shell
 status: deprecated
+description: "Always filter shell output with grep/head/tail when expecting large results (>1000 lines)."
 ---
 
 # Shell Output Filtering for Token Efficiency

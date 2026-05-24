@@ -7,6 +7,7 @@ match:
     - "type checking fails after adding package"
     - "add package to mypy.ini"
 status: active
+description: "When creating a new workspace package, immediately add 'packages/PACKAGE_NAME/src' to the mypy_path setting in mypy."
 ---
 
 # Add New Package Paths to mypy Configuration

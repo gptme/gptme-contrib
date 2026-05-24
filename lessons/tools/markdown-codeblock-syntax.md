@@ -14,6 +14,7 @@ automation:
   enforcement: warning
   automated_date: 2025-11-26
 status: active
+description: "Always specify language tags for markdown codeblocks (```txt, ```csv, ```ascii, ```diagram) to prevent parsing cut-offs."
 ---
 
 # Markdown Codeblock Syntax

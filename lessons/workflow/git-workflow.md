@@ -8,6 +8,7 @@ match:
   - "submodule update sequence"
   - "committed to master by accident"
 status: active
+description: "Stage only intended files explicitly, never use `git add .` or `git commit -a`, and commit trivial docs/journal directly to master while using branches/PRs for non-trivial changes."
 ---
 
 # Git Workflow
