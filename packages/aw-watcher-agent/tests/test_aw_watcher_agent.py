@@ -115,3 +115,73 @@ def test_info_validates_shape():
     c2 = _FakeClient([(200, "not-a-dict")])
     with pytest.raises(AWClientError):
         c2.info()
+
+
+# --- CLI emit-start / emit-end metadata persistence -------------------------
+
+
+def test_emit_end_preserves_start_metadata(tmp_path, monkeypatch):
+    """emit-end must carry harness/model/workspace even when not re-supplied."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    from aw_watcher_agent import cli
+
+    # Simulate what emit-start writes into the state file.
+    saved_data = {
+        "harness": "claude-code",
+        "model": "claude-opus-4-7",
+        "session_id": "abc1",
+        "workspace": "bob",
+    }
+    core.write_state(
+        "abc1",
+        {
+            "bucket_id": "aw-watcher-agent_host",
+            "event_id": 42,
+            "start": "2026-01-01T00:00:00+00:00",
+            "data": saved_data,
+        },
+    )
+
+    # emit-end is called with only --session-id and --outcome (the typical case).
+    import argparse
+
+    args = argparse.Namespace(
+        server="http://localhost:5600",
+        hostname="host",  # matches the bucket_id saved in state above
+        session_id="abc1",
+        outcome="productive",
+        harness=None,
+        model=None,
+        category=None,
+        trigger=None,
+        workspace=None,
+        duration=None,
+        strict=False,
+    )
+
+    posted_events: list[dict] = []
+
+    class _CapturingClient(_FakeClient):
+        def __init__(self):
+            # ensure_bucket check, delete placeholder, heartbeat for final event
+            super().__init__(
+                [
+                    (200, {"aw-watcher-agent_host": {}}),  # ensure_bucket
+                    (200, None),  # delete_event
+                    (200, {"id": 99, "timestamp": "t", "duration": 0}),  # heartbeat
+                ]
+            )
+
+        def heartbeat(self, bid, event, pulsetime):
+            posted_events.append(event.data)
+            return super().heartbeat(bid, event, pulsetime)
+
+    monkeypatch.setattr(cli, "AWClient", lambda _url: _CapturingClient())
+    rc = cli.cmd_emit_end(args)
+    assert rc == 0
+    assert posted_events, "no heartbeat was posted"
+    final_data = posted_events[-1]
+    assert final_data.get("harness") == "claude-code", "harness lost from final event"
+    assert final_data.get("model") == "claude-opus-4-7", "model lost from final event"
+    assert final_data.get("workspace") == "bob", "workspace lost from final event"
+    assert final_data.get("outcome") == "productive"

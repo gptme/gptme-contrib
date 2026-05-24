@@ -70,7 +70,7 @@ def cmd_emit_start(args: argparse.Namespace) -> int:
     event_id = client.heartbeat(bid, event, pulsetime=0.0)
 
     sid = args.session_id or start
-    core.write_state(sid, {"bucket_id": bid, "event_id": event_id, "start": start})
+    core.write_state(sid, {"bucket_id": bid, "event_id": event_id, "start": start, "data": data})
     print(f"session start emitted: {bid} event_id={event_id} session_id={sid}")
     return 0
 
@@ -96,7 +96,14 @@ def cmd_emit_end(args: argparse.Namespace) -> int:
         start = end
         duration = float(args.duration or 0.0)
 
-    data = core.session_data(vars(args), outcome=args.outcome)
+    # Merge saved start metadata with any fields supplied at emit-end time.
+    # CLI args at emit-end take precedence (allows corrections), outcome appended.
+    saved_data: dict[str, str] = (state.get("data") or {}) if state else {}
+    cli_overrides = core.session_data(vars(args))
+    merged = {**saved_data, **cli_overrides}
+    if args.outcome:
+        merged["outcome"] = str(args.outcome)
+    data = merged
     event = Event(timestamp=start, duration=max(duration, 0.0), data=data)
     # pulsetime=0 forces a fresh event (the outcome field differs from any prior
     # block anyway); heartbeat returns the id for logging where POST does not.
