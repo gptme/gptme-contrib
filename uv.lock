@@ -10,6 +10,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "aw-watcher-agent",
     "credential-slots",
     "gptmail",
     "gptme-ace",
@@ -370,6 +371,28 @@ sdist = { url = "https://files.pythonhosted.org/packages/97/a8/995d460e4c18c6994
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cc/39/3fa82d04ce85f252f5cb5b9fdbb4761a80617997799486e8aea883ac1bf1/aw_core-0.5.13-py3-none-any.whl", hash = "sha256:dc77b19701a120dd4c86a8b75203230a23fff2bdc3017d50093098c138b8ae08", size = 47586, upload-time = "2023-05-15T07:57:55.655Z" },
 ]
+
+[[package]]
+name = "aw-watcher-agent"
+version = "0.1.0"
+source = { editable = "packages/aw-watcher-agent" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+]
+provides-extras = ["test", "dev"]
 
 [[package]]
 name = "backports-asyncio-runner"
