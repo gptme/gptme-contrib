@@ -1,5 +1,5 @@
 ---
-description: "Execute autonomous work by completing real deliverables rather than spending time on meta-analysis or planning"
+description: "Follow a structured 4-phase approach (status check, task selection, execution, commit) for autonomous sessions to maximise productivity and proper task management"
 match:
   keywords:
   - "autonomous session"

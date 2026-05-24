@@ -1,5 +1,4 @@
 ---
-description: "End sessions with a committed journal entry, pushed changes, and task state updates — never leave sessions undocumented"
 match:
   keywords: ["session complete", "ending a session", "wrap up the session", "land the plane", "session ending checklist", "before completing"]
   session_categories: [code, cross-repo, infrastructure, cleanup]

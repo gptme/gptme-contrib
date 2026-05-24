@@ -1,5 +1,4 @@
 ---
-description: "Use Thompson sampling to select work categories based on historical success rates rather than fixed rotation"
 status: deprecated
 category: autonomous
 tags:
