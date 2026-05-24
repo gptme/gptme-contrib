@@ -1423,23 +1423,23 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             gptodo edit monthly-report --set recur monthly
 
     Examples:
-        tasks edit task-123 --set state active
-        tasks edit task-123 --set priority high
-        tasks edit task-123 --set created 2025-05-05T10:00:00+02:00
-        tasks edit task-123 --add requires other-task
-        tasks edit task-123 --add tag feature
-        tasks edit task-123 --remove tag wip
-        tasks edit task-123 --set state active --add tag feature --add requires other-task
-        tasks edit task-123 --set-subtask "Handle simple responses" done
+        gptodo edit task-123 --set state active
+        gptodo edit task-123 --set priority high
+        gptodo edit task-123 --set created 2025-05-05T10:00:00+02:00
+        gptodo edit task-123 --add requires other-task
+        gptodo edit task-123 --add tag feature
+        gptodo edit task-123 --remove tag wip
+        gptodo edit task-123 --set state active --add tag feature --add requires other-task
+        gptodo edit task-123 --set-subtask "Handle simple responses" done
 
     Clearing optional fields:
         Pass 'none' as the value to clear (unset) an optional field.
         Useful when transitioning a task to a terminal state (done/cancelled)
         and removing now-stale waiting metadata:
 
-        tasks edit task-123 --set waiting_for none --set waiting_since none
-        tasks edit task-123 --set priority none
-        tasks edit task-123 --set next_action none
+        gptodo edit task-123 --set waiting_for none --set waiting_since none
+        gptodo edit task-123 --set priority none
+        gptodo edit task-123 --set next_action none
 
     Date formats:
         The created field accepts ISO format dates:
