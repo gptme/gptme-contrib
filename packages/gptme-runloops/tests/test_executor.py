@@ -11,6 +11,7 @@ from gptme_runloops.utils.executor import (
     ClaudeCodeExecutor,
     Executor,
     GptmeExecutor,
+    GrokBuildExecutor,
     get_executor,
     list_backends,
 )
@@ -293,6 +294,7 @@ def test_list_backends():
     backends = list_backends()
     assert "gptme" in backends
     assert "claude-code" in backends
+    assert "grok-build" in backends
     assert backends == sorted(backends)  # Should be sorted
 
 
@@ -308,6 +310,14 @@ def test_get_executor_claude_code():
     with patch("shutil.which", return_value="/usr/bin/claude"):
         executor = get_executor("claude-code")
         assert isinstance(executor, ClaudeCodeExecutor)
+
+
+def test_get_executor_grok_build():
+    """Test getting grok-build executor by name."""
+    with patch("gptme_runloops.utils.executor._resolve_grok_build_binary") as mock_bin:
+        mock_bin.return_value = "/usr/bin/grok"
+        executor = get_executor("grok-build")
+        assert isinstance(executor, GrokBuildExecutor)
 
 
 def test_get_executor_unknown():
@@ -488,3 +498,131 @@ def test_claude_code_executor_no_warn_without_tools():
                 timeout=60,
             )
             mock_logger.warning.assert_not_called()
+
+
+# --- GrokBuildExecutor tests ---
+
+
+def test_grok_build_executor_name():
+    executor = GrokBuildExecutor()
+    assert executor.name == "grok-build"
+
+
+def test_grok_build_executor_binary_name():
+    executor = GrokBuildExecutor()
+    assert executor._binary_name == "grok"
+
+
+def test_grok_build_executor_is_available_from_path():
+    executor = GrokBuildExecutor()
+
+    with patch("shutil.which", return_value="/usr/bin/grok"):
+        assert executor.is_available()
+
+
+def test_grok_build_executor_is_available_from_home_fallback(monkeypatch, tmp_path):
+    executor = GrokBuildExecutor()
+    grok_home = tmp_path / ".grok" / "bin"
+    grok_home.mkdir(parents=True)
+    grok_bin = grok_home / "grok"
+    grok_bin.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setattr("shutil.which", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    assert executor.is_available()
+
+
+def test_grok_build_executor_basic_execution():
+    executor = GrokBuildExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(
+            "gptme_runloops.utils.executor._resolve_grok_build_binary"
+        ) as mock_bin:
+            mock_bin.return_value = "/usr/bin/grok"
+
+            result = executor.execute(
+                prompt="test prompt",
+                workspace=Path("/tmp"),
+                timeout=300,
+            )
+
+        assert result.success
+        assert result.exit_code == 0
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:4] == ["stdbuf", "-oL", "-eL", "/usr/bin/grok"]
+        assert "--single" in cmd
+        assert "--output-format" in cmd
+        assert "streaming-json" in cmd
+        assert "--permission-mode" in cmd
+        assert "bypassPermissions" in cmd
+
+
+def test_grok_build_executor_system_prompt():
+    executor = GrokBuildExecutor()
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write("You are a helpful assistant.")
+        f.flush()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch(
+                "gptme_runloops.utils.executor._resolve_grok_build_binary"
+            ) as mock_bin:
+                mock_bin.return_value = "/usr/bin/grok"
+                executor.execute(
+                    prompt="test",
+                    workspace=Path("/tmp"),
+                    timeout=60,
+                    system_prompt_file=Path(f.name),
+                )
+
+            cmd = mock_run.call_args[0][0]
+            assert "--system-prompt-override" in cmd
+
+
+def test_grok_build_executor_timeout():
+    executor = GrokBuildExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="grok", timeout=60)
+
+        with patch(
+            "gptme_runloops.utils.executor._resolve_grok_build_binary"
+        ) as mock_bin:
+            mock_bin.return_value = "/usr/bin/grok"
+            result = executor.execute(
+                prompt="test",
+                workspace=Path("/tmp"),
+                timeout=60,
+            )
+
+        assert not result.success
+        assert result.exit_code == 124
+        assert result.timed_out
+
+
+def test_grok_build_executor_uses_devnull_stdin():
+    executor = GrokBuildExecutor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(
+            "gptme_runloops.utils.executor._resolve_grok_build_binary"
+        ) as mock_bin:
+            mock_bin.return_value = "/usr/bin/grok"
+            executor.execute(
+                prompt="test",
+                workspace=Path("/tmp"),
+                timeout=60,
+            )
+
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["stdin"] == subprocess.DEVNULL
