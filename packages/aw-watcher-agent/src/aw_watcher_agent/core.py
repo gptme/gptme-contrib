@@ -47,7 +47,7 @@ def state_path(session_id: str) -> Path:
 def write_state(session_id: str, payload: dict[str, Any]) -> Path:
     path = state_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
@@ -56,7 +56,7 @@ def read_state(session_id: str) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
     return data if isinstance(data, dict) else None

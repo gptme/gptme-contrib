@@ -90,7 +90,12 @@ def cmd_emit_end(args: argparse.Namespace) -> int:
         duration = (_parse_iso(end) - _parse_iso(start)).total_seconds()
         # Drop the zero-duration placeholder so we end with one clean block.
         if state.get("event_id") is not None:
-            client.delete_event(state.get("bucket_id", bid), state["event_id"])
+            if not client.delete_event(state.get("bucket_id", bid), state["event_id"]):
+                print(
+                    f"warning: failed to delete placeholder event {state['event_id']} "
+                    f"from {state.get('bucket_id', bid)} — timeline may contain duplicate block",
+                    file=sys.stderr,
+                )
     else:
         # No recorded start (crash / hook gap): fall back to provided duration.
         start = end
