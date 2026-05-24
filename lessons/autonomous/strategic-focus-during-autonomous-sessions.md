@@ -1,4 +1,5 @@
 ---
+description: "Prioritize tasks by strategic value and verifiability rather than picking the easiest visible work"
 category: autonomous
 tags:
 - autonomous-sessions

@@ -1,4 +1,5 @@
 ---
+description: "Close communication loops explicitly — every mention/ping deserves a reply that resolves or routes the request"
 match:
   keywords:
   - close the communication loop

@@ -1,4 +1,5 @@
 ---
+description: "Keep the agent workspace clean and functional by running periodic health checks and fixing broken invariants"
 match:
   keywords:
     - "setting up new agent workspace"

@@ -1,4 +1,5 @@
 ---
+description: "When submitting PRs from a fork, secrets in the parent repo are not available — avoid workflows that require them"
 match:
   keywords:
     - "ANTHROPIC_API_KEY not set"

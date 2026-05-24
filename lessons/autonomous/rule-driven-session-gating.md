@@ -1,4 +1,5 @@
 ---
+description: "Gate autonomous sessions on rule checks (claim verification, scope discipline) before executing significant work"
 status: active
 category: autonomous
 tags:

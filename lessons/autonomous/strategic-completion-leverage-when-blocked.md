@@ -1,4 +1,5 @@
 ---
+description: "When the primary task is blocked, identify and complete high-leverage adjacent work that unblocks future sessions"
 match:
   keywords:
   - blocked on external

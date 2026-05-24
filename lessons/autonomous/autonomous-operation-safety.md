@@ -1,4 +1,5 @@
 ---
+description: "Never combine private data access, untrusted content, and external comms in one step — apply containment principles"
 match:
   keywords:
   - lethal trifecta

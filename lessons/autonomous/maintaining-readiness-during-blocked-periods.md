@@ -1,4 +1,5 @@
 ---
+description: "When waiting on blockers, maintain readiness by doing small improvements that keep the workspace healthy"
 match:
   keywords:
     - maintaining readiness when blocked

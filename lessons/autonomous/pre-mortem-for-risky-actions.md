@@ -1,4 +1,5 @@
 ---
+description: "Before taking irreversible or high-blast-radius actions, name what could go wrong and verify safeguards are in place"
 match:
   keywords:
   - pre-mortem for risky actions

@@ -1,4 +1,5 @@
 ---
+description: "When a PR is accidentally closed, recover it cleanly rather than opening a duplicate with the same diff"
 match:
   keywords:
     - closed pr

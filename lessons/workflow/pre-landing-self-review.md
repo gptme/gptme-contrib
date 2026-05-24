@@ -1,4 +1,5 @@
 ---
+description: "Before landing significant changes, run the self-review checklist to catch correctness issues CI won't catch"
 match:
   keywords: ["self-review", "pre-landing", "review iteration", "code review", "substantial change"]
   session_categories: [code, self-review]

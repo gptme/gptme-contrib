@@ -1,4 +1,5 @@
 ---
+description: "When the primary path is blocked, find adjacent unblocked work that keeps the session productive"
 match:
   keywords:
   - "completely blocked"

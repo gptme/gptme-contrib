@@ -1,4 +1,5 @@
 ---
+description: "Only document something when the documentation will be read soon; skip just-in-case docs that clutter context"
 match:
   keywords:
   - "let me document this"

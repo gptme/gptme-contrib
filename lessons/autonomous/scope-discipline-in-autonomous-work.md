@@ -1,4 +1,5 @@
 ---
+description: "Stay within the declared scope of a task — don't expand work or create adjacent PRs without declaring the new lane"
 match:
   keywords:
   - "while working on X noticed Y could be improved"

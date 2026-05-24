@@ -1,4 +1,5 @@
 ---
+description: "Use the structured 4-phase approach (status, selection, execution, completion) for every autonomous session"
 match:
   keywords:
   - autonomous session structure

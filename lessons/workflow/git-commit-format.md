@@ -1,4 +1,5 @@
 ---
+description: "Format commits as Conventional Commits (type(scope): description) with focused, atomic changes per commit"
 match:
   keywords:
   - "conventional commits"

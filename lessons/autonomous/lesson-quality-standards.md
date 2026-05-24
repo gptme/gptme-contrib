@@ -1,4 +1,5 @@
 ---
+description: "Write lessons that match specific observable failure signals, not general advice that applies to all situations"
 category: autonomous
 tags:
 - lesson-quality
