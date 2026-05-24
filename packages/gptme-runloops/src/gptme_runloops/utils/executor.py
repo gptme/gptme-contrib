@@ -17,6 +17,25 @@ from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
 logger = logging.getLogger(__name__)
 
 
+def _read_system_prompt(path: Path | None) -> str | None:
+    """Return system prompt text when available."""
+    if path and path.exists():
+        return path.read_text()
+    return None
+
+
+def _resolve_grok_build_binary() -> str | None:
+    """Resolve the Grok Build CLI from PATH or the default install location."""
+    path = shutil.which("grok")
+    if path:
+        return path
+
+    fallback = Path.home() / ".grok" / "bin" / "grok"
+    if fallback.is_file():
+        return str(fallback)
+    return None
+
+
 class Executor(ABC):
     """Backend-agnostic execution interface.
 
@@ -185,11 +204,100 @@ class ClaudeCodeExecutor(Executor):
             return ExecutionResult(exit_code=124, timed_out=True)
 
 
+class GrokBuildExecutor(Executor):
+    """Executor for xAI's Grok Build CLI."""
+
+    name = "grok-build"
+
+    @property
+    def _binary_name(self) -> str:
+        return "grok"
+
+    def is_available(self) -> bool:
+        return _resolve_grok_build_binary() is not None
+
+    def execute(
+        self,
+        prompt: str,
+        workspace: Path,
+        timeout: int,
+        *,
+        model: str | None = None,
+        tool_format: str | None = None,
+        tools: str | None = None,
+        env: dict[str, str] | None = None,
+        run_type: str = "run",
+        system_prompt_file: Path | None = None,
+    ) -> ExecutionResult:
+        # Grok Build currently has no allowlist contract compatible with TeamRun's
+        # `tools` string, so ignore it instead of pretending the restriction applied.
+        if tools:
+            logger.warning(
+                "GrokBuildExecutor: 'tools' parameter is not supported by Grok Build "
+                "and will be ignored."
+            )
+        if tool_format:
+            logger.warning(
+                "GrokBuildExecutor: 'tool_format' parameter is not supported by Grok Build "
+                "and will be ignored."
+            )
+
+        binary = _resolve_grok_build_binary()
+        if not binary:
+            raise RuntimeError(
+                "Backend 'grok-build' is not available ('grok' not found)"
+            )
+
+        # Use stdbuf if available (GNU coreutils) to prevent libc block-buffering
+        # hangs when stdout is piped in headless mode. Not available on stock macOS.
+        stdbuf = shutil.which("stdbuf")
+        cmd = ([stdbuf, "-oL", "-eL", binary] if stdbuf else [binary]) + [
+            "--single",
+            prompt,
+            "--cwd",
+            str(workspace),
+            "--no-memory",
+            "--output-format",
+            "streaming-json",
+            "--permission-mode",
+            "bypassPermissions",
+        ]
+        if model:
+            cmd += ["--model", model]
+
+        system_prompt = _read_system_prompt(system_prompt_file)
+        if system_prompt:
+            cmd += ["--system-prompt-override", system_prompt]
+
+        run_env = os.environ.copy()
+        if env:
+            run_env.update(env)
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=workspace,
+                env=run_env,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+            return ExecutionResult(exit_code=result.returncode)
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(exit_code=124, timed_out=True)
+
+
 # --- Backend registry ---
 
 EXECUTORS: dict[str, type[Executor]] = {
     "gptme": GptmeExecutor,
     "claude-code": ClaudeCodeExecutor,
+    "grok-build": GrokBuildExecutor,
 }
 
 
