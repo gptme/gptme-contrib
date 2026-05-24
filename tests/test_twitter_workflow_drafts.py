@@ -87,6 +87,7 @@ def _load_workflow_module() -> Any:
     twitter_llm_stub.TweetResponse = type("TweetResponse", (), {})
     twitter_llm_stub.process_tweet = lambda *args, **kwargs: None
     twitter_llm_stub.verify_draft = lambda *args, **kwargs: (True, None)
+    twitter_llm_stub._unescape_literal_newlines = lambda text: text.replace("\\n", "\n")
 
     twitter_api_stub: Any = types.ModuleType("twitter.twitter")
     twitter_api_stub.cached_get_me = lambda *args, **kwargs: SimpleNamespace(

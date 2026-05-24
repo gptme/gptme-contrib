@@ -66,6 +66,7 @@ from trusted_users import is_trusted_user  # type: ignore
 from twitter.llm import (
     EvaluationResponse,
     TweetResponse,
+    _unescape_literal_newlines,
     process_tweet,
     verify_draft,
 )
@@ -276,18 +277,19 @@ class TweetDraft:
 
         # Unescape literal \\n sequences that some LLMs emit in JSON/YAML.
         # This fixes tweets that leak escape sequences like "line1\\nline2".
-        def _fix(text: str) -> str:
-            return text.replace("\\n", "\n")
-
+        # Uses the shared _unescape_literal_newlines helper from twitter.llm.
         raw_text = data.get("text", data.get("content", ""))
-        fixed_text: str | None = _fix(raw_text) if isinstance(raw_text, str) else None
-        if fixed_text is None:
-            fixed_text = ""
+        fixed_text: str = (
+            _unescape_literal_newlines(raw_text) if isinstance(raw_text, str) else ""
+        )
 
         raw_thread = data.get("thread")
         fixed_thread: list[str] | None = None
         if isinstance(raw_thread, list):
-            fixed_thread = [_fix(t) if isinstance(t, str) else "" for t in raw_thread]
+            fixed_thread = [
+                _unescape_literal_newlines(t) if isinstance(t, str) else ""
+                for t in raw_thread
+            ]
 
         draft = cls(
             text=fixed_text,
