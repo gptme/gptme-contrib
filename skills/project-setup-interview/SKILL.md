@@ -109,11 +109,15 @@ cat Cargo.toml 2>/dev/null | head -20
 
 # CI config (infer workflow and test commands)
 ls .github/workflows/ 2>/dev/null
-cat .github/workflows/*.yml 2>/dev/null | head -60
+for f in .github/workflows/*.yml 2>/dev/null; do
+  echo "=== $f ==="
+  head -30 "$f"
+done
 
 # Existing conventions
 cat .pre-commit-config.yaml 2>/dev/null | head -30
-cat .ruff.toml pyproject.toml setup.cfg 2>/dev/null | grep -A 5 '\[tool.ruff\]'
+cat .ruff.toml 2>/dev/null | head -30
+grep -A 5 '\[tool.ruff\]' pyproject.toml 2>/dev/null
 ```
 
 ### Phase 3: Generate CLAUDE.md
