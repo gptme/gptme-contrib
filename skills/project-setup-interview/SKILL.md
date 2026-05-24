@@ -9,13 +9,14 @@ metadata:
   tags: [onboarding, setup, claude-md, agents-md, project-configuration]
   requires_tools: []
   requires_skills: []
-keywords:
-  - "set up gptme for my project"
-  - "generate CLAUDE.md"
-  - "generate AGENTS.md"
-  - "configure agent for new project"
-  - "project onboarding interview"
-  - "gptme setup"
+match:
+  keywords:
+    - "set up gptme for my project"
+    - "generate CLAUDE.md"
+    - "generate AGENTS.md"
+    - "configure agent for new project"
+    - "project onboarding interview"
+    - "gptme setup"
 ---
 
 # Project Setup Interview Skill
@@ -35,7 +36,7 @@ agent permissions — so every future session starts with the right context.
 ## When NOT to Use
 
 - The project already has a `CLAUDE.md` (update it directly instead)
-- The setup is for Bob's own brain repo (use `ABOUT.md`/`SOUL.md` conventions)
+- The agent workspace already has its own identity/persona files (update those directly)
 
 ## Process
 
@@ -120,7 +121,7 @@ cat .ruff.toml pyproject.toml setup.cfg 2>/dev/null | grep -A 5 '\[tool.ruff\]'
 Output the file directly. Use this template, filling in every `<...>` from the
 interview answers and repo inspection:
 
-```markdown
+````markdown
 # <Project Name>
 
 <One-sentence description of what the project does.>
@@ -177,7 +178,7 @@ interview answers and repo inspection:
 - Commit secrets or credentials
 - Push directly to <protected branches>
 - <any hard stops the user named>
-```
+````
 
 ### Phase 4: Write and confirm
 
@@ -206,7 +207,7 @@ git commit -m "docs: add CLAUDE.md for agent configuration"
 
 ## Example output (Python library)
 
-```markdown
+````markdown
 # mylib
 
 Fast numerical computing library built on NumPy.
@@ -263,4 +264,4 @@ uv build
 **Never:**
 - Push directly to main
 - Modify `.github/secrets` or CI credentials
-```
+````
