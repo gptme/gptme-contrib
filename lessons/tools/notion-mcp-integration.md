@@ -1,10 +1,7 @@
 ---
 match:
   keywords:
-
     - "notion mcp"
-
-
     - "notion token"
     - "NOTION_TOKEN"
 category: tools

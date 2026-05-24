@@ -1,7 +1,6 @@
 ---
 match:
   keywords:
-
     - knowledge retrieval
 status: active
 ---
