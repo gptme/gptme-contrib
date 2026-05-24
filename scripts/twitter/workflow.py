@@ -273,8 +273,26 @@ class TweetDraft:
         - ``created`` as fallback for ``created_at``
         - ``context`` is optional (defaults to empty dict)
         """
+
+        # Unescape literal \\n sequences that some LLMs emit in JSON/YAML.
+        # This fixes tweets that leak escape sequences like "line1\\nline2".
+        def _fix(text: str | None) -> str | None:
+            if text is None:
+                return None
+            return text.replace("\\n", "\n")
+
+        raw_text = data.get("text", data.get("content", ""))
+        fixed_text: str | None = _fix(raw_text) if isinstance(raw_text, str) else None
+        if fixed_text is None:
+            fixed_text = ""
+
+        raw_thread = data.get("thread")
+        fixed_thread: list[str] | None = None
+        if isinstance(raw_thread, list):
+            fixed_thread = [_fix(t) if isinstance(t, str) else "" for t in raw_thread]
+
         draft = cls(
-            text=data.get("text", data.get("content", "")),
+            text=fixed_text,
             type=data.get("type", "tweet"),
             in_reply_to=data.get("in_reply_to"),
             scheduled_time=(
@@ -289,7 +307,7 @@ class TweetDraft:
             context=data.get("context", {}),
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
             quality_score=data.get("quality_score"),  # Optional, backward compatible
-            thread=data.get("thread"),  # Optional, backward compatible
+            thread=fixed_thread,
         )
         created_at = data.get("created_at", data.get("created"))
         if created_at is None:
