@@ -13,7 +13,7 @@ match:
   - "work on PR in separate directory"
   session_categories: [cross-repo, code]
 status: active
-description: "**ALWAYS branch from `origin/master`, NEVER from local `master`."
+description: "Always branch from `origin/master`, never from local `master` — fetch first, then create the branch from `origin/master`."
 ---
 
 # Git Worktree Workflow for External Repositories

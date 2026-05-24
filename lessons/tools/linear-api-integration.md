@@ -7,7 +7,7 @@ match:
   session_categories: [triage, infrastructure]
 category: tools
 status: active
-description: "Use `linear-activity."
+description: "Use `linear-activity.py` CLI for common operations; fall back to GraphQL API only when CLI doesn't support the operation."
 ---
 # Linear API Integration
 
