@@ -114,6 +114,16 @@ class EvaluationResponse:
         )
 
 
+def _unescape_literal_newlines(text: str) -> str:
+    """Replace literal two-character '\\n' sequences with actual newlines.
+
+    Some LLMs emit JSON where newlines are double-escaped (\\n instead of \n).
+    json.loads leaves these as literal backslash-n pairs. This helper fixes
+    them so tweets render correctly instead of leaking escape sequences.
+    """
+    return text.replace("\\n", "\n")
+
+
 @dataclass
 class TweetResponse:
     """Generated tweet response"""
@@ -129,10 +139,12 @@ class TweetResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TweetResponse":
         return cls(
-            text=str(data["text"]),
+            text=_unescape_literal_newlines(str(data["text"])),
             type=str(data["type"]),
             thread_needed=bool(data["thread_needed"]),
-            follow_up=str(data["follow_up"]) if data.get("follow_up") else None,
+            follow_up=_unescape_literal_newlines(str(data["follow_up"]))
+            if data.get("follow_up")
+            else None,
             reasoning=str(data["reasoning"]),
         )
 
