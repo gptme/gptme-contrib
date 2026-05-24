@@ -6,7 +6,7 @@ match:
     - "fresh greptile review"
     - "greptile after fixing"
   session_categories: [cross-repo, code]
-description: "After pushing new commits that address an automated code-review bot's (greptile-apps) feedback on a PR, request a re-review via greptile-helper.sh so the bot takes another look without spamming duplicate review comments"
+description: "After new commits land on a PR, retrigger the automated code-quality scoring pass by running greptile-helper.sh to get a fresh evaluation — posting raw bot-trigger comments directly causes duplicate scoring spam when concurrent sessions fire"
 status: active
 ---
 
