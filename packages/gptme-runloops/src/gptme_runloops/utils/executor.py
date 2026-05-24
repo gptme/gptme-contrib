@@ -248,11 +248,10 @@ class GrokBuildExecutor(Executor):
                 "Backend 'grok-build' is not available ('grok' not found)"
             )
 
-        cmd = [
-            "stdbuf",
-            "-oL",
-            "-eL",
-            binary,
+        # Use stdbuf if available (GNU coreutils) to prevent libc block-buffering
+        # hangs when stdout is piped in headless mode. Not available on stock macOS.
+        stdbuf = shutil.which("stdbuf")
+        cmd = ([stdbuf, "-oL", "-eL", binary] if stdbuf else [binary]) + [
             "--single",
             prompt,
             "--cwd",

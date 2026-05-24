@@ -1,5 +1,7 @@
 """Tests for the executor abstraction."""
 
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -217,7 +219,9 @@ def test_claude_code_executor_system_prompt():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
         f.write("You are a helpful assistant.")
         f.flush()
+        tmp_path = f.name
 
+    try:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
@@ -225,11 +229,13 @@ def test_claude_code_executor_system_prompt():
                 prompt="test",
                 workspace=Path("/tmp"),
                 timeout=60,
-                system_prompt_file=Path(f.name),
+                system_prompt_file=Path(tmp_path),
             )
 
             cmd = mock_run.call_args[0][0]
             assert "--append-system-prompt" in cmd
+    finally:
+        os.unlink(tmp_path)
 
 
 def test_claude_code_executor_timeout():
@@ -554,7 +560,12 @@ def test_grok_build_executor_basic_execution():
         assert result.exit_code == 0
 
         cmd = mock_run.call_args[0][0]
-        assert cmd[:4] == ["stdbuf", "-oL", "-eL", "/usr/bin/grok"]
+        # stdbuf is optional (unavailable on stock macOS); check by basename
+        if shutil.which("stdbuf"):
+            assert os.path.basename(cmd[0]) == "stdbuf"
+            assert cmd[1:4] == ["-oL", "-eL", "/usr/bin/grok"]
+        else:
+            assert cmd[0] == "/usr/bin/grok"
         assert "--single" in cmd
         assert "--output-format" in cmd
         assert "streaming-json" in cmd
@@ -568,7 +579,9 @@ def test_grok_build_executor_system_prompt():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
         f.write("You are a helpful assistant.")
         f.flush()
+        tmp_path = f.name
 
+    try:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
@@ -580,11 +593,13 @@ def test_grok_build_executor_system_prompt():
                     prompt="test",
                     workspace=Path("/tmp"),
                     timeout=60,
-                    system_prompt_file=Path(f.name),
+                    system_prompt_file=Path(tmp_path),
                 )
 
             cmd = mock_run.call_args[0][0]
             assert "--system-prompt-override" in cmd
+    finally:
+        os.unlink(tmp_path)
 
 
 def test_grok_build_executor_timeout():
