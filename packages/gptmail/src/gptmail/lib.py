@@ -46,7 +46,7 @@ from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.policy import default
-from email.utils import format_datetime, parseaddr, parsedate_to_datetime
+from email.utils import format_datetime, getaddresses, parseaddr, parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -178,6 +178,12 @@ class AgentEmail:
             raise ValueError(
                 "own_email must be provided or AGENT_EMAIL environment variable must be set"
             )
+        aliases = [
+            alias.strip().lower()
+            for alias in os.getenv("AGENT_EMAIL_ALIASES", "").split(",")
+            if alias.strip()
+        ]
+        self.own_emails: tuple[str, ...] = tuple(dict.fromkeys([self.own_email.lower(), *aliases]))
         # Optional display name for the agent's email
         self.own_email_name: str | None = (
             own_email_name if own_email_name is not None else os.getenv("AGENT_EMAIL_NAME")
@@ -359,9 +365,17 @@ class AgentEmail:
 
                     # Skip if not addressed to the agent's email
                     # (only process emails sent TO the agent, not CC'd or other recipients)
-                    if to_match and self.own_email:
-                        to_line = to_match.group(1).lower()
-                        if self.own_email.lower() not in to_line:
+                    if to_match and self.own_emails:
+                        to_line = to_match.group(1)
+                        to_addrs = {addr.lower() for _, addr in getaddresses([to_line]) if addr}
+                        if to_addrs:
+                            is_addressed_to_agent = bool(to_addrs.intersection(self.own_emails))
+                        else:
+                            lower_to_line = to_line.lower()
+                            is_addressed_to_agent = any(
+                                own_email in lower_to_line for own_email in self.own_emails
+                            )
+                        if not is_addressed_to_agent:
                             continue
 
                     # Extract email from "Name <email>" format
