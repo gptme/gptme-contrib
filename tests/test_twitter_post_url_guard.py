@@ -21,7 +21,7 @@ def _make_pkg(name: str) -> types.ModuleType:
     return mod
 
 
-def _load_twitter_module() -> tuple[Any, dict[str, Any]]:
+def _load_twitter_module() -> tuple[Any, dict[str, Any], list[str]]:
     click_stub: Any = types.ModuleType("click")
 
     def _passthrough_decorator(*args, **kwargs):
@@ -96,8 +96,10 @@ def _load_twitter_module() -> tuple[Any, dict[str, Any]]:
     original_modules = {
         name: sys.modules.get(name, _MISSING) for name in stubbed_modules
     }
+    original_sys_path = sys.path.copy()
     for name, stub in stubbed_modules.items():
         sys.modules[name] = stub
+    sys.path.insert(0, str(TWITTER_PATH.parent))
 
     spec = importlib.util.spec_from_file_location(
         "twitter_post_guard_under_test", TWITTER_PATH
@@ -106,13 +108,14 @@ def _load_twitter_module() -> tuple[Any, dict[str, Any]]:
     module: Any = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module, original_modules
+    return module, original_modules, original_sys_path
 
 
 @pytest.fixture(scope="module")
 def twitter_module() -> Generator[Any, None, None]:
-    module, original_modules = _load_twitter_module()
+    module, original_modules, original_sys_path = _load_twitter_module()
     yield module
+    sys.path[:] = original_sys_path
     sys.modules.pop("twitter_post_guard_under_test", None)
     for key, original in original_modules.items():
         if original is _MISSING:
@@ -128,7 +131,7 @@ def test_post_aborts_before_single_tweet_with_dead_url(
 
     monkeypatch.setattr(
         twitter_module,
-        "_validate_urls_in_text",
+        "validate_urls_in_text",
         lambda text: [("https://timetobuildbob.github.io/blog/missing/", 404)],
     )
     monkeypatch.setattr(
@@ -162,7 +165,7 @@ def test_post_aborts_before_thread_with_dead_followup_url(
     )
     monkeypatch.setattr(
         twitter_module,
-        "_validate_urls_in_text",
+        "validate_urls_in_text",
         lambda text: (
             [("https://timetobuildbob.github.io/blog/missing/", 404)]
             if "missing" in text

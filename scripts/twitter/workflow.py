@@ -71,6 +71,7 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import cached_get_me, load_twitter_client
+from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
 
 logger = get_logger(__name__, "twitter")
 metrics = MetricsCollector()
@@ -763,33 +764,6 @@ def cli(model: str | None = None) -> None:
     )
 
 
-def _validate_urls_in_text(text: str) -> list[tuple[str, int]]:
-    """HEAD-check any http(s) URLs in tweet text. Return [(url, status)] for unreachable ones (4xx/5xx).
-
-    Network errors are treated as non-fatal (returns nothing for those URLs) — the goal is to
-    catch deterministic 404s like the recurring `/YYYY/MM/DD/title/` vs `/blog/title/` permalink
-    bug, not to require connectivity. Mirrors the check in scripts/twitter/post-blog-tweet.py.
-    """
-    import re
-    import urllib.error
-    import urllib.request
-
-    url_pattern = re.compile(r"https?://[^\s\"'<>)]+")
-    bad: list[tuple[str, int]] = []
-    for url in url_pattern.findall(text):
-        url = url.rstrip(".,;:!?")
-        try:
-            req = urllib.request.Request(url, method="HEAD")
-            req.add_header("User-Agent", "Mozilla/5.0 (URL checker)")
-            with urllib.request.urlopen(req, timeout=5):
-                pass  # 4xx/5xx raise HTTPError before reaching here
-        except urllib.error.HTTPError as e:
-            bad.append((url, e.code))
-        except Exception:
-            pass
-    return bad
-
-
 def _validate_draft_urls(draft: TweetDraft) -> list[tuple[str, int]]:
     """Validate URLs across both the main tweet text and any thread follow-ups."""
     bad: list[tuple[str, int]] = []
@@ -798,7 +772,7 @@ def _validate_draft_urls(draft: TweetDraft) -> list[tuple[str, int]]:
     for text in [draft.text, *draft.thread]:
         if not text:
             continue
-        for issue in _validate_urls_in_text(text):
+        for issue in validate_urls_in_text(text):
             if issue in seen:
                 continue
             seen.add(issue)
@@ -831,7 +805,7 @@ def draft(
 
     try:
         if not skip_url_check:
-            bad_urls = _validate_urls_in_text(text)
+            bad_urls = validate_urls_in_text(text)
             if bad_urls:
                 for url, status in bad_urls:
                     console.print(

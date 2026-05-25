@@ -52,7 +52,6 @@ For OAuth 2.0 setup:
 """
 
 import os
-import re
 import sys
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -82,6 +81,7 @@ from gptmail.communication_utils.messaging import (  # type: ignore[import-not-f
     split_thread,
 )
 from rich.console import Console
+from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
 
 DEFAULT_SINCE = "7d"
 DEFAULT_LIMIT = 10
@@ -121,36 +121,15 @@ def _get_user_auth(client) -> bool:
     return getattr(client, "_use_user_auth", False)
 
 
-def _validate_urls_in_text(text: str) -> list[tuple[str, int]]:
-    """HEAD-check URLs and return deterministic HTTP failures."""
-    import urllib.error
-    import urllib.request
-
-    url_pattern = re.compile(r"https?://[^\s\"'<>)]+")
-    bad: list[tuple[str, int]] = []
-    for url in url_pattern.findall(text):
-        url = url.rstrip(".,;:!?")
-        try:
-            req = urllib.request.Request(url, method="HEAD")
-            req.add_header("User-Agent", "Mozilla/5.0 (URL checker)")
-            with urllib.request.urlopen(req, timeout=5):
-                pass
-        except urllib.error.HTTPError as e:
-            bad.append((url, e.code))
-        except Exception:
-            pass
-    return bad
-
-
 def _abort_on_bad_urls(messages: list[str]) -> None:
-    """Fail closed on dead self-links before posting live tweets."""
+    """Abort on HTTP 4xx/5xx URLs before posting — network errors pass through as non-fatal."""
     bad: list[tuple[str, int]] = []
     seen: set[tuple[str, int]] = set()
 
     for text in messages:
         if not text:
             continue
-        for issue in _validate_urls_in_text(text):
+        for issue in validate_urls_in_text(text):
             if issue in seen:
                 continue
             seen.add(issue)
