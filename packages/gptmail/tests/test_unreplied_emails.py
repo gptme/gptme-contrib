@@ -179,6 +179,38 @@ def test_get_unreplied_emails_returns_typed_records(agent: AgentEmail) -> None:
     ]
 
 
+def test_get_unreplied_emails_accepts_agent_email_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    email_dir = tmp_path / "email"
+    for subdir in ["inbox", "sent", "archive", "drafts", "filters"]:
+        (email_dir / subdir).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("EMAIL_ALLOWLIST", "friend@example.com")
+    monkeypatch.setenv("AGENT_EMAIL_ALIASES", "alias@example.com")
+    agent = AgentEmail(str(tmp_path), "test@example.com")
+
+    _write_email(
+        email_dir / "inbox" / "alias-recipient.md",
+        message_id="<alias@example.com>",
+        subject="Alias recipient",
+        sender="friend@example.com",
+        recipient="Bob <alias@example.com>",
+        date=datetime(2026, 5, 16, 11, 30, tzinfo=timezone.utc),
+    )
+    _write_email(
+        email_dir / "inbox" / "other-recipient.md",
+        message_id="<other@example.com>",
+        subject="Other recipient",
+        sender="friend@example.com",
+        recipient="other@example.com",
+        date=datetime(2026, 5, 16, 11, 31, tzinfo=timezone.utc),
+    )
+
+    unreplied = agent.get_unreplied_emails()
+
+    assert [entry.message_id for entry in unreplied] == ["<alias@example.com>"]
+
+
 def test_process_unreplied_emails_keeps_legacy_callback_contract(agent: AgentEmail) -> None:
     inbox = agent.email_dir / "inbox"
     expected_date = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
