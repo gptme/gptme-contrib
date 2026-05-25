@@ -52,6 +52,7 @@ For OAuth 2.0 setup:
 """
 
 import os
+import re
 import sys
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -118,6 +119,50 @@ def _get_user_auth(client) -> bool:
     Set by load_twitter_client() as client._use_user_auth.
     """
     return getattr(client, "_use_user_auth", False)
+
+
+def _validate_urls_in_text(text: str) -> list[tuple[str, int]]:
+    """HEAD-check URLs and return deterministic HTTP failures."""
+    import urllib.error
+    import urllib.request
+
+    url_pattern = re.compile(r"https?://[^\s\"'<>)]+")
+    bad: list[tuple[str, int]] = []
+    for url in url_pattern.findall(text):
+        url = url.rstrip(".,;:!?")
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            req.add_header("User-Agent", "Mozilla/5.0 (URL checker)")
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except urllib.error.HTTPError as e:
+            bad.append((url, e.code))
+        except Exception:
+            pass
+    return bad
+
+
+def _abort_on_bad_urls(messages: list[str]) -> None:
+    """Fail closed on dead self-links before posting live tweets."""
+    bad: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    for text in messages:
+        if not text:
+            continue
+        for issue in _validate_urls_in_text(text):
+            if issue in seen:
+                continue
+            seen.add(issue)
+            bad.append(issue)
+
+    if not bad:
+        return
+
+    for url, status in bad:
+        console.print(f"[red]✗ URL returns {status}: {url}[/red]")
+    console.print("[red]Aborting post — fix dead URLs before tweeting.[/red]")
+    sys.exit(1)
 
 
 def _verify_account_identity(username: str, console) -> None:
@@ -614,6 +659,7 @@ def post(text: str, reply_to: str | None, thread: bool) -> None:
     # Handle thread posting
     if thread:
         thread_messages = split_thread(text)
+        _abort_on_bad_urls([message.text for message in thread_messages])
         reply_to_id: str | None = None
 
         for message in thread_messages:
@@ -641,6 +687,7 @@ def post(text: str, reply_to: str | None, thread: bool) -> None:
             console.print(f"[green]Posted tweet: {message.text}")
     else:
         # Single tweet
+        _abort_on_bad_urls([text])
         response = client.create_tweet(
             text=text, in_reply_to_tweet_id=reply_to, user_auth=_get_user_auth(client)
         )

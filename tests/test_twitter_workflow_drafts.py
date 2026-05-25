@@ -5,6 +5,8 @@ import logging
 import sys
 import types
 from collections.abc import Generator
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -301,6 +303,138 @@ def test_duplicate_reply_detection_includes_rejected_and_review(
         "review": [review_path],
         "rejected": [rejected_path],
     }
+
+
+def test_validate_draft_urls_checks_thread_followups(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def fake_validate(text: str) -> list[tuple[str, int]]:
+        calls.append(text)
+        if "dead-link" in text:
+            return [("https://timetobuildbob.github.io/blog/missing/", 404)]
+        return []
+
+    monkeypatch.setattr(workflow_module, "_validate_urls_in_text", fake_validate)
+
+    draft = workflow_module.TweetDraft(
+        text="Main tweet has no URL.",
+        thread=["https://timetobuildbob.github.io/blog/missing/ dead-link"],
+    )
+
+    assert workflow_module._validate_draft_urls(draft) == [
+        ("https://timetobuildbob.github.io/blog/missing/", 404)
+    ]
+    assert calls == [
+        "Main tweet has no URL.",
+        "https://timetobuildbob.github.io/blog/missing/ dead-link",
+    ]
+
+
+def test_trusted_user_autopost_with_bad_url_saves_draft_instead_of_posting(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="You should link the post.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="ErikBjare",
+        public_metrics={"followers_count": 1},
+    )
+
+    saved: list[tuple[str, str, str | None]] = []
+
+    def fake_save_draft(draft: Any, status: str = "new") -> Path:
+        saved.append((status, draft.text, draft.reject_reason))
+        path = Path(workflow_module.NEW_DIR) / "saved.yml"
+        path.write_text("text: saved\n")
+        return path
+
+    class PostingClient:
+        def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("auto-post should not happen for dead URLs")
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            EvalResult("respond", 100, 100),
+            Response(
+                "Read this https://timetobuildbob.github.io/blog/missing/",
+                "reply",
+                False,
+                None,
+            ),
+        ),
+    )
+    monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        workflow_module, "is_trusted_user", lambda username: username == "ErikBjare"
+    )
+    monkeypatch.setattr(
+        workflow_module, "_check_for_duplicate_replies_internal", lambda draft: {}
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "_validate_draft_urls",
+        lambda draft: [("https://timetobuildbob.github.io/blog/missing/", 404)],
+    )
+    monkeypatch.setattr(workflow_module, "save_draft", fake_save_draft)
+    monkeypatch.setattr(
+        workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
+    )
+    monkeypatch.setattr(workflow_module, "_git_commit_posted", lambda *a, **k: None)
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    assert saved == [
+        (
+            "new",
+            "Read this https://timetobuildbob.github.io/blog/missing/",
+            "Auto-post blocked: dead URL in tweet or thread",
+        )
+    ]
 
 
 def test_find_live_duplicate_reply_ids_matches_own_replies(
