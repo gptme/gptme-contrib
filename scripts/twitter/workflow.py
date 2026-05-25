@@ -790,6 +790,23 @@ def _validate_urls_in_text(text: str) -> list[tuple[str, int]]:
     return bad
 
 
+def _validate_draft_urls(draft: TweetDraft) -> list[tuple[str, int]]:
+    """Validate URLs across both the main tweet text and any thread follow-ups."""
+    bad: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    for text in [draft.text, *draft.thread]:
+        if not text:
+            continue
+        for issue in _validate_urls_in_text(text):
+            if issue in seen:
+                continue
+            seen.add(issue)
+            bad.append(issue)
+
+    return bad
+
+
 @cli.command()
 @click.argument("text")
 @click.option(
@@ -1319,13 +1336,13 @@ def post(
             continue
 
         # URL validation: catch 404s before asking for confirmation
-        if not skip_url_check and draft.text:
-            bad_urls = _validate_urls_in_text(draft.text)
+        if not skip_url_check:
+            bad_urls = _validate_draft_urls(draft)
             if bad_urls:
                 for url, status in bad_urls:
                     console.print(f"[red]✗ URL returns {status}: {url}[/red]")
                 console.print(
-                    "[red]Skipping draft — fix URLs or pass --skip-url-check.[/red]"
+                    "[red]Skipping draft — fix dead URLs in the tweet or thread, or pass --skip-url-check.[/red]"
                 )
                 move_draft(path, "rejected")
                 continue
@@ -1663,6 +1680,24 @@ def process_timeline_tweets(
                             f"[green]Auto-posting reply to trusted user @{author_username}"
                         )
                         try:
+                            bad_urls = _validate_draft_urls(draft)
+                            if bad_urls:
+                                for url, status in bad_urls:
+                                    console.print(
+                                        f"[red]✗ URL returns {status}: {url}[/red]"
+                                    )
+                                draft.reject_reason = (
+                                    "Auto-post blocked: dead URL in tweet or thread"
+                                )
+                                path = save_draft(draft, "new")
+                                console.print(
+                                    f"[yellow]Saved as draft for manual URL fix: {path}"
+                                )
+                                drafts_generated += 1
+                                if draft.in_reply_to is not None:
+                                    _replied_tweet_ids.add(str(draft.in_reply_to))
+                                continue
+
                             client_for_post = load_twitter_client(
                                 require_auth=True, headless=True
                             )
@@ -2190,6 +2225,16 @@ def auto(
                     console.print(
                         f"[cyan]Thread: {len(draft.thread)} follow-up tweet(s)"
                     )
+
+                bad_urls = _validate_draft_urls(draft)
+                if bad_urls:
+                    for url, http_status in bad_urls:
+                        console.print(f"[red]✗ URL returns {http_status}: {url}[/red]")
+                    console.print(
+                        "[red]Skipping draft — fix dead URLs in the tweet or thread.[/red]"
+                    )
+                    move_draft(path, "rejected")
+                    continue
 
                 try:
                     response = client.create_tweet(
