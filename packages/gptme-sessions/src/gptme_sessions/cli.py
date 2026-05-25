@@ -8,6 +8,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 
 import click
 
@@ -32,6 +33,12 @@ from .discovery import (
     session_datetime_from_path,
 )
 from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
+from .replay import (
+    ToolResultsMode,
+    render_replay,
+    resolve_replay_target,
+    resolve_session_record_prefix,
+)
 from .record import SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
@@ -458,20 +465,10 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
     if not session_id:
         raise click.UsageError("Session ID must not be empty.")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
-    records = store.load_all()
-    matches = [r for r in records if r.session_id.startswith(session_id)]
-    if not matches:
-        raise click.ClickException(
-            f"No session found matching '{session_id}'. "
-            "Run 'gptme-sessions query' to list available session IDs."
-        )
-    if len(matches) > 1:
-        raise click.ClickException(
-            f"Ambiguous prefix '{session_id}' matches {len(matches)} sessions: "
-            + ", ".join(r.session_id for r in matches)
-            + ". Run 'gptme-sessions query' to list available session IDs."
-        )
-    record = matches[0]
+    try:
+        record = resolve_session_record_prefix(store.load_all(), session_id)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
 
     if as_json:
         click.echo(json.dumps(record.to_dict(), indent=2))
@@ -1243,6 +1240,65 @@ def transcript(path: Path, as_json: bool, messages_only: bool) -> None:
             else:
                 content_preview = (msg.content or "")[:80].replace("\n", "\\n")
                 click.echo(f"  {ts_str}{msg.role}: {content_preview}")
+
+
+@cli.command()
+@click.argument("target")
+@click.option(
+    "--raw-system",
+    is_flag=True,
+    help="Show initial system messages instead of collapsing them",
+)
+@click.option(
+    "--tool-input",
+    is_flag=True,
+    help="Show structured tool inputs for tool calls",
+)
+@click.option(
+    "--tool-results",
+    type=click.Choice(["summary", "full", "hide"], case_sensitive=False),
+    default="summary",
+    show_default=True,
+    help="How to render tool result payloads",
+)
+@click.option(
+    "--tail",
+    type=click.IntRange(min=1),
+    help="Render only the last N normalized messages",
+)
+@click.pass_context
+def replay(
+    ctx: click.Context,
+    target: str,
+    raw_system: bool,
+    tool_input: bool,
+    tool_results: str,
+    tail: int | None,
+) -> None:
+    """Replay a completed session in the terminal.
+
+    TARGET can be either a trajectory path or a session-record ID prefix.
+    """
+    try:
+        transcript = resolve_replay_target(target, sessions_dir=ctx.obj["sessions_dir"])
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc))
+    except PermissionError:
+        raise click.ClickException(f"cannot read {target}: permission denied")
+    except UnicodeDecodeError:
+        raise click.ClickException(f"{target} contains non-UTF-8 content")
+
+    tool_results_mode = cast(ToolResultsMode, tool_results)
+    click.echo(
+        render_replay(
+            transcript,
+            raw_system=raw_system,
+            show_tool_input=tool_input,
+            tool_results=tool_results_mode,
+            tail=tail,
+        ),
+        nl=False,
+    )
 
 
 # -- sync --------------------------------------------------------------------

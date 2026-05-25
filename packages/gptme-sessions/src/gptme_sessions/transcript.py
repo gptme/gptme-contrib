@@ -384,6 +384,42 @@ def _normalize_copilot(msgs: list[dict]) -> list[NormalizedMessage]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_model(fmt: str, msgs: list[dict], path: Path) -> str | None:
+    """Extract a model string for the detected harness when possible."""
+    if fmt == "claude_code":
+        from .discovery import extract_cc_model
+
+        return extract_cc_model(path)
+
+    if fmt == "gptme":
+        session_dir = path.parent if path.suffix == ".jsonl" else path
+        from .discovery import parse_gptme_config
+
+        return parse_gptme_config(session_dir).get("model") or None
+
+    if fmt == "codex":
+        for record in msgs:
+            if record.get("type") != "session_meta":
+                continue
+            payload = record.get("payload") or {}
+            model = payload.get("model")
+            if model:
+                return str(model)
+        return None
+
+    if fmt == "copilot":
+        for record in msgs:
+            if record.get("type") != "session.start":
+                continue
+            data = record.get("data") or {}
+            model = data.get("selectedModel")
+            if model:
+                return str(model)
+        return None
+
+    return None
+
+
 def read_transcript(path: Path) -> SessionTranscript:
     """Read a trajectory file and return a normalized SessionTranscript.
 
@@ -449,19 +485,7 @@ def read_transcript(path: Path) -> SessionTranscript:
     session_name = extract_session_name(harness, path)
     project = extract_project(harness, path)
 
-    # Model extraction: for CC we can read from the first assistant message
-    model: str | None = None
-    if fmt == "claude_code":
-        from .discovery import extract_cc_model
-
-        model = extract_cc_model(path)
-    elif fmt == "gptme":
-        # Check parent dir config.toml
-        session_dir = path.parent if path.suffix == ".jsonl" else path
-        from .discovery import parse_gptme_config
-
-        model = parse_gptme_config(session_dir).get("model") or None
-    # For codex/copilot, model is in usage/context records (not extracted here to keep lean)
+    model = _extract_model(fmt, msgs, path)
 
     # Session ID: use path stem (UUID for CC, session dir name for gptme, etc.)
     session_id = path.stem if path.suffix == ".jsonl" else path.name
