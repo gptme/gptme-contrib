@@ -12,6 +12,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TWITTER_PATH = REPO_ROOT / "scripts" / "twitter" / "twitter.py"
+_MISSING = object()
 
 
 def _make_pkg(name: str) -> types.ModuleType:
@@ -20,7 +21,7 @@ def _make_pkg(name: str) -> types.ModuleType:
     return mod
 
 
-def _load_twitter_module() -> Any:
+def _load_twitter_module() -> tuple[Any, dict[str, Any]]:
     click_stub: Any = types.ModuleType("click")
 
     def _passthrough_decorator(*args, **kwargs):
@@ -92,8 +93,11 @@ def _load_twitter_module() -> Any:
         "gptmail.communication_utils.messaging": messaging_stub,
     }
 
+    original_modules = {
+        name: sys.modules.get(name, _MISSING) for name in stubbed_modules
+    }
     for name, stub in stubbed_modules.items():
-        sys.modules.setdefault(name, stub)
+        sys.modules[name] = stub
 
     spec = importlib.util.spec_from_file_location(
         "twitter_post_guard_under_test", TWITTER_PATH
@@ -102,31 +106,19 @@ def _load_twitter_module() -> Any:
     module: Any = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module
+    return module, original_modules
 
 
 @pytest.fixture(scope="module")
 def twitter_module() -> Generator[Any, None, None]:
-    stub_keys = (
-        "click",
-        "tweepy",
-        "dotenv",
-        "rich",
-        "rich.console",
-        "gptmail",
-        "gptmail.communication_utils",
-        "gptmail.communication_utils.auth",
-        "gptmail.communication_utils.auth.oauth",
-        "gptmail.communication_utils.auth.tokens",
-        "gptmail.communication_utils.messaging",
-        "twitter_post_guard_under_test",
-    )
-    pre_existing = {key for key in stub_keys if key in sys.modules}
-    module = _load_twitter_module()
+    module, original_modules = _load_twitter_module()
     yield module
-    for key in stub_keys:
-        if key not in pre_existing:
+    sys.modules.pop("twitter_post_guard_under_test", None)
+    for key, original in original_modules.items():
+        if original is _MISSING:
             sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = original
 
 
 def test_post_aborts_before_single_tweet_with_dead_url(

@@ -15,6 +15,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_PATH = REPO_ROOT / "scripts" / "twitter" / "workflow.py"
+_MISSING = object()
 
 
 def _make_pkg(name: str) -> types.ModuleType:
@@ -23,7 +24,7 @@ def _make_pkg(name: str) -> types.ModuleType:
     return mod
 
 
-def _load_workflow_module() -> Any:
+def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     class _Operation:
         def complete(self, *args, **kwargs) -> None:
             return None
@@ -114,8 +115,11 @@ def _load_workflow_module() -> Any:
         "twitter.twitter": twitter_api_stub,
     }
 
+    original_modules = {
+        name: sys.modules.get(name, _MISSING) for name in stubbed_modules
+    }
     for name, stub in stubbed_modules.items():
-        sys.modules.setdefault(name, stub)
+        sys.modules[name] = stub
 
     spec = importlib.util.spec_from_file_location(
         "twitter_workflow_under_test", WORKFLOW_PATH
@@ -124,34 +128,19 @@ def _load_workflow_module() -> Any:
     module: Any = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module
+    return module, original_modules
 
 
 @pytest.fixture(scope="module")
 def workflow_module() -> Generator[Any, None, None]:
-    stub_keys = (
-        "gptmail",
-        "gptmail.communication_utils",
-        "gptmail.communication_utils.monitoring",
-        "gptme",
-        "gptme.init",
-        "dotenv",
-        "click",
-        "rich",
-        "rich.console",
-        "rich.prompt",
-        "trusted_users",
-        "twitter",
-        "twitter.llm",
-        "twitter.twitter",
-        "twitter_workflow_under_test",
-    )
-    pre_existing = {key for key in stub_keys if key in sys.modules}
-    module = _load_workflow_module()
+    module, original_modules = _load_workflow_module()
     yield module
-    for key in stub_keys:
-        if key not in pre_existing:
+    sys.modules.pop("twitter_workflow_under_test", None)
+    for key, original in original_modules.items():
+        if original is _MISSING:
             sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = original
 
 
 def _set_status_dirs(module: Any, tmp_path: Path) -> None:
