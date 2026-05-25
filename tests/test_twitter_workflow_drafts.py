@@ -305,7 +305,7 @@ def test_validate_draft_urls_checks_thread_followups(
             return [("https://timetobuildbob.github.io/blog/missing/", 404)]
         return []
 
-    monkeypatch.setattr(workflow_module, "_validate_urls_in_text", fake_validate)
+    monkeypatch.setattr(workflow_module, "validate_urls_in_text", fake_validate)
 
     draft = workflow_module.TweetDraft(
         text="Main tweet has no URL.",

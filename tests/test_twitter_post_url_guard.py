@@ -128,7 +128,7 @@ def test_post_aborts_before_single_tweet_with_dead_url(
 
     monkeypatch.setattr(
         twitter_module,
-        "_validate_urls_in_text",
+        "validate_urls_in_text",
         lambda text: [("https://timetobuildbob.github.io/blog/missing/", 404)],
     )
     monkeypatch.setattr(
@@ -162,7 +162,7 @@ def test_post_aborts_before_thread_with_dead_followup_url(
     )
     monkeypatch.setattr(
         twitter_module,
-        "_validate_urls_in_text",
+        "validate_urls_in_text",
         lambda text: (
             [("https://timetobuildbob.github.io/blog/missing/", 404)]
             if "missing" in text
