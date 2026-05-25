@@ -46,6 +46,7 @@ Reusable Python packages. See [packages/README.md](./packages/README.md).
 
 | Package | Description |
 |---------|-------------|
+| [gptme-codegraph](./packages/gptme-codegraph/) | Structural code retrieval with tree-sitter (parse, call graph, blast/impact analysis, 9 MCP tools) |
 | [gptmail](./packages/gptmail/) | Universal email system for AI agents |
 | [gptodo](./packages/gptodo/) | Task management CLI and utilities |
 | [gptme-activity-summary](./packages/gptme-activity-summary/) | Activity summarization for agents — journals, GitHub, sessions, tweets, email |
