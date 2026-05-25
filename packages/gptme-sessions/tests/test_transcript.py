@@ -322,11 +322,13 @@ class TestReadTranscript:
     def test_codex_transcript(self, codex_jsonl: Path):
         t = read_transcript(codex_jsonl)
         assert t.harness == "codex"
+        assert t.model == "gpt-5.3-codex"
         assert len(t.messages) > 0
 
     def test_copilot_transcript(self, copilot_jsonl: Path):
         t = read_transcript(copilot_jsonl)
         assert t.harness == "copilot"
+        assert t.model == "gpt-5.4"
         assert len(t.messages) > 0
 
     def test_started_at_and_last_activity(self, gptme_jsonl: Path):
