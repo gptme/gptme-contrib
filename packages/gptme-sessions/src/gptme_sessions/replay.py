@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +12,7 @@ from .store import SessionStore
 from .transcript import NormalizedMessage, SessionTranscript, read_transcript
 
 ToolResultsMode = Literal["summary", "full", "hide"]
+logger = logging.getLogger(__name__)
 
 
 def resolve_session_record_prefix(records: list[SessionRecord], prefix: str) -> SessionRecord:
@@ -40,6 +42,12 @@ def resolve_replay_target(target: str, *, sessions_dir: Path) -> SessionTranscri
 
     path = Path(target).expanduser()
     if path.exists():
+        logger.debug(
+            "Replay target %r resolved as existing path %s (cwd=%s); skipping session ID lookup.",
+            target,
+            path.resolve(),
+            Path.cwd(),
+        )
         return read_transcript(path)
 
     store = SessionStore(sessions_dir=sessions_dir)
@@ -72,6 +80,7 @@ def render_replay(
 
     if tail is not None:
         messages = messages[-tail:]
+    displayed_count = len(messages)
 
     lines = [
         f"Session:       {transcript.session_id}",
@@ -89,7 +98,7 @@ def render_replay(
         lines.append(f"Last activity: {transcript.last_activity}")
     lines.extend(
         [
-            f"Messages:      {len(transcript.messages)}",
+            f"Messages:      {_format_message_count(displayed_count, len(transcript.messages))}",
             f"Source:        {transcript.trajectory_path}",
         ]
     )
@@ -170,19 +179,28 @@ def _summarize_text(text: str, *, max_lines: int = 4, max_chars: int = 320) -> s
         return "[empty]"
 
     lines = stripped.splitlines()
-    truncated = False
+    truncated_by_lines = False
     if len(lines) > max_lines:
         lines = lines[:max_lines]
-        truncated = True
+        truncated_by_lines = True
 
     summary = "\n".join(lines)
+    truncated_by_chars = False
     if len(summary) > max_chars:
         summary = summary[: max_chars - 3].rstrip()
-        truncated = True
+        truncated_by_chars = True
 
-    if truncated:
-        summary = summary.rstrip() + "\n..."
+    if truncated_by_lines or truncated_by_chars:
+        suffix = "\n..." if truncated_by_lines or "\n" in summary else "..."
+        summary = summary.rstrip() + suffix
     return summary
+
+
+def _format_message_count(displayed_count: int, total_count: int) -> str:
+    """Format replay message counts for rendered output."""
+    if displayed_count == total_count:
+        return str(total_count)
+    return f"{displayed_count} displayed ({total_count} total)"
 
 
 def _format_bytes(byte_count: int) -> str:

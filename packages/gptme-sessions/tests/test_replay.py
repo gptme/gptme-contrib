@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,7 @@ class TestReplayCli:
         runner = CliRunner()
         result = runner.invoke(cli, ["replay", str(codex_replay_jsonl)])
         assert result.exit_code == 0, result.output
+        assert "Messages:      4 displayed (5 total)" in result.output
         assert "[system prelude collapsed: 1 message" in result.output
         assert "System prelude that should collapse." not in result.output
         assert "TOOL CALL  exec_command" in result.output
@@ -123,6 +125,7 @@ class TestReplayCli:
         runner = CliRunner()
         result = runner.invoke(cli, ["replay", str(codex_replay_jsonl), "--tail", "2"])
         assert result.exit_code == 0, result.output
+        assert "Messages:      2 displayed (5 total)" in result.output
         assert "TOOL CALL  exec_command" in result.output
         assert "TOOL RESULT" in result.output
         assert "Show me the files." not in result.output
@@ -160,3 +163,38 @@ class TestReplayCli:
         result = runner.invoke(cli, ["--sessions-dir", str(sessions_dir), "replay", "abcd"])
         assert result.exit_code != 0
         assert "has no trajectory_path" in result.output
+
+
+def test_replay_summary_uses_inline_ellipsis_for_single_line_char_truncation():
+    from gptme_sessions.replay import _summarize_text
+
+    summary = _summarize_text("x" * 400, max_chars=20)
+
+    assert summary.endswith("...")
+    assert "\n..." not in summary
+
+
+def test_replay_logs_when_existing_path_wins_over_session_id_prefix(
+    tmp_path: Path, codex_replay_jsonl: Path, monkeypatch: pytest.MonkeyPatch, caplog
+):
+    from gptme_sessions.replay import resolve_replay_target
+
+    shadow_path = tmp_path / "abcd1234"
+    shadow_path.write_text(codex_replay_jsonl.read_text())
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234-session",
+            harness="codex",
+            trajectory_path=str(codex_replay_jsonl),
+        )
+    )
+
+    monkeypatch.chdir(tmp_path)
+    with caplog.at_level(logging.DEBUG, logger="gptme_sessions.replay"):
+        transcript = resolve_replay_target("abcd1234", sessions_dir=sessions_dir)
+
+    assert transcript.trajectory_path == str(shadow_path.resolve())
+    assert "skipping session ID lookup" in caplog.text
