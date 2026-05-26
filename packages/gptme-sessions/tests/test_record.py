@@ -33,6 +33,30 @@ def test_context_tier_roundtrip():
     assert r2.context_tier == "massive"
 
 
+def test_reasoning_profile_default():
+    """reasoning_profile defaults to None."""
+    r = SessionRecord()
+    assert r.reasoning_profile is None
+
+
+def test_reasoning_profile_roundtrip():
+    """reasoning_profile survives to_dict/from_dict and JSON round-trip."""
+    r = SessionRecord(
+        harness="claude-code",
+        model="opus",
+        reasoning_profile="routine",
+        outcome="productive",
+    )
+    d = r.to_dict()
+    assert d["reasoning_profile"] == "routine"
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.reasoning_profile == "routine"
+
+    parsed = json.loads(r.to_json())
+    assert parsed["reasoning_profile"] == "routine"
+
+
 def test_deliverable_details_roundtrip():
     """deliverable_details survives to_dict/from_dict round-trip."""
     r = SessionRecord(

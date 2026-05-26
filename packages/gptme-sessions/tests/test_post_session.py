@@ -61,6 +61,24 @@ def test_post_session_context_tier_standard(tmp_path: Path):
     assert result.record.context_tier == "standard"
 
 
+def test_post_session_reasoning_profile(tmp_path: Path):
+    """reasoning_profile is stored in the SessionRecord when passed to post_session."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        reasoning_profile="routine",
+        duration_seconds=90,
+    )
+    assert result.record.reasoning_profile == "routine"
+
+    store2 = SessionStore(sessions_dir=tmp_path)
+    records = store2.load_all()
+    assert len(records) == 1
+    assert records[0].reasoning_profile == "routine"
+
+
 def test_post_session_ab_group_tier_version(tmp_path: Path):
     """ab_group and tier_version are stored in SessionRecord when passed to post_session."""
     store = SessionStore(sessions_dir=tmp_path)
@@ -159,6 +177,19 @@ def test_post_session_ab_group_invalid(tmp_path: Path):
             harness="claude-code",
             model="opus",
             ab_group="invalid-group",
+            duration_seconds=60,
+        )
+
+
+def test_post_session_reasoning_profile_invalid(tmp_path: Path):
+    """post_session raises ValueError for invalid reasoning_profile values."""
+    store = SessionStore(sessions_dir=tmp_path)
+    with pytest.raises(ValueError, match="Invalid reasoning_profile"):
+        post_session(
+            store=store,
+            harness="claude-code",
+            model="opus",
+            reasoning_profile="cheap",
             duration_seconds=60,
         )
 

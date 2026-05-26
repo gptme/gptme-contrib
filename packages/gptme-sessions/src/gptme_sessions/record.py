@@ -190,6 +190,7 @@ class SessionRecord:
     harness: str | None = "unknown"  # claude-code, gptme, codex
     model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
     context_tier: str | None = None  # standard, extended, large, massive
+    reasoning_profile: str | None = None  # routine, default, deep
     ab_group: str | None = None  # A/B group assignment ("treatment" or "control")
     tier_version: str | None = None  # version of context tier config used
     run_type: str | None = "unknown"  # deprecated: use trigger instead

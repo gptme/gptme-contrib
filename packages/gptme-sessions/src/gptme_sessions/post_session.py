@@ -184,6 +184,9 @@ VALID_CONTEXT_TIERS: frozenset[str] = frozenset({"standard", "extended", "large"
 #: can use a single source of truth for ``click.Choice``.
 VALID_AB_GROUPS: frozenset[str] = frozenset({"treatment", "control"})
 
+#: Valid values for the semantic reasoning-profile routing contract.
+VALID_REASONING_PROFILES: frozenset[str] = frozenset({"routine", "default", "deep"})
+
 
 @dataclass
 class PostSessionResult:
@@ -233,6 +236,7 @@ def post_session(
     harness: str,
     model: str | None = None,
     context_tier: str | None = None,
+    reasoning_profile: str | None = None,
     ab_group: str | None = None,
     tier_version: str | None = None,
     run_type: str | None = None,
@@ -263,6 +267,10 @@ def post_session(
     context_tier:
         Context tier used for this session (e.g. ``"standard"``, ``"massive"``).
         Enables A/B comparison of context inclusion strategies.
+    reasoning_profile:
+        Semantic reasoning intent requested for the run (``"routine"``,
+        ``"default"``, or ``"deep"``). Records caller intent even when the
+        backend could not apply a provider-specific effort flag.
     ab_group:
         A/B group assignment for this session (e.g. ``"treatment"`` or ``"control"``).
     tier_version:
@@ -350,6 +358,11 @@ def post_session(
     if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
             f"Invalid context_tier {context_tier!r}. Expected one of {sorted(VALID_CONTEXT_TIERS)}"
+        )
+    if reasoning_profile is not None and reasoning_profile not in VALID_REASONING_PROFILES:
+        raise ValueError(
+            "Invalid reasoning_profile "
+            f"{reasoning_profile!r}. Expected one of {sorted(VALID_REASONING_PROFILES)}"
         )
     if ab_group is not None and ab_group not in VALID_AB_GROUPS:
         raise ValueError(
@@ -637,6 +650,8 @@ def post_session(
     }
     if context_tier is not None:
         record_kwargs["context_tier"] = context_tier
+    if reasoning_profile is not None:
+        record_kwargs["reasoning_profile"] = reasoning_profile
     if ab_group is not None:
         record_kwargs["ab_group"] = ab_group
     if tier_version is not None:

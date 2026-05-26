@@ -32,7 +32,12 @@ from .discovery import (
     session_date_from_path,
     session_datetime_from_path,
 )
-from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
+from .post_session import (
+    VALID_AB_GROUPS,
+    VALID_CONTEXT_TIERS,
+    VALID_REASONING_PROFILES,
+    post_session,
+)
 from .replay import (
     ToolResultsMode,
     render_replay,
@@ -1699,6 +1704,12 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
     help="Context tier used in this session (standard, extended, large, massive)",
 )
 @click.option(
+    "--reasoning-profile",
+    default=None,
+    type=click.Choice(sorted(VALID_REASONING_PROFILES)),
+    help="Semantic reasoning profile requested for the session (routine, default, deep)",
+)
+@click.option(
     "--ab-group",
     default=None,
     type=click.Choice(sorted(VALID_AB_GROUPS)),
@@ -1725,6 +1736,7 @@ def post_session_cmd(
     journal_path: str | None,
     session_id: str | None,
     context_tier: str | None,
+    reasoning_profile: str | None,
     ab_group: str | None,
     tier_version: str | None,
     as_json: bool,
@@ -1750,6 +1762,7 @@ def post_session_cmd(
         journal_path=journal_path,
         session_id=session_id,
         context_tier=context_tier,
+        reasoning_profile=reasoning_profile,
         ab_group=ab_group,
         tier_version=tier_version,
     )
