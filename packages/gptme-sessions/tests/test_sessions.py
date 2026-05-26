@@ -2335,6 +2335,58 @@ def test_signals_cli_usage_cc(tmp_path):
     assert "total=650" in out
 
 
+def test_signals_cli_usage_codex(tmp_path):
+    """signals --usage exposes Codex reasoning/cache counters with Bob's canonical names."""
+    import subprocess
+
+    msgs = [
+        {
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex"},
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 12000,
+                        "output_tokens": 100,
+                        "reasoning_output_tokens": 42,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 12000,
+                        "cached_input_tokens": 9000,
+                        "output_tokens": 100,
+                        "reasoning_output_tokens": 42,
+                        "total_tokens": 12100,
+                    },
+                },
+            },
+        },
+    ]
+    p = tmp_path / "rollout.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--usage"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    out = result.stdout.strip()
+    assert "input=12000" in out
+    assert "output=100" in out
+    assert "cache_read=9000" in out
+    assert "cache_create=0" in out
+    assert "reasoning=42" in out
+    assert "total=12100" in out
+
+
 def test_signals_cli_usage_gptme(tmp_path):
     """signals --usage produces no output for gptme format (no embedded usage)."""
     import subprocess
@@ -3856,6 +3908,7 @@ def test_extract_usage_codex():
                         "input_tokens": 12000,
                         "cached_input_tokens": 9000,
                         "output_tokens": 100,
+                        "reasoning_output_tokens": 42,
                         "total_tokens": 12100,
                     },
                     "model_context_window": 200000,
@@ -3876,8 +3929,10 @@ def test_extract_usage_codex():
     assert usage["context_peak_tokens"] == 12000
     assert usage["context_window"] == 200000
     assert usage["input_tokens"] == 12000
+    assert usage["cache_read_tokens"] == 9000
     assert usage["cached_input_tokens"] == 9000
     assert usage["output_tokens"] == 100
+    assert usage["reasoning_output_tokens"] == 42
     assert usage["total_tokens"] == 12100
 
 

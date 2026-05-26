@@ -1680,13 +1680,19 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         input_tokens = _as_int(final_total.get("input_tokens"))
         output_tokens = _as_int(final_total.get("output_tokens"))
         cached_input_tokens = _as_int(final_total.get("cached_input_tokens"))
+        reasoning_output_tokens = _as_int(final_total.get("reasoning_output_tokens"))
         total_tokens = _as_int(final_total.get("total_tokens"))
         if input_tokens is not None:
             result["input_tokens"] = input_tokens
         if output_tokens is not None:
             result["output_tokens"] = output_tokens
         if cached_input_tokens is not None:
+            # Codex names this as a subset of input tokens; keep the raw key for
+            # compatibility, but also normalize onto Bob's canonical cache-read field.
             result["cached_input_tokens"] = cached_input_tokens
+            result["cache_read_tokens"] = cached_input_tokens
+        if reasoning_output_tokens is not None:
+            result["reasoning_output_tokens"] = reasoning_output_tokens
         if total_tokens is not None:
             result["total_tokens"] = total_tokens
     if sys_prompt_tokens is not None:

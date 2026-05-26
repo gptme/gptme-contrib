@@ -75,6 +75,78 @@ _USAGE_FIELD_MAP: dict[str, str] = {
 }
 
 
+def _usage_cache_read_tokens(usage: dict[str, object]) -> int | None:
+    """Return canonical cache-read tokens, accepting Codex's legacy key too."""
+    value = usage.get("cache_read_tokens")
+    if value is None:
+        value = usage.get("cached_input_tokens")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _usage_int(usage: dict[str, object], key: str) -> int:
+    """Return an integer usage counter or zero when absent/non-integral."""
+    value = usage.get(key)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return 0
+
+
+def _format_usage_summary(usage: dict[str, object]) -> str | None:
+    """Render a stable cross-harness usage summary line."""
+    total = usage.get("total_tokens")
+    if not isinstance(total, int) or total <= 0:
+        return None
+
+    input_tokens = _usage_int(usage, "input_tokens")
+    output_tokens = _usage_int(usage, "output_tokens")
+    cache_create = _usage_int(usage, "cache_creation_tokens")
+    cache_read = _usage_cache_read_tokens(usage) or 0
+    reasoning = usage.get("reasoning_output_tokens")
+    reasoning_suffix = (
+        f" reasoning={int(reasoning)}" if isinstance(reasoning, int) and reasoning > 0 else ""
+    )
+    return (
+        f"input={input_tokens} "
+        f"output={output_tokens} "
+        f"cache_read={cache_read} "
+        f"cache_create={cache_create}"
+        f"{reasoning_suffix} "
+        f"total={total}"
+    )
+
+
+def _format_usage_human(usage: dict[str, object]) -> str | None:
+    """Render a human-readable usage summary for the default CLI view."""
+    total = usage.get("total_tokens")
+    if not isinstance(total, int) or total <= 0:
+        return None
+
+    input_tokens = _usage_int(usage, "input_tokens")
+    output_tokens = _usage_int(usage, "output_tokens")
+    cache_create = _usage_int(usage, "cache_creation_tokens")
+    cache_read = _usage_cache_read_tokens(usage) or 0
+    reasoning = usage.get("reasoning_output_tokens")
+    reasoning_suffix = (
+        f" reasoning={int(reasoning):,}" if isinstance(reasoning, int) and reasoning > 0 else ""
+    )
+    return (
+        f"Tokens: {total:,} total "
+        f"(in={input_tokens:,} out={output_tokens:,} "
+        f"cache_create={cache_create:,} cache_read={cache_read:,}"
+        f"{reasoning_suffix})"
+    )
+
+
 def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool:
     """Set ``record.field`` when it is empty/unknown and ``value`` is usable."""
     if value is None:
@@ -1100,14 +1172,9 @@ def signals(
     if usage:
         u = result.get("usage")
         if u:
-            if u.get("total_tokens", 0) > 0:
-                click.echo(
-                    f"input={u['input_tokens']} "
-                    f"output={u['output_tokens']} "
-                    f"cache_read={u['cache_read_tokens']} "
-                    f"cache_create={u['cache_creation_tokens']} "
-                    f"total={u['total_tokens']}"
-                )
+            usage_summary = _format_usage_summary(u)
+            if usage_summary is not None:
+                click.echo(usage_summary)
             elif u.get("rate_limit_primary_pct") is not None:
                 primary = u["rate_limit_primary_pct"]
                 secondary = u.get("rate_limit_secondary_pct")
@@ -1143,13 +1210,9 @@ def signals(
     click.echo(f"Grade: {result['grade']:.4f}")
     if result.get("usage"):
         u = result["usage"]
-        if "total_tokens" in u:
-            click.echo(
-                f"Tokens: {u['total_tokens']:,} total "
-                f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
-                f"cache_create={u['cache_creation_tokens']:,} "
-                f"cache_read={u['cache_read_tokens']:,})"
-            )
+        usage_human = _format_usage_human(u)
+        if usage_human is not None:
+            click.echo(usage_human)
         elif u.get("rate_limit_primary_pct") is not None:
             primary = u["rate_limit_primary_pct"]
             secondary = u.get("rate_limit_secondary_pct")
