@@ -498,6 +498,108 @@ def test_execute_reports_timeout() -> None:
     asyncio.run(_exercise())
 
 
+def test_extract_error_text_filters_sigpipe_shell_noise() -> None:
+    """A SIGPIPE (signal 13) from a shell command the subagent ran internally
+    (e.g. `find ... | xargs grep ... | head`) is benign downstream-pipe-close
+    noise and must not be surfaced as the subagent error."""
+    stderr = "xargs: grep: terminated by signal 13"
+    error = GptmeToolBridge._extract_error_text("", stderr, output="")
+    assert "terminated by signal 13" not in error
+    # With no other meaningful signal, fall through to the empty -> exit-code path.
+    assert error == ""
+
+
+def test_extract_error_text_filters_known_broken_pipe_noise() -> None:
+    stderr = "sort: write failed: standard output: Broken pipe"
+    stdout = "[11:13:00] ERROR    Error code: 429 too many requests"
+    error = GptmeToolBridge._extract_error_text(stdout, stderr, output="")
+    assert "Broken pipe" not in error
+    assert "Error code: 429" in error
+
+
+def test_extract_error_text_keeps_generic_broken_pipe_error() -> None:
+    stderr = "ERROR: Broken pipe on database connection socket"
+    error = GptmeToolBridge._extract_error_text("", stderr, output="")
+    assert error == stderr
+
+
+def test_execute_timeout_exit_code_reports_clear_message_not_shell_noise() -> None:
+    """Regression for the 2026-05-26 live-call failure: the fast subagent was
+    killed by the wrapper's `timeout` (exit 124) mid-exploration, and the last
+    stderr line was a benign `xargs: grep: terminated by signal 13` SIGPIPE.
+    The user-facing error used to be that misleading shell line. It should be a
+    clear, actionable timeout message instead."""
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=124,
+                stdout="[12:55:30] thinking... searching the workspace",
+                stderr="xargs: grep: terminated by signal 13",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            result = await bridge._execute(
+                "Summarize the software factory in this workspace", mode="fast"
+            )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "timed out" in result.error.lower()
+        assert "signal 13" not in result.error
+        assert "124" not in result.error
+
+    asyncio.run(_exercise())
+
+
+def test_execute_sigterm_exit_code_reported_as_timeout() -> None:
+    """143 = 128 + SIGTERM — the kill the wrapper sends on expiry — is also a
+    timeout, not a generic crash."""
+
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(returncode=143, stdout="partial work")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            result = await bridge._execute("long lookup", mode="fast")
+
+        assert result.success is False
+        assert result.error is not None
+        assert "timed out" in result.error.lower()
+
+    asyncio.run(_exercise())
+
+
+def test_execute_sigkill_exit_code_reports_killed_not_timeout() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=137,
+                stdout="partial work",
+                stderr="sort: write failed: standard output: Broken pipe",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            result = await bridge._execute("long lookup", mode="fast")
+
+        assert result.success is False
+        assert result.error is not None
+        assert "killed" in result.error.lower()
+        assert "out-of-memory" in result.error.lower()
+        assert "broken pipe" not in result.error.lower()
+
+    asyncio.run(_exercise())
+
+
 def test_handle_function_call_hangup_fires_callback_when_wired() -> None:
     """hangup triggers on_hangup callback with optional reason."""
 

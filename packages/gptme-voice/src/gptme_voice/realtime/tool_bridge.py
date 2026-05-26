@@ -37,6 +37,17 @@ _IGNORABLE_ERROR_PREFIXES = (
     "WARNING  Failed to load plugin ",  # gptme plugin discovery noise
     "WARNING  OpenTelemetry dependencies not available",
 )
+# Substrings that mark benign shell-pipeline noise from commands the subagent
+# itself ran (e.g. `find ... | xargs grep ... | head`).  SIGPIPE (signal 13) is
+# the normal result of a downstream consumer closing the pipe early; it is
+# never the real reason a lookup failed and must not be surfaced as the
+# subagent error.
+_IGNORABLE_ERROR_SUBSTRINGS = ("terminated by signal 13",)
+# Returncodes that indicate the subagent was killed by a timeout wrapper
+# (`timeout` exits 124 on expiry; 143 = 128+SIGTERM from the timeout wrapper).
+# These mean "ran out of time", not a generic crash.
+_TIMEOUT_RETURNCODES = frozenset({124, 143})
+_KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -135,11 +146,20 @@ class GptmeToolBridge:
 
     @staticmethod
     def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
+        def _is_ignorable_broken_pipe(line: str) -> bool:
+            return line.endswith("Broken pipe") and (
+                ": write failed: " in line or ": error writing " in line
+            )
+
         def _is_ignorable(line: str) -> bool:
             stripped = line.strip()
             if stripped in _IGNORABLE_ERROR_LINES:
                 return True
-            return any(stripped.startswith(p) for p in _IGNORABLE_ERROR_PREFIXES)
+            if any(stripped.startswith(p) for p in _IGNORABLE_ERROR_PREFIXES):
+                return True
+            if any(s in stripped for s in _IGNORABLE_ERROR_SUBSTRINGS):
+                return True
+            return _is_ignorable_broken_pipe(stripped)
 
         stderr_lines = [
             line.strip()
@@ -552,6 +572,41 @@ class GptmeToolBridge:
 
             if on_completed:
                 on_completed(process.returncode, time.monotonic())
+
+            if process.returncode in _TIMEOUT_RETURNCODES:
+                # The wrapper's timeout fired before the subagent could write a
+                # clean response file. Surface a clear, actionable signal rather
+                # than whatever stderr line happened to be last (often benign
+                # SIGPIPE noise from an in-flight shell pipeline).
+                logger.warning(
+                    "Subagent timed out (exit %s) after producing %d chars of output",
+                    process.returncode,
+                    len(output),
+                )
+                return ToolResult(
+                    success=False,
+                    output=output,
+                    error=(
+                        "Subagent timed out before it could finish. "
+                        "Try a narrower, more specific question."
+                    ),
+                )
+
+            if process.returncode == _KILLED_RETURNCODE:
+                logger.warning(
+                    "Subagent was killed (exit %s) after producing %d chars of output",
+                    process.returncode,
+                    len(output),
+                )
+                return ToolResult(
+                    success=False,
+                    output=output,
+                    error=(
+                        "Subagent was killed before it could finish "
+                        "(timeout or out-of-memory). "
+                        "Try a narrower, more specific question."
+                    ),
+                )
 
             if process.returncode != 0:
                 logger.error(
