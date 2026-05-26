@@ -509,12 +509,18 @@ def test_extract_error_text_filters_sigpipe_shell_noise() -> None:
     assert error == ""
 
 
-def test_extract_error_text_filters_broken_pipe_noise() -> None:
+def test_extract_error_text_filters_known_broken_pipe_noise() -> None:
     stderr = "sort: write failed: standard output: Broken pipe"
     stdout = "[11:13:00] ERROR    Error code: 429 too many requests"
     error = GptmeToolBridge._extract_error_text(stdout, stderr, output="")
     assert "Broken pipe" not in error
     assert "Error code: 429" in error
+
+
+def test_extract_error_text_keeps_generic_broken_pipe_error() -> None:
+    stderr = "ERROR: Broken pipe on database connection socket"
+    error = GptmeToolBridge._extract_error_text("", stderr, output="")
+    assert error == stderr
 
 
 def test_execute_timeout_exit_code_reports_clear_message_not_shell_noise() -> None:
@@ -566,6 +572,30 @@ def test_execute_sigterm_exit_code_reported_as_timeout() -> None:
         assert result.success is False
         assert result.error is not None
         assert "timed out" in result.error.lower()
+
+    asyncio.run(_exercise())
+
+
+def test_execute_sigkill_exit_code_reports_killed_not_timeout() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=137,
+                stdout="partial work",
+                stderr="sort: write failed: standard output: Broken pipe",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            result = await bridge._execute("long lookup", mode="fast")
+
+        assert result.success is False
+        assert result.error is not None
+        assert "killed" in result.error.lower()
+        assert "out-of-memory" in result.error.lower()
+        assert "broken pipe" not in result.error.lower()
 
     asyncio.run(_exercise())
 
