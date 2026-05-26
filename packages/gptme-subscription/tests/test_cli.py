@@ -8,7 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
-from gptme_subscription.cli import _cmd_evaluate, _execute_switch_decision
+from gptme_subscription.cli import (
+    _cmd_evaluate,
+    _cmd_switch,
+    _execute_switch_decision,
+)
 from gptme_subscription.manager import Decision, SubscriptionManager
 
 
@@ -27,6 +31,7 @@ class FakeManager:
     ) -> None:
         self.config = SimpleNamespace(
             primary=primary,
+            subscriptions=[primary, "alice", "erik"],
             probe_primary_cooldown=1800,
             rate_limit_file=Path("/tmp/nonexistent-rate-limit-flag"),
         )
@@ -64,6 +69,7 @@ class FakeManager:
         self.switch_calls: list[tuple[str, str]] = []
         self.saved_decision: dict[str, object] | None = None
         self.cleared_rebalance = 0
+        self.manual_hold_calls: list[str] = []
         self.recorded_reset: tuple[str, float, dict[str, object]] | None = None
         self.last_switch_deferred = False
 
@@ -88,7 +94,7 @@ class FakeManager:
     def seconds_since_last_primary_departure(self) -> None:
         return None
 
-    def switch_to(self, sub: str, reason: str) -> bool:
+    def switch_to(self, sub: str, reason: str, force: bool = False) -> bool:
         self.switch_calls.append((sub, reason))
         ok, deferred = self._switch_results.pop(0)
         self.last_switch_deferred = deferred
@@ -99,6 +105,9 @@ class FakeManager:
 
     def clear_rebalance_state(self) -> None:
         self.cleared_rebalance += 1
+
+    def record_manual_switch_hold(self, target: str) -> None:
+        self.manual_hold_calls.append(target)
 
     def is_subscription_blocked(
         self, usage: dict[str, object], *, config
@@ -306,3 +315,39 @@ def test_execute_switch_decision_no_alert_on_deferred_switch(capsys) -> None:
     assert payload.get("deferred") is True
     captured = capsys.readouterr()
     assert "[ALERT]" not in captured.err
+
+
+def test_cmd_switch_execute_writes_manual_hold_not_clear() -> None:
+    # A successful manual --switch must record a protective hold (so a concurrent
+    # automated --execute can't immediately route away), not clear hold state.
+    sm = FakeManager(active="bob")
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 0
+    assert sm.switch_calls == [("alice", "manual switch via --switch alice")]
+    assert sm.manual_hold_calls == ["alice"]
+    assert sm.cleared_rebalance == 0
+
+
+def test_cmd_switch_unknown_slot_returns_error(capsys) -> None:
+    sm = FakeManager(active="bob")
+    args = argparse.Namespace(switch="nobody", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 1
+    assert sm.switch_calls == []
+    assert sm.manual_hold_calls == []
+
+
+def test_cmd_switch_dry_run_does_not_switch_or_hold(capsys) -> None:
+    sm = FakeManager(active="bob")
+    args = argparse.Namespace(switch="alice", execute=False, dry_run=True)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 0
+    assert sm.switch_calls == []
+    assert sm.manual_hold_calls == []
