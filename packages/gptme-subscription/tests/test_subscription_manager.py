@@ -311,6 +311,45 @@ def test_manual_switch_hold_does_not_strand_on_exhausted_fallback(
     assert decision.mode != "manual-switch-hold"
 
 
+def test_manual_switch_hold_does_not_block_wrong_slot(tmp_path: Path) -> None:
+    """A hold targeting slot A must not block routing when active is slot B."""
+    sm = _make_manager(tmp_path)
+    _write_cred(sm, "alice", age_days=1)
+    _write_cred(sm, "erik", age_days=1)
+    now = datetime.now(timezone.utc)
+    decision = sm.evaluate(
+        _healthy_usage(),
+        "bob",
+        now=now,
+        rebalance_state=_manual_hold(now, target="alice"),
+    )
+
+    # The hold is for alice, but bob is active — it should not block routing.
+    assert decision.action == "switch"
+    assert decision.mode != "manual-switch-hold"
+    assert decision.target in ("alice", "erik")
+
+
+def test_manual_switch_hold_does_not_block_wrong_slot_fallback(
+    tmp_path: Path,
+) -> None:
+    """A hold targeting slot A must not block routing when active is slot B
+    (fallback lane)."""
+    sm = _make_manager(tmp_path)
+    _write_cred(sm, "erik", age_days=1)
+    now = datetime.now(timezone.utc)
+    decision = sm.evaluate(
+        _healthy_usage(),
+        "alice",
+        now=now,
+        rebalance_state=_manual_hold(now, target="bob"),
+    )
+
+    # The hold is for bob, but alice is the active fallback.
+    assert decision.action == "switch"
+    assert decision.mode != "manual-switch-hold"
+
+
 def test_record_manual_switch_hold_persists_state(tmp_path: Path) -> None:
     sm = _make_manager(tmp_path)
     now = datetime.now(timezone.utc)

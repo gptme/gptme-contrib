@@ -592,10 +592,12 @@ class SubscriptionManager:
             if rebalance_state is not None:
                 hold_until = rebalance_state.get("hold_until")
                 blocked, _ = self.is_subscription_blocked(usage, config=cfg)
+                hold_target = rebalance_state.get("target")
                 if (
                     isinstance(hold_until, datetime)
                     and hold_until > current_time
                     and not blocked
+                    and hold_target == active
                 ):
                     remaining = int((hold_until - current_time).total_seconds())
                     hold_mode = rebalance_state.get("mode", "rebalance")
@@ -776,10 +778,12 @@ class SubscriptionManager:
         # never strand on an exhausted primary.)
         if rebalance_state is not None:
             manual_hold_until = rebalance_state.get("hold_until")
+            manual_hold_target = rebalance_state.get("target")
             if (
                 rebalance_state.get("mode") == "manual-switch"
                 and isinstance(manual_hold_until, datetime)
                 and manual_hold_until > current_time
+                and manual_hold_target == active
             ):
                 remaining = int((manual_hold_until - current_time).total_seconds())
                 hold_reason = rebalance_state.get("reason", "manual switch")
