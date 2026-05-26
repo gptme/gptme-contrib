@@ -375,6 +375,32 @@ class SubscriptionManager:
     def clear_rebalance_state(self) -> None:
         self.config.rebalance_state_file.unlink(missing_ok=True)
 
+    def record_manual_switch_hold(
+        self, target: str, now: datetime | None = None
+    ) -> None:
+        """Persist a hold protecting an operator's explicit ``--switch``.
+
+        Without this, an automated ``--execute`` (rebalance / forward-routing)
+        running seconds later — e.g. at the start of a concurrent autonomous
+        session — would re-decide and immediately route away from the slot the
+        operator just selected. The hold lasts ``forward_routing_hold_seconds``,
+        matching the duration the automated paths use for their own switches.
+        """
+        current_time = now or datetime.now(timezone.utc)
+        hold_seconds = self.config.forward_routing_hold_seconds
+        hold_until = current_time + timedelta(seconds=hold_seconds)
+        self.save_rebalance_state(
+            {
+                "active": target,
+                "action": "stay",
+                "target": target,
+                "reason": f"manual switch via --switch {target}",
+                "mode": "manual-switch",
+                "hold_until": hold_until.isoformat(),
+                "hold_seconds": hold_seconds,
+            }
+        )
+
     def compute_rebalance_hold_seconds(self, pace_overage: float) -> int:
         cfg = self.config
         if pace_overage <= 0:
@@ -566,10 +592,12 @@ class SubscriptionManager:
             if rebalance_state is not None:
                 hold_until = rebalance_state.get("hold_until")
                 blocked, _ = self.is_subscription_blocked(usage, config=cfg)
+                hold_target = rebalance_state.get("target")
                 if (
                     isinstance(hold_until, datetime)
                     and hold_until > current_time
                     and not blocked
+                    and hold_target == active
                 ):
                     remaining = int((hold_until - current_time).total_seconds())
                     hold_mode = rebalance_state.get("mode", "rebalance")
@@ -589,6 +617,13 @@ class SubscriptionManager:
                             f"{format_duration(remaining)} ({hold_reason})"
                         )
                         d.mode = "capacity-rebalance-hold"
+                    elif hold_mode == "manual-switch":
+                        hold_reason = rebalance_state.get("reason", "manual switch")
+                        d.reason = (
+                            f"manual-switch hold active for "
+                            f"{format_duration(remaining)} ({hold_reason})"
+                        )
+                        d.mode = "manual-switch-hold"
                     else:
                         raw_pace_overage = rebalance_state.get("pace_overage")
                         pace_overage = (
@@ -736,6 +771,30 @@ class SubscriptionManager:
             else:
                 d.reason += " — no fallback defined"
             return d
+
+        # Respect an operator manual-switch hold on a healthy primary too: don't
+        # proactively rebalance / forward-route away from an explicit operator
+        # choice. (The exhaustion fallback above already fired if needed, so we
+        # never strand on an exhausted primary.)
+        if rebalance_state is not None:
+            manual_hold_until = rebalance_state.get("hold_until")
+            manual_hold_target = rebalance_state.get("target")
+            if (
+                rebalance_state.get("mode") == "manual-switch"
+                and isinstance(manual_hold_until, datetime)
+                and manual_hold_until > current_time
+                and manual_hold_target == active
+            ):
+                remaining = int((manual_hold_until - current_time).total_seconds())
+                hold_reason = rebalance_state.get("reason", "manual switch")
+                d.reason = (
+                    f"manual-switch hold active for "
+                    f"{format_duration(remaining)} ({hold_reason})"
+                )
+                d.mode = "manual-switch-hold"
+                d.hold_until = manual_hold_until.isoformat()
+                d.hold_seconds = remaining
+                return d
 
         # Healthy primary — check pacing for rebalance / forward-routing.
         rebalance_stale_note: str | None = None

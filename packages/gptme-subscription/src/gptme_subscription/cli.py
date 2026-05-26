@@ -351,7 +351,11 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         return 0
     ok = sm.switch_to(target, f"manual switch via --switch {target}", force=True)
     if ok:
-        sm.clear_rebalance_state()
+        # Protect the operator's explicit choice: write a manual-switch hold so a
+        # concurrent automated --execute doesn't immediately rebalance / forward-
+        # route away from it. Previously this cleared all hold state, leaving the
+        # manual switch unprotected for the next decision.
+        sm.record_manual_switch_hold(target)
         print(f"Switched to {target}")
         sm.check_usage(no_cache=True)
         return 0
