@@ -11,6 +11,8 @@ wrappers exercised in the staged rollout, not in unit tests.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -171,3 +173,295 @@ def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     assert url == "https://github.com/gptme/gptme-contrib/pull/99"
     # Verify we fell back to `gh pr view`
     assert any(a[0] == "pr" and a[1] == "view" for a in calls)
+
+
+def test_run_gptme_uses_restricted_tools_and_sanitized_env(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    shim_root = tmp_path / "shims"
+    shim_root.mkdir()
+
+    class FakeResult:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    class FakeTemporaryDirectory:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def __enter__(self):
+            return str(shim_root)
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args[0]
+        captured["env"] = kwargs["env"]
+        captured["cwd"] = kwargs["cwd"]
+        return FakeResult()
+
+    monkeypatch.setenv("GH_TOKEN", "gh-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(resolve_issue.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        resolve_issue.tempfile, "TemporaryDirectory", FakeTemporaryDirectory
+    )
+
+    stdout, stderr = resolve_issue.run_gptme(
+        "prompt", model="claude-sonnet", workdir=tmp_path
+    )
+
+    assert stdout == "ok"
+    assert stderr == ""
+    assert captured["args"] == [
+        "gptme",
+        "--non-interactive",
+        "--no-confirm",
+        "--tools",
+        resolve_issue.RESOLVER_TOOL_ALLOWLIST,
+        "--model",
+        "claude-sonnet",
+        "-",
+    ]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "GH_TOKEN" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert Path(env["PATH"].split(os.pathsep)[0]) == shim_root
+    assert (shim_root / "git").exists()
+    assert (shim_root / "gh").exists()
+    assert captured["cwd"] == tmp_path
+
+
+def test_detect_repo_state_violation_on_unexpected_commit(tmp_path):
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "resolver-test"], cwd=tmp_path, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "resolver-test@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "note.txt").write_text("old\n")
+    subprocess.run(["git", "add", "note.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "initial"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    baseline = resolve_issue.capture_repo_state(tmp_path)
+
+    (tmp_path / "note.txt").write_text("new\n")
+    subprocess.run(["git", "add", "note.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "agent direct commit",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    violation = resolve_issue.detect_repo_state_violation(baseline, tmp_path)
+    assert violation is not None
+    assert "HEAD moved" in violation
+    assert "master" in violation
+    assert resolve_issue.has_git_changes(tmp_path) is False
+
+
+def test_push_branch_uses_explicit_github_token(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_git(args, *, check=True, cwd=None):
+        del check
+        assert cwd == tmp_path
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(resolve_issue, "git", fake_git)
+
+    resolve_issue.push_branch(
+        tmp_path,
+        "gptme-resolver/issue-42",
+        repo="gptme/gptme-contrib",
+        auth_token="token-123",
+    )
+
+    assert calls == [
+        [
+            "push",
+            "--force-with-lease",
+            "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git",
+            "HEAD:refs/heads/gptme-resolver/issue-42",
+        ]
+    ]
+
+
+def test_main_preserves_direct_commit_as_partial_attempt(monkeypatch, tmp_path):
+    bare = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    out_dir = tmp_path / "out"
+
+    subprocess.run(
+        ["git", "init", "--bare", str(bare)], check=True, stdout=subprocess.DEVNULL
+    )
+    subprocess.run(
+        ["git", "clone", str(bare), str(repo)], check=True, stdout=subprocess.DEVNULL
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "master"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "resolver-test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "resolver-test@example.com"],
+        check=True,
+    )
+    (repo / "note.txt").write_text("old\n")
+    subprocess.run(["git", "-C", str(repo), "add", "note.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "push",
+            "-u",
+            "origin",
+            "master",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    issue = resolve_issue.Issue(
+        number=42,
+        title="Fix note",
+        body="Update note",
+        author="alice",
+        labels=["bug"],
+    )
+    comments: list[str] = []
+
+    def fake_fetch_issue(repo_name, issue_number):
+        assert repo_name == "local/test"
+        assert issue_number == 42
+        return issue
+
+    def fake_run_gptme(prompt, *, model=None, workdir):
+        del prompt, model
+        (workdir / "note.txt").write_text("new\n")
+        subprocess.run(["git", "-C", str(workdir), "add", "note.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workdir),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-q",
+                "-m",
+                "agent direct commit",
+            ],
+            check=True,
+        )
+        return ("RESOLVER_STATUS: changes\nRESOLVER_SUMMARY: Updated note.\n", "")
+
+    def fake_comment(repo_name, issue_number, body):
+        assert repo_name == "local/test"
+        assert issue_number == 42
+        comments.append(body)
+
+    def fail_gh(args, *, check=True):
+        del check
+        raise AssertionError(f"unsafe direct-commit path must not call gh: {args}")
+
+    monkeypatch.setattr(resolve_issue, "fetch_issue", fake_fetch_issue)
+    monkeypatch.setattr(resolve_issue, "run_gptme", fake_run_gptme)
+    monkeypatch.setattr(resolve_issue, "post_issue_comment", fake_comment)
+    monkeypatch.setattr(resolve_issue, "gh", fail_gh)
+    # Prevent GitHub Actions' auto-injected GITHUB_TOKEN / GH_TOKEN from
+    # routing push_branch to the real GitHub instead of the local bare repo.
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    rc = resolve_issue.main(
+        [
+            "--repo",
+            "local/test",
+            "--issue",
+            "42",
+            "--workdir",
+            str(repo),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    assert len(comments) == 1
+    assert "mutated git state directly" in comments[0]
+    assert (
+        "Partial attempt preserved on branch `gptme-resolver/issue-42`." in comments[0]
+    )
+
+    refs = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare),
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "master" in refs
+    assert "gptme-resolver/issue-42" in refs
+
+    branch_head = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare),
+            "log",
+            "--oneline",
+            "gptme-resolver/issue-42",
+            "-1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "agent direct commit" in branch_head

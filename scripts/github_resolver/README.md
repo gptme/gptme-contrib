@@ -50,6 +50,12 @@ clean.
   comment.
 - **Observable.** The gptme stdout log + final status JSON are uploaded as a
   workflow artifact (`gptme-resolver-output`, 30-day retention).
+- **Branch-safe execution.** The agent run gets a restricted tool set
+  (`read,save,patch,shell`), a shimmed `git`/`gh`, and no GitHub credentials;
+  only the orchestrator is allowed to push branches, open PRs, or comment.
+- **Fail-closed git invariant.** If the agent still changes HEAD or switches
+  branches directly, the orchestrator treats that as an error and preserves the
+  result on the attempt branch instead of trusting the run as a clean success.
 
 ## How trusted users invoke it
 
