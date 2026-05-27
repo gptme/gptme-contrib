@@ -1,5 +1,6 @@
 """Project monitoring run loop implementation."""
 
+import fcntl
 import json
 import re
 import subprocess
@@ -559,9 +560,12 @@ class ProjectMonitoringRun(BaseRunLoop):
         state_file = (
             self.state_dir / f"{repo.replace('/', '-')}-pr-{pr_number}-comment.state"
         )
+        # Separate lock file prevents a concurrent session from racing through
+        # the check-then-write window and posting a duplicate comment.
+        lock_file = state_file.with_suffix(".lock")
 
         try:
-            # Get PR's current update time
+            # Get PR's current update time (outside the lock — network call)
             result = subprocess.run(
                 [
                     "gh",
@@ -588,71 +592,76 @@ class ProjectMonitoringRun(BaseRunLoop):
 
             current_updated = result.stdout.strip()
 
-            # Check previous comment state
-            if state_file.exists():
-                state_data = state_file.read_text().strip().split()
-                if len(state_data) >= 3:
-                    prev_type, prev_time, pr_updated = (
-                        state_data[0],
-                        state_data[1],
-                        state_data[2],
-                    )
+            # Exclusive lock serializes concurrent sessions on this PR's state.
+            # flock is released automatically when the file handle is closed.
+            with open(lock_file, "w") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
 
-                    # Rule 1: PR updated since last comment (new commits/reviews)
-                    if current_updated > pr_updated:
-                        # Check if last activity was by agent (skip own comments)
-                        if self._is_last_activity_by_self(repo, pr_number):
+                # Check previous comment state
+                if state_file.exists():
+                    state_data = state_file.read_text().strip().split()
+                    if len(state_data) >= 3:
+                        prev_type, prev_time, pr_updated = (
+                            state_data[0],
+                            state_data[1],
+                            state_data[2],
+                        )
+
+                        # Rule 1: PR updated since last comment (new commits/reviews)
+                        if current_updated > pr_updated:
+                            # Check if last activity was by agent (skip own comments)
+                            if self._is_last_activity_by_self(repo, pr_number):
+                                self.logger.info(
+                                    f"PR {repo}#{pr_number} updated by self, skipping"
+                                )
+                                # Update state to avoid repeated checks
+                                state_file.write_text(
+                                    f"{comment_type} {datetime.now().isoformat()} {current_updated}"
+                                )
+                                return False
+
                             self.logger.info(
-                                f"PR {repo}#{pr_number} updated by self, skipping"
+                                f"PR {repo}#{pr_number} updated since last comment"
                             )
-                            # Update state to avoid repeated checks
                             state_file.write_text(
                                 f"{comment_type} {datetime.now().isoformat()} {current_updated}"
                             )
-                            return False
+                            return True
 
+                        # Rule 2: Comment type changed
+                        if comment_type != prev_type:
+                            self.logger.info(
+                                f"Comment type changed for {repo}#{pr_number}: {prev_type} -> {comment_type}"
+                            )
+                            state_file.write_text(
+                                f"{comment_type} {datetime.now().isoformat()} {current_updated}"
+                            )
+                            return True
+
+                        # Rule 3: Comment stale (24+ hours)
+                        prev_time_dt = datetime.fromisoformat(prev_time)
+                        age = datetime.now() - prev_time_dt
+                        if age > timedelta(hours=24):
+                            self.logger.info(
+                                f"Comment stale for {repo}#{pr_number} (age: {age})"
+                            )
+                            state_file.write_text(
+                                f"{comment_type} {datetime.now().isoformat()} {current_updated}"
+                            )
+                            return True
+
+                        # Don't post duplicate
                         self.logger.info(
-                            f"PR {repo}#{pr_number} updated since last comment"
+                            f"Skipping duplicate comment on {repo}#{pr_number} (type: {comment_type})"
                         )
-                        state_file.write_text(
-                            f"{comment_type} {datetime.now().isoformat()} {current_updated}"
-                        )
-                        return True
+                        return False
 
-                    # Rule 2: Comment type changed
-                    if comment_type != prev_type:
-                        self.logger.info(
-                            f"Comment type changed for {repo}#{pr_number}: {prev_type} -> {comment_type}"
-                        )
-                        state_file.write_text(
-                            f"{comment_type} {datetime.now().isoformat()} {current_updated}"
-                        )
-                        return True
-
-                    # Rule 3: Comment stale (24+ hours)
-                    prev_time_dt = datetime.fromisoformat(prev_time)
-                    age = datetime.now() - prev_time_dt
-                    if age > timedelta(hours=24):
-                        self.logger.info(
-                            f"Comment stale for {repo}#{pr_number} (age: {age})"
-                        )
-                        state_file.write_text(
-                            f"{comment_type} {datetime.now().isoformat()} {current_updated}"
-                        )
-                        return True
-
-                    # Don't post duplicate
-                    self.logger.info(
-                        f"Skipping duplicate comment on {repo}#{pr_number} (type: {comment_type})"
-                    )
-                    return False
-
-            # No previous comment: post it (Rule 0)
-            self.logger.info(f"First comment for {repo}#{pr_number}")
-            state_file.write_text(
-                f"{comment_type} {datetime.now().isoformat()} {current_updated}"
-            )
-            return True
+                # No previous comment: post it (Rule 0)
+                self.logger.info(f"First comment for {repo}#{pr_number}")
+                state_file.write_text(
+                    f"{comment_type} {datetime.now().isoformat()} {current_updated}"
+                )
+                return True
 
         except Exception as e:
             self.logger.error(

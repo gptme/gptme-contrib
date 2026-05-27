@@ -327,6 +327,45 @@ def test_should_post_comment_stale(workspace):
         assert should_post is True
 
 
+def test_should_post_comment_concurrent_first_time(workspace):
+    """Race condition: two sessions on the same PR with no prior state.
+
+    Only one should return True (post). Without flock the check-then-write
+    window lets both sessions see state_file.exists()==False and both post.
+    """
+    import threading
+    from unittest.mock import MagicMock, patch
+
+    results = []
+    barrier = threading.Barrier(2)
+
+    def call_should_post():
+        run = ProjectMonitoringRun(workspace)
+        with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="2025-11-25T10:00:00Z",
+                stderr="",
+            )
+            # Sync both threads at the gate so they enter should_post_comment
+            # at the same time, maximising the chance of hitting the race.
+            barrier.wait()
+            result = run.should_post_comment("gptme/gptme", 456, "update")
+            results.append(result)
+
+    t1 = threading.Thread(target=call_should_post)
+    t2 = threading.Thread(target=call_should_post)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Exactly one session should have won the race and posted.
+    assert (
+        results.count(True) == 1
+    ), f"Expected exactly 1 True (one poster), got {results}"
+
+
 @patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_check_pr_updates_new_pr(mock_run, workspace):
     """Test detecting new PR updates."""
