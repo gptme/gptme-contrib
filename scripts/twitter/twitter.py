@@ -52,6 +52,7 @@ For OAuth 2.0 setup:
 """
 
 import os
+import re
 import sys
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -121,8 +122,53 @@ def _get_user_auth(client) -> bool:
     return getattr(client, "_use_user_auth", False)
 
 
+PLACEHOLDER_PATTERNS = [
+    r"\[link would go here\]",
+    r"\[link\s+here\]",
+    r"\[media\s+here\]",
+    r"\[image\s+here\]",
+    r"\[video\s+here\]",
+    r"\[gif\s+here\]",
+    r"\[TODO\]",
+    r"\[FIXME\]",
+    r"\[TBD\]",
+    r"\[PLACEHOLDER\]",
+]
+
+COMPILED_PLACEHOLDERS = [re.compile(p, re.IGNORECASE) for p in PLACEHOLDER_PATTERNS]
+
+
+def _find_placeholder_in_text(text: str) -> str | None:
+    """Return the first unresolved placeholder match in text, or None."""
+    for compiled in COMPILED_PLACEHOLDERS:
+        m = compiled.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _abort_on_placeholder_patterns(messages: list[str]) -> None:
+    """Abort if any message contains an unresolved placeholder pattern."""
+    for text in messages:
+        if not text:
+            continue
+        hit = _find_placeholder_in_text(text)
+        if hit:
+            console.print(f"[red]✗ Unresolved placeholder: '{hit}'[/red]")
+            console.print(
+                "[red]Aborting — the text contains an unresolved placeholder."
+                " This is a bug in the LLM drafting pipeline (the LLM emitted a"
+                " placeholder because it could not resolve the needed content at"
+                " draft time). Fix the pipeline to resolve any required URLs or"
+                " media before drafting, or write a concrete reply without the"
+                " placeholder.[/red]"
+            )
+            sys.exit(1)
+
+
 def _abort_on_bad_urls(messages: list[str]) -> None:
-    """Abort on HTTP 4xx/5xx URLs before posting — network errors pass through as non-fatal."""
+    """Abort on HTTP 4xx/5xx URLs or unresolved placeholders before posting."""
+    _abort_on_placeholder_patterns(messages)
     bad: list[tuple[str, int]] = []
     seen: set[tuple[str, int]] = set()
 
