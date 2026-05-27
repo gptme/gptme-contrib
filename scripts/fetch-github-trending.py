@@ -112,6 +112,21 @@ def parse_trending(html: str) -> list[dict]:
     return repos
 
 
+def parse_keywords(filter_arg: str | None) -> list[str] | None:
+    """Parse a comma-separated --filter argument into a keyword list.
+
+    Drops empty/whitespace-only entries so a trailing or doubled comma
+    (e.g. "agent,") does not inject an empty-string keyword. An empty string
+    is a substring of every text, which would silently match all repos and
+    disable filtering. Returns None when there are no usable keywords (filter
+    unset or all entries empty), matching the "no filter" sentinel.
+    """
+    if not filter_arg:
+        return None
+    keywords = [k.strip() for k in filter_arg.split(",") if k.strip()]
+    return keywords or None
+
+
 def format_compact(repos: list[dict], keywords: list[str] | None = None) -> str:
     """Format repos in compact format.
 
@@ -177,7 +192,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    keywords = [k.strip() for k in args.filter.split(",")] if args.filter else None
+    keywords = parse_keywords(args.filter)
 
     if args.json:
         filtered = repos
