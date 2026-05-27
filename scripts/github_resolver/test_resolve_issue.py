@@ -409,6 +409,10 @@ def test_main_preserves_direct_commit_as_partial_attempt(monkeypatch, tmp_path):
     monkeypatch.setattr(resolve_issue, "run_gptme", fake_run_gptme)
     monkeypatch.setattr(resolve_issue, "post_issue_comment", fake_comment)
     monkeypatch.setattr(resolve_issue, "gh", fail_gh)
+    # Prevent GitHub Actions' auto-injected GITHUB_TOKEN / GH_TOKEN from
+    # routing push_branch to the real GitHub instead of the local bare repo.
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     rc = resolve_issue.main(
         [

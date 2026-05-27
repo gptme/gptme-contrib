@@ -248,7 +248,31 @@ def write_resolver_command_shims(shim_dir: Path) -> None:
         shim_dir / "git",
         f"""#!/bin/sh
 set -eu
-subcmd="${{1:-}}"
+# Find the real subcommand by skipping any global flags that appear before it.
+# Single-arg flags (--no-pager, --bare, -P, etc.) are skipped as-is.
+# Two-arg flags (-C <path>, -c <key=val>, --git-dir <path>, --work-tree <path>)
+# consume the following token as their value.
+subcmd=""
+skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" -eq 1 ]; then
+    skip_next=0
+    continue
+  fi
+  case "$arg" in
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path)
+      skip_next=1
+      continue
+      ;;
+    --*|-*)
+      continue
+      ;;
+    *)
+      subcmd="$arg"
+      break
+      ;;
+  esac
+done
 case "$subcmd" in
   {allowed_subcommands})
     exec {real_git} "$@"
