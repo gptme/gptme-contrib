@@ -125,6 +125,8 @@ def _get_user_auth(client) -> bool:
 PLACEHOLDER_PATTERNS = [
     r"\[link would go here\]",
     r"\[link\s+here\]",
+    r"\[URL\s+here\]",
+    r"\[insert\s+link\]",
     r"\[media\s+here\]",
     r"\[image\s+here\]",
     r"\[video\s+here\]",
