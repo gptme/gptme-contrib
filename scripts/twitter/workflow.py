@@ -70,7 +70,11 @@ from twitter.llm import (
     process_tweet,
     verify_draft,
 )
-from twitter.twitter import cached_get_me, load_twitter_client
+from twitter.twitter import (
+    _find_placeholder_in_text,
+    cached_get_me,
+    load_twitter_client,
+)
 from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
 
 logger = get_logger(__name__, "twitter")
@@ -781,6 +785,23 @@ def _validate_draft_urls(draft: TweetDraft) -> list[tuple[str, int]]:
     return bad
 
 
+def _validate_draft_placeholders(draft: TweetDraft) -> list[str]:
+    """Reject drafts containing unresolved LLM placeholders like '[link would go here]'.
+
+    These are emitted by the LLM when it composes a reply that references a URL
+    but doesn't yet know the resolved value. They must never reach the posting
+    stage — the draft should either be rewritten with a real URL or dropped.
+    """
+    hits: list[str] = []
+    for text in [draft.text, *draft.thread]:
+        if not text:
+            continue
+        hit = _find_placeholder_in_text(text)
+        if hit:
+            hits.append(hit)
+    return list(dict.fromkeys(hits))  # deduplicate, preserve order
+
+
 @cli.command()
 @click.argument("text")
 @click.option(
@@ -804,6 +825,18 @@ def draft(
     op = metrics.start_operation("draft_creation", "twitter")
 
     try:
+        # Guard: reject drafts with unresolved LLM placeholders
+        text_hit = _find_placeholder_in_text(text)
+        if text_hit:
+            console.print(
+                f"[red]✗ Text contains unresolved placeholder: '{text_hit}'[/red]",
+            )
+            console.print(
+                "[red]Aborting draft — rewrite without unresolved placeholders.[/red]"
+            )
+            op.complete(success=False, error="placeholder")
+            sys.exit(1)
+
         if not skip_url_check:
             bad_urls = validate_urls_in_text(text)
             if bad_urls:
@@ -1309,6 +1342,18 @@ def post(
             console.print(f"[blue]Draft ID: {path.stem}[/blue]")
             continue
 
+        # Placeholder validation: catch unresolved LLM placeholders before posting
+        placeholder_hits = _validate_draft_placeholders(draft)
+        if placeholder_hits:
+            console.print(
+                f"[red]✗ Draft contains unresolved placeholders: {', '.join(placeholder_hits)}[/red]"
+            )
+            console.print(
+                "[red]Skipping draft — fix or rewrite the draft to remove unresolved placeholders.[/red]"
+            )
+            move_draft(path, "rejected")
+            continue
+
         # URL validation: catch 404s before asking for confirmation
         if not skip_url_check:
             bad_urls = _validate_draft_urls(draft)
@@ -1654,6 +1699,23 @@ def process_timeline_tweets(
                             f"[green]Auto-posting reply to trusted user @{author_username}"
                         )
                         try:
+                            placeholder_hits = _validate_draft_placeholders(draft)
+                            if placeholder_hits:
+                                console.print(
+                                    f"[red]✗ Auto-post blocked: unresolved placeholders: {', '.join(placeholder_hits)}[/red]"
+                                )
+                                draft.reject_reason = (
+                                    "Auto-post blocked: unresolved LLM placeholders"
+                                )
+                                path = save_draft(draft, "new")
+                                console.print(
+                                    f"[yellow]Saved as draft for manual fix: {path}"
+                                )
+                                drafts_generated += 1
+                                if draft.in_reply_to is not None:
+                                    _replied_tweet_ids.add(str(draft.in_reply_to))
+                                continue
+
                             bad_urls = _validate_draft_urls(draft)
                             if bad_urls:
                                 for url, status in bad_urls:
@@ -2199,6 +2261,17 @@ def auto(
                     console.print(
                         f"[cyan]Thread: {len(draft.thread)} follow-up tweet(s)"
                     )
+
+                placeholder_hits = _validate_draft_placeholders(draft)
+                if placeholder_hits:
+                    console.print(
+                        f"[red]✗ Draft contains unresolved placeholders: {', '.join(placeholder_hits)}[/red]"
+                    )
+                    console.print(
+                        "[red]Skipping draft — fix or rewrite the draft to remove unresolved placeholders.[/red]"
+                    )
+                    move_draft(path, "rejected")
+                    continue
 
                 bad_urls = _validate_draft_urls(draft)
                 if bad_urls:

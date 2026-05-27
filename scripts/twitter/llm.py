@@ -348,6 +348,10 @@ Response Guidelines:
 7. Add value to the discussion
 8. Demonstrate understanding of specific context from the thread
 9. Reference relevant details to show you've understood the conversation
+10. NEVER write placeholder text like "[link would go here]", "[URL here]", "[insert link]",
+    "[media here]", or any bracket-enclosed instruction. If you don't have a specific URL
+    or media item to include, write a complete response without referencing it — either
+    omit the link entirely or say you'll share it separately as plain prose.
 
 Few-shot examples:
 {yaml.dump(config["templates"]["examples"])}"""
