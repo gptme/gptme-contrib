@@ -278,6 +278,7 @@ class AgentEmail:
             conversation_id=conversation_id,
             message_id=normalized_id,
             state=MessageState.COMPLETED,
+            metadata={"reply_id": reply_message_id},
         )
 
     def _mark_no_reply_needed(self, message_id: str, reason: str = "no reply needed") -> None:
@@ -296,6 +297,7 @@ class AgentEmail:
             conversation_id=conversation_id,
             message_id=normalized_id,
             state=MessageState.NO_REPLY_NEEDED,
+            metadata={"reason": reason},
         )
 
     def _is_completed(self, message_id: str) -> bool:

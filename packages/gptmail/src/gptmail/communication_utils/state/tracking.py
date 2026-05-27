@@ -6,7 +6,7 @@ messages, and completion status across platforms.
 """
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -35,6 +35,8 @@ class MessageInfo:
     created_at: str | None = None
     updated_at: str | None = None
     error: str | None = None
+    reason: str | None = None
+    reply_id: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -44,8 +46,13 @@ class MessageInfo:
 
     @classmethod
     def from_dict(cls, data: dict) -> "MessageInfo":
-        """Create from dictionary."""
-        data = data.copy()
+        """Create from dictionary, ignoring unknown keys.
+
+        Legacy/foreign trackers may store extra fields (e.g. ``platform``,
+        ``status``); filtering to known dataclass fields keeps loading robust.
+        """
+        known = {f.name for f in fields(cls)}
+        data = {k: v for k, v in data.items() if k in known}
         data["state"] = MessageState(data["state"])
         return cls(**data)
 
@@ -107,6 +114,7 @@ class ConversationTracker:
         message_id: str,
         state: MessageState,
         error: str | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """
         Update message state.
@@ -116,6 +124,8 @@ class ConversationTracker:
             message_id: Message identifier
             state: New message state
             error: Optional error message if state is FAILED
+            metadata: Optional extra fields to merge into the message record
+                (e.g. ``reason`` for no-reply-needed, ``reply_id`` for replies)
         """
         state_file = self._get_state_file(conversation_id)
 
@@ -141,6 +151,9 @@ class ConversationTracker:
 
             if error:
                 data["messages"][message_id]["error"] = error
+
+            if metadata:
+                data["messages"][message_id].update(metadata)
 
             # Save updated state
             with open(state_file, "w") as f:
@@ -212,6 +225,33 @@ class ConversationTracker:
             for msg_data in data.get("messages", {}).values():
                 msg_info = MessageInfo.from_dict(msg_data)
                 if msg_info.state == MessageState.PENDING:
+                    messages.append(msg_info)
+
+            return messages
+
+    def get_completed_messages(self, conversation_id: str) -> list[MessageInfo]:
+        """
+        Get all completed messages (replied or no-reply-needed) for a conversation.
+
+        Args:
+            conversation_id: Conversation identifier
+
+        Returns:
+            List of completed MessageInfo objects
+        """
+        completed_states = (MessageState.COMPLETED, MessageState.NO_REPLY_NEEDED)
+        state_file = self._get_state_file(conversation_id)
+        if not state_file.exists():
+            return []
+
+        with file_lock(self._get_lock_file(conversation_id)):
+            with open(state_file) as f:
+                data = json.load(f)
+
+            messages = []
+            for msg_data in data.get("messages", {}).values():
+                msg_info = MessageInfo.from_dict(msg_data)
+                if msg_info.state in completed_states:
                     messages.append(msg_info)
 
             return messages
