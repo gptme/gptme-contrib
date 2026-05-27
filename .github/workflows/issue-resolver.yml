@@ -84,6 +84,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Do not leave a write-capable token configured in the worktree the
+          # agent edits. The orchestrator pushes explicitly with GH_TOKEN after
+          # validating the result, so direct agent-side `git push` attempts fail
+          # closed even if the model ignores the prompt contract.
+          persist-credentials: false
 
       - name: Fetch resolver scripts from gptme-contrib
         # Always fetch from gptme-contrib so this workflow works both when

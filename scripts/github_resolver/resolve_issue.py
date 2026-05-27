@@ -42,10 +42,13 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 # Make the sibling `github_actions_common` package importable when the script
 # is run directly inside the Action workflow (no editable install).
@@ -64,6 +67,28 @@ STATUS_RE = re.compile(r"^RESOLVER_STATUS:\s*(changes|no_changes)\s*$", re.MULTI
 SUMMARY_RE = re.compile(r"^RESOLVER_SUMMARY:\s*(.+?)\s*$", re.MULTILINE)
 REASON_RE = re.compile(r"^RESOLVER_REASON:\s*(.+?)\s*$", re.MULTILINE)
 BRANCH_PREFIX = "gptme-resolver/issue-"
+RESOLVER_TOOL_ALLOWLIST = "read,save,patch,shell"
+READONLY_GIT_SUBCOMMANDS = (
+    "blame",
+    "cat-file",
+    "describe",
+    "diff",
+    "grep",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "status",
+    "symbolic-ref",
+)
+BLOCKED_AGENT_ENV_VARS = (
+    "GH_ENTERPRISE_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "SSH_AUTH_SOCK",
+)
 
 
 @dataclass
@@ -72,6 +97,12 @@ class ResolverOutcome:
     summary: str
     branch: str | None
     pr_url: str | None
+
+
+@dataclass(frozen=True)
+class RepoState:
+    head: str
+    branch: str | None
 
 
 def git(args: list[str], *, check: bool = True, cwd: Path | None = None) -> str:
@@ -97,18 +128,29 @@ def run_gptme(
     prompt: str, *, model: str | None = None, workdir: Path
 ) -> tuple[str, str]:
     """Invoke gptme non-interactively. Fail soft: return (stdout, stderr)."""
-    cmd = ["gptme", "--non-interactive", "--no-confirm", "-"]
+    cmd = [
+        "gptme",
+        "--non-interactive",
+        "--no-confirm",
+        "--tools",
+        RESOLVER_TOOL_ALLOWLIST,
+    ]
     if model:
         cmd.extend(["--model", model])
+    cmd.append("-")
     try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=workdir,
-        )
+        with tempfile.TemporaryDirectory(prefix="gptme-resolver-shims-") as shim_dir:
+            shim_path = Path(shim_dir)
+            write_resolver_command_shims(shim_path)
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=workdir,
+                env=build_agent_env(os.environ, shim_path),
+            )
     except FileNotFoundError:
         msg = "gptme not found on PATH; skipping resolver.\n"
         sys.stderr.write(msg)
@@ -141,8 +183,115 @@ def has_git_changes(cwd: Path) -> bool:
     return bool(out.strip())
 
 
+def current_branch(cwd: Path) -> str | None:
+    out = git(["symbolic-ref", "--quiet", "--short", "HEAD"], check=False, cwd=cwd)
+    branch = out.strip()
+    return branch or None
+
+
+def capture_repo_state(cwd: Path) -> RepoState:
+    return RepoState(
+        head=git(["rev-parse", "HEAD"], cwd=cwd).strip(),
+        branch=current_branch(cwd),
+    )
+
+
+def detect_repo_state_violation(before: RepoState, cwd: Path) -> str | None:
+    after = capture_repo_state(cwd)
+    violations: list[str] = []
+    if after.branch != before.branch:
+        before_branch = before.branch or "(detached HEAD)"
+        after_branch = after.branch or "(detached HEAD)"
+        violations.append(f"branch changed from {before_branch} to {after_branch}")
+    if after.head != before.head:
+        branch_desc = after.branch or before.branch or "(detached HEAD)"
+        violations.append(
+            f"HEAD moved from {before.head[:12]} to {after.head[:12]} on {branch_desc}"
+        )
+    if not violations:
+        return None
+    return (
+        "gptme mutated git state directly ("
+        + "; ".join(violations)
+        + "). The resolver agent must leave branch and history changes to the orchestrator."
+    )
+
+
 def branch_for_issue(issue_number: int) -> str:
     return f"{BRANCH_PREFIX}{issue_number}"
+
+
+def build_agent_env(
+    base_env: os._Environ[str] | dict[str, str], shim_dir: Path
+) -> dict[str, str]:
+    env = dict(base_env)
+    for key in BLOCKED_AGENT_ENV_VARS:
+        env.pop(key, None)
+    path_parts = [str(shim_dir)]
+    if env.get("PATH"):
+        path_parts.append(env["PATH"])
+    env["PATH"] = os.pathsep.join(path_parts)
+    return env
+
+
+def _write_executable(path: Path, content: str) -> None:
+    path.write_text(content)
+    path.chmod(0o755)
+
+
+def write_resolver_command_shims(shim_dir: Path) -> None:
+    real_git = shutil.which("git")
+    if not real_git:
+        raise FileNotFoundError("git not found on PATH")
+    allowed_subcommands = "|".join(READONLY_GIT_SUBCOMMANDS)
+    _write_executable(
+        shim_dir / "git",
+        f"""#!/bin/sh
+set -eu
+subcmd="${{1:-}}"
+case "$subcmd" in
+  {allowed_subcommands})
+    exec {real_git} "$@"
+    ;;
+  *)
+    echo "gptme resolver blocked direct git command: git ${{subcmd:-<none>}}" >&2
+    exit 1
+    ;;
+esac
+""",
+    )
+    _write_executable(
+        shim_dir / "gh",
+        """#!/bin/sh
+echo "gptme resolver blocked direct GitHub CLI usage; the orchestrator owns PR and comment actions." >&2
+exit 1
+""",
+    )
+
+
+def github_push_url(repo: str, auth_token: str) -> str:
+    return f"https://x-access-token:{quote(auth_token, safe='')}@github.com/{repo}.git"
+
+
+def push_branch(
+    cwd: Path,
+    branch: str,
+    *,
+    repo: str | None = None,
+    auth_token: str | None = None,
+) -> None:
+    if auth_token and repo:
+        git(
+            [
+                "push",
+                "--force-with-lease",
+                github_push_url(repo, auth_token),
+                f"HEAD:refs/heads/{branch}",
+            ],
+            cwd=cwd,
+        )
+        return
+    git(["push", "--force-with-lease", "origin", branch], cwd=cwd)
 
 
 def commit_and_push(
@@ -150,6 +299,8 @@ def commit_and_push(
     branch: str,
     *,
     commit_message: str,
+    repo: str | None = None,
+    auth_token: str | None = None,
     author_name: str = "gptme-resolver",
     author_email: str = "gptme-resolver@users.noreply.github.com",
 ) -> None:
@@ -170,7 +321,19 @@ def commit_and_push(
         ],
         cwd=cwd,
     )
-    git(["push", "--force-with-lease", "origin", branch], cwd=cwd)
+    push_branch(cwd, branch, repo=repo, auth_token=auth_token)
+
+
+def push_existing_head(
+    cwd: Path,
+    branch: str,
+    *,
+    repo: str | None = None,
+    auth_token: str | None = None,
+) -> None:
+    """Preserve the current HEAD on ``branch`` without creating a new commit."""
+    git(["checkout", "-B", branch], cwd=cwd)
+    push_branch(cwd, branch, repo=repo, auth_token=auth_token)
 
 
 def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> str:
@@ -263,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     issue = fetch_issue(args.repo, args.issue)
     template = args.prompt_file.read_text()
     prompt = render_prompt(template, repo=args.repo, issue=issue)
+    baseline_state = capture_repo_state(args.workdir)
+    auth_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
 
     gptme_output, gptme_stderr = run_gptme(
         prompt, model=os.environ.get("GPTME_MODEL"), workdir=args.workdir
@@ -279,9 +444,22 @@ def main(argv: list[str] | None = None) -> int:
 
     branch = branch_for_issue(issue.number)
     pr_url: str | None = None
+    worktree_dirty = has_git_changes(args.workdir)
+    repo_state_violation = detect_repo_state_violation(baseline_state, args.workdir)
+    preserve_existing_head = (
+        repo_state_violation is not None
+        and capture_repo_state(args.workdir).head != baseline_state.head
+    )
+
+    if repo_state_violation is not None:
+        status = "error"
+        upstream_message = message
+        message = repo_state_violation
+        if upstream_message:
+            message = f"{message} Upstream result: {upstream_message}"
 
     # gptme said "changes" — but only trust it if git actually sees changes.
-    if status == "changes" and has_git_changes(args.workdir):
+    if status == "changes" and worktree_dirty:
         if args.dry_run:
             print(f"[dry-run] Would push {branch} and open draft PR: {message}")
             return 0
@@ -289,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
             args.workdir,
             branch,
             commit_message=f"gptme-resolver attempt for #{issue.number}\n\n{message}",
+            repo=args.repo,
+            auth_token=auth_token,
         )
         pr_url = open_draft_pr(args.repo, issue.number, branch, message)
         comment_on_issue(
@@ -303,27 +483,41 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # gptme said "changes" but worktree is clean — treat as a failed attempt.
-    if status == "changes" and not has_git_changes(args.workdir):
+    if status == "changes" and not worktree_dirty:
         status = "error"
         message = (
             "gptme reported changes but no files were modified. "
             f"Upstream message: {message}"
         )
 
-    # no_changes / error: preserve partial work if present.
+    # no_changes / error: preserve partial work if present, including an
+    # unsolicited direct commit that moved HEAD but left the worktree clean.
     partial_branch: str | None = None
-    if has_git_changes(args.workdir):
+    if worktree_dirty or preserve_existing_head:
         if args.dry_run:
-            print(f"[dry-run] Would push partial attempt to {branch}")
-        else:
-            commit_and_push(
-                args.workdir,
-                branch,
-                commit_message=(
-                    f"gptme-resolver partial attempt for #{issue.number}\n\n"
-                    f"Status: {status}\n\n{message}"
-                ),
+            action = (
+                "push partial attempt" if worktree_dirty else "preserve mutated HEAD"
             )
+            print(f"[dry-run] Would {action} on {branch}")
+        else:
+            if worktree_dirty:
+                commit_and_push(
+                    args.workdir,
+                    branch,
+                    commit_message=(
+                        f"gptme-resolver partial attempt for #{issue.number}\n\n"
+                        f"Status: {status}\n\n{message}"
+                    ),
+                    repo=args.repo,
+                    auth_token=auth_token,
+                )
+            else:
+                push_existing_head(
+                    args.workdir,
+                    branch,
+                    repo=args.repo,
+                    auth_token=auth_token,
+                )
             partial_branch = branch
 
     if args.dry_run:
