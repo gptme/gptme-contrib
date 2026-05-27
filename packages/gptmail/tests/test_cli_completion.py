@@ -18,6 +18,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         (email_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("EMAIL_ALLOWLIST", "friend@example.com")
+    monkeypatch.setenv("AGENT_EMAIL", "test@example.com")
     monkeypatch.setattr(gptmail_cli, "get_workspace_dir", lambda: tmp_path)
     return tmp_path
 
