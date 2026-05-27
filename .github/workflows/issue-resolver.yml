@@ -92,19 +92,27 @@ jobs:
         # this step, `scripts/github_resolver/` would not exist in a
         # caller's checkout.
         #
-        # Use runner.temp (outside the workspace) so the fetched scripts
-        # are never inside the target repo's working tree. This prevents
-        # `git add -A` in the resolver from staging the scripts directory
-        # as a broken submodule reference.
+        # `actions/checkout` now requires a workspace-relative path, so stage
+        # the sparse checkout inside the workspace first, then move it out to
+        # runner.temp before the resolver touches git. Keeping the helper repo
+        # outside the target worktree prevents `git add -A` in the resolver
+        # from staging the scripts directory as a broken submodule reference.
         uses: actions/checkout@v4
         with:
           repository: gptme/gptme-contrib
           ref: ${{ github.workflow_sha }}
-          path: ${{ runner.temp }}/gptme-resolver
+          path: .gptme-resolver-stage
           sparse-checkout: |
             scripts/github_resolver
             scripts/github_actions_common
           sparse-checkout-cone-mode: false
+
+      - name: Move resolver scripts out of repo worktree
+        run: |
+          stage_dir="$GITHUB_WORKSPACE/.gptme-resolver-stage"
+          target_dir="$RUNNER_TEMP/gptme-resolver"
+          rm -rf "$target_dir"
+          mv "$stage_dir" "$target_dir"
 
       - name: Set up Python
         uses: actions/setup-python@v5
