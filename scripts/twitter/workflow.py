@@ -28,7 +28,6 @@ Usage:
 # Import stdlib email.message BEFORE sys.path manipulation
 # This ensures the stdlib module is cached and not shadowed by any local directories
 import email.message  # noqa: F401
-import re
 import sys
 from pathlib import Path as _Path
 
@@ -71,7 +70,11 @@ from twitter.llm import (
     process_tweet,
     verify_draft,
 )
-from twitter.twitter import cached_get_me, load_twitter_client
+from twitter.twitter import (
+    _find_placeholder_in_text,
+    cached_get_me,
+    load_twitter_client,
+)
 from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
 
 logger = get_logger(__name__, "twitter")
@@ -765,19 +768,6 @@ def cli(model: str | None = None) -> None:
     )
 
 
-# Patterns that indicate the LLM emitted a placeholder instead of a real value.
-# These are never valid in published tweets and must be caught before posting.
-_PLACEHOLDER_PATTERNS: list[tuple[str, str]] = [
-    (r"\[link would go here\]", "unresolved link placeholder"),
-    (r"\[link\s*(would go|goes)?\s*here\]", "unresolved link placeholder"),
-    (r"\[TODO[^\]]*\]", "TODO marker left in draft"),
-    (r"\[TBD[^\]]*\]", "TBD marker left in draft"),
-    (r"\[insert [^\]]+\]", "insert-instruction placeholder"),
-    (r"\[add [^\]]+\]", "add-instruction placeholder"),
-    (r"\[click here\]", "generic 'click here' placeholder"),
-]
-
-
 def _validate_draft_urls(draft: TweetDraft) -> list[tuple[str, int]]:
     """Validate URLs across both the main tweet text and any thread follow-ups."""
     bad: list[tuple[str, int]] = []
@@ -806,9 +796,9 @@ def _validate_draft_placeholders(draft: TweetDraft) -> list[str]:
     for text in [draft.text, *draft.thread]:
         if not text:
             continue
-        for pattern, label in _PLACEHOLDER_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
-                hits.append(label)
+        hit = _find_placeholder_in_text(text)
+        if hit:
+            hits.append(hit)
     return list(dict.fromkeys(hits))  # deduplicate, preserve order
 
 
@@ -836,13 +826,10 @@ def draft(
 
     try:
         # Guard: reject drafts with unresolved LLM placeholders
-        text_hits: list[str] = []
-        for pattern, label in _PLACEHOLDER_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
-                text_hits.append(label)
-        if text_hits:
+        text_hit = _find_placeholder_in_text(text)
+        if text_hit:
             console.print(
-                f"[red]✗ Text contains unresolved placeholders: {', '.join(dict.fromkeys(text_hits))}[/red]",
+                f"[red]✗ Text contains unresolved placeholder: '{text_hit}'[/red]",
             )
             console.print(
                 "[red]Aborting draft — rewrite without unresolved placeholders.[/red]"
