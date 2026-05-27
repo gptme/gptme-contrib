@@ -8,7 +8,6 @@
 # ///
 """CLI interface for the email system."""
 
-import json
 import os
 import subprocess
 import sys
@@ -19,6 +18,7 @@ from pathlib import Path
 
 import click
 
+from gptmail.communication_utils.state.tracking import MessageState
 from gptmail.lib import AgentEmail
 
 
@@ -403,11 +403,23 @@ def list_completed(status: str) -> None:
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
 
-    try:
-        replies_data = json.loads(email.replies_state_file.read_text())
-    except (json.JSONDecodeError, FileNotFoundError):
-        click.echo("No completed emails found.")
-        return
+    # Completion state lives in the conversation tracker, not a flat file.
+    # Map tracker MessageState -> the display schema used below.
+    replies_data: dict[str, dict] = {}
+    for msg in email.tracker.get_completed_messages("email"):
+        completed_at = msg.updated_at or msg.created_at or "unknown"
+        if msg.state == MessageState.COMPLETED:
+            replies_data[msg.message_id] = {
+                "status": "replied",
+                "replied_at": completed_at,
+                "reply_id": msg.reply_id or "unknown",
+            }
+        else:  # NO_REPLY_NEEDED
+            replies_data[msg.message_id] = {
+                "status": "no_reply_needed",
+                "completed_at": completed_at,
+                "reason": msg.reason or "no reason given",
+            }
 
     if not replies_data:
         click.echo("No completed emails found.")
@@ -604,24 +616,19 @@ def check_completion_status(message_id: str) -> None:
     is_completed = email._is_completed(message_id)
     click.echo(f"Is completed: {is_completed}")
 
-    # Show what's actually in the replies state file
-    try:
-        replies_data = json.loads(email.replies_state_file.read_text())
-        click.echo("\nEntries in replies_state.json:")
-        matching_entries = []
-        for stored_id, data in replies_data.items():
-            if stored_id == message_id or stored_id == normalized_id or stored_id == with_brackets:
-                matching_entries.append((stored_id, data))
+    # Show what's actually tracked for this message (tracker keys are normalized).
+    msg_info = email.tracker.get_message_state("email", normalized_id)
+    if msg_info is None:
+        click.echo("\nNo tracker entry found for this message.")
+        return
 
-        if matching_entries:
-            for stored_id, data in matching_entries:
-                click.echo(f"  {stored_id}: {data}")
-        else:
-            click.echo("  No matching entries found")
-            click.echo(f"  Total entries in file: {len(replies_data)}")
-
-    except (json.JSONDecodeError, FileNotFoundError):
-        click.echo("No replies_state.json file found or invalid JSON")
+    click.echo("\nTracker entry:")
+    click.echo(f"  Message ID: {msg_info.message_id}")
+    click.echo(f"  State: {msg_info.state.value}")
+    if msg_info.reason:
+        click.echo(f"  Reason: {msg_info.reason}")
+    if msg_info.reply_id:
+        click.echo(f"  Reply ID: {msg_info.reply_id}")
 
 
 @cli.command()
