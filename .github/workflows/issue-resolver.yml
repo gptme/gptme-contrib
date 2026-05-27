@@ -60,7 +60,7 @@ on:
         default: "/gptme-resolve"
     secrets:
       gptme-provider-key:
-        description: "API key gptme should use (e.g. OPENAI_API_KEY)."
+        description: "Provider key for gptme (any prefix: sk-ant- → Anthropic, sk-or- → OpenRouter, AIza → Gemini, else → OpenAI)."
         required: false
 
 permissions:
@@ -143,6 +143,7 @@ jobs:
               AIza*)    export GEMINI_API_KEY="$GPTME_PROVIDER_KEY" ;;
               *)        export OPENAI_API_KEY="$GPTME_PROVIDER_KEY" ;;
             esac
+            unset GPTME_PROVIDER_KEY
           fi
 
           mkdir -p output
