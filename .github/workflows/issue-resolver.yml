@@ -128,7 +128,11 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install gptme
-        run: uv tool install gptme
+        # Install a pinned git revision rather than the stale packaged release:
+        # the PyPI build used in CI does not understand newer repo-local
+        # `gptme.toml` fields such as `agent.avatar`, which breaks resolver
+        # runs before they can emit RESOLVER_STATUS markers.
+        run: uv tool install git+https://github.com/gptme/gptme.git@3dc0f94b4159367e89c4c9ae6f6d4e9a2e9cb94f
 
       - name: Resolve issue
         id: resolve
