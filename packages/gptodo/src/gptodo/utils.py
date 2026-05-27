@@ -689,7 +689,10 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     # Check required fields
     required_fields: Dict[str, type | tuple[type, ...]] = {
         "state": str,
-        "created": (str, datetime),  # Can be string or datetime
+        # Accept date too: an unquoted YAML date-only value (e.g. `created:
+        # 2026-05-27`) parses to a datetime.date, which is NOT a datetime
+        # instance — datetime subclasses date, not the reverse.
+        "created": (str, date, datetime),
     }
 
     for field_name, expected_type in required_fields.items():
@@ -719,8 +722,6 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
         except ValueError:
             # Try parsing as date-only
             try:
-                from datetime import date
-
                 date.fromisoformat(metadata["created"])
             except ValueError:
                 issues.append("Created date must be ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
@@ -850,8 +851,6 @@ def load_tasks(
                     return datetime.fromisoformat(value_str)
                 except ValueError:
                     # Try parsing as date-only
-                    from datetime import date
-
                     date_obj = date.fromisoformat(value_str)
                     return datetime.combine(date_obj, datetime.min.time())
 
