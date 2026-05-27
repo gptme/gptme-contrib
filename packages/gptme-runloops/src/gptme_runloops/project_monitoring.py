@@ -1,12 +1,16 @@
 """Project monitoring run loop implementation."""
 
-import fcntl
 import json
 import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None  # type: ignore[assignment]
 
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult
@@ -565,7 +569,8 @@ class ProjectMonitoringRun(BaseRunLoop):
         lock_file = state_file.with_suffix(".lock")
 
         try:
-            # Get PR's current update time (outside the lock — network call)
+            # Fetch PR update time and last comment author in one call (outside
+            # the lock — network I/O must not be held inside the critical section).
             result = subprocess.run(
                 [
                     "gh",
@@ -575,9 +580,9 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--repo",
                     repo,
                     "--json",
-                    "updatedAt",
+                    "updatedAt,comments",
                     "--jq",
-                    ".updatedAt",
+                    '{"updatedAt": .updatedAt, "lastCommentAuthor": (.comments | sort_by(.createdAt) | last | .author.login // "")}',
                 ],
                 capture_output=True,
                 text=True,
@@ -585,17 +590,18 @@ class ProjectMonitoringRun(BaseRunLoop):
             )
 
             if result.returncode != 0 or not result.stdout.strip():
-                self.logger.warning(
-                    f"Could not get PR update time for {repo}#{pr_number}"
-                )
+                self.logger.warning(f"Could not get PR info for {repo}#{pr_number}")
                 return False
 
-            current_updated = result.stdout.strip()
+            pr_info = json.loads(result.stdout)
+            current_updated = pr_info["updatedAt"]
+            last_activity_by_self = pr_info.get("lastCommentAuthor") == self.author
 
             # Exclusive lock serializes concurrent sessions on this PR's state.
             # flock is released automatically when the file handle is closed.
             with open(lock_file, "w") as lf:
-                fcntl.flock(lf, fcntl.LOCK_EX)
+                if _fcntl is not None:
+                    _fcntl.flock(lf, _fcntl.LOCK_EX)
 
                 # Check previous comment state
                 if state_file.exists():
@@ -610,7 +616,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                         # Rule 1: PR updated since last comment (new commits/reviews)
                         if current_updated > pr_updated:
                             # Check if last activity was by agent (skip own comments)
-                            if self._is_last_activity_by_self(repo, pr_number):
+                            if last_activity_by_self:
                                 self.logger.info(
                                     f"PR {repo}#{pr_number} updated by self, skipping"
                                 )
