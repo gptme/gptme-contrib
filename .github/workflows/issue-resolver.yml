@@ -97,10 +97,15 @@ jobs:
         # runner.temp before the resolver touches git. Keeping the helper repo
         # outside the target worktree prevents `git add -A` in the resolver
         # from staging the scripts directory as a broken submodule reference.
+        #
+        # In reusable workflows, the `github` context belongs to the caller.
+        # Use `job.workflow_*` to fetch the revision that defines THIS reusable
+        # workflow, so helper scripts stay aligned with the called workflow even
+        # for cross-repo callers.
         uses: actions/checkout@v4
         with:
-          repository: gptme/gptme-contrib
-          ref: ${{ github.workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .gptme-resolver-stage
           sparse-checkout: |
             scripts/github_resolver
