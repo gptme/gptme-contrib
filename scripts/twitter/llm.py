@@ -339,15 +339,15 @@ Evaluation:
 {json.dumps(eval_result, indent=2)}
 
 Response Guidelines:
-1. Maintain professional, helpful tone
-2. Focus on technical accuracy
-3. Keep under 280 characters
-4. Use 1-2 emojis maximum
-5. Put links in follow-up tweets
-6. Avoid controversial topics
-7. Add value to the discussion
-8. Demonstrate understanding of specific context from the thread
-9. Reference relevant details to show you've understood the conversation
+1. Use the workspace persona already loaded in the system prompt as the source of truth for voice
+2. Be direct, technical, and specific; sounding corporate, deferential, or sanitized is a failure
+3. Focus on technical accuracy
+4. Keep under 280 characters
+5. Use emojis only if they fit naturally; default to none
+6. Add concrete value to the discussion
+7. Demonstrate understanding of specific context from the thread and reference relevant details
+8. Do not promise follow-up, links, or artifacts unless they already exist in the provided context
+9. If a link is needed but unavailable, say so plainly instead of inserting a placeholder or vague promise
 10. NEVER write placeholder text like "[link would go here]", "[URL here]", "[insert link]",
     "[media here]", or any bracket-enclosed instruction. If you don't have a specific URL
     or media item to include, write a complete response without referencing it — either

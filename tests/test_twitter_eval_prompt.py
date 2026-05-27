@@ -203,6 +203,42 @@ def test_unset_handle_raises_value_error(
         llm_module.create_tweet_eval_prompt(tweet, eval_config)
 
 
+def test_response_prompt_defers_to_workspace_persona(
+    llm_module: types.ModuleType,
+) -> None:
+    """Reply drafting should reinforce the loaded agent voice, not flatten it.
+
+    ErikBjare/bob#808 found that generic "professional helpful tone" guidance
+    suppressed Bob's direct, opinionated voice even though SOUL.md was loaded.
+    """
+    tweet = _base_tweet("@TimeToBuildBob loved the gource demo")
+    config = {
+        "templates": {
+            "examples": [
+                {
+                    "reasoning": "Specific technical response fits",
+                    "text": "Nice catch. The media path is still missing, but the post-tweet worker now closes the loop.",
+                    "type": "reply",
+                    "thread_needed": False,
+                    "follow_up": None,
+                }
+            ]
+        }
+    }
+
+    prompt = llm_module.create_response_prompt(
+        tweet,
+        {"action": "respond", "reasoning": "Direct mention"},
+        config,
+    )
+
+    assert "workspace persona already loaded in the system prompt" in prompt
+    assert "sounding corporate, deferential, or sanitized is a failure" in prompt
+    assert "Do not promise follow-up, links, or artifacts" in prompt
+    assert "professional, helpful tone" not in prompt
+    assert "Avoid controversial topics" not in prompt
+
+
 def test_openrouter_key_resolution_prefers_twitter_specific_key(
     llm_module: types.ModuleType,
     monkeypatch: pytest.MonkeyPatch,
