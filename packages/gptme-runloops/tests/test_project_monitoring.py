@@ -214,11 +214,11 @@ def test_should_post_comment_first_time(workspace):
     """Test posting comment for first time."""
     run = ProjectMonitoringRun(workspace)
 
-    # Mock gh pr view to return updated time
+    # Mock gh pr view to return updated time and last comment author
     with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="2025-11-25T10:00:00Z",
+            stdout='{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}',
             stderr="",
         )
 
@@ -246,7 +246,7 @@ def test_should_post_comment_duplicate(workspace):
     with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="2025-11-25T09:00:00Z",
+            stdout='{"updatedAt": "2025-11-25T09:00:00Z", "lastCommentAuthor": ""}',
             stderr="",
         )
 
@@ -270,7 +270,7 @@ def test_should_post_comment_pr_updated(workspace):
     with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="2025-11-25T11:00:00Z",  # Newer than state file
+            stdout='{"updatedAt": "2025-11-25T11:00:00Z", "lastCommentAuthor": "other-user"}',  # Newer than state file, not by self
             stderr="",
         )
 
@@ -294,7 +294,7 @@ def test_should_post_comment_type_changed(workspace):
     with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="2025-11-25T10:00:00Z",
+            stdout='{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}',
             stderr="",
         )
 
@@ -318,13 +318,52 @@ def test_should_post_comment_stale(workspace):
     with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="2025-11-25T10:00:00Z",
+            stdout='{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}',
             stderr="",
         )
 
         # Should post (stale comment)
         should_post = run.should_post_comment("gptme/gptme", 123, "update")
         assert should_post is True
+
+
+def test_should_post_comment_concurrent_first_time(workspace):
+    """Race condition: two sessions on the same PR with no prior state.
+
+    Only one should return True (post). Without flock the check-then-write
+    window lets both sessions see state_file.exists()==False and both post.
+    """
+    import threading
+    from unittest.mock import MagicMock, patch
+
+    results = []
+    barrier = threading.Barrier(2)
+
+    def call_should_post():
+        run = ProjectMonitoringRun(workspace)
+        with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout='{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}',
+                stderr="",
+            )
+            # Sync both threads at the gate so they enter should_post_comment
+            # at the same time, maximising the chance of hitting the race.
+            barrier.wait()
+            result = run.should_post_comment("gptme/gptme", 456, "update")
+            results.append(result)
+
+    t1 = threading.Thread(target=call_should_post)
+    t2 = threading.Thread(target=call_should_post)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Exactly one session should have won the race and posted.
+    assert (
+        results.count(True) == 1
+    ), f"Expected exactly 1 True (one poster), got {results}"
 
 
 @patch("gptme_runloops.project_monitoring.subprocess.run")
@@ -341,11 +380,14 @@ def test_check_pr_updates_new_pr(mock_run, workspace):
             }
         ]
     )
-    mock_run.return_value = MagicMock(
-        returncode=0,
-        stdout=pr_data,
-        stderr="",
-    )
+    comment_state = '{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}'
+
+    def side_effect(args, **kwargs):
+        if "updatedAt,comments" in args:
+            return MagicMock(returncode=0, stdout=comment_state, stderr="")
+        return MagicMock(returncode=0, stdout=pr_data, stderr="")
+
+    mock_run.side_effect = side_effect
 
     run = ProjectMonitoringRun(workspace)
     work_items = run.check_pr_updates("gptme/gptme")
@@ -370,11 +412,14 @@ def test_check_pr_updates_no_change(mock_run, workspace):
             }
         ]
     )
-    mock_run.return_value = MagicMock(
-        returncode=0,
-        stdout=pr_data,
-        stderr="",
-    )
+    comment_state = '{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}'
+
+    def side_effect(args, **kwargs):
+        if "updatedAt,comments" in args:
+            return MagicMock(returncode=0, stdout=comment_state, stderr="")
+        return MagicMock(returncode=0, stdout=pr_data, stderr="")
+
+    mock_run.side_effect = side_effect
 
     run = ProjectMonitoringRun(workspace)
 
@@ -407,7 +452,14 @@ def test_check_pr_updates_surfaces_draft(mock_run, workspace):
             }
         ]
     )
-    mock_run.return_value = MagicMock(returncode=0, stdout=pr_data, stderr="")
+    comment_state = '{"updatedAt": "2026-05-12T20:17:24Z", "lastCommentAuthor": ""}'
+
+    def side_effect(args, **kwargs):
+        if "updatedAt,comments" in args:
+            return MagicMock(returncode=0, stdout=comment_state, stderr="")
+        return MagicMock(returncode=0, stdout=pr_data, stderr="")
+
+    mock_run.side_effect = side_effect
 
     run = ProjectMonitoringRun(workspace)
     work_items = run.check_pr_updates("gptme/gptme")
@@ -468,11 +520,14 @@ def test_check_ci_failures(mock_run, workspace):
             }
         ]
     )
-    mock_run.return_value = MagicMock(
-        returncode=0,
-        stdout=pr_data,
-        stderr="",
-    )
+    comment_state = '{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}'
+
+    def side_effect(args, **kwargs):
+        if "updatedAt,comments" in args:
+            return MagicMock(returncode=0, stdout=comment_state, stderr="")
+        return MagicMock(returncode=0, stdout=pr_data, stderr="")
+
+    mock_run.side_effect = side_effect
 
     run = ProjectMonitoringRun(workspace)
     work_items = run.check_ci_failures("gptme/gptme")
