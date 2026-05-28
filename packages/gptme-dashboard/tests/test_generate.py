@@ -2019,6 +2019,20 @@ def test_generate_html_includes_summaries(workspace: Path, tmp_path: Path):
     assert "2026-03-07" in html
 
 
+def test_summaries_header_shows_capped_of_total(workspace: Path, tmp_path: Path):
+    """When more summaries exist than are rendered, the section header shows
+    'N of TOTAL' so it stops contradicting the stat card (which reports TOTAL)."""
+    daily_dir = workspace / "knowledge" / "summaries" / "daily"
+    daily_dir.mkdir(parents=True)
+    for i in range(1, 26):  # 25 > default rendered cap of 20
+        (daily_dir / f"2026-01-{i:02d}.md").write_text(f"# Day {i}\n\nContent.\n")
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    assert "(20 of 25)" in html
+
+
 def test_render_markdown_lists():
     """Lists after a paragraph should render as <li> elements."""
     md = "External resources:\n- LLM evaluation benchmarks\n- Agent evaluation research"
