@@ -136,7 +136,12 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install gptme
-        run: uv tool install gptme
+        # Use --prerelease=allow so the resolver gets the latest dev release, which
+        # includes the `avatar` field in AgentConfig (stable 0.31.0 predates #1198).
+        # Bob repos use gptme.toml with `[agent] avatar = "..."` and fail with
+        # `TypeError: AgentConfig.__init__() got an unexpected keyword argument 'avatar'`
+        # when gptme parses the config.
+        run: uv tool install --prerelease=allow gptme
 
       - name: Resolve issue
         id: resolve
