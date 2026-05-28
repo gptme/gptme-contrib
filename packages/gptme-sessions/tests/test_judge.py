@@ -1011,6 +1011,96 @@ class TestSessionRecordJudgeFields:
         assert updated.span_aggregates["dominant_tool"] == "exec_command"
         assert updated.span_aggregates["error_rate"] == 0.0
 
+    def test_writeback_merges_trajectory_ref_preserves_existing_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """write_alignment_grade does NOT overwrite harness or trajectory_path
+        from trajectory_ref.json when the stored record already has them."""
+        sess_id = "63ad2f94-e455-4ed6-b25f-6bdb87a9fca7"
+        traj_path = tmp_path / "claude-code-trajectory.jsonl"
+        traj_path.write_text("{}")
+
+        # trajectory_ref sidecar with DIFFERENT values than the record
+        traj_ref = {
+            "sentinel_uuid": "04a39d54-a200-41d5-9163-4d1dbc5a035d",
+            "session_id": sess_id,
+            "workspace_session_id": "dc23",
+            "backend": "codex",  # different from record's harness
+            "written_at": "2026-05-21T05:10:31.266993+00:00",
+            "trajectory_path": str(tmp_path / "codex-rollout.jsonl"),  # different path
+        }
+        (tmp_path / f"{sess_id}.trajectory_ref.json").write_text(json.dumps(traj_ref))
+
+        # Stored record WITH harness and trajectory_path already populated
+        store = SessionStore(sessions_dir=tmp_path)
+        record = SessionRecord(
+            session_id=sess_id,
+            outcome="productive",
+            harness="claude-code",
+            trajectory_path=str(traj_path),
+        )
+        store.append(record)
+
+        with (
+            patch(
+                "gptme_sessions.judge.judge_session",
+                return_value={
+                    "score": 0.74,
+                    "reason": "Real work shipped",
+                    "model": "openai-subscription/gpt-5.4",
+                },
+            ),
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id=sess_id,
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result["status"] == "ok"
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        # Existing fields preserved — NOT overwritten by sidecar
+        assert updated.harness == "claude-code"
+        assert updated.trajectory_path == str(traj_path)
+
+    def test_writeback_tolerates_malformed_trajectory_ref(self, tmp_path: Path) -> None:
+        """write_alignment_grade gracefully handles a malformed trajectory_ref.json
+        (covers the json.JSONDecodeError / OSError except path)."""
+        sess_id = "63ad2f94-e455-4ed6-b25f-6bdb87a9fca7"
+
+        # Malformed trajectory_ref sidecar
+        (tmp_path / f"{sess_id}.trajectory_ref.json").write_text("not valid json {{{")
+
+        # Stored record WITHOUT harness or trajectory_path
+        store = SessionStore(sessions_dir=tmp_path)
+        record = SessionRecord(session_id=sess_id, outcome="productive")
+        store.append(record)
+
+        with (
+            patch(
+                "gptme_sessions.judge.judge_session",
+                return_value={
+                    "score": 0.74,
+                    "reason": "Real work shipped",
+                    "model": "openai-subscription/gpt-5.4",
+                },
+            ),
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id=sess_id,
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        # Must not crash — malformed sidecar is silently ignored
+        assert result["status"] == "ok"
+
     def test_judge_and_writeback_reports_missing_record(self, tmp_path: Path) -> None:
         with patch(
             "gptme_sessions.judge.judge_session",
