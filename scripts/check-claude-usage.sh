@@ -343,7 +343,7 @@ if seven_day and seven_day.get('resets_in_seconds') is not None:
 # detect a credential switch (different slot or rewritten slot) and bypass.
 # Format: '<resolved-target-inode>:<resolved-target-mtime>' (mtime as int).
 # See _creds_fingerprint() in the surrounding bash for the matching reader.
-import os as _os
+# (os already imported above in the off-peak block)
 try:
     _st = _os.stat('$CREDS_FILE')  # follows symlinks by default
     result['_cred_fingerprint'] = f'{_st.st_ino}:{int(_st.st_mtime)}'
