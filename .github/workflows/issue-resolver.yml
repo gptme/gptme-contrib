@@ -141,7 +141,9 @@ jobs:
         # Bob repos use gptme.toml with `[agent] avatar = "..."` and fail with
         # `TypeError: AgentConfig.__init__() got an unexpected keyword argument 'avatar'`
         # when gptme parses the config.
-        run: uv tool install --prerelease=allow gptme
+        # Version floor ensures we never pick up a build older than the avatar-field
+        # introduction, even as pre-releases cycle.
+        run: uv tool install --prerelease=allow "gptme>=0.32.0.dev0"
 
       - name: Resolve issue
         id: resolve
