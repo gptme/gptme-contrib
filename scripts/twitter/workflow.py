@@ -275,7 +275,7 @@ class TweetDraft:
         """Create from dictionary.
 
         Resilient to alternate field names used in manually-created draft files:
-        - ``content`` as fallback for ``text``
+        - ``content`` and legacy ``tweet`` as fallbacks for ``text``
         - ``created`` as fallback for ``created_at``
         - ``context`` is optional (defaults to empty dict)
         """
@@ -283,7 +283,7 @@ class TweetDraft:
         # Unescape literal \\n sequences that some LLMs emit in JSON/YAML.
         # This fixes tweets that leak escape sequences like "line1\\nline2".
         # Uses the shared _unescape_literal_newlines helper from twitter.llm.
-        raw_text = data.get("text", data.get("content", ""))
+        raw_text = data.get("text", data.get("content", data.get("tweet", "")))
         fixed_text: str = (
             _unescape_literal_newlines(raw_text) if isinstance(raw_text, str) else ""
         )
