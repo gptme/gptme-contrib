@@ -859,7 +859,7 @@ tr:hover { background: var(--accent-dim); }
 {% if summaries %}
 <!-- Knowledge Summaries -->
 <section id="summaries">
-  <h2>Summaries <span class="count-badge">({{ summaries | length }})</span></h2>
+  <h2>Summaries <span class="count-badge">({% if stats.total_summaries and stats.total_summaries > summaries | length %}{{ summaries | length }} of {{ stats.total_summaries }}{% else %}{{ summaries | length }}{% endif %})</span></h2>
   <table id="summaries-table">
     <thead>
       <tr><th>Period</th><th>Type</th><th>Preview</th></tr>
@@ -875,7 +875,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if summaries | length > 10 %}
-  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }} summaries</button>
+  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }}{% if stats.total_summaries and stats.total_summaries > summaries | length %} rendered{% endif %} summaries</button>
   {% endif %}
 </section>
 {% endif %}
