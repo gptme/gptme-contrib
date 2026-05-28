@@ -348,6 +348,11 @@ try:
     _st = _os.stat('$CREDS_FILE')  # follows symlinks by default
     result['_cred_fingerprint'] = f'{_st.st_ino}:{int(_st.st_mtime)}'
 except OSError:
+    # Bash _creds_fingerprint() falls back to the literal 0:0 on stat failure;
+    # we write an empty string so the non-empty-check guard in the bash reader
+    # forces a cache bypass when credentials were absent at write time.
+    # This is intentional — matching the reader's own 0:0 fallback would
+    # incorrectly serve stale N/A data from a previous cache write.
     result['_cred_fingerprint'] = ''
 
 # Write cache file (always, for both modes)
