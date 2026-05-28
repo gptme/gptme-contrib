@@ -432,6 +432,38 @@ def _write_gptme_trajectory(tmp_path: Path, session_name: str = "sess-aa") -> Pa
     return p
 
 
+def _write_codex_trajectory(tmp_path: Path) -> Path:
+    """Synthetic codex rollout JSONL: one exec_command dispatch + success result."""
+    records = [
+        {
+            "timestamp": "2026-05-27T10:00:00+00:00",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "echo hi"}),
+                "call_id": "c1",
+            },
+        },
+        {
+            "timestamp": "2026-05-27T10:00:00+00:00",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "Process exited with code 0\n",
+            },
+        },
+    ]
+    p = tmp_path / "rollout.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    parent = tmp_path / ".codex" / "sessions"
+    parent.mkdir(parents=True)
+    codex_path = parent / "rollout.jsonl"
+    codex_path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return codex_path
+
+
 def test_span_aggregates_default_is_none():
     """span_aggregates defaults to None."""
     r = SessionRecord()
@@ -544,6 +576,37 @@ def test_populate_span_aggregates_idempotent_rerun(tmp_path: Path):
     first = dict(r.span_aggregates or {})
     assert r.populate_span_aggregates() is True
     assert r.span_aggregates == first
+
+
+def test_populate_span_aggregates_codex_via_path_fallback(tmp_path: Path):
+    """Falls back to codex harness when harness="unknown" and path contains /.codex/."""
+    p = _write_codex_trajectory(tmp_path)
+    r = SessionRecord(harness="unknown", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    assert r.span_aggregates is not None
+    assert r.span_aggregates["total_spans"] == 1
+    assert r.span_aggregates["dominant_tool"] == "exec_command"
+    assert r.span_aggregates["error_spans"] == 0
+
+
+def test_populate_span_aggregates_codex_trajectory(tmp_path: Path):
+    """Populates aggregates from a codex rollout JSONL when harness is set."""
+    p = _write_codex_trajectory(tmp_path)
+    r = SessionRecord(harness="codex", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    assert r.span_aggregates is not None
+    assert r.span_aggregates["total_spans"] == 1
+    assert r.span_aggregates["dominant_tool"] == "exec_command"
+    assert r.span_aggregates["tool_counts"] == {"exec_command": 1}
+    assert r.span_aggregates["error_spans"] == 0
+
+
+def test_populate_span_aggregates_path_fallback_no_false_positive(tmp_path: Path):
+    """Path fallback does not trigger on gptme trajectories with no /.codex/ in path."""
+    p = _write_gptme_trajectory(tmp_path, session_name="sess-bb")
+    r = SessionRecord(harness="unknown", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is False
+    assert r.span_aggregates is None
 
 
 # --- harm_category tests ---
