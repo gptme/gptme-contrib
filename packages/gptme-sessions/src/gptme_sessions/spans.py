@@ -5,7 +5,7 @@ timing, input/output sizes, and success recorded. Sessions produce
 sequences of spans that tell the per-turn story of what the agent did
 and how long each operation took.
 
-Supports Claude Code and gptme JSONL formats.
+Supports Claude Code, gptme, and codex JSONL formats.
 
 Design doc: knowledge/technical-designs/span-level-tracing-design.md
 """
@@ -20,6 +20,10 @@ from datetime import datetime
 from pathlib import Path
 
 _EXIT_CODE_RE = re.compile(r"(?:Exit code|exit code):\s*(\d+)")
+
+# codex exec_command annotates the subprocess exit in its plaintext output as
+# "Process exited with code N".
+_CODEX_EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
 
 # gptme tool-use marker: `@tool_name(call-UUID-N): {json_args}` at the start
 # of a line. Args may be absent (e.g. `@todo(call-...-4): {}`).
@@ -421,6 +425,162 @@ def extract_spans_from_gptme_jsonl(
                 success = exit_code == 0
             else:
                 success = not _gptme_is_error_result(content)
+
+            spans.append(
+                ToolSpan(
+                    span_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    timestamp=dispatch_ts_str,
+                    duration_ms=dur_ms,
+                    success=success,
+                    input_size=isize,
+                    output_size=osize,
+                    exit_code=exit_code,
+                    turn_index=tidx,
+                )
+            )
+
+    return spans
+
+
+# codex payload types that mark a model "turn" boundary between tool dispatches.
+_CODEX_TURN_MARKERS = {"reasoning", "agent_message", "message"}
+
+
+def _codex_exec_exit_code(output: str) -> int | None:
+    """Exit code from a codex ``exec_command`` plaintext output, if annotated."""
+    matches = _CODEX_EXIT_CODE_RE.findall(output)
+    return int(matches[-1]) if matches else None
+
+
+def _codex_custom_exit_code(output: str) -> int | None:
+    """Exit code from a codex ``custom_tool_call_output`` JSON metadata, if present.
+
+    The output is a JSON string shaped like
+    ``{"output": "...", "metadata": {"exit_code": 0, "duration_seconds": 0.0}}``.
+    Returns None when the payload isn't JSON or carries no integer exit code.
+    """
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    meta = parsed.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    code = meta.get("exit_code")
+    return code if isinstance(code, int) else None
+
+
+def extract_spans_from_codex_jsonl(
+    path: Path | str,
+    session_id: str | None = None,
+) -> list[ToolSpan]:
+    """Extract ToolSpan objects from a codex ``rollout-*.jsonl`` trajectory.
+
+    codex records tool use as ``response_item`` envelopes. Regular tools
+    (``exec_command``, ``write_stdin``, MCP calls) appear as
+    ``payload.type == "function_call"`` paired with ``function_call_output`` by
+    ``call_id``; patch edits appear as ``custom_tool_call`` paired with
+    ``custom_tool_call_output``. Success is read from the subprocess exit code
+    annotated in the output (``Process exited with code N`` for exec, or
+    ``metadata.exit_code`` for custom tools); calls with no exit annotation are
+    treated as successful absent an error signal.
+
+    Args:
+        path: Path to the codex ``rollout-*.jsonl`` file.
+        session_id: Session ID to assign to all spans. Defaults to the
+            filename stem.
+
+    Returns:
+        List of spans in chronological dispatch order.
+    """
+    path = Path(path)
+    if session_id is None:
+        session_id = path.stem
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    # pending maps call_id → (tool_name, dispatch_ts, dispatch_ts_str,
+    #                         input_size, turn_index, is_custom)
+    pending: dict[str, tuple[str, datetime | None, str, int, int, bool]] = {}
+    spans: list[ToolSpan] = []
+    turn_index = 0
+    new_turn = False  # set by a turn marker; the next dispatch opens a new turn
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        ts_str = record.get("timestamp", "")
+        ts = _parse_ts(ts_str)
+
+        if ptype in _CODEX_TURN_MARKERS:
+            new_turn = True
+            continue
+
+        if ptype in ("function_call", "custom_tool_call"):
+            call_id = payload.get("call_id", "")
+            if not call_id:
+                continue
+            tool_name = payload.get("name", "unknown")
+            is_custom = ptype == "custom_tool_call"
+            if is_custom:
+                isize = len(str(payload.get("input", "")))
+            else:
+                args_raw = payload.get("arguments", "")
+                try:
+                    args = json.loads(args_raw) if args_raw else {}
+                except (json.JSONDecodeError, TypeError):
+                    args = args_raw
+                isize = _input_size(args)
+            # A dispatch following a reasoning/message marker opens a new model
+            # turn; the very first dispatch stays at turn 0.
+            if new_turn:
+                turn_index += 1
+                new_turn = False
+            pending[call_id] = (tool_name, ts, ts_str, isize, turn_index, is_custom)
+
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
+            call_id = payload.get("call_id", "")
+            if call_id not in pending:
+                continue
+            tool_name, dispatch_ts, dispatch_ts_str, isize, tidx, is_custom = pending.pop(call_id)
+            output = payload.get("output", "")
+            output_str = output if isinstance(output, str) else str(output)
+            osize = len(output_str)
+
+            if is_custom:
+                exit_code = _codex_custom_exit_code(output_str)
+            else:
+                exit_code = _codex_exec_exit_code(output_str)
+            # Missing exit annotation (MCP calls, plan updates) => no error signal.
+            success = exit_code in (None, 0)
+
+            dur_ms = -1
+            if dispatch_ts is not None and ts is not None:
+                try:
+                    delta = (ts - dispatch_ts).total_seconds()
+                    if delta >= 0:
+                        dur_ms = int(delta * 1000)
+                except TypeError:
+                    pass  # mixed tz-aware/naive timestamps – leave sentinel
 
             spans.append(
                 ToolSpan(
