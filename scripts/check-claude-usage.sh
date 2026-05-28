@@ -42,12 +42,27 @@ done
 
 CACHE_FILE="/tmp/claude-usage-cache.json"
 CACHE_TTL="${CLAUDE_USAGE_CACHE_TTL:-600}"  # 10 minutes default
+CREDS_FILE="${HOME}/.claude/.credentials.json"
+
+# Fingerprint = "<target_inode>:<target_mtime>" of the resolved credentials file.
+# Changes when the slot is rewritten (token refresh / `cp` into slot) or the
+# live symlink retargets a different slot. Used to invalidate the cache across
+# a credential switch — the cache key is the file path, not the credential
+# identity, so a /login or `ln -sfn` would otherwise serve a stale-shaped
+# response for up to CACHE_TTL seconds.
+_creds_fingerprint() {
+    stat -Lc '%i:%Y' "$CREDS_FILE" 2>/dev/null \
+        || stat -Lf '%i:%m' "$CREDS_FILE" 2>/dev/null \
+        || echo "0:0"
+}
 
 # --- Cache check (JSON and human-readable modes only, not --raw) ---
 if [ "$MODE" != "raw" ] && [ "$NO_CACHE" = false ] && [ -f "$CACHE_FILE" ]; then
     # stat mtime: -c %Y on Linux, -f %m on macOS/BSD
     CACHE_AGE=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0) ))
-    if [ "$CACHE_AGE" -lt "$CACHE_TTL" ]; then
+    CURRENT_FP=$(_creds_fingerprint)
+    CACHED_FP=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('_cred_fingerprint',''))" "$CACHE_FILE" 2>/dev/null || echo "")
+    if [ "$CACHE_AGE" -lt "$CACHE_TTL" ] && [ -n "$CACHED_FP" ] && [ "$CURRENT_FP" = "$CACHED_FP" ]; then
         if [ "$MODE" = "json" ]; then
             cat "$CACHE_FILE"
             exit 0
@@ -323,6 +338,22 @@ if seven_day and seven_day.get('resets_in_seconds') is not None:
         'pace_gap': round(gap, 3),
         'status': 'underusing' if gap > 0.05 else ('overusing' if gap < -0.05 else 'on_track'),
     }
+
+# Stamp the credential fingerprint into the cache so a later cache read can
+# detect a credential switch (different slot or rewritten slot) and bypass.
+# Format: '<resolved-target-inode>:<resolved-target-mtime>' (mtime as int).
+# See _creds_fingerprint() in the surrounding bash for the matching reader.
+# (os already imported above in the off-peak block)
+try:
+    _st = _os.stat('$CREDS_FILE')  # follows symlinks by default
+    result['_cred_fingerprint'] = f'{_st.st_ino}:{int(_st.st_mtime)}'
+except OSError:
+    # Bash _creds_fingerprint() falls back to the literal 0:0 on stat failure;
+    # we write an empty string so the non-empty-check guard in the bash reader
+    # forces a cache bypass when credentials were absent at write time.
+    # This is intentional — matching the reader's own 0:0 fallback would
+    # incorrectly serve stale N/A data from a previous cache write.
+    result['_cred_fingerprint'] = ''
 
 # Write cache file (always, for both modes)
 cache_path = '$CACHE_FILE'
