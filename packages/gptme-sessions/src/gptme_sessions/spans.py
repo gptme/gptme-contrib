@@ -450,8 +450,8 @@ _CODEX_TURN_MARKERS = {"reasoning", "agent_message", "message"}
 
 def _codex_exec_exit_code(output: str) -> int | None:
     """Exit code from a codex ``exec_command`` plaintext output, if annotated."""
-    m = _CODEX_EXIT_CODE_RE.search(output)
-    return int(m.group(1)) if m else None
+    matches = _CODEX_EXIT_CODE_RE.findall(output)
+    return int(matches[-1]) if matches else None
 
 
 def _codex_custom_exit_code(output: str) -> int | None:
