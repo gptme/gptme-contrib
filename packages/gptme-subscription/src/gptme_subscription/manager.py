@@ -579,16 +579,21 @@ class SubscriptionManager:
         d.five_hour_utilization = five_hour
         d.sonnet_weekly_utilization = sonnet_weekly
 
-        if active != primary:
-            # Record reset time for this fallback so future calls can rank.
-            _weekly_resets_in = usage.get("seven_day", {}).get("resets_in_seconds")
-            if (
-                active
-                and isinstance(_weekly_resets_in, int | float)
-                and _weekly_resets_in > 0
-            ):
-                self.record_sub_reset_time(active, float(_weekly_resets_in), usage)
+        # Record the live observation for *whichever* slot is active, not just
+        # fallbacks. The earlier gate (`active != primary`) was correct for
+        # rebalance hold logic but left ``reset-times.json`` permanently empty
+        # for the primary slot — downstream readers (Bob's vitals subscription
+        # pacing, ``subscription-usage-history.py``) then can't pick up the
+        # primary's weekly_utilization between probes.
+        _weekly_resets_in = usage.get("seven_day", {}).get("resets_in_seconds")
+        if (
+            active
+            and isinstance(_weekly_resets_in, int | float)
+            and _weekly_resets_in > 0
+        ):
+            self.record_sub_reset_time(active, float(_weekly_resets_in), usage)
 
+        if active != primary:
             if rebalance_state is not None:
                 hold_until = rebalance_state.get("hold_until")
                 blocked, _ = self.is_subscription_blocked(usage, config=cfg)

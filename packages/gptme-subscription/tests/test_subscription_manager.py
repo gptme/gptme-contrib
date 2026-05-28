@@ -127,6 +127,34 @@ def _write_cred(sm: SubscriptionManager, slot: str, *, age_days: float) -> None:
     os.utime(path, (old_ts, old_ts))
 
 
+def test_evaluate_records_observation_for_active_primary(tmp_path: Path) -> None:
+    """``evaluate`` must record the live observation for the active slot even
+    when it is the primary. Previously gated on ``active != primary``, which
+    silently left the primary's weekly_utilization out of reset-times.json and
+    broke downstream readers (Bob's vitals subscription pacing, the
+    subscription-usage-history dashboard panel) for the slot that actually
+    matters most.
+    """
+    sm = _make_manager(tmp_path)
+    usage = {
+        "seven_day": {"utilization": 0.42, "resets_in_seconds": 3 * 24 * 3600},
+        "five_hour": {"utilization": 0.10, "resets_in_seconds": 3 * 3600},
+        "seven_day_sonnet": {
+            "utilization": 0.30,
+            "resets_in_seconds": 3 * 24 * 3600,
+        },
+    }
+
+    sm.evaluate(usage, "bob")
+
+    reset_times = json.loads(sm.config.reset_times_file.read_text())
+    assert "bob" in reset_times, "primary slot observation was not recorded"
+    entry = reset_times["bob"]
+    assert entry["weekly_utilization"] == pytest.approx(0.42)
+    assert entry["five_hour_utilization"] == pytest.approx(0.10)
+    assert entry["sonnet_weekly_utilization"] == pytest.approx(0.30)
+
+
 def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:
     sm = _make_manager(tmp_path)
     # alice is stale (17 days), erik is fresh
