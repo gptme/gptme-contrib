@@ -819,6 +819,25 @@ def write_alignment_grade(
     for record in records:
         if record.session_id != session_id:
             continue
+
+        # Merge trajectory_ref data (harness + trajectory_path) when missing
+        # from the stored record.  codex sessions in particular carry these
+        # fields only in the per-session trajectory_ref.json sidecar, not
+        # in the main JSONL store, so populate_span_aggregates() skips them
+        # unless we merge here.
+        if not record.trajectory_path or (not record.harness or record.harness == "unknown"):
+            traj_ref_path = sessions_dir / f"{session_id}.trajectory_ref.json"
+            if traj_ref_path.exists():
+                try:
+                    traj_ref = json.loads(traj_ref_path.read_text())
+                    if not record.trajectory_path and traj_ref.get("trajectory_path"):
+                        record.trajectory_path = traj_ref["trajectory_path"]
+                    backend = traj_ref.get("backend")
+                    if backend and (not record.harness or record.harness == "unknown"):
+                        record.harness = backend
+                except (json.JSONDecodeError, OSError):
+                    pass
+
         record.set_alignment_grade(
             normalized["score"],
             reason=normalized["reason"],

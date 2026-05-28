@@ -934,6 +934,83 @@ class TestSessionRecordJudgeFields:
         updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
         assert updated.grades["alignment"] == 0.5
 
+    def test_writeback_merges_trajectory_ref_for_codex(self, tmp_path: Path) -> None:
+        """write_alignment_grade merges harness+trajectory_path from trajectory_ref.json
+        when the stored record is missing them (codex path)."""
+        sess_id = "63ad2f94-e455-4ed6-b25f-6bdb87a9fca7"
+        traj_path = tmp_path / "codex-rollout.jsonl"
+        traj_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-27T10:00:00+00:00",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "echo hi"}),
+                        "call_id": "c1",
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "timestamp": "2026-05-27T10:00:00+00:00",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "c1",
+                        "output": "Process exited with code 0\n",
+                    },
+                }
+            )
+            + "\n"
+        )
+
+        # trajectory_ref sidecar (real shape from codex sessions)
+        traj_ref = {
+            "sentinel_uuid": "04a39d54-a200-41d5-9163-4d1dbc5a035d",
+            "session_id": sess_id,
+            "workspace_session_id": "dc23",
+            "backend": "codex",
+            "written_at": "2026-05-21T05:10:31.266993+00:00",
+            "trajectory_path": str(traj_path),
+        }
+        (tmp_path / f"{sess_id}.trajectory_ref.json").write_text(json.dumps(traj_ref))
+
+        # Stored record WITHOUT harness or trajectory_path (real codex post-backfill state)
+        store = SessionStore(sessions_dir=tmp_path)
+        record = SessionRecord(session_id=sess_id, outcome="productive")
+        store.append(record)
+
+        with (
+            patch(
+                "gptme_sessions.judge.judge_session",
+                return_value={
+                    "score": 0.74,
+                    "reason": "Real work shipped",
+                    "model": "openai-subscription/gpt-5.4",
+                },
+            ),
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id=sess_id,
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result["status"] == "ok"
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert updated.harness == "codex"
+        assert updated.trajectory_path == str(traj_path)
+        assert updated.span_aggregates is not None
+        assert updated.span_aggregates["total_spans"] == 1
+        assert updated.span_aggregates["dominant_tool"] == "exec_command"
+        assert updated.span_aggregates["error_rate"] == 0.0
+
     def test_judge_and_writeback_reports_missing_record(self, tmp_path: Path) -> None:
         with patch(
             "gptme_sessions.judge.judge_session",

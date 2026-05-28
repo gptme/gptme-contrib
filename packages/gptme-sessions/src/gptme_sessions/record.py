@@ -389,6 +389,11 @@ class SessionRecord:
             return False
 
         harness = harness_hint or self.harness
+        # Fallback: detect harness from trajectory path when harness is
+        # "unknown" (common for codex sessions where the trajectory_ref
+        # backend field doesn't flow into SessionRecord.harness).
+        if harness in ("unknown", None) and "/.codex/" in str(traj):
+            harness = "codex"
         if harness == "claude-code":
             spans = extract_spans_from_cc_jsonl(traj, session_id=self.session_id)
         elif harness == "gptme":
