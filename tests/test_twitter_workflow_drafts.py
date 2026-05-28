@@ -97,6 +97,7 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
         data=SimpleNamespace(id=0)
     )
     twitter_api_stub.load_twitter_client = lambda *args, **kwargs: None
+    twitter_api_stub._find_placeholder_in_text = lambda *args, **kwargs: None
 
     stubbed_modules: dict[str, Any] = {
         "gptmail": gptmail_stub,
@@ -198,6 +199,26 @@ def test_tweet_draft_loads_markdown_frontmatter_body_as_text(
     assert draft.text == "Manual markdown draft body."
     assert draft.type == "reply"
     assert draft.in_reply_to == "12345"
+
+
+def test_tweet_draft_loads_legacy_tweet_key_as_text(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    # Legacy drafts used `tweet:` as the content key instead of `text:`.
+    # Without a fallback, from_dict() blanks the content on load and a
+    # subsequent save() overwrites the file with an empty tweet.
+    draft_path = tmp_path / "legacy-draft.yml"
+    draft_path.write_text(
+        "tweet: |\n"
+        "  Legacy content line one.\n"
+        "  Legacy content line two.\n"
+        "tags: [a, b]\n"
+        "created: 2026-05-28\n"
+    )
+
+    draft = workflow_module.TweetDraft.load(draft_path)
+
+    assert draft.text.strip() == "Legacy content line one.\nLegacy content line two."
 
 
 def test_list_and_find_drafts_include_markdown_files(
