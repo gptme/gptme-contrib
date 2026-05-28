@@ -94,9 +94,9 @@ jobs:
         # github.workflow_sha resolves to the CALLER'S repo SHA in reusable
         # workflow context, not gptme-contrib's SHA. GITHUB_WORKFLOW_REF is
         # documented to be the reusable workflow's own path@ref (gptme-contrib),
-        # so we extract the SHA from it instead.
+        # so we extract the ref from it instead (may be a SHA or branch ref).
         id: resolver-ref
-        run: echo "sha=${GITHUB_WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+        run: echo "ref=${GITHUB_WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
 
       - name: Fetch resolver scripts from gptme-contrib
         # Always fetch from gptme-contrib so this workflow works both when
@@ -113,7 +113,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gptme/gptme-contrib
-          ref: ${{ steps.resolver-ref.outputs.sha }}
+          ref: ${{ steps.resolver-ref.outputs.ref }}
           path: .gptme-resolver-stage
           sparse-checkout: |
             scripts/github_resolver
