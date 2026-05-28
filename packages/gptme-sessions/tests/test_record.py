@@ -10,34 +10,6 @@ import pytest
 from gptme_sessions.record import HARM_CATEGORY_LABELS, SessionRecord, normalize_model
 
 
-def _write_codex_trajectory(tmp_path: Path) -> Path:
-    """Synthetic codex rollout JSONL: one exec_command call + successful output."""
-    records = [
-        {
-            "timestamp": "2026-05-27T10:00:00+00:00",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "arguments": json.dumps({"cmd": "echo hi"}),
-                "call_id": "c1",
-            },
-        },
-        {
-            "timestamp": "2026-05-27T10:00:01+00:00",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "c1",
-                "output": "Process exited with code 0\n",
-            },
-        },
-    ]
-    p = tmp_path / "rollout.jsonl"
-    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-    return p
-
-
 def test_context_tier_default():
     """context_tier defaults to None."""
     r = SessionRecord()
