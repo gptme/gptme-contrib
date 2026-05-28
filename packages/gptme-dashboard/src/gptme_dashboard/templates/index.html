@@ -875,7 +875,7 @@ tr:hover { background: var(--accent-dim); }
     </tbody>
   </table>
   {% if summaries | length > 10 %}
-  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }} summaries</button>
+  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }}{% if stats.total_summaries and stats.total_summaries > summaries | length %} rendered{% endif %} summaries</button>
   {% endif %}
 </section>
 {% endif %}
