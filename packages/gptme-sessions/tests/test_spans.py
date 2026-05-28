@@ -11,6 +11,7 @@ from gptme_sessions.spans import (
     SpanAggregates,
     ToolSpan,
     extract_spans_from_cc_jsonl,
+    extract_spans_from_codex_jsonl,
     extract_spans_from_gptme_jsonl,
 )
 
@@ -561,3 +562,229 @@ def test_gptme_malformed_lines_skipped(tmp_path: Path) -> None:
     p.write_text("not json\n{}\n")
     spans = extract_spans_from_gptme_jsonl(p)
     assert spans == []
+
+
+# ── codex rollout JSONL fixtures ──────────────────────────────────────────────
+
+
+def _codex_function_call(name: str, call_id: str, args: dict, ts: str) -> dict:
+    return {
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": name,
+            "arguments": json.dumps(args),
+            "call_id": call_id,
+        },
+    }
+
+
+def _codex_function_output(call_id: str, output: str, ts: str) -> dict:
+    return {
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        },
+    }
+
+
+def _codex_custom_call(name: str, call_id: str, tool_input: str, ts: str) -> dict:
+    return {
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "name": name,
+            "input": tool_input,
+            "call_id": call_id,
+        },
+    }
+
+
+def _codex_custom_output(call_id: str, exit_code: int, ts: str, output_text: str = "ok") -> dict:
+    payload_output = json.dumps(
+        {"output": output_text, "metadata": {"exit_code": exit_code, "duration_seconds": 0.0}}
+    )
+    return {
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": payload_output,
+        },
+    }
+
+
+def _codex_reasoning(ts: str) -> dict:
+    return {"timestamp": ts, "type": "response_item", "payload": {"type": "reasoning"}}
+
+
+# ── extract_spans_from_codex_jsonl ────────────────────────────────────────────
+
+
+def test_codex_single_exec_span(tmp_path: Path) -> None:
+    records = [
+        _codex_function_call(
+            "exec_command", "c1", {"cmd": "git status"}, "2026-05-27T10:00:00+00:00"
+        ),
+        _codex_function_output(
+            "c1", "Output:\nclean\nProcess exited with code 0\n", "2026-05-27T10:00:01+00:00"
+        ),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 1
+    s = spans[0]
+    assert s.tool_name == "exec_command"
+    assert s.session_id == "rollout-x"
+    assert s.duration_ms == 1000
+    assert s.success is True
+    assert s.exit_code == 0
+    assert s.turn_index == 0
+
+
+def test_codex_exec_nonzero_exit_is_error(tmp_path: Path) -> None:
+    records = [
+        _codex_function_call("exec_command", "c1", {"cmd": "false"}, "2026-05-27T10:00:00+00:00"),
+        _codex_function_output("c1", "Process exited with code 2\n", "2026-05-27T10:00:00+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].success is False
+    assert spans[0].exit_code == 2
+
+
+def test_codex_no_exit_annotation_is_success(tmp_path: Path) -> None:
+    """MCP / plan tools carry no exit annotation — treat as success absent a signal."""
+    records = [
+        _codex_function_call("_fetch_pr", "c1", {"number": 5}, "2026-05-27T10:00:00+00:00"),
+        _codex_function_output("c1", '{"title": "some PR"}', "2026-05-27T10:00:01+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].tool_name == "_fetch_pr"
+    assert spans[0].success is True
+    assert spans[0].exit_code is None
+
+
+def test_codex_custom_tool_apply_patch(tmp_path: Path) -> None:
+    records = [
+        _codex_custom_call(
+            "apply_patch", "c1", "*** Begin Patch\n...\n", "2026-05-27T10:00:00+00:00"
+        ),
+        _codex_custom_output("c1", 0, "2026-05-27T10:00:00.2+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 1
+    s = spans[0]
+    assert s.tool_name == "apply_patch"
+    assert s.success is True
+    assert s.exit_code == 0
+    assert s.input_size > 0
+
+
+def test_codex_custom_tool_nonzero_exit_is_error(tmp_path: Path) -> None:
+    records = [
+        _codex_custom_call("apply_patch", "c1", "bad patch", "2026-05-27T10:00:00+00:00"),
+        _codex_custom_output("c1", 1, "2026-05-27T10:00:01+00:00", output_text="patch failed"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].success is False
+    assert spans[0].exit_code == 1
+
+
+def test_codex_turn_index_increments_on_reasoning(tmp_path: Path) -> None:
+    """A reasoning marker between dispatches opens a new model turn."""
+    records = [
+        _codex_function_call("exec_command", "c1", {"cmd": "a"}, "2026-05-27T10:00:00+00:00"),
+        _codex_function_output("c1", "Process exited with code 0\n", "2026-05-27T10:00:01+00:00"),
+        _codex_reasoning("2026-05-27T10:00:02+00:00"),
+        _codex_function_call("exec_command", "c2", {"cmd": "b"}, "2026-05-27T10:00:03+00:00"),
+        _codex_function_output("c2", "Process exited with code 0\n", "2026-05-27T10:00:04+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 2
+    assert spans[0].turn_index == 0
+    assert spans[1].turn_index == 1
+
+
+def test_codex_consecutive_calls_same_turn(tmp_path: Path) -> None:
+    """Back-to-back dispatches with no reasoning marker stay in the same turn."""
+    records = [
+        _codex_function_call("exec_command", "c1", {"cmd": "a"}, "2026-05-27T10:00:00+00:00"),
+        _codex_function_call("exec_command", "c2", {"cmd": "b"}, "2026-05-27T10:00:00+00:00"),
+        _codex_function_output("c1", "Process exited with code 0\n", "2026-05-27T10:00:01+00:00"),
+        _codex_function_output("c2", "Process exited with code 0\n", "2026-05-27T10:00:01+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 2
+    assert spans[0].turn_index == spans[1].turn_index == 0
+
+
+def test_codex_timestamp_is_dispatch_time(tmp_path: Path) -> None:
+    dispatch_ts = "2026-05-27T10:00:00+00:00"
+    arrival_ts = "2026-05-27T10:00:05+00:00"
+    records = [
+        _codex_function_call("exec_command", "c1", {"cmd": "sleep 5"}, dispatch_ts),
+        _codex_function_output("c1", "Process exited with code 0\n", arrival_ts),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert spans[0].timestamp == dispatch_ts
+    assert spans[0].duration_ms == 5000
+
+
+def test_codex_unpaired_call_not_emitted(tmp_path: Path) -> None:
+    records = [
+        _codex_function_call("exec_command", "c1", {"cmd": "a"}, "2026-05-27T10:00:00+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+    assert spans == []
+
+
+def test_codex_session_id_override(tmp_path: Path) -> None:
+    records = [
+        _codex_function_call("exec_command", "c1", {"cmd": "a"}, "2026-05-27T10:00:00+00:00"),
+        _codex_function_output("c1", "Process exited with code 0\n", "2026-05-27T10:00:01+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p, session_id="custom-codex-id")
+    assert spans[0].session_id == "custom-codex-id"
+
+
+def test_codex_empty_file(tmp_path: Path) -> None:
+    p = tmp_path / "rollout-empty.jsonl"
+    p.write_text("")
+    assert extract_spans_from_codex_jsonl(p) == []
+
+
+def test_codex_missing_file() -> None:
+    assert extract_spans_from_codex_jsonl(Path("/nonexistent/rollout-x.jsonl")) == []
+
+
+def test_codex_malformed_lines_skipped(tmp_path: Path) -> None:
+    p = tmp_path / "rollout-bad.jsonl"
+    p.write_text('not json\n{}\n{"type": "event_msg"}\n')
+    assert extract_spans_from_codex_jsonl(p) == []

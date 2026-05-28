@@ -365,7 +365,8 @@ class SessionRecord:
 
         Chooses the extractor based on ``harness_hint`` (or ``self.harness``
         when not given): ``"claude-code"`` → CC JSONL, ``"gptme"`` → gptme
-        JSONL. Stores ``SpanAggregates.from_spans(...)`` serialized as a dict
+        JSONL, ``"codex"`` → codex rollout JSONL. Stores
+        ``SpanAggregates.from_spans(...)`` serialized as a dict
         on ``self.span_aggregates`` (including the computed ``error_rate``).
 
         Returns ``True`` when aggregates were populated, ``False`` when the
@@ -377,6 +378,7 @@ class SessionRecord:
         from gptme_sessions.spans import (
             SpanAggregates,
             extract_spans_from_cc_jsonl,
+            extract_spans_from_codex_jsonl,
             extract_spans_from_gptme_jsonl,
         )
 
@@ -391,6 +393,8 @@ class SessionRecord:
             spans = extract_spans_from_cc_jsonl(traj, session_id=self.session_id)
         elif harness == "gptme":
             spans = extract_spans_from_gptme_jsonl(traj, session_id=self.session_id)
+        elif harness == "codex":
+            spans = extract_spans_from_codex_jsonl(traj, session_id=self.session_id)
         else:
             return False
 
