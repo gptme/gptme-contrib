@@ -12,6 +12,16 @@ Structural code retrieval for gptme via [tree-sitter](https://tree-sitter.github
 - **Blast/impact semantics split**: `blast` = dependency closure (what X needs), `impact` = what breaks if you change X
 - **Repo map / symbol skeletons** for token-cheap default codebase context
 
+## When to use
+
+Reach for the right retrieval tool by the *shape* of the question, not by habit:
+
+- **codegraph** — structural / symbol questions: *where is `X` defined?*, *who calls `X`?*, *what breaks if I change `X`?*, *give me a repo skeleton*. Use it when you care about definitions, call graphs, blast radius, or impact.
+- **grep / ripgrep** — exact strings and known patterns: a literal identifier, an error message, a config key. Fastest when you already know the text to match.
+- **semantic search (gptme-rag / semble)** — conceptual queries where you don't know the exact tokens: *how does auth work here?*, *where is retry logic?*. Matches by meaning over text chunks.
+
+Rule of thumb: exact text → grep; "what does this concept look like" → semantic; "how is this symbol wired" → codegraph.
+
 ## Install
 
 ```bash
