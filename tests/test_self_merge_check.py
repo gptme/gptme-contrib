@@ -41,6 +41,37 @@ def test_checks_green_allows_empty_list() -> None:
     assert self_merge_check.checks_green([])
 
 
+def test_checks_green_allows_success_statuscontext() -> None:
+    # StatusContext (legacy commit status, e.g. codecov/patch) carries its
+    # result in `state` with no status/conclusion. A green one must pass.
+    assert self_merge_check.checks_green(
+        [
+            {
+                "__typename": "StatusContext",
+                "context": "codecov/patch",
+                "state": "SUCCESS",
+            }
+        ]
+    )
+
+
+def test_checks_green_rejects_non_success_statuscontext() -> None:
+    for bad in ("PENDING", "FAILURE", "ERROR", "EXPECTED"):
+        assert not self_merge_check.checks_green(
+            [{"__typename": "StatusContext", "context": "ci", "state": bad}]
+        )
+
+
+def test_checks_green_mixed_checkrun_and_statuscontext() -> None:
+    # A green CheckRun alongside a green StatusContext should pass.
+    assert self_merge_check.checks_green(
+        [
+            {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"state": "SUCCESS"},
+        ]
+    )
+
+
 def test_parse_pr_target_rejects_malformed_url() -> None:
     """Malformed URL missing owner/repo path segments must raise ValueError."""
     import pytest

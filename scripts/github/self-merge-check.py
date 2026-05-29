@@ -682,6 +682,13 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     Returns True when no checks are configured (no CI), treating the
     absence of CI as neutral rather than failing. Individual checks with no
     status and no conclusion are treated as indeterminate, not passing.
+
+    Handles both check shapes in ``statusCheckRollup``:
+    - ``CheckRun`` (GitHub Actions) — result in ``status``/``conclusion``
+    - ``StatusContext`` (legacy commit statuses, e.g. ``codecov/patch``) —
+      result in ``state`` alone, with no ``status``/``conclusion``. Reading
+      only status/conclusion would treat a green StatusContext as
+      indeterminate and falsely flag CI as not green.
     """
     if not status_checks:
         return True
@@ -689,6 +696,12 @@ def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     for check in status_checks:
         conclusion = (check.get("conclusion") or "").upper()
         status = (check.get("status") or "").upper()
+        state = (check.get("state") or "").upper()
+        # StatusContext entries carry their result in `state` alone.
+        if state and not status and not conclusion:
+            if state not in allowed:
+                return False
+            continue
         if not status and not conclusion:
             return False
         if status and status != "COMPLETED":
