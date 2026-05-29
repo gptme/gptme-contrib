@@ -122,6 +122,24 @@ def cmd_emit_end(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tail_codex(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import tailer
+
+    client = AWClient(args.server)
+    host = _hostname(args.hostname)
+
+    path: Path | None = Path(args.file) if args.file else tailer.latest_rollout()
+    if path is None:
+        print("no Codex rollout transcripts found", file=sys.stderr)
+        return 0
+    count = tailer.emit_file(client, host, path, pulsetime=args.pulsetime)
+    bid = core.activity_bucket_id(host)
+    print(f"codex activity emitted: {bid} events={count} file={path.name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aw-watcher-agent", description=__doc__)
     parser.add_argument("--strict", action="store_true", help="exit non-zero on errors")
@@ -141,6 +159,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_end.add_argument("--outcome", help="productive / blocked / noop")
     p_end.add_argument("--duration", type=float, help="fallback duration (s) if no start state")
     p_end.set_defaults(func=cmd_emit_end)
+
+    p_tail = sub.add_parser(
+        "tail-codex", help="emit per-tool activity from a Codex rollout transcript"
+    )
+    p_tail.add_argument(
+        "--file", help="rollout JSONL to process (default: latest under ~/.codex/sessions)"
+    )
+    p_tail.add_argument(
+        "--pulsetime",
+        type=float,
+        default=5.0,
+        help="heartbeat merge window in seconds (default: 5.0)",
+    )
+    p_tail.add_argument("--hostname")
+    p_tail.add_argument("--server", default=core_default_server())
+    p_tail.set_defaults(func=cmd_tail_codex)
 
     return parser
 
