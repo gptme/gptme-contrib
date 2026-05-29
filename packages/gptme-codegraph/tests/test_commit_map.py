@@ -91,6 +91,9 @@ def test_map_is_fresh_backward_compat_git_sha_fallback():
         assert commit_map._map_is_fresh(existing, Path("/tmp"), 1) is True
     with patch.object(commit_map, "_git_sha", return_value="sha-2"):
         assert commit_map._map_is_fresh(existing, Path("/tmp"), 1) is False
+    # Git unavailable: can't verify, must treat as stale (not silently fresh).
+    with patch.object(commit_map, "_git_sha", return_value=None):
+        assert commit_map._map_is_fresh(existing, Path("/tmp"), 1) is False
 
 
 def test_save_and_load_roundtrip(tmp_path):

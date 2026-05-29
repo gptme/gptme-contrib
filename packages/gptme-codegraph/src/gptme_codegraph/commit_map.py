@@ -71,8 +71,8 @@ def _git_toplevel(directory: Path) -> Path | None:
     return None
 
 
-def _tracked_source_files(directory: Path) -> list[Path] | None:
-    """Return tracked source files for digesting, or None on git failure."""
+def _tracked_source_files(directory: Path) -> tuple[list[Path], Path] | None:
+    """Return (tracked source files, repo_root) or None on git failure."""
     repo_root = _git_toplevel(directory)
     if repo_root is None:
         return None
@@ -103,20 +103,17 @@ def _tracked_source_files(directory: Path) -> list[Path] | None:
         path = repo_root / rel_path
         if path.is_file():
             files.append(path)
-    return files
+    return files, repo_root
 
 
 def _source_digest(directory: Path) -> tuple[str | None, int]:
     """Return a stable digest of tracked source files plus the file count."""
-    tracked = _tracked_source_files(directory)
-    if tracked is None:
+    result = _tracked_source_files(directory)
+    if result is None:
         return None, 0
 
+    tracked, repo_root = result
     digest = hashlib.sha256()
-    repo_root = _git_toplevel(directory)
-    if repo_root is None:
-        return None, 0
-
     count = 0
     for path in tracked:
         try:
@@ -206,7 +203,10 @@ def _map_is_fresh(
     # Backward-compat fallback for older artifacts without a source_digest.
     current_sha = _git_sha(directory)
     map_sha = existing.get("git_sha")
-    if current_sha and map_sha and current_sha != map_sha:
+    if current_sha is None:
+        # Git unavailable: can't verify freshness, treat as stale to be safe.
+        return False
+    if map_sha and current_sha != map_sha:
         return False
 
     return True
