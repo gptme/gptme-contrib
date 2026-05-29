@@ -4,6 +4,12 @@ Exposes codegraph tools as MCP resources so any MCP-compatible agent
 (Claude Code, Cursor, Codex, gptme) can query code structure without
 a separate CLI invocation.
 
+When to use codegraph: structural / symbol questions — where is `X` defined,
+who calls `X`, what breaks if I change `X`, or "give me a repo skeleton". For
+exact strings use grep/ripgrep; for conceptual "how does this work" questions
+where you don't know the tokens, use semantic search (gptme-rag). Rule of
+thumb: exact text -> grep; concept -> semantic; symbol wiring -> codegraph.
+
 Usage:
     # As an MCP server (stdio transport)
     gptme-codegraph-mcp
