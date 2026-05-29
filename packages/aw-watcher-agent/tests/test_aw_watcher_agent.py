@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -36,6 +37,32 @@ def test_session_data_drops_empty_and_adds_outcome():
     assert "outcome" not in start
     end = core.session_data(args, outcome="productive")
     assert end["outcome"] == "productive"
+
+
+def test_activity_data_drops_empty():
+    args = {
+        "harness": "gptme",
+        "session_id": "8531",
+        "tool": "shell",
+        "status": "success",
+        "workspace": "bob",
+        "model": "",  # dropped — falsy
+        "category": None,  # dropped — falsy
+    }
+    assert core.activity_data(args) == {
+        "harness": "gptme",
+        "session_id": "8531",
+        "tool": "shell",
+        "status": "success",
+        "workspace": "bob",
+    }
+
+
+def test_activity_data_raises_on_missing_tool():
+    with pytest.raises(ValueError, match="tool"):
+        core.activity_data({"harness": "gptme", "tool": "", "status": "success"})
+    with pytest.raises(ValueError, match="tool"):
+        core.activity_data({"harness": "gptme", "status": "success"})
 
 
 def test_state_roundtrip(tmp_path, monkeypatch):
@@ -188,6 +215,80 @@ def test_emit_end_preserves_start_metadata(tmp_path, monkeypatch):
     assert final_data.get("outcome") == "productive"
 
 
+def test_main_empty_tool_is_nonfatal(monkeypatch, capsys):
+    """Empty --tool raises ValueError in activity_data(); main() must catch it non-fatally."""
+    from aw_watcher_agent import cli
+
+    # ensure_bucket: GET /api/0/buckets/ (empty → not found) + POST create.
+    # activity_data() is called after that and raises ValueError for empty tool.
+    monkeypatch.setattr(cli, "AWClient", lambda _url: _FakeClient([(200, {}), (200, None)]))
+    rc = cli.main(["emit-activity", "--tool", "", "--session-id", "s1"])
+    assert rc == 0, "non-strict: empty --tool should exit 0, not raise"
+    captured = capsys.readouterr()
+    assert "ignored" in captured.err, "should print the ignored-error message to stderr"
+
+    # With --strict the same error should propagate as exit 1.
+    monkeypatch.setattr(cli, "AWClient", lambda _url: _FakeClient([(200, {}), (200, None)]))
+    rc_strict = cli.main(["--strict", "emit-activity", "--tool", "", "--session-id", "s1"])
+    assert rc_strict == 1
+
+
+def test_emit_activity_uses_activity_bucket_and_duration(monkeypatch):
+    from aw_watcher_agent import cli
+    import argparse
+
+    args = argparse.Namespace(
+        server="http://localhost:5600",
+        hostname="host",
+        harness="gptme",
+        model=None,
+        category=None,
+        session_id="abc1",
+        trigger=None,
+        workspace="bob",
+        tool="shell",
+        status="success",
+        duration_ms=1500,
+        pulsetime=3.0,
+        strict=False,
+    )
+
+    captured: dict[str, object] = {}
+
+    class _CapturingClient(_FakeClient):
+        def __init__(self):
+            super().__init__([])
+
+        def ensure_bucket(self, bid, etype, client_name, host):
+            captured["ensure"] = (bid, etype, client_name, host)
+            return True
+
+        def heartbeat(self, bid, event, pulsetime):
+            captured["heartbeat"] = (bid, event, pulsetime)
+            return 99
+
+    monkeypatch.setattr(cli, "AWClient", lambda _url: _CapturingClient())
+    rc = cli.cmd_emit_activity(args)
+    assert rc == 0
+    assert captured["ensure"] == (
+        "aw-watcher-agent-activity_host",
+        "app.agent.activity",
+        "aw-watcher-agent",
+        "host",
+    )
+    bid, event, pulsetime = cast(tuple[str, Event, float], captured["heartbeat"])
+    assert bid == "aw-watcher-agent-activity_host"
+    assert event.duration == 1.5
+    assert event.data == {
+        "harness": "gptme",
+        "session_id": "abc1",
+        "tool": "shell",
+        "status": "success",
+        "workspace": "bob",
+    }
+    assert pulsetime == 3.0
+
+
 # --- Codex log-tailer (Phase 2) ---------------------------------------------
 
 import json as _json  # noqa: E402
@@ -280,7 +381,12 @@ def test_activity_to_event_excludes_duration_from_data():
         session_id="sess-1",
     )
     ev = act.to_event()
-    assert ev.data == {"tool": "exec_command", "status": "success", "session_id": "sess-1"}
+    assert ev.data == {
+        "harness": "codex",
+        "tool": "exec_command",
+        "status": "success",
+        "session_id": "sess-1",
+    }
     assert ev.duration == 1.5
     assert "duration_ms" not in ev.data  # keeps same-tool/status blocks mergeable
 
@@ -320,7 +426,12 @@ def test_emit_file_ensures_bucket_and_heartbeats(tmp_path):
     assert seen[1] == (
         "hb",
         "aw-watcher-agent-activity_bob",
-        {"tool": "exec_command", "status": "success", "session_id": "sess-1"},
+        {
+            "harness": "codex",
+            "tool": "exec_command",
+            "status": "success",
+            "session_id": "sess-1",
+        },
         3.0,
     )
 

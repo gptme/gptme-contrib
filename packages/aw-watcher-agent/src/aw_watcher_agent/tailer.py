@@ -94,9 +94,14 @@ class ToolActivity:
     def to_event(self, *, min_duration_s: float = 0.0) -> Event:
         """Build an AW event. ``data`` excludes duration so same-tool/status
         calls merge under heartbeat; the per-call duration drives the block."""
-        data = {"tool": self.tool, "status": self.status}
-        if self.session_id:
-            data["session_id"] = self.session_id
+        data = core.activity_data(
+            {
+                "harness": "codex",
+                "session_id": self.session_id,
+                "tool": self.tool,
+                "status": self.status,
+            }
+        )
         return Event(
             timestamp=self.timestamp,
             duration=max(self.duration_ms / 1000.0, min_duration_s),

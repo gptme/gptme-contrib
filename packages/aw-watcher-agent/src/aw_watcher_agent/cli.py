@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import socket
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from .client import AWClient, AWClientError, Event, utc_now_iso
 from . import core
@@ -122,6 +122,28 @@ def cmd_emit_end(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_emit_activity(args: argparse.Namespace) -> int:
+    client = AWClient(args.server)
+    host = _hostname(args.hostname)
+    bid = core.activity_bucket_id(host)
+    client.ensure_bucket(bid, core.ACTIVITY_BUCKET_TYPE, core.CLIENT_NAME, host)
+
+    duration_ms = max(int(args.duration_ms or 0), 0)
+    duration_s = duration_ms / 1000.0
+    start = datetime.now(timezone.utc) - timedelta(milliseconds=duration_ms)
+    event = Event(
+        timestamp=start.isoformat(),
+        duration=duration_s,
+        data=core.activity_data(vars(args)),
+    )
+    event_id = client.heartbeat(bid, event, pulsetime=float(args.pulsetime))
+    print(
+        f"activity emitted: {bid} event_id={event_id} "
+        f"tool={args.tool} duration_ms={duration_ms}"
+    )
+    return 0
+
+
 def cmd_tail_codex(args: argparse.Namespace) -> int:
     from pathlib import Path
 
@@ -160,6 +182,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_end.add_argument("--duration", type=float, help="fallback duration (s) if no start state")
     p_end.set_defaults(func=cmd_emit_end)
 
+    p_activity = sub.add_parser("emit-activity", help="record one tool activity heartbeat")
+    _add_session_args(p_activity)
+    p_activity.add_argument("--tool", required=True, help="tool name, e.g. shell")
+    p_activity.add_argument(
+        "--status",
+        default="success",
+        help="coarse tool status, e.g. success / error / completed",
+    )
+    p_activity.add_argument(
+        "--duration-ms",
+        dest="duration_ms",
+        type=int,
+        default=0,
+        help="tool duration in milliseconds",
+    )
+    p_activity.add_argument(
+        "--pulsetime",
+        type=float,
+        default=5.0,
+        help="heartbeat merge window in seconds (default: 5.0)",
+    )
+    p_activity.set_defaults(func=cmd_emit_activity)
+
     p_tail = sub.add_parser(
         "tail-codex", help="emit per-tool activity from a Codex rollout transcript"
     )
@@ -184,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (AWClientError, OSError) as exc:
+    except (AWClientError, OSError, ValueError) as exc:
         msg = f"aw-watcher-agent: {exc}"
         if args.strict:
             print(msg, file=sys.stderr)
