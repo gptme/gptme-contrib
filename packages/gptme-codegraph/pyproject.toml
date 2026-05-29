@@ -28,6 +28,7 @@ dev = [
 [project.scripts]
 gptme-codegraph = "gptme_codegraph.core:main"
 gptme-codegraph-mcp = "gptme_codegraph.mcp_server:main"
+gptme-codegraph-commit-map = "gptme_codegraph.commit_map:main"
 
 [build-system]
 requires = ["hatchling"]
