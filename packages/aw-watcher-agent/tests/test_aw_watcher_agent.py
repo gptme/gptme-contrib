@@ -215,6 +215,24 @@ def test_emit_end_preserves_start_metadata(tmp_path, monkeypatch):
     assert final_data.get("outcome") == "productive"
 
 
+def test_main_empty_tool_is_nonfatal(monkeypatch, capsys):
+    """Empty --tool raises ValueError in activity_data(); main() must catch it non-fatally."""
+    from aw_watcher_agent import cli
+
+    # ensure_bucket: GET /api/0/buckets/ (empty → not found) + POST create.
+    # activity_data() is called after that and raises ValueError for empty tool.
+    monkeypatch.setattr(cli, "AWClient", lambda _url: _FakeClient([(200, {}), (200, None)]))
+    rc = cli.main(["emit-activity", "--tool", "", "--session-id", "s1"])
+    assert rc == 0, "non-strict: empty --tool should exit 0, not raise"
+    captured = capsys.readouterr()
+    assert "ignored" in captured.err, "should print the ignored-error message to stderr"
+
+    # With --strict the same error should propagate as exit 1.
+    monkeypatch.setattr(cli, "AWClient", lambda _url: _FakeClient([(200, {}), (200, None)]))
+    rc_strict = cli.main(["--strict", "emit-activity", "--tool", "", "--session-id", "s1"])
+    assert rc_strict == 1
+
+
 def test_emit_activity_uses_activity_bucket_and_duration(monkeypatch):
     from aw_watcher_agent import cli
     import argparse

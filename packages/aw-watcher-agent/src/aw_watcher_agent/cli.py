@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (AWClientError, OSError) as exc:
+    except (AWClientError, OSError, ValueError) as exc:
         msg = f"aw-watcher-agent: {exc}"
         if args.strict:
             print(msg, file=sys.stderr)
