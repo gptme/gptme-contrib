@@ -185,3 +185,140 @@ def test_emit_end_preserves_start_metadata(tmp_path, monkeypatch):
     assert final_data.get("model") == "claude-opus-4-7", "model lost from final event"
     assert final_data.get("workspace") == "bob", "workspace lost from final event"
     assert final_data.get("outcome") == "productive"
+
+
+# --- Codex log-tailer (Phase 2) ---------------------------------------------
+
+import json as _json  # noqa: E402
+
+from aw_watcher_agent import tailer  # noqa: E402
+
+
+def _rollout_lines(records):
+    return [_json.dumps(r) for r in records]
+
+
+def _call(call_id, name, ts):
+    return {
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {"type": "function_call", "name": name, "call_id": call_id},
+    }
+
+
+def _output(call_id, ts, output):
+    return {
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {"type": "function_call_output", "call_id": call_id, "output": output},
+    }
+
+
+def test_activity_bucket_id_is_sibling():
+    assert core.activity_bucket_id("bob") == "aw-watcher-agent-activity_bob"
+    assert core.activity_bucket_id("bob") != core.bucket_id("bob")
+
+
+def test_parse_rollout_pairs_calls_with_outputs():
+    lines = _rollout_lines(
+        [
+            {"type": "session_meta", "payload": {"id": "sess-1", "type": None}},
+            _call("c1", "exec_command", "2026-05-29T05:19:56.055Z"),
+            _output("c1", "2026-05-29T05:19:58.265Z", "Process exited with code 0\nOutput:\nok"),
+            _call("c2", "apply_patch", "2026-05-29T05:20:00.000Z"),
+            _output("c2", "2026-05-29T05:20:00.500Z", "exited with code 1\nboom"),
+        ]
+    )
+    session_id, acts = tailer.parse_rollout(lines)
+    assert session_id == "sess-1"
+    assert [a.tool for a in acts] == ["exec_command", "apply_patch"]
+    assert acts[0].status == "success"
+    assert acts[0].duration_ms == 2210  # 58.265 - 56.055 = 2.210s
+    assert acts[0].session_id == "sess-1"
+    assert acts[1].status == "error"
+    assert acts[1].duration_ms == 500
+
+
+def test_parse_rollout_unpaired_call_gets_zero_duration():
+    lines = _rollout_lines([_call("c9", "read_file", "2026-05-29T05:19:56.055Z")])
+    _, acts = tailer.parse_rollout(lines)
+    assert len(acts) == 1
+    assert acts[0].duration_ms == 0
+    assert acts[0].status == "completed"
+
+
+def test_parse_rollout_ignores_non_tool_records():
+    lines = _rollout_lines(
+        [
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": "hi"}},
+            {"type": "response_item", "payload": {"type": "reasoning", "summary": []}},
+            {"type": "turn_context", "payload": None},
+            "not json at all",
+        ]
+    )
+    session_id, acts = tailer.parse_rollout(lines)
+    assert session_id == ""
+    assert acts == []
+
+
+def test_status_from_output_variants():
+    assert tailer._status_from_output("Process exited with code 0") == "success"
+    assert tailer._status_from_output("exited with code 127") == "error"
+    assert tailer._status_from_output("some normal tool result") == "completed"
+    assert tailer._status_from_output("") == "completed"
+    assert tailer._status_from_output(None) == "completed"
+
+
+def test_activity_to_event_excludes_duration_from_data():
+    act = tailer.ToolActivity(
+        tool="exec_command",
+        status="success",
+        duration_ms=1500,
+        timestamp="2026-05-29T05:19:56.055Z",
+        call_id="c1",
+        session_id="sess-1",
+    )
+    ev = act.to_event()
+    assert ev.data == {"tool": "exec_command", "status": "success", "session_id": "sess-1"}
+    assert ev.duration == 1.5
+    assert "duration_ms" not in ev.data  # keeps same-tool/status blocks mergeable
+
+
+def test_emit_file_ensures_bucket_and_heartbeats(tmp_path):
+    rollout = tmp_path / "rollout-test.jsonl"
+    rollout.write_text(
+        "\n".join(
+            _rollout_lines(
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-1", "type": None}},
+                    _call("c1", "exec_command", "2026-05-29T05:19:56.055Z"),
+                    _output("c1", "2026-05-29T05:19:56.255Z", "Process exited with code 0"),
+                ]
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    seen: list[tuple] = []
+
+    class _Client(_FakeClient):
+        def __init__(self):
+            super().__init__([(200, {})])  # buckets() lookup for ensure_bucket
+
+        def ensure_bucket(self, bid, etype, client_name, host):
+            seen.append(("ensure", bid, etype))
+            return True
+
+        def heartbeat(self, bid, event, pulsetime):
+            seen.append(("hb", bid, event.data, pulsetime))
+            return 1
+
+    count = tailer.emit_file(_Client(), "bob", rollout, pulsetime=3.0)
+    assert count == 1
+    assert seen[0] == ("ensure", "aw-watcher-agent-activity_bob", "app.agent.activity")
+    assert seen[1] == (
+        "hb",
+        "aw-watcher-agent-activity_bob",
+        {"tool": "exec_command", "status": "success", "session_id": "sess-1"},
+        3.0,
+    )

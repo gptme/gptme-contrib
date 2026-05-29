@@ -55,8 +55,30 @@ Point `SessionStart` / `Stop` hooks (in `~/.claude/settings.json`) at the
 (`--strict` to opt in) so a watcher problem never breaks the agent session it
 observes.
 
+### Per-tool activity from Codex (log-tailer)
+
+Codex can't host an in-process hook, so per-tool observability comes from
+tailing its rollout transcripts (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`).
+`tail-codex` pairs each `function_call` with its `function_call_output`, derives
+a coarse `success`/`error`/`completed` status, and emits one
+`app.agent.activity` event per tool call:
+
+```bash
+# Process the most recent rollout transcript
+aw-watcher-agent tail-codex
+
+# Or a specific transcript, with a custom heartbeat merge window
+aw-watcher-agent tail-codex --file ~/.codex/sessions/2026/05/29/rollout-...jsonl --pulsetime 5
+```
+
+Events land in `aw-watcher-agent-activity_<hostname>` (type `app.agent.activity`),
+a sibling of the session bucket. Adjacent same-tool/same-status calls within
+`--pulsetime` seconds merge into one Timeline block. Run it on a timer (or after
+each Codex run) to keep the bucket current.
+
 ## Status
 
 Phase 1 (MVP): session bucket + CLI + REST client, dogfooded against a local
-aw-server. Phase 2 adds per-tool activity heartbeats and a gptme-native plugin
-hook; Phase 3 adds an aw-webui "AI work" view.
+aw-server. Phase 2 (in progress): per-tool `app.agent.activity` heartbeats —
+the Codex log-tailer (`tail-codex`) is shipped; the gptme-native plugin hook is
+the remaining deliverable. Phase 3 adds an aw-webui "AI work" view.
