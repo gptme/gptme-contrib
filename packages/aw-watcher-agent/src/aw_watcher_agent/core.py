@@ -34,6 +34,7 @@ ACTIVITY_BUCKET_TYPE = "app.agent.activity"
 
 # Stable session fields (everything except outcome, which is end-only).
 START_FIELDS = ("harness", "model", "category", "session_id", "trigger", "workspace")
+ACTIVITY_FIELDS = ("harness", "session_id", "tool", "status")
 
 
 def bucket_id(hostname: str) -> str:
@@ -89,3 +90,8 @@ def session_data(args: dict[str, Any], *, outcome: str | None = None) -> dict[st
     if outcome:
         data["outcome"] = str(outcome)
     return data
+
+
+def activity_data(args: dict[str, Any]) -> dict[str, str]:
+    """Build per-tool activity event data, dropping empty values."""
+    return {f: str(args[f]) for f in ACTIVITY_FIELDS if args.get(f)}
