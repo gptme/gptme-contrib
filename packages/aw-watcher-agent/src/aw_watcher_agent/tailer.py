@@ -31,9 +31,6 @@ from . import core
 # Codex marks shell exits as "Process exited with code N" / "exited with code N".
 _EXIT_CODE_RE = re.compile(r"exited with code (\d+)")
 
-# Default duration (s) for a call whose output we never saw (crash / truncation).
-_UNPAIRED_DURATION = 0.0
-
 
 def default_sessions_dir() -> Path:
     """Root of Codex rollout transcripts (honors ``CODEX_HOME``)."""
@@ -44,6 +41,8 @@ def default_sessions_dir() -> Path:
 def latest_rollout(sessions_dir: Path | None = None) -> Path | None:
     """Most recently modified ``rollout-*.jsonl`` under ``sessions_dir``."""
     root = sessions_dir or default_sessions_dir()
+    if not root.exists():
+        return None
     files = sorted(root.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None
 
@@ -129,7 +128,7 @@ def parse_rollout(lines: Iterable[str]) -> tuple[str, list[ToolActivity]]:
 
         if ptype == "function_call":
             call_id = payload.get("call_id")
-            if not isinstance(call_id, str):
+            if not isinstance(call_id, str) or call_id in pending:
                 continue
             pending[call_id] = {
                 "tool": str(payload.get("name") or "unknown"),
