@@ -75,6 +75,8 @@ def get_repo_landmarks(path: str) -> dict[str, object]:
                 landmarks["entry_points"] = [str(m) for m in main_candidates]
             break
 
+    if not p.is_dir():
+        return landmarks
     package_dirs = [d for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")]
     landmarks["subdirectories"] = sorted(d.name for d in package_dirs)
 
@@ -123,10 +125,7 @@ def format_repo_summary(path: str, max_files: int = 10, max_symbols: int = 80) -
     parts.append("")
     parts.append("```txt")
     if repo_map:
-        # Trim per-file detail unless it's short
-        lines = repo_map.split("\n")
-        for line in lines[: max_files * 3 + 5]:
-            parts.append(line)
+        parts.append(repo_map)
     else:
         parts.append("(no repo-map data)")
     parts.append("```")
