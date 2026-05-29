@@ -34,7 +34,16 @@ ACTIVITY_BUCKET_TYPE = "app.agent.activity"
 
 # Stable session fields (everything except outcome, which is end-only).
 START_FIELDS = ("harness", "model", "category", "session_id", "trigger", "workspace")
-ACTIVITY_FIELDS = ("harness", "session_id", "tool", "status")
+ACTIVITY_FIELDS = (
+    "harness",
+    "session_id",
+    "tool",
+    "status",
+    "model",
+    "category",
+    "trigger",
+    "workspace",
+)
 
 
 def bucket_id(hostname: str) -> str:
@@ -93,5 +102,11 @@ def session_data(args: dict[str, Any], *, outcome: str | None = None) -> dict[st
 
 
 def activity_data(args: dict[str, Any]) -> dict[str, str]:
-    """Build per-tool activity event data, dropping empty values."""
+    """Build per-tool activity event data, dropping empty values.
+
+    Raises ValueError if 'tool' is absent or empty — it is the semantic
+    discriminator for per-tool heartbeats and cannot be safely omitted.
+    """
+    if not args.get("tool"):
+        raise ValueError("activity_data: 'tool' is required but missing or empty")
     return {f: str(args[f]) for f in ACTIVITY_FIELDS if args.get(f)}

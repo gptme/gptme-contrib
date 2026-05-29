@@ -45,14 +45,24 @@ def test_activity_data_drops_empty():
         "session_id": "8531",
         "tool": "shell",
         "status": "success",
-        "workspace": "bob",  # not part of activity payload
+        "workspace": "bob",
+        "model": "",  # dropped — falsy
+        "category": None,  # dropped — falsy
     }
     assert core.activity_data(args) == {
         "harness": "gptme",
         "session_id": "8531",
         "tool": "shell",
         "status": "success",
+        "workspace": "bob",
     }
+
+
+def test_activity_data_raises_on_missing_tool():
+    with pytest.raises(ValueError, match="tool"):
+        core.activity_data({"harness": "gptme", "tool": "", "status": "success"})
+    with pytest.raises(ValueError, match="tool"):
+        core.activity_data({"harness": "gptme", "status": "success"})
 
 
 def test_state_roundtrip(tmp_path, monkeypatch):
@@ -256,6 +266,7 @@ def test_emit_activity_uses_activity_bucket_and_duration(monkeypatch):
         "session_id": "abc1",
         "tool": "shell",
         "status": "success",
+        "workspace": "bob",
     }
     assert pulsetime == 3.0
 
