@@ -248,7 +248,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     symbols_shown = map_data.get("symbols_shown", 0)
     print(f"Saved repo map to {output_path}")
     print(f"  {files_shown} files, {symbols_shown} symbols shown")
-    print(format_repo_map(map_data))
+    print(format_repo_map({**map_data, "directory": str(directory)}))
 
     return 0
 
