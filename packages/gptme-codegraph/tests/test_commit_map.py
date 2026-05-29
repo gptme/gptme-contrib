@@ -71,6 +71,19 @@ def test_map_is_fresh_rejects_old_age():
     assert commit_map._map_is_fresh(existing, Path("/tmp"), 1) is False
 
 
+def test_map_is_fresh_rejects_timezone_naive_generated():
+    # A hand-crafted or older-tool artifact may omit the UTC offset.
+    # datetime.fromisoformat("2024-01-01T12:00:00") succeeds but the
+    # subsequent subtraction from timezone.utc raises TypeError — must return False, not crash.
+    naive_iso = "2024-01-01T12:00:00"  # no "+00:00"
+    existing = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "generated": naive_iso,
+        "source_digest": "digest",
+    }
+    assert commit_map._map_is_fresh(existing, Path("/tmp"), 365) is False
+
+
 def test_map_is_fresh_rejects_version_mismatch():
     existing = {
         "version": commit_map.ARTIFACT_VERSION + 1,

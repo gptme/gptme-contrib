@@ -186,7 +186,7 @@ def _map_is_fresh(
             age = datetime.now(timezone.utc) - generated
             if age > timedelta(days=stale_after_days):
                 return False
-        except ValueError:
+        except (ValueError, TypeError):
             return False
     else:
         return False
