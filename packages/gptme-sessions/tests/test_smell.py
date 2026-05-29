@@ -59,7 +59,7 @@ def test_specific_tells_caught():
     """High-confidence tells fire on their trigger phrases."""
     labels = {h["label"] for h in detect_smells(SMELLY_PROSE)["hits"]}
     assert "delve" in labels
-    assert "tapestry" in labels
+    assert "tapestry of" in labels
     assert "it's not just X, it's Y" in labels
     assert "it's worth noting" in labels
 

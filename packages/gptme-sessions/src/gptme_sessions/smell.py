@@ -49,7 +49,7 @@ _RAW_PATTERNS: list[tuple[str, int, str, str]] = [
     ("hedging", 2, r"\bat the end of the day\b", "at the end of the day"),
     # --- ChatGPT vocabulary tics (high confidence) ---
     ("vocab_strong", 3, r"\bdelv(?:e|ing|es)\b", "delve"),
-    ("vocab_strong", 3, r"\btapestr(?:y|ies)\b", "tapestry"),
+    ("vocab_strong", 3, r"\btapestr(?:y|ies)\b(?!\s+of\b)", "tapestry"),
     ("vocab_strong", 3, r"\b(?:a |)testament to\b", "testament to"),
     ("vocab_strong", 3, r"\bin the realm of\b", "in the realm of"),
     (
@@ -173,8 +173,8 @@ def compute_smell_score(journal_path: str | Path) -> float | None:
     """Read *journal_path* and return a scaled smell score (0.0–1.0).
 
     Returns ``None`` if the file cannot be read or is empty.  The raw
-    ``weighted_score`` is sigmoid-scaled: a score of 0 → 0.0 (clean voice),
-    ~10 → ~0.5, ≥30 → ~1.0.
+    ``weighted_score`` is exponentially scaled: a score of 0 → 0.0 (clean voice),
+    ~10 → ~0.49 (moderate), ~30 → ~0.86 (heavy LLM voice).
     """
     try:
         text = Path(journal_path).read_text(encoding="utf-8", errors="replace")
@@ -184,9 +184,9 @@ def compute_smell_score(journal_path: str | Path) -> float | None:
         return None
     report = detect_smells(text)
     raw = report["weighted_score"]
-    # Sigmoid: map raw weighted_score to 0.0-1.0 range.
-    #  0    → ~0.0  (clean technical prose)
-    #  10   → ~0.5  (moderate)
-    #  30   → ~0.95 (heavy LLM voice)
-    scaled = 1.0 / (1.0 + math.exp(-(raw - 10) / 6.0))
+    # Exponential approach to 1: maps raw weighted_score to 0.0-1.0 range.
+    #  0    → 0.0   (clean technical prose)
+    #  ~10  → ~0.49 (moderate)
+    #  ~30  → ~0.86 (heavy LLM voice)
+    scaled = 1.0 - math.exp(-raw / 15.0)
     return round(scaled, 4)
