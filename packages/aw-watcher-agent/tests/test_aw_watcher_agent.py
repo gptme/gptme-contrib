@@ -460,6 +460,67 @@ def test_emit_file_incremental_appends_new_calls(tmp_path, monkeypatch):
     assert seen == ["read_file"], "only new call should emit"
 
 
+def test_emit_file_does_not_advance_cursor_past_inflight_tail_call(tmp_path, monkeypatch):
+    """Cursor stops short of in-flight tail calls; they emit correctly after output arrives."""
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    rollout = tmp_path / "rollout-inflight.jsonl"
+
+    # c1 is paired; c2 is in-flight (no output yet).
+    rollout.write_text(
+        "\n".join(
+            _rollout_lines(
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-1", "type": None}},
+                    _call("c1", "exec_command", "2026-05-29T05:19:56.055Z"),
+                    _output("c1", "2026-05-29T05:19:56.255Z", "Process exited with code 0"),
+                    _call("c2", "apply_patch", "2026-05-29T05:20:00.000Z"),
+                    # c2 output not yet written — in-flight
+                ]
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    seen: list[str] = []
+
+    class _Client(_FakeClient):
+        def __init__(self):
+            super().__init__([])
+
+        def ensure_bucket(self, bid, etype, client_name, host):
+            return True
+
+        def heartbeat(self, bid, event, pulsetime):
+            seen.append(event.data["tool"])
+            return 1
+
+    # Run 1: only c1 emitted; cursor stops before in-flight c2.
+    count1 = tailer.emit_file(_Client(), "bob", rollout)
+    assert count1 == 1
+    assert seen == ["exec_command"]
+    cur = tailer._read_cursor(rollout)
+    assert cur is not None
+    assert cur["last_index"] == 0  # cursor stopped before in-flight c2
+
+    # Simulate c2's output arriving.
+    seen.clear()
+    with open(rollout, "a", encoding="utf-8") as f:
+        f.write(
+            "\n"
+            + _rollout_lines(
+                [_output("c2", "2026-05-29T05:20:00.500Z", "exited with code 1\nboom")]
+            )[0]
+        )
+
+    # Run 2: c2 now has output and emits with correct status/duration.
+    count2 = tailer.emit_file(_Client(), "bob", rollout)
+    assert count2 == 1
+    assert seen == ["apply_patch"]
+    cur = tailer._read_cursor(rollout)
+    assert cur is not None
+    assert cur["last_index"] == 1  # cursor now covers c2
+
+
 def test_emit_file_no_cursor_on_empty_activities(tmp_path, monkeypatch):
     """No-op when the rollout file has no tool calls (no cursor written)."""
     monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)

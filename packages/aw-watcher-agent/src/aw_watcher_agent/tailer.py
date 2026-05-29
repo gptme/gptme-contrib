@@ -89,6 +89,7 @@ class ToolActivity:
     timestamp: str  # ISO 8601 start time (the function_call timestamp)
     call_id: str
     session_id: str
+    paired: bool = True  # False when function_call_output not yet in transcript
 
     def to_event(self, *, min_duration_s: float = 0.0) -> Event:
         """Build an AW event. ``data`` excludes duration so same-tool/status
@@ -194,6 +195,7 @@ def parse_rollout(lines: Iterable[str]) -> tuple[str, list[ToolActivity]]:
                 timestamp=start,
                 call_id=call_id,
                 session_id=session_id,
+                paired="end" in call,
             )
         )
     return session_id, activities
@@ -226,13 +228,24 @@ def emit_file(
     if not new:
         return 0
 
+    # Stop short of trailing unpaired (in-flight) calls so the cursor never
+    # advances past a call whose output hasn't arrived yet.  Unpaired calls in
+    # the middle of the list (orphaned by a crash) are still emitted.
+    last_paired_pos = len(new) - 1
+    while last_paired_pos >= 0 and not new[last_paired_pos].paired:
+        last_paired_pos -= 1
+
+    to_emit = new[: last_paired_pos + 1]
+    if not to_emit:
+        return 0
+
     bucket = core.activity_bucket_id(hostname)
     client.ensure_bucket(bucket, core.ACTIVITY_BUCKET_TYPE, core.CLIENT_NAME, hostname)
-    for activity in new:
+    for activity in to_emit:
         client.heartbeat(bucket, activity.to_event(), pulsetime=pulsetime)
 
-    # Advance the cursor to the last activity we just emitted.
-    final_index = last_index + len(new)
-    final_ts = new[-1].timestamp
+    # Advance the cursor to the last emitted (paired) activity.
+    final_index = last_index + len(to_emit)
+    final_ts = to_emit[-1].timestamp
     _write_cursor(path, final_index, final_ts)
-    return len(new)
+    return len(to_emit)
