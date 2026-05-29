@@ -23,13 +23,45 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from .client import AWClient, Event
 from . import core
 
 # Codex marks shell exits as "Process exited with code N" / "exited with code N".
 _EXIT_CODE_RE = re.compile(r"exited with code (\d+)")
+
+
+# ---------------------------------------------------------------------------
+# Cursor helpers: prevent duplicate emission when tail-codex is re-run on the
+# same rollout file (e.g. from a timer).  We persist the 0-based index and
+# timestamp of the last emitted activity so emit_file only sends new calls.
+# ---------------------------------------------------------------------------
+
+
+def _cursor_path(rollout_path: Path) -> Path:
+    """Path to the cursor state file for a given rollout."""
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "_", str(rollout_path.absolute()))
+    return core.state_dir() / f"cursor-{safe}.json"
+
+
+def _read_cursor(rollout_path: Path) -> dict[str, Any] | None:
+    """Last-emitted cursor for *rollout_path*, or ``None``."""
+    path = _cursor_path(rollout_path)
+    if not path.exists():
+        return None
+    try:
+        return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_cursor(rollout_path: Path, last_index: int, last_timestamp: str) -> None:
+    """Persist the cursor after emitting activities."""
+    path = _cursor_path(rollout_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {"last_index": last_index, "last_timestamp": last_timestamp}
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def default_sessions_dir() -> Path:
@@ -174,17 +206,33 @@ def emit_file(
     *,
     pulsetime: float = 5.0,
 ) -> int:
-    """Parse one rollout file and emit its tool activities. Returns the count.
+    """Parse one rollout file and emit **new** tool activities since the last run.
+
+    Uses a cursor file (alongside the rollout) to skip previously-emitted
+    calls, so timer-driven runs do not duplicate historical heartbeats.
+    Returns the count of activities actually emitted this invocation.
 
     ``pulsetime`` controls heartbeat merging: consecutive same-tool/same-status
     calls within this many seconds collapse into a single Timeline block.
     """
+    cursor = _read_cursor(path)
+    last_index = cursor.get("last_index", -1) if cursor else -1
+
     text = path.read_text(encoding="utf-8", errors="replace")
     _, activities = parse_rollout(text.splitlines())
-    if not activities:
+
+    # Only emit calls that are new since the last cursor position.
+    new = activities[last_index + 1 :]
+    if not new:
         return 0
+
     bucket = core.activity_bucket_id(hostname)
     client.ensure_bucket(bucket, core.ACTIVITY_BUCKET_TYPE, core.CLIENT_NAME, hostname)
-    for activity in activities:
+    for activity in new:
         client.heartbeat(bucket, activity.to_event(), pulsetime=pulsetime)
-    return len(activities)
+
+    # Advance the cursor to the last activity we just emitted.
+    final_index = last_index + len(new)
+    final_ts = new[-1].timestamp
+    _write_cursor(path, final_index, final_ts)
+    return len(new)

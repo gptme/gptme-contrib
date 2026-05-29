@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 
 import pytest
 
@@ -322,3 +323,162 @@ def test_emit_file_ensures_bucket_and_heartbeats(tmp_path):
         {"tool": "exec_command", "status": "success", "session_id": "sess-1"},
         3.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Cursor tests: verify incremental emission prevents duplicate heartbeats.
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_path_is_stable_and_distinct(tmp_path, monkeypatch):
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    p1 = tailer._cursor_path(Path("/tmp/sessions/2026/05/29/rollout-abc.jsonl"))
+    p2 = tailer._cursor_path(Path("/tmp/sessions/2026/05/29/rollout-abc.jsonl"))
+    p3 = tailer._cursor_path(Path("/tmp/sessions/2026/05/29/rollout-def.jsonl"))
+    assert str(p1) == str(p2), "same rollout → same cursor path"
+    assert str(p1) != str(p3), "different rollout → different cursor path"
+
+
+def test_cursor_read_write_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    rollout = Path("/fake/rollout.jsonl")
+    tailer._write_cursor(rollout, 5, "2026-05-29T05:30:00Z")
+    cur = tailer._read_cursor(rollout)
+    assert cur is not None
+    assert cur["last_index"] == 5
+    assert cur["last_timestamp"] == "2026-05-29T05:30:00Z"
+
+
+def test_cursor_read_missing_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    cur = tailer._read_cursor(Path("/nonexistent/rollout.jsonl"))
+    assert cur is None
+
+
+def test_emit_file_incremental_only_emits_new_calls(tmp_path, monkeypatch):
+    """First run emits all 2 calls; second run emits 0 (cursor advanced)."""
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    rollout = tmp_path / "rollout-test.jsonl"
+    rollout.write_text(
+        "\n".join(
+            _rollout_lines(
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-1", "type": None}},
+                    _call("c1", "exec_command", "2026-05-29T05:19:56.055Z"),
+                    _output("c1", "2026-05-29T05:19:56.255Z", "Process exited with code 0"),
+                    _call("c2", "apply_patch", "2026-05-29T05:20:00.000Z"),
+                    _output("c2", "2026-05-29T05:20:00.500Z", "exited with code 1\nboom"),
+                ]
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    seen: list[tuple] = []
+
+    class _Client(_FakeClient):
+        def __init__(self):
+            super().__init__([])
+
+        def ensure_bucket(self, bid, etype, client_name, host):
+            seen.append(("ensure", bid))
+            return True
+
+        def heartbeat(self, bid, event, pulsetime):
+            seen.append(("hb", bid, event.data["tool"]))
+            return 1
+
+    # First run: emits both calls, writes cursor.
+    count1 = tailer.emit_file(_Client(), "bob", rollout, pulsetime=3.0)
+    assert count1 == 2
+    assert seen == [
+        ("ensure", "aw-watcher-agent-activity_bob"),
+        ("hb", "aw-watcher-agent-activity_bob", "exec_command"),
+        ("hb", "aw-watcher-agent-activity_bob", "apply_patch"),
+    ]
+
+    # Verify cursor was written.
+    cur = tailer._read_cursor(rollout)
+    assert cur is not None
+    assert cur["last_index"] == 1  # 0-based index of the last (2nd) activity
+    assert cur["last_timestamp"] == "2026-05-29T05:20:00.000Z"  # start of apply_patch
+
+    # Second run: nothing emitted (file unchanged, cursor already advanced).
+    seen.clear()
+    count2 = tailer.emit_file(_Client(), "bob", rollout, pulsetime=3.0)
+    assert count2 == 0
+    assert seen == []  # No ensure, no heartbeats — everything already emitted.
+
+
+def test_emit_file_incremental_appends_new_calls(tmp_path, monkeypatch):
+    """First run emits calls 1-2; after appending a 3rd call, only call 3 emits."""
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    rollout = tmp_path / "rollout-test.jsonl"
+
+    # Write initial 2-call transcript.
+    initial_lines = _rollout_lines(
+        [
+            {"type": "session_meta", "payload": {"id": "sess-1", "type": None}},
+            _call("c1", "exec_command", "2026-05-29T05:19:56.055Z"),
+            _output("c1", "2026-05-29T05:19:56.255Z", "Process exited with code 0"),
+            _call("c2", "apply_patch", "2026-05-29T05:20:00.000Z"),
+            _output("c2", "2026-05-29T05:20:00.500Z", "exited with code 1\nboom"),
+        ]
+    )
+    rollout.write_text("\n".join(initial_lines), encoding="utf-8")
+
+    seen: list[str] = []
+
+    class _Client(_FakeClient):
+        def __init__(self):
+            super().__init__([])
+
+        def ensure_bucket(self, bid, etype, client_name, host):
+            return True
+
+        def heartbeat(self, bid, event, pulsetime):
+            seen.append(event.data["tool"])
+            return 1
+
+    # First run.
+    tailer.emit_file(_Client(), "bob", rollout)
+    assert seen == ["exec_command", "apply_patch"]
+    seen.clear()
+
+    # Append a 3rd call.
+    extra_lines = _rollout_lines(
+        [
+            _call("c3", "read_file", "2026-05-29T05:21:00.000Z"),
+            _output("c3", "2026-05-29T05:21:00.350Z", "Process exited with code 0"),
+        ]
+    )
+    with open(rollout, "a", encoding="utf-8") as f:
+        f.write("\n" + "\n".join(extra_lines))
+
+    # Second run: only the new call emits.
+    tailer.emit_file(_Client(), "bob", rollout)
+    assert seen == ["read_file"], "only new call should emit"
+
+
+def test_emit_file_no_cursor_on_empty_activities(tmp_path, monkeypatch):
+    """No-op when the rollout file has no tool calls (no cursor written)."""
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
+    rollout = tmp_path / "empty.jsonl"
+    rollout.write_text(
+        "\n".join(
+            _rollout_lines([{"type": "session_meta", "payload": {"id": "sess-1", "type": None}}])
+        ),
+        encoding="utf-8",
+    )
+
+    class _Client(_FakeClient):
+        def __init__(self):
+            super().__init__([])
+
+        def ensure_bucket(self, bid, etype, client_name, host):
+            return True
+
+    count = tailer.emit_file(_Client(), "bob", rollout)
+    assert count == 0
+    # Cursor should NOT be created when there's nothing to emit.
+    assert tailer._read_cursor(rollout) is None
