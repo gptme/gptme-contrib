@@ -177,6 +177,25 @@ def test_generate_map_metadata_not_overwritten_by_repo_map(tmp_path):
     assert result["source_file_count"] == 5
 
 
+def test_generate_map_directory_is_portable(tmp_path):
+    # build_repo_map() returns an absolute build path, but the committed
+    # artifact must be reproducible across clones/CI — the top-level directory
+    # is pinned to "." regardless of where the map was generated.
+    abs_dir_repo_map = {
+        "directory": str(tmp_path),
+        "files": [],
+        "files_shown": 0,
+    }
+    with (
+        patch.object(commit_map, "build_repo_map", return_value=abs_dir_repo_map),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+    ):
+        result = commit_map.generate_map(tmp_path)
+
+    assert result["directory"] == "."
+
+
 def test_cmd_refresh_force_regenerates_fresh_map(tmp_path):
     # --refresh --force must regenerate even when the map is already fresh.
     output = tmp_path / commit_map.DEFAULT_OUTPUT_FILE

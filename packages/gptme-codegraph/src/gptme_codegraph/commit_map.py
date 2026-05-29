@@ -145,6 +145,14 @@ def generate_map(
 
     return {
         **repo_map,
+        # The committed artifact lives in the repo it maps, so the absolute
+        # build path from build_repo_map() is non-portable: it leaks the
+        # generating machine's filesystem layout and churns the diff across
+        # clones/CI. Per-file paths are already repo-relative; pin the
+        # top-level directory to "." so the artifact is reproducible anywhere.
+        # (The live MCP server keeps the absolute path — it is a query
+        # response, not a committed file.)
+        "directory": ".",
         "version": ARTIFACT_VERSION,
         "generated": datetime.now(timezone.utc).isoformat(),
         "generator": "gptme-codegraph-commit-map",
