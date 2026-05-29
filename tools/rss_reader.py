@@ -27,6 +27,7 @@ import pickle
 import re
 import sys
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -623,6 +624,25 @@ def format_validation_result(
     return "\n".join(lines)
 
 
+def describe_feed_failure(feed: feedparser.FeedParserDict) -> str:
+    """Describe why a bozo feed failed, distinguishing fetch from parse errors.
+
+    feedparser sets ``feed.bozo`` for two very different situations: a network
+    failure (DNS/connection/timeout, where ``bozo_exception`` is a urllib/OS
+    error) and a genuine parse error (malformed XML). Reporting a network
+    failure as "Failed to parse feed" sends you debugging the wrong layer, so
+    classify by the exception type.
+    """
+    exc = feed.get("bozo_exception")
+    if isinstance(exc, urllib.error.URLError):
+        return f"Failed to fetch feed (network error): {exc.reason}"
+    # ConnectionError/TimeoutError are OSError subclasses, so OSError covers
+    # the remaining socket/connection/timeout failures.
+    if isinstance(exc, OSError):
+        return f"Failed to fetch feed (network error): {exc}"
+    return f"Failed to parse feed: {exc}"
+
+
 def fetch_feed_safe(
     source_name: str, url: str, cache: FeedCache | None = None
 ) -> tuple[str, feedparser.FeedParserDict | None]:
@@ -643,7 +663,7 @@ def fetch_feed_safe(
         feed = feedparser.parse(url)
         if feed.bozo:
             console.print(
-                f"[yellow]Warning: Failed to parse {source_name}: {feed.bozo_exception}[/yellow]"
+                f"[yellow]Warning: {describe_feed_failure(feed)} ({source_name})[/yellow]"
             )
             return source_name, None
 
@@ -707,8 +727,8 @@ def fetch_feed(url: str, cache: FeedCache | None = None) -> feedparser.FeedParse
         sys.exit(1)
 
     feed = feedparser.parse(url)
-    if feed.bozo:  # feedparser sets this flag for malformed feeds
-        console.print(f"[red]Error: Failed to parse feed: {feed.bozo_exception}[/red]")
+    if feed.bozo:  # feedparser sets this for malformed feeds AND fetch errors
+        console.print(f"[red]Error: {describe_feed_failure(feed)}[/red]")
         sys.exit(1)
 
     # Cache successful fetch
