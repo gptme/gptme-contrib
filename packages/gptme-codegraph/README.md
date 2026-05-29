@@ -59,6 +59,30 @@ gptme-codegraph path/to/file.py def my_function
 gptme-codegraph path/to/repo map
 ```
 
+### Committed repo-map artifact
+
+"Analyze once, commit the graph." Generate a `.gptme-codegraph-map.json` that
+teammates and agents can read for a repo's structural outline without re-running
+the tree-sitter pipeline:
+
+```bash
+# Generate and save the artifact at <repo>/.gptme-codegraph-map.json
+gptme-codegraph-commit-map path/to/repo
+
+# Check freshness (exit 0 = fresh, 1 = stale/missing) — for pre-commit/CI gating
+gptme-codegraph-commit-map path/to/repo --check
+
+# Regenerate only if stale (use in a pre-commit hook); --force always regenerates
+gptme-codegraph-commit-map path/to/repo --refresh
+```
+
+Freshness is keyed off a digest of the tracked source files (`*.py`, `*.ts`,
+`*.tsx`, `*.js`, `*.rs`), not `HEAD` — so an artifact regenerated in a
+pre-commit hook stays fresh after the commit that contains it lands. The default
+staleness window is 1 day (`--stale-after-days N` to change it). The artifact is
+structural only (paths, class/function names, nesting) — no source, comments, or
+values — so it is safe to commit to any repo.
+
 ### MCP Server
 
 ```bash
