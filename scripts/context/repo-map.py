@@ -11,65 +11,14 @@ Usage:
 """
 
 import argparse
-import json
 import subprocess
-import sys
 from pathlib import Path
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # gptme-contrib root
-_CODEGRAPH_COMMIT_MAP = _REPO_ROOT / "scripts" / "codegraph-commit-map.py"
-_COMMITTED_MAP_FILE = ".gptme-codegraph-map.json"
-_CODEGRAPH_SRC = _REPO_ROOT / "packages" / "gptme-codegraph" / "src"
-
-if _CODEGRAPH_SRC.is_dir():
-    sys.path.insert(0, str(_CODEGRAPH_SRC))
-
-try:
-    from gptme_codegraph.core import format_repo_map  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - exercised only in degraded local envs
-    format_repo_map = None
-
-
-def _load_committed_repo_map(path: str) -> str | None:
-    """Return a fresh committed repo-map artifact when available."""
-    if format_repo_map is None:
-        return None
-
-    directory = Path(path).resolve()
-    artifact_path = directory / _COMMITTED_MAP_FILE
-    if not artifact_path.exists():
-        return None
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(_CODEGRAPH_COMMIT_MAP),
-            str(directory),
-            "--check",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-
-    try:
-        with artifact_path.open() as f:
-            repo_map = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    return str(format_repo_map(repo_map))
 
 
 def get_repo_map(
     path: str, max_files: int = 10, max_symbols: int = 80
 ) -> tuple[str, str]:
     """Return repo-map text plus the source used to produce it."""
-    committed_map = _load_committed_repo_map(path)
-    if committed_map:
-        return committed_map, f"committed artifact ({_COMMITTED_MAP_FILE})"
-
     cmd = [
         "uv",
         "run",
@@ -81,8 +30,16 @@ def get_repo_map(
         "--max-symbols",
         str(max_symbols),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    output = (result.stdout or "") + (result.stderr or "")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return "(gptme-codegraph timed out)", "live gptme-codegraph (error)"
+
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "unknown error").strip()
+        return f"(gptme-codegraph failed: {error})", "live gptme-codegraph (error)"
+
+    output = result.stdout or ""
     return output.strip(), "live gptme-codegraph"
 
 
