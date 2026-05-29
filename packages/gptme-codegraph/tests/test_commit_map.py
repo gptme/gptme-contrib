@@ -137,3 +137,64 @@ def test_cmd_check_fresh_map_exits_zero(tmp_path):
     )
     with patch.object(commit_map, "_source_digest", return_value=("digest", 1)):
         assert commit_map.cmd_check(args) == 0
+
+
+def test_generate_map_metadata_not_overwritten_by_repo_map(tmp_path):
+    # If build_repo_map returns keys that collide with freshness metadata, the
+    # explicit metadata values must win.
+    colliding_repo_map = {
+        "version": 999,
+        "source_digest": "WRONG",
+        "source_file_count": 0,
+        "files": [],
+        "files_shown": 2,
+    }
+    with (
+        patch.object(commit_map, "build_repo_map", return_value=colliding_repo_map),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "_source_digest", return_value=("correct-digest", 5)),
+    ):
+        result = commit_map.generate_map(tmp_path)
+
+    assert result["version"] == commit_map.ARTIFACT_VERSION
+    assert result["source_digest"] == "correct-digest"
+    assert result["source_file_count"] == 5
+
+
+def test_cmd_refresh_force_regenerates_fresh_map(tmp_path):
+    # --refresh --force must regenerate even when the map is already fresh.
+    output = tmp_path / commit_map.DEFAULT_OUTPUT_FILE
+    data = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "source_digest": "digest",
+        "git_sha": "sha",
+    }
+    output.write_text(json.dumps(data))
+
+    args = argparse.Namespace(
+        directory=str(tmp_path),
+        output=commit_map.DEFAULT_OUTPUT_FILE,
+        stale_after_days=1,
+        max_files=20,
+        max_symbols_per_file=12,
+        force=True,
+    )
+
+    with (
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+        patch.object(
+            commit_map,
+            "build_repo_map",
+            return_value={"files": [], "files_shown": 0, "symbols_shown": 0},
+        ),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "format_repo_map", return_value=""),
+    ):
+        result = commit_map.cmd_refresh(args)
+
+    assert result == 0
+    # Map must have been rewritten (new generated timestamp differs from original).
+    loaded = commit_map._load_existing_map(output)
+    assert loaded is not None
+    assert loaded.get("source_file_count") == 1

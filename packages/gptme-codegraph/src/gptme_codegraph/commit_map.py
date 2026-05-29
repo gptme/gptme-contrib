@@ -12,10 +12,12 @@ Usage:
     python3 -m gptme_codegraph.commit_map <repo-dir> [--output FILE]
     python3 -m gptme_codegraph.commit_map <repo-dir> --check
     python3 -m gptme_codegraph.commit_map <repo-dir> --refresh
+    python3 -m gptme_codegraph.commit_map <repo-dir> --refresh --force
     python3 -m gptme_codegraph.commit_map <repo-dir> --stale-after-days N
 
 Or via the installed console script:
     gptme-codegraph-commit-map <repo-dir> --refresh
+    gptme-codegraph-commit-map <repo-dir> --refresh --force
 """
 
 from __future__ import annotations
@@ -145,13 +147,13 @@ def generate_map(
     )
 
     return {
+        **repo_map,
         "version": ARTIFACT_VERSION,
         "generated": datetime.now(timezone.utc).isoformat(),
         "generator": "gptme-codegraph-commit-map",
         "git_sha": _git_sha(directory),
         "source_digest": source_digest,
         "source_file_count": source_file_count,
-        **repo_map,
         "max_files": max_files,
         "max_symbols_per_file": max_symbols_per_file,
     }
@@ -324,8 +326,10 @@ def main() -> None:
         action="store_true",
         help="Check freshness and regenerate if stale",
     )
-    mode.add_argument(
-        "--force", action="store_true", help="Force refresh even if fresh"
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force refresh even if fresh (use with --refresh)",
     )
 
     args = parser.parse_args()
