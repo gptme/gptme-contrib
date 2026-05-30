@@ -34,23 +34,26 @@ VALID_TARGET_GRADE_FIELDS = frozenset(
 
 
 class LessonValidator:
-    """Validates lesson structure and content.
+    """Validates lesson and skill structure and content.
 
-    Supports two lesson formats:
+    Supports two lesson formats and one skill format:
     1. Original format: Full lesson with all sections in one file
     2. Two-file format: Concise primary lesson + companion documentation
+    3. Skill format: Anthropic SKILL.md standard (auto-detected by path/frontmatter)
 
     Attributes:
         ORIGINAL_REQUIRED_SECTIONS: List of required sections for original format
         TWO_FILE_REQUIRED_SECTIONS: List of required sections for two-file format
+        SKILL_REQUIRED_FRONTMATTER_FIELDS: Required frontmatter fields for skills
         MIN_FAILURE_SIGNALS: Minimum number of failure signals required
         MIN_VERIFICATION_ITEMS: Minimum number of verification checklist items
         MIN_AUTOMATION_HOOKS: Minimum number of automation hooks
-        filepath: Path to lesson file being validated
-        content: Content of lesson file
+        filepath: Path to lesson/skill file being validated
+        content: Content of lesson/skill file
         errors: List of validation errors
         warnings: List of validation warnings
-        format_type: Detected lesson format ('original' or 'two-file')
+        format_type: Detected format ('original', 'two-file', or 'skill')
+        is_skill: Whether the file is a skill (SKILL.md)
     """
 
     # Original format (verbose, all-in-one)
@@ -83,17 +86,31 @@ class LessonValidator:
     MIN_VERIFICATION_ITEMS = 1
     MIN_AUTOMATION_HOOKS = 1
 
+    SKILL_REQUIRED_FRONTMATTER_FIELDS = frozenset({"name", "description"})
+
     def __init__(self, filepath: Path):
-        """Initialize validator for a lesson file.
+        """Initialize validator for a lesson or skill file.
 
         Args:
-            filepath: Path to lesson file to validate
+            filepath: Path to lesson/skill file to validate
         """
         self.filepath = filepath
         self.content = filepath.read_text()
         self.errors: List[str] = []
         self.warnings: List[str] = []
         self.format_type: str | None = None
+        self.is_skill = self._detect_skill()
+
+    def _detect_skill(self) -> bool:
+        """Detect whether this file is a skill (SKILL.md format).
+
+        Detection is path-based only: files must be named ``SKILL.md``.
+        Frontmatter-based heuristics were removed because they can silently
+        reclassify a partially-authored lesson (with ``name`` + ``description``
+        but no ``match.keywords``) as a skill, bypassing all lesson-section
+        checks and reporting it as valid.
+        """
+        return self.filepath.name == "SKILL.md"
 
     def _detect_format(self) -> str:
         """Detect which format this lesson uses.
@@ -128,23 +145,74 @@ class LessonValidator:
         return "original"
 
     def validate(self) -> bool:
-        """Run all validation checks on the lesson file.
+        """Run all validation checks on the lesson/skill file.
 
         Returns:
-            True if lesson passes all validation checks, False otherwise
+            True if file passes all validation checks, False otherwise
         """
         self._check_frontmatter()
 
-        # Detect format
-        self.format_type = self._detect_format()
-
-        # Validate based on format
-        if self.format_type == "two-file":
-            self._validate_two_file_format()
+        # Skills skip lesson-format section checks
+        if self.is_skill:
+            self.format_type = "skill"
+            self._validate_skill()
         else:
-            self._validate_original_format()
+            self.format_type = self._detect_format()
+
+            if self.format_type == "two-file":
+                self._validate_two_file_format()
+            else:
+                self._validate_original_format()
 
         return len(self.errors) == 0
+
+    def _validate_skill(self):
+        """Validate a skill file (SKILL.md format).
+
+        Checks frontmatter for required fields (name, description), ensures
+        the body is non-empty, and warns if the file is unusually long.
+        """
+        # Check frontmatter has required fields
+        if self.content.startswith("---"):
+            try:
+                end_idx = self.content.index("---", 3)
+                frontmatter = yaml.safe_load(self.content[3:end_idx])
+                if not isinstance(frontmatter, dict):
+                    self.errors.append("Frontmatter must be a mapping")
+                    return
+
+                for field in self.SKILL_REQUIRED_FRONTMATTER_FIELDS:
+                    if field not in frontmatter:
+                        self.errors.append(
+                            f"Missing required SKILL.md frontmatter field: {field}"
+                        )
+                    elif (
+                        not isinstance(frontmatter[field], str)
+                        or not frontmatter[field].strip()
+                    ):
+                        self.errors.append(
+                            f"SKILL.md frontmatter field '{field}' must be a non-empty string"
+                        )
+
+            except (ValueError, yaml.YAMLError) as e:
+                self.errors.append(f"Invalid YAML frontmatter: {e}")
+                return
+        else:
+            # _check_frontmatter() already appended "Missing YAML frontmatter"
+            return
+
+        # Check body is non-empty
+        body = self.content[end_idx + 3 :].strip()
+        if not body:
+            self.errors.append("SKILL.md body is empty")
+
+        # Warn on unusually long skills
+        body_lines = len(body.split("\n"))
+        if body_lines > 200:
+            self.warnings.append(
+                f"Skill body is {body_lines} lines. Consider if content can be condensed "
+                "or split into a companion doc."
+            )
 
     def _check_frontmatter(self):
         """Check for required YAML frontmatter and validate structure.
@@ -212,7 +280,17 @@ class LessonValidator:
                 # not operational state; safe to keep in frontmatter.
                 "metadata",
             }
+            # Skill files use different frontmatter fields (name, description, license, etc.)
             extra_fields = set(frontmatter.keys()) - allowed_fields
+            if self.is_skill:
+                skill_allowed = {
+                    "name",
+                    "license",
+                    "keywords",
+                    "compatibility",
+                    "tags",
+                }
+                extra_fields = extra_fields - skill_allowed
             if extra_fields:
                 self.warnings.append(
                     f"Frontmatter should be minimal. Consider removing: {', '.join(extra_fields)}"
@@ -580,7 +658,11 @@ class LessonValidator:
 
     def print_results(self, verbose: bool = False):
         """Print validation results."""
-        format_label = "two-file" if self.format_type == "two-file" else "original"
+        format_label = (
+            self.format_type
+            if self.format_type in ("two-file", "skill")
+            else "original"
+        )
 
         if self.errors:
             print(
@@ -598,7 +680,7 @@ class LessonValidator:
             for warning in self.warnings:
                 print(f"  - {warning}")
 
-        if not self.errors and not self.warnings:
+        if not self.errors:
             print(f"✅ {self.filepath.name} is valid ({format_label} format)")
 
 
