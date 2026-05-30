@@ -20,7 +20,8 @@
     "packages/lib/src/lib/**",
     "packages/gptodo/src/gptodo/**",
     "scripts/communication_utils/**",
-    "packages/gptme-codegraph/**"
+    "packages/gptme-codegraph/**",
+    "scripts/github_resolver/test_*.py"
   ],
   "minTokens": 50,
   "minLines": 5,
