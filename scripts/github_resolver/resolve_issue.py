@@ -210,11 +210,23 @@ def extract_tool_errors(gptme_output: str) -> list[str]:
     return unique
 
 
+def count_tool_errors(gptme_output: str) -> int:
+    """Count raw (possibly repeated) tool execution errors in gptme's stdout log.
+
+    Unlike :func:`extract_tool_errors`, this does NOT deduplicate — two identical
+    ``Error during execution`` lines count as two errors.  This is the right
+    operand to compare against :func:`count_write_tool_calls` to decide whether
+    ALL write calls failed, because gptme emits one error line per failing tool
+    invocation even when the error message is identical.
+    """
+    return len(_ERROR_RE.findall(gptme_output))
+
+
 def count_write_tool_calls(gptme_output: str) -> int:
     """Count patch/save tool invocations in gptme's stdout log.
 
     Each ``\\`\\`\\`patch`` or ``\\`\\`\\`save`` block in the model output represents
-    one write tool call.  Used together with :func:`extract_tool_errors` to
+    one write tool call.  Used together with :func:`count_tool_errors` to
     determine whether *all* writes failed — for example when a submodule bump
     makes the worktree dirty but every actual patch errored.
     """
@@ -564,7 +576,8 @@ def main(argv: list[str] | None = None) -> int:
     if status == "changes" and worktree_dirty:
         tool_errors = extract_tool_errors(gptme_output or "")
         write_calls = count_write_tool_calls(gptme_output or "")
-        if write_calls > 0 and len(tool_errors) >= write_calls:
+        error_count = count_tool_errors(gptme_output or "")
+        if write_calls > 0 and error_count >= write_calls:
             # All write tool calls errored — reclassify and fall through to the
             # partial-work / error path below so the incidental changes are
             # pushed as a partial attempt, not as a false-positive success PR.
