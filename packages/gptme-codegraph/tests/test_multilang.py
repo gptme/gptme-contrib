@@ -593,8 +593,8 @@ def test_rust_symbol_locations(rust_module: Path):
 def test_parse_rust_function_calls(rust_module: Path):
     """Rust: calls are extracted from function bodies."""
     result = parse_file(rust_module)
-    multiply = next(s for s in result.symbols if s.name == "multiply")
-    assert multiply.calls is not None
+    multiply = next((s for s in result.symbols if s.name == "multiply"), None)
+    assert multiply is not None, "multiply symbol not found in parse result"
     assert "multiply_internal" in multiply.calls
 
 
@@ -603,8 +603,10 @@ def test_parse_rust_impl_method_calls(rust_module: Path):
     """Rust: calls are extracted from impl method bodies."""
     result = parse_file(rust_module)
     # add() body is `a + b` — no calls expected (no call_expression)
-    add_sym = next(s for s in result.symbols if s.name == "add")
+    add_sym = next((s for s in result.symbols if s.name == "add"), None)
+    assert add_sym is not None, "add symbol not found in parse result"
     assert add_sym.calls == []
-    # with_max() has a method-chain style but no call_expression in a simple body
-    with_max = next(s for s in result.symbols if s.name == "with_max")
-    assert with_max.calls is not None  # list, possibly empty
+    # with_max() body is `self.max_value = max; self` — no call_expression
+    with_max = next((s for s in result.symbols if s.name == "with_max"), None)
+    assert with_max is not None, "with_max symbol not found in parse result"
+    assert with_max.calls == []
