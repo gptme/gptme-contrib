@@ -34,6 +34,15 @@ Read the issue and decide:
   for that.
 - If tests exist and your change is code-touching, add or update the most
   obviously relevant test.
+
+- **Validate your changes took effect.** After calling `save` or `patch`,
+  verify the tool succeeded. If you see an error like `Patch failed: original
+  chunk not found in file`, retry at least 2 more times — read the current
+  file content and rewrite the patch with correct line matches, or fall back
+  to a full-file `save`. If still failing after retries, do NOT claim
+  `RESOLVER_STATUS: changes` — emit `no_changes` instead with the failure
+  reason.
+
 - If you make changes, end your run with a short summary in this exact format:
 
     ```
@@ -49,4 +58,7 @@ Read the issue and decide:
     ```
 
 The workflow parses those final markers to decide whether to open a draft PR
-or post a failure comment. Keep the markers verbatim.
+or post a failure comment. Keep the markers verbatim. Only emit
+`RESOLVER_STATUS: changes` when file content was **actually modified** on
+disk. If a tool call failed or the file was unchanged, always emit
+`no_changes`.
