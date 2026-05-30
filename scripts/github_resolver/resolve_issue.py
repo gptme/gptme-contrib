@@ -458,7 +458,12 @@ def push_existing_head(
 
 
 def _repo_default_branch(repo: str) -> str:
-    """Return the default branch of *repo*, falling back to 'master'."""
+    """Return the default branch of *repo*, falling back to 'master'.
+
+    The fallback exists so that a transient gh error (network, rate-limit)
+    does not abort the whole PR-creation flow.  Auth failures are logged to
+    stderr so they remain visible in CI logs.
+    """
     try:
         name = gh(
             [
@@ -473,7 +478,12 @@ def _repo_default_branch(repo: str) -> str:
             ]
         ).strip()
         return name or "master"
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(
+            f"[resolver] warning: could not determine default branch for {repo!r}"
+            f" (gh exited {e.returncode}); falling back to 'master'.\n"
+            f"  stderr: {(e.stderr or '').strip()}\n"
+        )
         return "master"
 
 
