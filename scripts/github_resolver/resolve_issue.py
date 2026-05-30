@@ -178,6 +178,33 @@ def parse_status(gptme_output: str) -> tuple[str, str]:
     return "no_changes", (m.group(1).strip() if m else "(no reason provided)")
 
 
+_ERROR_RE = re.compile(
+    r"Error during execution:\s*(.+)",
+    re.MULTILINE,
+)
+
+
+def extract_tool_errors(gptme_output: str) -> list[str]:
+    """Extract tool execution errors from gptme's stdout log.
+
+    gptme emits ``System: Error during execution: <description>`` when a tool
+    call raises.  The model often ignores these and hallucinates success.  This
+    helper surfaces the raw failure evidence for the orchestrator's error
+    message so a human reviewing the issue comment sees actionable diagnostics
+    without downloading the session artifact.
+    """
+    errors = _ERROR_RE.findall(gptme_output)
+    # Deduplicate while preserving order (same error repeated N times).
+    seen: set[str] = set()
+    unique: list[str] = []
+    for e in errors:
+        line = e.strip()
+        if line not in seen:
+            seen.add(line)
+            unique.append(line)
+    return unique
+
+
 def has_git_changes(cwd: Path) -> bool:
     out = git(["status", "--porcelain"], cwd=cwd)
     return bool(out.strip())
@@ -297,6 +324,23 @@ def github_push_url(repo: str, auth_token: str) -> str:
     return f"https://x-access-token:{quote(auth_token, safe='')}@github.com/{repo}.git"
 
 
+def remote_branch_exists(
+    cwd: Path,
+    branch: str,
+    *,
+    remote_url: str | None = None,
+) -> bool:
+    """Return True if *branch* already exists on the remote.
+
+    Uses the explicit *remote_url* when given (token-authenticated CI path),
+    otherwise queries the ``origin`` remote.  The check is done with
+    ``git ls-remote --heads`` which works without a configured remote name.
+    """
+    remote = remote_url or "origin"
+    output = git(["ls-remote", "--heads", remote, branch], cwd=cwd)
+    return bool(output.strip())
+
+
 def push_branch(
     cwd: Path,
     branch: str,
@@ -305,17 +349,32 @@ def push_branch(
     auth_token: str | None = None,
 ) -> None:
     if auth_token and repo:
+        push_url = github_push_url(repo, auth_token)
+        # ``--force-with-lease`` requires a remote tracking ref to compare
+        # against.  When pushing via an explicit URL (no named remote) the
+        # tracking ref is never updated, so a re-trigger run always sees a
+        # "stale" ref and is rejected.  Use plain ``--force`` for the URL
+        # path: the resolver branch is exclusively owned by the resolver
+        # workflow and concurrent runs are serialised by the caller's
+        # ``concurrency`` group, so ``--force`` is safe for both new
+        # branches and re-trigger pushes.
         git(
             [
                 "push",
-                "--force-with-lease",
-                github_push_url(repo, auth_token),
+                "--force",
+                push_url,
                 f"HEAD:refs/heads/{branch}",
             ],
             cwd=cwd,
         )
         return
-    git(["push", "--force-with-lease", "origin", branch], cwd=cwd)
+    # Named-remote path (local / non-CI use): --force-with-lease works
+    # correctly because git can track the remote ref via origin.
+    exists = remote_branch_exists(cwd, branch)
+    if exists:
+        git(["push", "--force-with-lease", "origin", branch], cwd=cwd)
+    else:
+        git(["push", "-u", "origin", branch], cwd=cwd)
 
 
 def commit_and_push(
@@ -509,10 +568,22 @@ def main(argv: list[str] | None = None) -> int:
     # gptme said "changes" but worktree is clean — treat as a failed attempt.
     if status == "changes" and not worktree_dirty:
         status = "error"
-        message = (
-            "gptme reported changes but no files were modified. "
-            f"Upstream message: {message}"
-        )
+        # Surface tool execution errors so the issue comment shows actionable
+        # diagnostics without downloading the session artifact.  If no tool
+        # errors are found, fall back to the generic description.
+        tool_errors = extract_tool_errors(gptme_output or "")
+        if tool_errors:
+            errors_block = "\n".join(f"- `{e}`" for e in tool_errors)
+            message = (
+                "gptme reported changes but no files were modified. "
+                f"Tool execution errors found in the session log:\n{errors_block}\n\n"
+                f"Upstream summary: {message}"
+            )
+        else:
+            message = (
+                "gptme reported changes but no files were modified. "
+                f"Upstream message: {message}"
+            )
 
     # no_changes / error: preserve partial work if present, including an
     # unsolicited direct commit that moved HEAD but left the worktree clean.

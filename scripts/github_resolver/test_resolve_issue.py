@@ -157,6 +157,38 @@ def test_status_regex_ignores_prose_mentions():
     assert status == "error"
 
 
+def test_extract_tool_errors_returns_empty_when_none():
+    out = "RESOLVER_STATUS: changes\nRESOLVER_SUMMARY: something\n"
+    assert resolve_issue.extract_tool_errors(out) == []
+
+
+def test_extract_tool_errors_finds_errors():
+    out = (
+        "some work\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "more work\n"
+        "System: Error during execution: another failure\n"
+        "RESOLVER_STATUS: changes\n"
+    )
+    errors = resolve_issue.extract_tool_errors(out)
+    assert len(errors) == 2
+    assert "Patch failed" in errors[0]
+    assert "another failure" in errors[1]
+
+
+def test_extract_tool_errors_deduplicates_consecutive_identical_errors():
+    out = (
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+    )
+    errors = resolve_issue.extract_tool_errors(out)
+    assert len(errors) == 1
+
+
+def test_extract_tool_errors_handles_empty_string():
+    assert resolve_issue.extract_tool_errors("") == []
+
+
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1 ("a pull request … already exists").
     # open_draft_pr must catch CalledProcessError and return the existing PR URL
@@ -287,6 +319,7 @@ def test_detect_repo_state_violation_on_unexpected_commit(tmp_path):
 
 
 def test_push_branch_uses_explicit_github_token(monkeypatch, tmp_path):
+    """URL-based push always uses --force (no tracking ref available via URL)."""
     calls: list[list[str]] = []
 
     def fake_git(args, *, check=True, cwd=None):
@@ -304,13 +337,40 @@ def test_push_branch_uses_explicit_github_token(monkeypatch, tmp_path):
         auth_token="token-123",
     )
 
+    push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
     assert calls == [
-        [
-            "push",
-            "--force-with-lease",
-            "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git",
-            "HEAD:refs/heads/gptme-resolver/issue-42",
-        ]
+        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
+    ]
+
+
+def test_push_branch_uses_force_on_existing_branch(monkeypatch, tmp_path):
+    """Re-trigger push (branch already exists on remote): still uses --force.
+
+    --force-with-lease requires a local tracking ref that URL-based pushes never
+    create, so it always fails on re-trigger.  --force is safe because the
+    resolver branch is exclusively owned by the resolver workflow and concurrent
+    runs are serialised by the caller's concurrency group.
+    """
+    calls: list[list[str]] = []
+
+    def fake_git(args, *, check=True, cwd=None):
+        del check
+        assert cwd == tmp_path
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(resolve_issue, "git", fake_git)
+
+    resolve_issue.push_branch(
+        tmp_path,
+        "gptme-resolver/issue-42",
+        repo="gptme/gptme-contrib",
+        auth_token="token-123",
+    )
+
+    push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
+    assert calls == [
+        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
     ]
 
 
