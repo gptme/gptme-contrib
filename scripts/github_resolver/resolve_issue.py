@@ -183,6 +183,16 @@ _ERROR_RE = re.compile(
     re.MULTILINE,
 )
 
+_WRITE_TOOL_ERROR_RE = re.compile(
+    r"Error during execution:\s*(?:Patch failed|save failed)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+_WRITE_TOOL_RE = re.compile(
+    r"^\s*```(?:patch|save)\s",
+    re.MULTILINE,
+)
+
 
 def extract_tool_errors(gptme_output: str) -> list[str]:
     """Extract tool execution errors from gptme's stdout log.
@@ -203,6 +213,34 @@ def extract_tool_errors(gptme_output: str) -> list[str]:
             seen.add(line)
             unique.append(line)
     return unique
+
+
+def count_tool_errors(gptme_output: str) -> int:
+    """Count raw (possibly repeated) write-tool errors in gptme's stdout log.
+
+    Unlike :func:`extract_tool_errors`, this does NOT deduplicate — two identical
+    ``Error during execution: Patch failed`` lines count as two errors.  This is
+    the right operand to compare against :func:`count_write_tool_calls` to decide
+    whether ALL write calls failed, because gptme emits one error line per failing
+    tool invocation even when the error message is identical.
+
+    Only write-tool errors (Patch failed / save failed) are counted.  Unrelated
+    tool errors (e.g. a shell command that failed) are intentionally excluded so
+    that a session with one successful patch and one incidental non-write error
+    does not incorrectly trigger the reclassification guard.
+    """
+    return len(_WRITE_TOOL_ERROR_RE.findall(gptme_output))
+
+
+def count_write_tool_calls(gptme_output: str) -> int:
+    """Count patch/save tool invocations in gptme's stdout log.
+
+    Each ``\\`\\`\\`patch`` or ``\\`\\`\\`save`` block in the model output represents
+    one write tool call.  Used together with :func:`count_tool_errors` to
+    determine whether *all* writes failed — for example when a submodule bump
+    makes the worktree dirty but every actual patch errored.
+    """
+    return len(_WRITE_TOOL_RE.findall(gptme_output))
 
 
 def has_git_changes(cwd: Path) -> bool:
@@ -541,29 +579,47 @@ def main(argv: list[str] | None = None) -> int:
         if upstream_message:
             message = f"{message} Upstream result: {upstream_message}"
 
-    # gptme said "changes" — but only trust it if git actually sees changes.
+    # gptme said "changes" — but only trust it if git actually sees changes AND
+    # at least one write tool call succeeded.  If every patch/save errored, the
+    # worktree is dirty for incidental reasons (e.g. a submodule bump) and
+    # opening a draft PR would be bogus.
     if status == "changes" and worktree_dirty:
-        if args.dry_run:
-            print(f"[dry-run] Would push {branch} and open draft PR: {message}")
+        tool_errors = extract_tool_errors(gptme_output or "")
+        write_calls = count_write_tool_calls(gptme_output or "")
+        error_count = count_tool_errors(gptme_output or "")
+        if write_calls > 0 and error_count >= write_calls:
+            # All write tool calls errored — reclassify and fall through to the
+            # partial-work / error path below so the incidental changes are
+            # pushed as a partial attempt, not as a false-positive success PR.
+            status = "error"
+            errors_block = "\n".join(f"- `{e}`" for e in tool_errors)
+            message = (
+                f"gptme reported changes but all {write_calls} write tool "
+                f"call(s) errored. Tool execution errors:\n{errors_block}\n\n"
+                f"Upstream summary: {message}"
+            )
+        else:
+            if args.dry_run:
+                print(f"[dry-run] Would push {branch} and open draft PR: {message}")
+                return 0
+            commit_and_push(
+                args.workdir,
+                branch,
+                commit_message=f"gptme-resolver attempt for #{issue.number}\n\n{message}",
+                repo=args.repo,
+                auth_token=auth_token,
+            )
+            pr_url = open_draft_pr(args.repo, issue.number, branch, message)
+            comment_on_issue(
+                args.repo,
+                issue.number,
+                status="changes",
+                message=message,
+                branch=branch,
+                pr_url=pr_url,
+            )
+            print(f"Opened draft PR for #{issue.number} at {pr_url}")
             return 0
-        commit_and_push(
-            args.workdir,
-            branch,
-            commit_message=f"gptme-resolver attempt for #{issue.number}\n\n{message}",
-            repo=args.repo,
-            auth_token=auth_token,
-        )
-        pr_url = open_draft_pr(args.repo, issue.number, branch, message)
-        comment_on_issue(
-            args.repo,
-            issue.number,
-            status="changes",
-            message=message,
-            branch=branch,
-            pr_url=pr_url,
-        )
-        print(f"Opened draft PR for #{issue.number} at {pr_url}")
-        return 0
 
     # gptme said "changes" but worktree is clean — treat as a failed attempt.
     if status == "changes" and not worktree_dirty:
