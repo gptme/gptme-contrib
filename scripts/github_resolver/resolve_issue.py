@@ -324,6 +324,23 @@ def github_push_url(repo: str, auth_token: str) -> str:
     return f"https://x-access-token:{quote(auth_token, safe='')}@github.com/{repo}.git"
 
 
+def remote_branch_exists(
+    cwd: Path,
+    branch: str,
+    *,
+    remote_url: str | None = None,
+) -> bool:
+    """Return True if *branch* already exists on the remote.
+
+    Uses the explicit *remote_url* when given (token-authenticated CI path),
+    otherwise queries the ``origin`` remote.  The check is done with
+    ``git ls-remote --heads`` which works without a configured remote name.
+    """
+    remote = remote_url or "origin"
+    output = git(["ls-remote", "--heads", remote, branch], cwd=cwd)
+    return bool(output.strip())
+
+
 def push_branch(
     cwd: Path,
     branch: str,
@@ -332,17 +349,33 @@ def push_branch(
     auth_token: str | None = None,
 ) -> None:
     if auth_token and repo:
+        push_url = github_push_url(repo, auth_token)
+        # ``--force-with-lease`` requires a remote tracking ref to compare
+        # against.  When pushing via an explicit URL (no named remote) the
+        # tracking ref is never updated, so a re-trigger run always sees a
+        # "stale" ref and fails.  Use plain ``--force`` for the URL path:
+        # the resolver branch is exclusively owned by the resolver workflow
+        # and concurrent runs are serialised by the caller's ``concurrency``
+        # group, so ``--force`` is safe here.
+        exists = remote_branch_exists(cwd, branch, remote_url=push_url)
+        flag = "--force-with-lease" if exists else "--force"
         git(
             [
                 "push",
-                "--force-with-lease",
-                github_push_url(repo, auth_token),
+                flag,
+                push_url,
                 f"HEAD:refs/heads/{branch}",
             ],
             cwd=cwd,
         )
         return
-    git(["push", "--force-with-lease", "origin", branch], cwd=cwd)
+    # Named-remote path (local / non-CI use): --force-with-lease works
+    # correctly because git can track the remote ref via origin.
+    exists = remote_branch_exists(cwd, branch)
+    if exists:
+        git(["push", "--force-with-lease", "origin", branch], cwd=cwd)
+    else:
+        git(["push", "-u", "origin", branch], cwd=cwd)
 
 
 def commit_and_push(
