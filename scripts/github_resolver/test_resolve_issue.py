@@ -227,6 +227,19 @@ def test_count_tool_errors_handles_empty_string():
     assert resolve_issue.count_tool_errors("") == 0
 
 
+def test_count_tool_errors_ignores_non_write_tool_errors():
+    # A shell command error should NOT count as a write-tool error.
+    # Greptile finding: error_count >= write_calls must only fire on write-tool
+    # errors, not on incidental non-write errors.
+    out = (
+        "```patch src/foo.py\n<<<< ORIGINAL\nold\n====\nnew\n>>>> UPDATED\n```\n"
+        "System: Error during execution: shell: command not found\n"
+    )
+    # 1 write call, 0 write-tool errors — should NOT trigger reclassification
+    assert resolve_issue.count_write_tool_calls(out) == 1
+    assert resolve_issue.count_tool_errors(out) == 0
+
+
 @pytest.fixture
 def local_git_repo(tmp_path):
     """Bare origin + clone with an initial commit, wired for resolver tests."""
