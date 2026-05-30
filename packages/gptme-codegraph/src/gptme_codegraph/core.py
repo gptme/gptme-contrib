@@ -1101,6 +1101,8 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
                 # Determine kind: methods are inside impl_item
                 kind = "method" if parent_kind == "impl" else "function"
                 parent_class = parent_scope if kind == "method" else None
+                body_node = node.child_by_field_name("body")
+                calls = _extract_calls(body_node) if body_node else []
                 symbols.append(
                     Symbol(
                         name=name,
@@ -1109,6 +1111,7 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
                         start_line=node.start_point[0] + 1,
                         end_line=node.end_point[0] + 1,
                         parent_class=parent_class,
+                        calls=list(set(calls)),
                     )
                 )
             return
