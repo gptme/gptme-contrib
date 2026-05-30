@@ -11,7 +11,6 @@ match:
   - "before/after timing"
   - "p50 = "
   - "is the bottleneck"
-  - optimized before measuring
   - "pytest --profile"
   session_categories: [code, infrastructure]
 status: active

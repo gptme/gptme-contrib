@@ -2,7 +2,6 @@
 description: "Use the structured 4-phase approach (status, selection, execution, completion) for every autonomous session"
 match:
   keywords:
-  - session structure lesson
   - 4-phase session
   - session phase planning
   - structured autonomous session

@@ -12,7 +12,6 @@ match:
 
   - straying from highest-leverage
   - trapped in maintenance loops
-  - self-reinforcing bad behavior
   - churning on low-value tasks
   - looking busy without shipping
   - plateau detector says category_monotony
