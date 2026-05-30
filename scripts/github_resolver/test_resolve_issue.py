@@ -189,6 +189,152 @@ def test_extract_tool_errors_handles_empty_string():
     assert resolve_issue.extract_tool_errors("") == []
 
 
+def test_count_write_tool_calls_returns_zero_when_none():
+    out = "RESOLVER_STATUS: changes\nRESOLVER_SUMMARY: something\n"
+    assert resolve_issue.count_write_tool_calls(out) == 0
+
+
+def test_count_write_tool_calls_counts_patch_and_save():
+    out = (
+        "Let me patch the file:\n"
+        "```patch src/foo.py\n"
+        "<<<<<<< ORIGINAL\nold\n=======\nnew\n>>>>>>> UPDATED\n"
+        "```\n"
+        "System: Error during execution: Patch failed: original chunk not found\n"
+        "Let me try save instead:\n"
+        "```save src/bar.py\nnew content\n```\n"
+        "System: Error during execution: save failed\n"
+    )
+    assert resolve_issue.count_write_tool_calls(out) == 2
+
+
+def test_count_write_tool_calls_handles_empty_string():
+    assert resolve_issue.count_write_tool_calls("") == 0
+
+
+def test_main_reclassifies_status_when_all_writes_errored_despite_dirty_worktree(
+    monkeypatch, tmp_path
+):
+    """Canary-#824 regression: submodule bump + all patches failed → no bogus draft PR."""
+    bare = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    out_dir = tmp_path / "out"
+
+    subprocess.run(
+        ["git", "init", "--bare", str(bare)], check=True, stdout=subprocess.DEVNULL
+    )
+    subprocess.run(
+        ["git", "clone", str(bare), str(repo)], check=True, stdout=subprocess.DEVNULL
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "master"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "resolver-test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "resolver-test@example.com"],
+        check=True,
+    )
+    (repo / "note.txt").write_text("old\n")
+    subprocess.run(["git", "-C", str(repo), "add", "note.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "push",
+            "-u",
+            "origin",
+            "master",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    issue = resolve_issue.Issue(
+        number=42,
+        title="Fix note",
+        body="Update note",
+        author="alice",
+        labels=["bug"],
+    )
+    comments: list[str] = []
+    draft_prs: list[str] = []
+
+    def fake_fetch_issue(repo_name, issue_number):
+        return issue
+
+    gptme_stdout = (
+        "Let me patch the file:\n"
+        "```patch note.txt\n"
+        "<<<<<<< ORIGINAL\nold\n=======\nnew\n>>>>>>> UPDATED\n"
+        "```\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "RESOLVER_STATUS: changes\n"
+        "RESOLVER_SUMMARY: Updated note.\n"
+    )
+
+    def fake_run_gptme(prompt, *, model=None, workdir):
+        # Simulate incidental worktree change (e.g. submodule bump) without a
+        # successful patch — the worktree is dirty but all writes errored.
+        (workdir / "incidental.txt").write_text("side-effect\n")
+        return (gptme_stdout, "")
+
+    def fake_comment(repo_name, issue_number, body):
+        comments.append(body)
+
+    def fake_open_draft_pr(repo_name, issue_number, branch, message):
+        draft_prs.append(message)
+        return "https://github.com/gptme/gptme-contrib/pull/99"
+
+    monkeypatch.setattr(resolve_issue, "fetch_issue", fake_fetch_issue)
+    monkeypatch.setattr(resolve_issue, "run_gptme", fake_run_gptme)
+    monkeypatch.setattr(resolve_issue, "post_issue_comment", fake_comment)
+    monkeypatch.setattr(resolve_issue, "open_draft_pr", fake_open_draft_pr)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    rc = resolve_issue.main(
+        [
+            "--repo",
+            "local/test",
+            "--issue",
+            "42",
+            "--workdir",
+            str(repo),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    # Must NOT open a draft PR when all writes failed.
+    assert draft_prs == [], f"Unexpected draft PR opened: {draft_prs}"
+    # Must comment with the error and tool error details.
+    assert len(comments) == 1
+    assert "write tool call" in comments[0]
+    assert "Patch failed" in comments[0]
+
+
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1 ("a pull request … already exists").
     # open_draft_pr must catch CalledProcessError and return the existing PR URL
