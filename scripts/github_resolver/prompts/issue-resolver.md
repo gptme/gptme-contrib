@@ -35,6 +35,13 @@ Read the issue and decide:
 - If tests exist and your change is code-touching, add or update the most
   obviously relevant test.
 
+- **Read existing files before editing them.** Before calling `patch` or
+  `save` on any file that already exists, first read the current on-disk
+  content from `$PWD` (for example with `cat path/to/file`). Build your edit
+  from that exact content. Do NOT write patch chunks from memory, issue text,
+  or assumed file contents. If the file does not exist yet, you may create it
+  directly.
+
 - **Validate your changes took effect.** After calling `save` or `patch`,
   verify the tool succeeded. If you see an error like `Patch failed: original
   chunk not found in file`, retry up to 2 more times — read the current
