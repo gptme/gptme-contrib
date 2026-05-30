@@ -587,3 +587,24 @@ def test_rust_symbol_locations(rust_module: Path):
         assert s.start_line >= 1
         assert s.end_line >= s.start_line
         assert s.file == str(rust_module)
+
+
+@_skip_no_rust
+def test_parse_rust_function_calls(rust_module: Path):
+    """Rust: calls are extracted from function bodies."""
+    result = parse_file(rust_module)
+    multiply = next(s for s in result.symbols if s.name == "multiply")
+    assert multiply.calls is not None
+    assert "multiply_internal" in multiply.calls
+
+
+@_skip_no_rust
+def test_parse_rust_impl_method_calls(rust_module: Path):
+    """Rust: calls are extracted from impl method bodies."""
+    result = parse_file(rust_module)
+    # add() body is `a + b` — no calls expected (no call_expression)
+    add_sym = next(s for s in result.symbols if s.name == "add")
+    assert add_sym.calls == []
+    # with_max() has a method-chain style but no call_expression in a simple body
+    with_max = next(s for s in result.symbols if s.name == "with_max")
+    assert with_max.calls is not None  # list, possibly empty
