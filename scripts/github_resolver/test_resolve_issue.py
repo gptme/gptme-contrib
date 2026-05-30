@@ -455,9 +455,9 @@ def test_main_reclassifies_status_when_two_identical_write_errors_despite_dirty_
 
 
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
-    # On re-trigger, `gh pr create` exits 1 ("a pull request … already exists").
-    # open_draft_pr must catch CalledProcessError and return the existing PR URL
-    # via `gh pr view` so the caller can still post the issue comment.
+    # On re-trigger, `gh pr create` exits 1. open_draft_pr must probe for an
+    # existing open PR via `gh pr list --head` and return its URL so the caller
+    # can still post the issue comment — without relying on gh's stderr wording.
     calls: list[list[str]] = []
 
     def fake_gh(args, **_kw):
@@ -468,7 +468,7 @@ def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
                 "a pull request for branch 'gptme-resolver/issue-42' already exists"
             )
             raise err
-        if args[0] == "pr" and args[1] == "view":
+        if args[0] == "pr" and args[1] == "list":
             return "https://github.com/gptme/gptme-contrib/pull/99\n"
         return ""
 
@@ -477,8 +477,34 @@ def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
         "gptme/gptme-contrib", 42, "gptme-resolver/issue-42", "fixed the crash"
     )
     assert url == "https://github.com/gptme/gptme-contrib/pull/99"
-    # Verify we fell back to `gh pr view`
-    assert any(a[0] == "pr" and a[1] == "view" for a in calls)
+    # Verify we probed with `gh pr list --head` rather than assuming.
+    list_call = next(c for c in calls if c[0] == "pr" and c[1] == "list")
+    assert "--head" in list_call and "gptme-resolver/issue-42" in list_call
+
+
+def test_open_draft_pr_reraises_when_probe_finds_no_pr(monkeypatch):
+    """A create failure with no existing PR must propagate the original error.
+
+    Even when stderr happens to mention "already exists", the explicit probe is
+    authoritative: if `gh pr list` returns no PR, surface the create failure
+    instead of masking it.
+    """
+    calls: list[list[str]] = []
+
+    def fake_gh(args, **_kw):
+        calls.append(args)
+        if args[0] == "pr" and args[1] == "create":
+            raise _cpe(stderr="HTTP 422: validation failed (no commits between …)")
+        if args[0] == "pr" and args[1] == "list":
+            return ""  # no open PR for this branch
+        return ""
+
+    monkeypatch.setattr(resolve_issue, "gh", fake_gh)
+    with pytest.raises(subprocess.CalledProcessError):
+        resolve_issue.open_draft_pr(
+            "org/repo", 42, "gptme-resolver/issue-42", "summary"
+        )
+    assert any(c[0] == "pr" and c[1] == "list" for c in calls)
 
 
 def test_run_gptme_uses_restricted_tools_and_sanitized_env(monkeypatch, tmp_path):

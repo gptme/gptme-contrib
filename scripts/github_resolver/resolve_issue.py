@@ -505,15 +505,49 @@ def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> st
             ]
         )
     except subprocess.CalledProcessError as e:
-        # Only treat as "PR already exists" when gh explicitly says so.
-        # A bare except used to swallow unrelated errors (e.g. missing --base
-        # outside a git workdir, auth issues) and mask the real failure with a
-        # confusing "no pull requests found for branch" secondary error.
-        stderr = (e.stderr or "").lower()
-        if "already exists" not in stderr:
-            raise
-        raw = gh(["pr", "view", "--repo", repo, "--json", "url", "-q", ".url", branch])
+        # `gh pr create` fails for many reasons (auth, missing --base outside a
+        # git workdir, GraphQL errors), not only because a PR already exists.
+        # Probe explicitly for an open PR on this branch rather than
+        # pattern-matching gh's (locale-dependent) stderr.
+        existing = _existing_pr_url(repo, branch)
+        if existing:
+            return existing
+        # No existing PR: surface the real create failure so the resolver
+        # reports the actual reason instead of a confusing secondary error.
+        if e.stderr:
+            sys.stderr.write(f"gh pr create failed:\n{e.stderr}\n")
+        raise
     return raw.strip().splitlines()[-1] if raw.strip() else ""
+
+
+def _existing_pr_url(repo: str, branch: str) -> str | None:
+    """Return the URL of an open PR for *branch*, or None if there is none.
+
+    Used as an explicit probe after `gh pr create` fails, so a create failure
+    is only treated as "PR already exists" when a PR genuinely does. Fails
+    soft: any error while probing returns None so the caller can surface the
+    original create failure instead of masking it.
+    """
+    try:
+        raw = gh(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "url",
+                "-q",
+                ".[0].url // empty",
+            ]
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return raw.strip() or None
 
 
 def comment_on_issue(
