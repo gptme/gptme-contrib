@@ -141,6 +141,13 @@ def test_prompt_template_mentions_both_markers():
     assert "RESOLVER_REASON" in template
 
 
+def test_prompt_template_requires_read_before_editing_existing_files():
+    template = TEMPLATE_PATH.read_text()
+    assert "Before calling `patch` or" in template
+    assert "`save` on any file that already exists" in template
+    assert "Do NOT write patch chunks from memory" in template
+
+
 def test_status_regex_ignores_prose_mentions():
     # The model often echoes the words "RESOLVER_STATUS" in the middle of a
     # sentence while explaining what it's about to do. Only an anchored line
