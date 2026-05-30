@@ -183,6 +183,11 @@ _ERROR_RE = re.compile(
     re.MULTILINE,
 )
 
+_WRITE_TOOL_ERROR_RE = re.compile(
+    r"Error during execution:\s*(?:Patch failed|save failed)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
 _WRITE_TOOL_RE = re.compile(
     r"^\s*```(?:patch|save)\s",
     re.MULTILINE,
@@ -211,15 +216,20 @@ def extract_tool_errors(gptme_output: str) -> list[str]:
 
 
 def count_tool_errors(gptme_output: str) -> int:
-    """Count raw (possibly repeated) tool execution errors in gptme's stdout log.
+    """Count raw (possibly repeated) write-tool errors in gptme's stdout log.
 
     Unlike :func:`extract_tool_errors`, this does NOT deduplicate — two identical
-    ``Error during execution`` lines count as two errors.  This is the right
-    operand to compare against :func:`count_write_tool_calls` to decide whether
-    ALL write calls failed, because gptme emits one error line per failing tool
-    invocation even when the error message is identical.
+    ``Error during execution: Patch failed`` lines count as two errors.  This is
+    the right operand to compare against :func:`count_write_tool_calls` to decide
+    whether ALL write calls failed, because gptme emits one error line per failing
+    tool invocation even when the error message is identical.
+
+    Only write-tool errors (Patch failed / save failed) are counted.  Unrelated
+    tool errors (e.g. a shell command that failed) are intentionally excluded so
+    that a session with one successful patch and one incidental non-write error
+    does not incorrectly trigger the reclassification guard.
     """
-    return len(_ERROR_RE.findall(gptme_output))
+    return len(_WRITE_TOOL_ERROR_RE.findall(gptme_output))
 
 
 def count_write_tool_calls(gptme_output: str) -> int:
