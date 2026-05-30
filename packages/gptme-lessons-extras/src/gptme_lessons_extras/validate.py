@@ -104,32 +104,13 @@ class LessonValidator:
     def _detect_skill(self) -> bool:
         """Detect whether this file is a skill (SKILL.md format).
 
-        Detection by path pattern (``**/SKILL.md``) or by frontmatter that has
-        the non-lesson fields ``name`` and ``description`` without ``match.keywords``.
+        Detection is path-based only: files must be named ``SKILL.md``.
+        Frontmatter-based heuristics were removed because they can silently
+        reclassify a partially-authored lesson (with ``name`` + ``description``
+        but no ``match.keywords``) as a skill, bypassing all lesson-section
+        checks and reporting it as valid.
         """
-        # Path-based detection: files named SKILL.md
-        if self.filepath.name == "SKILL.md":
-            return True
-
-        # Frontmatter-based detection: has name + description but no match.keywords
-        if self.content.startswith("---"):
-            try:
-                end_idx = self.content.index("---", 3)
-                frontmatter = yaml.safe_load(self.content[3:end_idx])
-                if isinstance(frontmatter, dict):
-                    has_skill_fields = (
-                        "name" in frontmatter and "description" in frontmatter
-                    )
-                    has_match_keywords = (
-                        isinstance(frontmatter.get("match"), dict)
-                        and "keywords" in frontmatter["match"]
-                    )
-                    if has_skill_fields and not has_match_keywords:
-                        return True
-            except (ValueError, yaml.YAMLError):
-                pass
-
-        return False
+        return self.filepath.name == "SKILL.md"
 
     def _detect_format(self) -> str:
         """Detect which format this lesson uses.
