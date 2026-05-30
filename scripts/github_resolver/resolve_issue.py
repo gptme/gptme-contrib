@@ -545,7 +545,7 @@ def _existing_pr_url(repo: str, branch: str) -> str | None:
                 ".[0].url // empty",
             ]
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return raw.strip() or None
 
