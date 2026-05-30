@@ -318,45 +318,14 @@ def test_detect_repo_state_violation_on_unexpected_commit(tmp_path):
     assert resolve_issue.has_git_changes(tmp_path) is False
 
 
-def test_push_branch_uses_explicit_github_token_new_branch(monkeypatch, tmp_path):
-    """First push of a resolver branch (no prior remote): uses --force."""
+def test_push_branch_uses_explicit_github_token(monkeypatch, tmp_path):
+    """URL-based push always uses --force (no tracking ref available via URL)."""
     calls: list[list[str]] = []
 
     def fake_git(args, *, check=True, cwd=None):
         del check
         assert cwd == tmp_path
         calls.append(args)
-        return ""  # empty ls-remote → branch does not exist yet
-
-    monkeypatch.setattr(resolve_issue, "git", fake_git)
-
-    resolve_issue.push_branch(
-        tmp_path,
-        "gptme-resolver/issue-42",
-        repo="gptme/gptme-contrib",
-        auth_token="token-123",
-    )
-
-    push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
-    assert calls == [
-        # First call: ls-remote to check existence
-        ["ls-remote", "--heads", push_url, "gptme-resolver/issue-42"],
-        # Second call: plain --force (no tracking ref available via URL)
-        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
-    ]
-
-
-def test_push_branch_uses_force_with_lease_on_existing_branch(monkeypatch, tmp_path):
-    """Re-trigger push (branch already exists on remote): uses --force-with-lease."""
-    calls: list[list[str]] = []
-
-    def fake_git(args, *, check=True, cwd=None):
-        del check
-        assert cwd == tmp_path
-        calls.append(args)
-        # Simulate ls-remote returning a ref line (branch exists)
-        if args[0] == "ls-remote":
-            return "abc123\trefs/heads/gptme-resolver/issue-42\n"
         return ""
 
     monkeypatch.setattr(resolve_issue, "git", fake_git)
@@ -370,13 +339,38 @@ def test_push_branch_uses_force_with_lease_on_existing_branch(monkeypatch, tmp_p
 
     push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
     assert calls == [
-        ["ls-remote", "--heads", push_url, "gptme-resolver/issue-42"],
-        [
-            "push",
-            "--force-with-lease",
-            push_url,
-            "HEAD:refs/heads/gptme-resolver/issue-42",
-        ],
+        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
+    ]
+
+
+def test_push_branch_uses_force_on_existing_branch(monkeypatch, tmp_path):
+    """Re-trigger push (branch already exists on remote): still uses --force.
+
+    --force-with-lease requires a local tracking ref that URL-based pushes never
+    create, so it always fails on re-trigger.  --force is safe because the
+    resolver branch is exclusively owned by the resolver workflow and concurrent
+    runs are serialised by the caller's concurrency group.
+    """
+    calls: list[list[str]] = []
+
+    def fake_git(args, *, check=True, cwd=None):
+        del check
+        assert cwd == tmp_path
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(resolve_issue, "git", fake_git)
+
+    resolve_issue.push_branch(
+        tmp_path,
+        "gptme-resolver/issue-42",
+        repo="gptme/gptme-contrib",
+        auth_token="token-123",
+    )
+
+    push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
+    assert calls == [
+        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
     ]
 
 

@@ -353,16 +353,15 @@ def push_branch(
         # ``--force-with-lease`` requires a remote tracking ref to compare
         # against.  When pushing via an explicit URL (no named remote) the
         # tracking ref is never updated, so a re-trigger run always sees a
-        # "stale" ref and fails.  Use plain ``--force`` for the URL path:
-        # the resolver branch is exclusively owned by the resolver workflow
-        # and concurrent runs are serialised by the caller's ``concurrency``
-        # group, so ``--force`` is safe here.
-        exists = remote_branch_exists(cwd, branch, remote_url=push_url)
-        flag = "--force-with-lease" if exists else "--force"
+        # "stale" ref and is rejected.  Use plain ``--force`` for the URL
+        # path: the resolver branch is exclusively owned by the resolver
+        # workflow and concurrent runs are serialised by the caller's
+        # ``concurrency`` group, so ``--force`` is safe for both new
+        # branches and re-trigger pushes.
         git(
             [
                 "push",
-                flag,
+                "--force",
                 push_url,
                 f"HEAD:refs/heads/{branch}",
             ],
