@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import resolve_issue  # type: ignore[import-not-found]  # noqa: E402,I001
@@ -212,14 +214,25 @@ def test_count_write_tool_calls_handles_empty_string():
     assert resolve_issue.count_write_tool_calls("") == 0
 
 
-def test_main_reclassifies_status_when_all_writes_errored_despite_dirty_worktree(
-    monkeypatch, tmp_path
-):
-    """Canary-#824 regression: submodule bump + all patches failed → no bogus draft PR."""
+def test_count_tool_errors_counts_repeated_identical_errors():
+    # Two identical errors must count as 2, not 1 after deduplication.
+    out = (
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+    )
+    assert resolve_issue.count_tool_errors(out) == 2
+
+
+def test_count_tool_errors_handles_empty_string():
+    assert resolve_issue.count_tool_errors("") == 0
+
+
+@pytest.fixture
+def local_git_repo(tmp_path):
+    """Bare origin + clone with an initial commit, wired for resolver tests."""
     bare = tmp_path / "origin.git"
     repo = tmp_path / "repo"
     out_dir = tmp_path / "out"
-
     subprocess.run(
         ["git", "init", "--bare", str(bare)], check=True, stdout=subprocess.DEVNULL
     )
@@ -269,46 +282,35 @@ def test_main_reclassifies_status_when_all_writes_errored_despite_dirty_worktree
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    return repo, out_dir
 
+
+def _run_resolver(monkeypatch, repo, out_dir, gptme_stdout, *, fake_run_gptme=None):
+    """Wire monkeypatches and call main(); return (rc, comments, draft_prs)."""
     issue = resolve_issue.Issue(
-        number=42,
-        title="Fix note",
-        body="Update note",
-        author="alice",
-        labels=["bug"],
+        number=42, title="Fix note", body="Update note", author="alice", labels=["bug"]
     )
     comments: list[str] = []
     draft_prs: list[str] = []
 
-    def fake_fetch_issue(repo_name, issue_number):
-        return issue
+    if fake_run_gptme is None:
 
-    gptme_stdout = (
-        "Let me patch the file:\n"
-        "```patch note.txt\n"
-        "<<<<<<< ORIGINAL\nold\n=======\nnew\n>>>>>>> UPDATED\n"
-        "```\n"
-        "System: Error during execution: Patch failed: original chunk not found in file\n"
-        "RESOLVER_STATUS: changes\n"
-        "RESOLVER_SUMMARY: Updated note.\n"
+        def fake_run_gptme(prompt, *, model=None, workdir):
+            (workdir / "incidental.txt").write_text("side-effect\n")
+            return (gptme_stdout, "")
+
+    monkeypatch.setattr(resolve_issue, "fetch_issue", lambda rn, inum: issue)
+    monkeypatch.setattr(resolve_issue, "run_gptme", fake_run_gptme)
+    monkeypatch.setattr(
+        resolve_issue,
+        "post_issue_comment",
+        lambda rn, inum, body: comments.append(body),
     )
 
-    def fake_run_gptme(prompt, *, model=None, workdir):
-        # Simulate incidental worktree change (e.g. submodule bump) without a
-        # successful patch — the worktree is dirty but all writes errored.
-        (workdir / "incidental.txt").write_text("side-effect\n")
-        return (gptme_stdout, "")
-
-    def fake_comment(repo_name, issue_number, body):
-        comments.append(body)
-
-    def fake_open_draft_pr(repo_name, issue_number, branch, message):
-        draft_prs.append(message)
+    def fake_open_draft_pr(rn, inum, br, msg):
+        draft_prs.append(msg)
         return "https://github.com/gptme/gptme-contrib/pull/99"
 
-    monkeypatch.setattr(resolve_issue, "fetch_issue", fake_fetch_issue)
-    monkeypatch.setattr(resolve_issue, "run_gptme", fake_run_gptme)
-    monkeypatch.setattr(resolve_issue, "post_issue_comment", fake_comment)
     monkeypatch.setattr(resolve_issue, "open_draft_pr", fake_open_draft_pr)
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -325,13 +327,65 @@ def test_main_reclassifies_status_when_all_writes_errored_despite_dirty_worktree
             str(out_dir),
         ]
     )
+    return rc, comments, draft_prs
 
+
+def test_main_reclassifies_status_when_all_writes_errored_despite_dirty_worktree(
+    monkeypatch, local_git_repo
+):
+    """Canary-#824 regression: submodule bump + all patches failed → no bogus draft PR."""
+    repo, out_dir = local_git_repo
+    gptme_stdout = (
+        "Let me patch the file:\n"
+        "```patch note.txt\n"
+        "<<<<<<< ORIGINAL\nold\n=======\nnew\n>>>>>>> UPDATED\n"
+        "```\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "RESOLVER_STATUS: changes\n"
+        "RESOLVER_SUMMARY: Updated note.\n"
+    )
+    rc, comments, draft_prs = _run_resolver(monkeypatch, repo, out_dir, gptme_stdout)
     assert rc == 0
-    # Must NOT open a draft PR when all writes failed.
     assert draft_prs == [], f"Unexpected draft PR opened: {draft_prs}"
-    # Must comment with the error and tool error details.
     assert len(comments) == 1
     assert "write tool call" in comments[0]
+    assert "Patch failed" in comments[0]
+
+
+def test_main_reclassifies_status_when_two_identical_write_errors_despite_dirty_worktree(
+    monkeypatch, local_git_repo
+):
+    """Exact canary-#824 failure mode: 2 write calls, 2 identical errors → no bogus PR.
+
+    The guard must compare raw error count (2) against write calls (2), NOT the
+    deduplicated error list length (1).  Before the fix, extract_tool_errors()
+    deduplication caused 1 >= 2 → False, so a draft PR was still opened.
+    """
+    repo, out_dir = local_git_repo
+    # Two patch calls, both with identical "Patch failed" errors — the exact
+    # canary-#824 shape where deduplication previously broke the guard.
+    gptme_stdout = (
+        "Let me patch the file:\n"
+        "```patch note.txt\n"
+        "<<<<<<< ORIGINAL\nold\n=======\nnew\n>>>>>>> UPDATED\n"
+        "```\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "Let me retry:\n"
+        "```patch note.txt\n"
+        "<<<<<<< ORIGINAL\nold\n=======\nnewer\n>>>>>>> UPDATED\n"
+        "```\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "RESOLVER_STATUS: changes\n"
+        "RESOLVER_SUMMARY: Updated note.\n"
+    )
+    rc, comments, draft_prs = _run_resolver(monkeypatch, repo, out_dir, gptme_stdout)
+    assert rc == 0
+    # 2 write calls, 2 identical errors → guard must fire, no bogus draft PR.
+    assert (
+        draft_prs == []
+    ), f"Unexpected draft PR opened (dedup guard bug?): {draft_prs}"
+    assert len(comments) == 1
+    assert "2 write tool call" in comments[0]
     assert "Patch failed" in comments[0]
 
 
