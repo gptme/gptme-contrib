@@ -37,7 +37,7 @@ Read the issue and decide:
 
 - **Validate your changes took effect.** After calling `save` or `patch`,
   verify the tool succeeded. If you see an error like `Patch failed: original
-  chunk not found in file`, retry at least 2 more times — read the current
+  chunk not found in file`, retry up to 2 more times — read the current
   file content and rewrite the patch with correct line matches, or fall back
   to a full-file `save`. If still failing after retries, do NOT claim
   `RESOLVER_STATUS: changes` — emit `no_changes` instead with the failure
