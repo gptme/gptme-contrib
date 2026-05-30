@@ -227,6 +227,58 @@ def test_count_tool_errors_handles_empty_string():
     assert resolve_issue.count_tool_errors("") == 0
 
 
+# --- open_draft_pr / _repo_default_branch tests ---
+
+
+def _cpe(stderr: str = "") -> subprocess.CalledProcessError:
+    """Build a CalledProcessError with captured stderr for test stubs."""
+    e = subprocess.CalledProcessError(1, ["gh"])
+    e.stderr = stderr
+    return e
+
+
+def test_open_draft_pr_includes_base_and_returns_url(monkeypatch):
+    """Happy path: --base is passed and the returned URL is correct."""
+    calls: list[list[str]] = []
+
+    def fake_gh(args: list[str], **_kw) -> str:
+        calls.append(list(args))
+        if args[:2] == ["repo", "view"]:
+            return "master\n"
+        if args[:2] == ["pr", "create"]:
+            return "https://github.com/org/repo/pull/99\n"
+        return ""
+
+    monkeypatch.setattr(resolve_issue, "gh", fake_gh)
+    url = resolve_issue.open_draft_pr("org/repo", 42, "gptme-resolver/issue-42", "s")
+    assert url == "https://github.com/org/repo/pull/99"
+    create_args = next(c for c in calls if c[:2] == ["pr", "create"])
+    assert "--base" in create_args
+
+
+def test_open_draft_pr_reraises_non_already_exists_errors(monkeypatch):
+    """Non-'already exists' CalledProcessError must propagate, not be swallowed."""
+
+    def fake_gh(args: list[str], **_kw) -> str:
+        if args[:2] == ["repo", "view"]:
+            return "master\n"
+        raise _cpe(
+            stderr="GraphQL: could not resolve to a Repository with the name 'org/repo'"
+        )
+
+    monkeypatch.setattr(resolve_issue, "gh", fake_gh)
+    with pytest.raises(subprocess.CalledProcessError):
+        resolve_issue.open_draft_pr("org/repo", 42, "gptme-resolver/issue-42", "s")
+
+
+def test_repo_default_branch_falls_back_to_master_on_error(monkeypatch):
+    """_repo_default_branch returns 'master' when the gh API call fails."""
+    monkeypatch.setattr(
+        resolve_issue, "gh", lambda *_, **__: (_ for _ in ()).throw(_cpe())
+    )
+    assert resolve_issue._repo_default_branch("org/repo") == "master"
+
+
 def test_count_tool_errors_ignores_non_write_tool_errors():
     # A shell command error should NOT count as a write-tool error.
     # Greptile finding: error_count >= write_calls must only fire on write-tool
@@ -406,14 +458,16 @@ def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1 ("a pull request … already exists").
     # open_draft_pr must catch CalledProcessError and return the existing PR URL
     # via `gh pr view` so the caller can still post the issue comment.
-    import subprocess
-
     calls: list[list[str]] = []
 
-    def fake_gh(args, *, check=True):
+    def fake_gh(args, **_kw):
         calls.append(args)
         if args[0] == "pr" and args[1] == "create":
-            raise subprocess.CalledProcessError(1, "gh")
+            err = subprocess.CalledProcessError(1, "gh")
+            err.stderr = (
+                "a pull request for branch 'gptme-resolver/issue-42' already exists"
+            )
+            raise err
         if args[0] == "pr" and args[1] == "view":
             return "https://github.com/gptme/gptme-contrib/pull/99\n"
         return ""

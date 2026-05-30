@@ -457,6 +457,26 @@ def push_existing_head(
     push_branch(cwd, branch, repo=repo, auth_token=auth_token)
 
 
+def _repo_default_branch(repo: str) -> str:
+    """Return the default branch of *repo*, falling back to 'master'."""
+    try:
+        name = gh(
+            [
+                "repo",
+                "view",
+                "--repo",
+                repo,
+                "--json",
+                "defaultBranchRef",
+                "--jq",
+                ".defaultBranchRef.name",
+            ]
+        ).strip()
+        return name or "master"
+    except subprocess.CalledProcessError:
+        return "master"
+
+
 def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> str:
     body = (
         f"{MARKER_COMMENT}\n\n"
@@ -465,6 +485,7 @@ def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> st
         f"Closes #{issue_number}\n\n"
         f"**Resolver summary:** {summary}\n"
     )
+    base_branch = _repo_default_branch(repo)
     try:
         raw = gh(
             [
@@ -473,6 +494,8 @@ def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> st
                 "--repo",
                 repo,
                 "--draft",
+                "--base",
+                base_branch,
                 "--head",
                 branch,
                 "--title",
@@ -481,8 +504,14 @@ def open_draft_pr(repo: str, issue_number: int, branch: str, summary: str) -> st
                 body,
             ]
         )
-    except subprocess.CalledProcessError:
-        # PR already exists for this branch (re-trigger). Return existing URL.
+    except subprocess.CalledProcessError as e:
+        # Only treat as "PR already exists" when gh explicitly says so.
+        # A bare except used to swallow unrelated errors (e.g. missing --base
+        # outside a git workdir, auth issues) and mask the real failure with a
+        # confusing "no pull requests found for branch" secondary error.
+        stderr = (e.stderr or "").lower()
+        if "already exists" not in stderr:
+            raise
         raw = gh(["pr", "view", "--repo", repo, "--json", "url", "-q", ".url", branch])
     return raw.strip().splitlines()[-1] if raw.strip() else ""
 
