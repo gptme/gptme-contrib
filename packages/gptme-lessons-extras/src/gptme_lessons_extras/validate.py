@@ -217,7 +217,7 @@ class LessonValidator:
                 self.errors.append(f"Invalid YAML frontmatter: {e}")
                 return
         else:
-            self.errors.append("Missing YAML frontmatter")
+            # _check_frontmatter() already appended "Missing YAML frontmatter"
             return
 
         # Check body is non-empty
@@ -307,7 +307,7 @@ class LessonValidator:
                     "license",
                     "keywords",
                     "compatibility",
-                    "keywords",
+                    "tags",
                 }
                 extra_fields = extra_fields - skill_allowed
             if extra_fields:
