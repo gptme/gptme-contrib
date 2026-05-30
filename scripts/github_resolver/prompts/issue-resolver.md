@@ -43,12 +43,14 @@ Read the issue and decide:
   directly.
 
 - **Validate your changes took effect.** After calling `save` or `patch`,
-  verify the tool succeeded. If you see an error like `Patch failed: original
-  chunk not found in file`, retry up to 2 more times — read the current
-  file content and rewrite the patch with correct line matches, or fall back
-  to a full-file `save`. If still failing after retries, do NOT claim
-  `RESOLVER_STATUS: changes` — emit `no_changes` instead with the failure
-  reason.
+  always check the tool result. A `System:` response that says `Error during
+  execution: Patch failed: original chunk not found in file` means the write
+  **did not happen** — the file on disk was NOT modified. If you see such an
+  error, retry up to 2 more times: read the current file content again and
+  rewrite the patch with correct line matches, or fall back to a full-file
+  `save`. If still failing after retries, do NOT claim `RESOLVER_STATUS:
+  changes` — emit `no_changes` instead with the failure reason. A patch error
+  is not a change.
 
 - If you make changes, end your run with a short summary in this exact format:
 

@@ -178,6 +178,33 @@ def parse_status(gptme_output: str) -> tuple[str, str]:
     return "no_changes", (m.group(1).strip() if m else "(no reason provided)")
 
 
+_ERROR_RE = re.compile(
+    r"Error during execution:\s*(.+)",
+    re.MULTILINE,
+)
+
+
+def extract_tool_errors(gptme_output: str) -> list[str]:
+    """Extract tool execution errors from gptme's stdout log.
+
+    gptme emits ``System: Error during execution: <description>`` when a tool
+    call raises.  The model often ignores these and hallucinates success.  This
+    helper surfaces the raw failure evidence for the orchestrator's error
+    message so a human reviewing the issue comment sees actionable diagnostics
+    without downloading the session artifact.
+    """
+    errors = _ERROR_RE.findall(gptme_output)
+    # Deduplicate while preserving order (same error repeated N times).
+    seen: set[str] = set()
+    unique: list[str] = []
+    for e in errors:
+        line = e.strip()
+        if line not in seen:
+            seen.add(line)
+            unique.append(line)
+    return unique
+
+
 def has_git_changes(cwd: Path) -> bool:
     out = git(["status", "--porcelain"], cwd=cwd)
     return bool(out.strip())
@@ -509,10 +536,22 @@ def main(argv: list[str] | None = None) -> int:
     # gptme said "changes" but worktree is clean — treat as a failed attempt.
     if status == "changes" and not worktree_dirty:
         status = "error"
-        message = (
-            "gptme reported changes but no files were modified. "
-            f"Upstream message: {message}"
-        )
+        # Surface tool execution errors so the issue comment shows actionable
+        # diagnostics without downloading the session artifact.  If no tool
+        # errors are found, fall back to the generic description.
+        tool_errors = extract_tool_errors(gptme_output or "")
+        if tool_errors:
+            errors_block = "\n".join(f"- `{e}`" for e in tool_errors)
+            message = (
+                "gptme reported changes but no files were modified. "
+                f"Tool execution errors found in the session log:\n{errors_block}\n\n"
+                f"Upstream summary: {message}"
+            )
+        else:
+            message = (
+                "gptme reported changes but no files were modified. "
+                f"Upstream message: {message}"
+            )
 
     # no_changes / error: preserve partial work if present, including an
     # unsolicited direct commit that moved HEAD but left the worktree clean.

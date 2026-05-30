@@ -157,6 +157,38 @@ def test_status_regex_ignores_prose_mentions():
     assert status == "error"
 
 
+def test_extract_tool_errors_returns_empty_when_none():
+    out = "RESOLVER_STATUS: changes\nRESOLVER_SUMMARY: something\n"
+    assert resolve_issue.extract_tool_errors(out) == []
+
+
+def test_extract_tool_errors_finds_errors():
+    out = (
+        "some work\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "more work\n"
+        "System: Error during execution: another failure\n"
+        "RESOLVER_STATUS: changes\n"
+    )
+    errors = resolve_issue.extract_tool_errors(out)
+    assert len(errors) == 2
+    assert "Patch failed" in errors[0]
+    assert "another failure" in errors[1]
+
+
+def test_extract_tool_errors_deduplicates_consecutive_identical_errors():
+    out = (
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+        "System: Error during execution: Patch failed: original chunk not found in file\n"
+    )
+    errors = resolve_issue.extract_tool_errors(out)
+    assert len(errors) == 1
+
+
+def test_extract_tool_errors_handles_empty_string():
+    assert resolve_issue.extract_tool_errors("") == []
+
+
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1 ("a pull request … already exists").
     # open_draft_pr must catch CalledProcessError and return the existing PR URL
