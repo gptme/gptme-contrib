@@ -648,10 +648,9 @@ def test_parse_rust_imports_basic(rust_module: Path):
     # rust_module has: use std::fmt; use std::io::{self, Write};
     assert len(imports) >= 2
 
-    # Check std::fmt import
-    fmt_imports = [i for i in imports if i.module == "std::fmt"]
+    # Check std::fmt import: module is the parent ("std"), name is the leaf ("fmt")
+    fmt_imports = [i for i in imports if i.name == "fmt" and i.module == "std"]
     assert len(fmt_imports) == 1
-    assert fmt_imports[0].name == "fmt"
     assert fmt_imports[0].is_from is True
 
     # Check std::io imports (self and Write — rust_module has `use std::io::{self, Write}`)
@@ -669,31 +668,38 @@ def test_parse_rust_imports_variants(rust_imports: Path):
     imports = result.imports
 
     # Simple path: use std::collections::HashMap
+    # module = parent path ("std::collections"), name = leaf ("HashMap")
     hm = [i for i in imports if i.name == "HashMap"]
     assert len(hm) == 1
-    assert hm[0].module == "std::collections::HashMap"
+    assert hm[0].module == "std::collections"
     assert hm[0].is_from is True
 
-    # Crate-relative: use crate::utils
+    # Crate-relative: use crate::utils → module="crate", name="utils"
     utils = [i for i in imports if i.name == "utils"]
     assert len(utils) >= 1
-    crate = [i for i in utils if i.module == "crate::utils"]
+    crate = [i for i in utils if i.module == "crate"]
     assert len(crate) == 1
 
-    # As-clause: use foo::bar as baz
+    # As-clause: use foo::bar as baz → module="foo", name="bar", alias="baz"
     baz = [i for i in imports if i.name == "bar" and i.alias == "baz"]
     assert len(baz) == 1
-    assert baz[0].module == "foo::bar"
+    assert baz[0].module == "foo"
 
-    # Nested use_list: use std::io::{self, BufRead}
-    io_path = [i for i in imports if i.module and i.module.startswith("std::io")]
+    # Nested use_list: use std::io::{self, BufRead} → module="std::io" (exact)
+    io_path = [i for i in imports if i.module == "std::io"]
     assert len(io_path) >= 2
 
     # Nested use_list 2 levels: use embedded_hal::i2c::{I2c, SevenBitAddress}
-    i2c_path = [
-        i for i in imports if i.module and i.module.startswith("embedded_hal::i2c")
-    ]
+    i2c_path = [i for i in imports if i.module == "embedded_hal::i2c"]
     assert len(i2c_path) >= 2
+
+    # Single-segment module prefix: use serde::{Serialize, Deserialize}
+    # module = "serde" (bare identifier, P2 fix), not "" or None
+    serde_path = [i for i in imports if i.module == "serde"]
+    assert len(serde_path) >= 2
+    serde_names = {i.name for i in serde_path}
+    assert "Serialize" in serde_names
+    assert "Deserialize" in serde_names
 
 
 @_skip_no_rust

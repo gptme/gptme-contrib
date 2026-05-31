@@ -922,6 +922,8 @@ def _extract_imports_rust(root) -> list[ImportInfo]:
 
     def _scoped_ident_text(node) -> str:
         """Reconstruct the full path from a scoped_identifier node."""
+        if node.type in ("identifier", "crate", "self", "super"):
+            return _text_rs(node)
         parts = []
         for child in node.named_children:
             if child.type in ("identifier", "crate", "self", "super"):
@@ -936,20 +938,23 @@ def _extract_imports_rust(root) -> list[ImportInfo]:
         """Walk a use_declaration node and yield (name, module, alias) tuples."""
         for child in node.named_children:
             if child.type == "scoped_identifier":
-                # use std::collections::HashMap;  → name=HashMap, module=std::collections::HashMap
-                # use crate::utils;               → name=utils,   module=crate::utils
+                # use std::collections::HashMap;  → name=HashMap, module=std::collections
+                # use crate::utils;               → name=utils,   module=crate
                 full_path = _scoped_ident_text(child)
                 name = full_path.split("::")[-1]
-                yield name, full_path or None, None, True
+                module = "::".join(full_path.split("::")[:-1]) or None
+                yield name, module, None, True
             elif child.type == "use_as_clause":
-                # use foo::bar as baz;  → name=bar, module=foo::bar, alias=baz
+                # use foo::bar as baz;  → name=bar, module=foo, alias=baz
+                # use serde as s;       → name=serde, module=None, alias=s
                 path_node = child.child_by_field_name("path")
                 alias_node = child.child_by_field_name("alias")
                 alias = _text_rs(alias_node) if alias_node else None
                 if path_node:
                     full_path = _scoped_ident_text(path_node)
                     name = full_path.split("::")[-1]
-                    yield name, full_path or None, alias, True
+                    module = "::".join(full_path.split("::")[:-1]) or None
+                    yield name, module, alias, True
             elif child.type == "use_wildcard":
                 # use super::*;  → name=*, module=super
                 path_part = None
