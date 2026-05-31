@@ -7903,3 +7903,51 @@ def test_extract_signals_cc_background_commit_no_duplicate(tmp_path: Path):
     ), f"Expected 1 commit, got {len(sigs['git_commits'])}: {sigs['git_commits']}"
     assert "feat(test): add background dedup test" in sigs["git_commits"][0]
     assert "a1b2c3d" in sigs["git_commits"][0]
+
+
+def test_session_store_atomic_append(tmp_path: Path):
+    """append() durably writes each record (fsync) and leaves no double
+    newlines between successive records."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive", session_id="r1"))
+    store.append(SessionRecord(model="sonnet", outcome="productive", session_id="r2"))
+
+    # Read content directly — no trailing newlines after final record
+    content = store.path.read_bytes()
+    assert not content.endswith(b"\n\n"), "no double newline from atomic write"
+
+    # All records survive a load cycle
+    records = store.load_all()
+    assert len(records) == 2
+    assert records[0].session_id == "r1"
+    assert records[1].session_id == "r2"
+
+
+def test_session_store_corrupt_tail_partial_line(tmp_path: Path):
+    """A partial last line (truncated JSON) does not block append and emits a warning.
+
+    This simulates the exact failure from operator session dea1 (2026-05-31):
+    a process kill mid-write leaves a 105-byte partial record as the last line,
+    silently blocking all future recordings via post_session().
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+
+    # Write good records first
+    store.append(SessionRecord(model="opus", outcome="productive", session_id="pre-1"))
+    store.append(SessionRecord(model="sonnet", outcome="productive", session_id="pre-2"))
+
+    # Inject a partial last line (truncated JSON — the exact failure mode)
+    with open(store.path, "a", encoding="utf-8") as f:
+        f.write('{"session_id": "6242a3bc", "timestamp": "2026-05-30T11:37:20')
+
+    # Append should detect and handle the corrupt tail, then add the new record
+    store.append(SessionRecord(model="haiku", outcome="productive", session_id="post-1"))
+
+    # All good records should survive
+    records = store.load_all()
+    assert len(records) == 3, f"Expected 3 records, got {len(records)}"
+    session_ids = [r.session_id for r in records]
+    assert "pre-1" in session_ids
+    assert "pre-2" in session_ids
+    assert "post-1" in session_ids
+    assert "6242a3bc" not in session_ids  # corrupt line was stripped
