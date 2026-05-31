@@ -541,12 +541,36 @@ def _merge_into_keeper(
             if apply:
                 setattr(keeper, name, other)
             filled.append(name)
+    # Merge deliverables (list[str])
     existing = set(keeper.deliverables or [])
     extra = [d for d in (duplicate.deliverables or []) if d not in existing]
     if extra:
         if apply:
-            keeper.deliverables.extend(extra)
+            if keeper.deliverables is None:
+                keeper.deliverables = list(extra)
+            else:
+                keeper.deliverables.extend(extra)
         filled.append("deliverables")
+    # Merge deliverable_details (list[dict]) — union by value equality
+    existing_details = keeper.deliverable_details or []
+    extra_details = [d for d in (duplicate.deliverable_details or []) if d not in existing_details]
+    if extra_details:
+        if apply:
+            if keeper.deliverable_details is None:
+                keeper.deliverable_details = list(extra_details)
+            else:
+                keeper.deliverable_details.extend(extra_details)
+        filled.append("deliverable_details")
+    # Merge grades (dict[str, float]) — add keys the keeper lacks
+    dup_grades = duplicate.grades or {}
+    extra_grades = {k: v for k, v in dup_grades.items() if k not in (keeper.grades or {})}
+    if extra_grades:
+        if apply:
+            if keeper.grades is None:
+                keeper.grades = dict(extra_grades)
+            else:
+                keeper.grades.update(extra_grades)
+        filled.append("grades")
     return filled
 
 

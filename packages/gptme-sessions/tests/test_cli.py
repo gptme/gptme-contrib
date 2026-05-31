@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from click.testing import CliRunner
 
 from gptme_sessions.cli import cli
@@ -1163,7 +1165,7 @@ class TestDedupCommand:
     def test_dedup_respects_min_overlap_threshold(self, tmp_path: Path) -> None:
         """Records overlapping below --min-overlap are left untouched."""
         store = SessionStore(sessions_dir=tmp_path)
-        # 2-min overlap of a 10-min interval = 0.2, below the 0.6 default.
+        # Jaccard = intersection/union = 2 min / 18 min ≈ 0.11, below the 0.6 default.
         store.append(
             SessionRecord(
                 session_id="a",
@@ -1246,3 +1248,71 @@ class TestDedupCommand:
         assert "Merged 1 duplicate record(s)" in out
         reloaded = {r.session_id: r for r in SessionStore(sessions_dir=tmp_path).load_all()}
         assert reloaded["instant-dup"]._legacy_fields.get("duplicate_of") == "instant-rich"
+
+    def test_dedup_keeper_no_deliverables_merges_from_dup(self, tmp_path: Path) -> None:
+        """Crash guard: keeper.deliverables=None must not raise AttributeError."""
+        store = SessionStore(sessions_dir=tmp_path)
+        # keeper has no deliverables — exercises the None-guard in _merge_into_keeper
+        store.append(
+            SessionRecord(
+                session_id="keeper",
+                harness="claude-code",
+                start_time="2026-05-31T10:00:00+00:00",
+                end_time="2026-05-31T10:10:00+00:00",
+                category="code",
+                deliverables=None,  # type: ignore[arg-type]
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="dup",
+                harness="claude-code",
+                start_time="2026-05-31T10:02:00+00:00",
+                end_time="2026-05-31T10:12:00+00:00",
+                deliverables=["sha-from-dup"],
+            )
+        )
+
+        rc, out = _invoke(["dedup"], tmp_path)
+
+        assert rc == 0, out
+        reloaded = {r.session_id: r for r in SessionStore(sessions_dir=tmp_path).load_all()}
+        assert "sha-from-dup" in (reloaded["keeper"].deliverables or [])
+
+    def test_dedup_merges_grades_and_deliverable_details(self, tmp_path: Path) -> None:
+        """grades and deliverable_details from the duplicate are merged into the keeper."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="keeper",
+                harness="claude-code",
+                start_time="2026-05-31T10:00:00+00:00",
+                end_time="2026-05-31T10:10:00+00:00",
+                category="code",
+                grades={"alignment": 0.8},
+                deliverable_details=[{"url": "https://github.com/org/repo/pull/1"}],
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="dup",
+                harness="claude-code",
+                start_time="2026-05-31T10:02:00+00:00",
+                end_time="2026-05-31T10:12:00+00:00",
+                grades={"productivity": 0.9},
+                deliverable_details=[{"url": "https://github.com/org/repo/pull/2"}],
+            )
+        )
+
+        rc, out = _invoke(["dedup"], tmp_path)
+
+        assert rc == 0, out
+        reloaded = {r.session_id: r for r in SessionStore(sessions_dir=tmp_path).load_all()}
+        keeper = reloaded["keeper"]
+        # Existing grades key preserved; dup's new key added.
+        assert keeper.grades.get("alignment") == pytest.approx(0.8)
+        assert keeper.grades.get("productivity") == pytest.approx(0.9)
+        # Existing detail preserved; dup's new detail added.
+        urls = [d["url"] for d in (keeper.deliverable_details or [])]
+        assert "https://github.com/org/repo/pull/1" in urls
+        assert "https://github.com/org/repo/pull/2" in urls
