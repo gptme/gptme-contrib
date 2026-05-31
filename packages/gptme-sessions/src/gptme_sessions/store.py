@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import TextIO
 
 from .record import SessionRecord
+
+logger = logging.getLogger(__name__)
 
 
 def _default_sessions_dir() -> Path:
@@ -44,11 +47,65 @@ class SessionStore:
         self.sessions_file = sessions_file
         self.path = sessions_dir / sessions_file
 
+    def _repair_tail(self) -> bool:
+        """Remove a corrupt partial JSON line from the end of the file.
+
+        A process killed mid-write (OOM, timeout, SIGKILL) can leave a
+        partial JSON record as the last line.  This method detects and
+        truncates it so the next ``append()`` starts from a clean state.
+
+        Returns True if a partial line was detected and removed.
+        """
+        if not self.path.exists():
+            return False
+
+        content = self.path.read_bytes()
+        if not content:
+            return False
+
+        # File ends with a newline — clean termination, no partial line
+        if content.endswith(b"\n"):
+            return False
+
+        # Find the last complete line boundary
+        last_newline = content.rfind(b"\n")
+
+        if last_newline == -1:
+            # Single line, no newline at all.  If it is valid JSON the file
+            # was never corrupted; just missing a trailing newline.
+            # If not valid, the damage is unrecoverable — leave it alone
+            # rather than silently deleting data.
+            try:
+                json.loads(content.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.warning("Corrupt single-line file %s — not truncating", self.path)
+            return False
+
+        partial = content[last_newline + 1 :]
+        try:
+            json.loads(partial.decode("utf-8"))
+            return False  # valid JSON even without trailing newline
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+        # Truncate to the last valid line (including its newline)
+        truncated = content[: last_newline + 1]
+        self.path.write_bytes(truncated)
+        logger.warning(
+            "Repaired corrupt tail in %s: removed %d bytes",
+            self.path,
+            len(content) - len(truncated),
+        )
+        return True
+
     def append(self, record: SessionRecord) -> Path:
-        """Append a session record to the JSONL store."""
+        """Append a session record to the JSONL store.  Self-heals corrupt tails."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._repair_tail()
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(record.to_json() + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         return self.path
 
     def load_all(self) -> list[SessionRecord]:
