@@ -7906,8 +7906,8 @@ def test_extract_signals_cc_background_commit_no_duplicate(tmp_path: Path):
 
 
 def test_session_store_atomic_append(tmp_path: Path):
-    """append() writes atomically (temp file + replace) so partial writes
-    cannot corrupt the on-disk file on crash."""
+    """append() durably writes each record (fsync) and leaves no double
+    newlines between successive records."""
     store = SessionStore(sessions_dir=tmp_path)
     store.append(SessionRecord(model="opus", outcome="productive", session_id="r1"))
     store.append(SessionRecord(model="sonnet", outcome="productive", session_id="r2"))

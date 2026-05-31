@@ -88,13 +88,20 @@ class SessionStore:
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
-        # Truncate to the last valid line (including its newline)
-        truncated = content[: last_newline + 1]
-        self.path.write_bytes(truncated)
+        # Truncate to the last valid line (including its newline).
+        # Use ftruncate (f.truncate) rather than write_bytes so that a process
+        # kill between the zero-truncate and the rewrite cannot destroy all
+        # prior records.  ftruncate is a single syscall that only shortens the
+        # file; it never zeros it first.
+        keep_bytes = last_newline + 1
+        with open(self.path, "r+b") as f:
+            f.truncate(keep_bytes)
+            f.flush()
+            os.fsync(f.fileno())
         logger.warning(
             "Repaired corrupt tail in %s: removed %d bytes",
             self.path,
-            len(content) - len(truncated),
+            len(content) - keep_bytes,
         )
         return True
 
