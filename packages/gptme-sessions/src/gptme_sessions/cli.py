@@ -411,7 +411,9 @@ _RICHNESS_FIELDS: tuple[str, ...] = (
 )
 
 # Values that count as "empty" for richness/merge purposes.
-_EMPTY_VALUES: tuple[object, ...] = (None, "", "unknown", 0)
+# Do NOT include numeric 0: Python's 0 == 0.0 would treat a legitimate 0.0
+# llm_judge_score or trajectory_grade as missing and silently overwrite it.
+_EMPTY_VALUES: tuple[object, ...] = (None, "", "unknown")
 
 
 def _record_interval(record: SessionRecord) -> tuple[datetime, datetime] | None:
@@ -452,17 +454,17 @@ def _overlap_ratio(
     nested inside a longer, genuinely different session has a small union ratio
     and is correctly left alone.
     """
-    latest_start = max(a[0], b[0])
-    earliest_end = min(a[1], b[1])
-    intersection = (earliest_end - latest_start).total_seconds()
-    if intersection <= 0:
-        return 0.0
     earliest_start = min(a[0], b[0])
     latest_end = max(a[1], b[1])
     union = (latest_end - earliest_start).total_seconds()
     if union <= 0:
         # Both intervals are the same zero-length instant → identical.
         return 1.0
+    latest_start = max(a[0], b[0])
+    earliest_end = min(a[1], b[1])
+    intersection = (earliest_end - latest_start).total_seconds()
+    if intersection <= 0:
+        return 0.0
     return min(intersection / union, 1.0)
 
 

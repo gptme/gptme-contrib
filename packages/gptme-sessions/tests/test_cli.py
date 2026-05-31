@@ -1185,3 +1185,64 @@ class TestDedupCommand:
 
         assert rc == 0
         assert "No duplicate session records found" in out
+
+    def test_dedup_preserves_zero_score(self, tmp_path: Path) -> None:
+        """A keeper with llm_judge_score=0.0 must not have it overwritten."""
+        store = SessionStore(sessions_dir=tmp_path)
+        # rich: overlapping interval, has a valid worst-case score of 0.0
+        store.append(
+            SessionRecord(
+                session_id="scored",
+                harness="claude-code",
+                start_time="2026-05-31T10:00:00+00:00",
+                end_time="2026-05-31T10:10:00+00:00",
+                category="code",
+                llm_judge_score=0.0,
+                journal_path="/journal/scored.md",
+            )
+        )
+        # poor duplicate carries a better score the keeper must NOT adopt
+        store.append(
+            SessionRecord(
+                session_id="scored-dup",
+                harness="claude-code",
+                start_time="2026-05-31T10:01:00+00:00",
+                end_time="2026-05-31T10:11:00+00:00",
+                llm_judge_score=0.9,
+            )
+        )
+
+        _invoke(["dedup"], tmp_path)
+
+        reloaded = {r.session_id: r for r in SessionStore(sessions_dir=tmp_path).load_all()}
+        assert reloaded["scored"].llm_judge_score == 0.0
+
+    def test_dedup_identical_zero_duration(self, tmp_path: Path) -> None:
+        """Two zero-duration records at the same instant count as duplicates."""
+        store = SessionStore(sessions_dir=tmp_path)
+        ts = "2026-05-31T10:00:00+00:00"
+        store.append(
+            SessionRecord(
+                session_id="instant-rich",
+                harness="gptme",
+                start_time=ts,
+                end_time=ts,
+                category="code",
+                journal_path="/journal/instant-rich.md",
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="instant-dup",
+                harness="gptme",
+                start_time=ts,
+                end_time=ts,
+            )
+        )
+
+        rc, out = _invoke(["dedup"], tmp_path)
+
+        assert rc == 0
+        assert "Merged 1 duplicate record(s)" in out
+        reloaded = {r.session_id: r for r in SessionStore(sessions_dir=tmp_path).load_all()}
+        assert reloaded["instant-dup"]._legacy_fields.get("duplicate_of") == "instant-rich"
