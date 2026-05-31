@@ -610,3 +610,96 @@ def test_parse_rust_impl_method_calls(rust_module: Path):
     with_max = next((s for s in result.symbols if s.name == "with_max"), None)
     assert with_max is not None, "with_max symbol not found in parse result"
     assert with_max.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Rust import extraction
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def rust_imports() -> Generator[Path, None, None]:
+    """A Rust file with various import patterns."""
+    code = """\
+// imports.rs — various import styles
+
+use std::collections::HashMap;
+use crate::utils;
+use super::*;
+use foo::bar as baz;
+use std::io::{self, BufRead};
+use serde::{Serialize, Deserialize};
+use embedded_hal::i2c::{I2c, SevenBitAddress};
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".rs", delete=False, prefix="test_rust_imports_"
+    ) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_rust
+def test_parse_rust_imports_basic(rust_module: Path):
+    """Rust: parse_file extracts imports from use statements."""
+    result = parse_file(rust_module)
+    imports = result.imports
+    # rust_module has: use std::fmt; use std::io::{self, Write};
+    assert len(imports) >= 2
+
+    # Check std::fmt import
+    fmt_imports = [i for i in imports if i.module == "std::fmt"]
+    assert len(fmt_imports) == 1
+    assert fmt_imports[0].name == "fmt"
+    assert fmt_imports[0].is_from is True
+
+    # Check std::io imports (self and Write — rust_module has `use std::io::{self, Write}`)
+    io_imports = [i for i in imports if i.module == "std::io"]
+    assert len(io_imports) == 2
+    io_names = {i.name for i in io_imports}
+    assert "self" in io_names
+    assert "Write" in io_names
+
+
+@_skip_no_rust
+def test_parse_rust_imports_variants(rust_imports: Path):
+    """Rust: dense import patterns (use_list, as-clause, wildcard)."""
+    result = parse_file(rust_imports)
+    imports = result.imports
+
+    # Simple path: use std::collections::HashMap
+    hm = [i for i in imports if i.name == "HashMap"]
+    assert len(hm) == 1
+    assert hm[0].module == "std::collections::HashMap"
+    assert hm[0].is_from is True
+
+    # Crate-relative: use crate::utils
+    utils = [i for i in imports if i.name == "utils"]
+    assert len(utils) >= 1
+    crate = [i for i in utils if i.module == "crate::utils"]
+    assert len(crate) == 1
+
+    # As-clause: use foo::bar as baz
+    baz = [i for i in imports if i.name == "bar" and i.alias == "baz"]
+    assert len(baz) == 1
+    assert baz[0].module == "foo::bar"
+
+    # Nested use_list: use std::io::{self, BufRead}
+    io_path = [i for i in imports if i.module and i.module.startswith("std::io")]
+    assert len(io_path) >= 2
+
+    # Nested use_list 2 levels: use embedded_hal::i2c::{I2c, SevenBitAddress}
+    i2c_path = [
+        i for i in imports if i.module and i.module.startswith("embedded_hal::i2c")
+    ]
+    assert len(i2c_path) >= 2
+
+
+@_skip_no_rust
+def test_parse_rust_imports_glob(rust_imports: Path):
+    """Rust: wildcard imports (use super::*) are extracted."""
+    result = parse_file(rust_imports)
+    super_wild = [i for i in result.imports if i.module == "super" and i.name == "*"]
+    assert len(super_wild) == 1
+    assert super_wild[0].is_from is True
