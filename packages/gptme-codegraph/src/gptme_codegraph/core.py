@@ -3,7 +3,7 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, and Rust via tree-sitter grammars.
+Supports Python, TypeScript/JavaScript, Rust, and Go via tree-sitter grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
 
@@ -45,6 +45,7 @@ _LANG_MAP: dict[str, str] = {
     ".mjs": "javascript",
     ".cjs": "javascript",
     ".rs": "rust",
+    ".go": "go",
 }
 
 _GRAMMAR_MODULES: dict[str, str] = {
@@ -54,11 +55,12 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "typescript": "tree_sitter_typescript",
     "tsx": "tree_sitter_typescript",
     "rust": "tree_sitter_rust",
+    "go": "tree_sitter_go",
 }
 
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
 _NOISE_PATH_PARTS: frozenset[str] = frozenset(
-    {"__pycache__", "node_modules", ".git", "target"}
+    {"__pycache__", "node_modules", ".git", "target", "vendor"}
 )
 
 
@@ -116,6 +118,12 @@ def _load_language(name: str):
         import tree_sitter_rust as tsrust  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["rust"] = tsrust.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_go as tsgo  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["go"] = tsgo.language()
     except ImportError:
         pass
 
@@ -1292,6 +1300,169 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
 
 
 # ---------------------------------------------------------------------------
+# Go extraction
+# ---------------------------------------------------------------------------
+
+
+def _receiver_type_go(receiver_node) -> str | None:
+    """Extract the base type name from a Go receiver parameter_list.
+
+    Handles plain, pointer, and generic receivers (Go 1.18+):
+      (r Foo)       → "Foo"
+      (r *Foo)      → "Foo"
+      (r Foo[T])    → "Foo"
+      (r *Foo[T])   → "Foo"
+    """
+
+    def _base_type(type_node) -> str | None:
+        if type_node.type == "type_identifier":
+            return _text(type_node)
+        if type_node.type == "pointer_type":
+            for sub in type_node.named_children:
+                result = _base_type(sub)
+                if result:
+                    return result
+        if type_node.type == "generic_type":
+            base = type_node.child_by_field_name("type")
+            if base is not None:
+                return _base_type(base)
+        return None
+
+    for child in receiver_node.named_children:
+        if child.type == "parameter_declaration":
+            type_node = child.child_by_field_name("type")
+            if type_node is None:
+                continue
+            result = _base_type(type_node)
+            if result:
+                return result
+    return None
+
+
+def _extract_symbols_go(root, filepath: str) -> list[Symbol]:
+    """Extract functions, methods, and named types from a Go parse tree."""
+    symbols: list[Symbol] = []
+
+    for node in root.named_children:
+        if node.type == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                body_node = node.child_by_field_name("body")
+                calls = _extract_calls(body_node) if body_node else []
+                symbols.append(
+                    Symbol(
+                        name=_text(name_node),
+                        kind="function",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        calls=list(set(calls)),
+                    )
+                )
+        elif node.type == "method_declaration":
+            name_node = node.child_by_field_name("name")
+            receiver_node = node.child_by_field_name("receiver")
+            if name_node:
+                parent_class = (
+                    _receiver_type_go(receiver_node) if receiver_node else None
+                )
+                body_node = node.child_by_field_name("body")
+                calls = _extract_calls(body_node) if body_node else []
+                symbols.append(
+                    Symbol(
+                        name=_text(name_node),
+                        kind="method",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent_class=parent_class,
+                        calls=list(set(calls)),
+                    )
+                )
+        elif node.type == "type_declaration":
+            for type_spec in node.named_children:
+                if type_spec.type == "type_spec":
+                    name_node = type_spec.child_by_field_name("name")
+                    type_node = type_spec.child_by_field_name("type")
+                    if (
+                        name_node
+                        and type_node
+                        and type_node.type
+                        in (
+                            "struct_type",
+                            "interface_type",
+                        )
+                    ):
+                        symbols.append(
+                            Symbol(
+                                name=_text(name_node),
+                                kind="class",
+                                file=filepath,
+                                start_line=type_spec.start_point[0] + 1,
+                                end_line=type_spec.end_point[0] + 1,
+                            )
+                        )
+
+    return symbols
+
+
+def _extract_imports_go(root) -> list[ImportInfo]:
+    """Extract import statements from a Go parse tree.
+
+    Handles:
+    - import "fmt"                  → name="fmt", module="fmt"
+    - import m "math"               → name="math", alias="m"
+    - import . "os"                 → name="os", is_from=True
+    - import _ "unused"             → name="unused", alias="_"
+    - import "github.com/foo/bar"   → name="bar", module="github.com/foo/bar"
+    """
+    imports: list[ImportInfo] = []
+
+    def _parse_import_spec(spec_node) -> None:
+        path_node = spec_node.child_by_field_name("path")
+        if path_node is None:
+            return
+        path_text = _strip_string_quotes(_text(path_node))
+        default_name = path_text.split("/")[-1]
+
+        alias = None
+        is_from = False
+        name_node = spec_node.child_by_field_name("name")
+        if name_node is not None:
+            alias_text = _text(name_node)
+            if alias_text == ".":
+                is_from = True
+            elif alias_text == "_":
+                alias = "_"
+            else:
+                alias = alias_text
+
+        imports.append(
+            ImportInfo(
+                file="",
+                name=default_name,
+                module=path_text,
+                is_from=is_from,
+                alias=alias,
+            )
+        )
+
+    try:
+        for node in root.named_children:
+            if node.type == "import_declaration":
+                for child in node.named_children:
+                    if child.type == "import_spec_list":
+                        for spec in child.named_children:
+                            if spec.type == "import_spec":
+                                _parse_import_spec(spec)
+                    elif child.type == "import_spec":
+                        _parse_import_spec(child)
+    except Exception:
+        pass
+    return imports
+
+
+# ---------------------------------------------------------------------------
 # Multi-language parse_file
 # ---------------------------------------------------------------------------
 
@@ -1300,7 +1471,7 @@ def parse_file(filepath: Path) -> FileParseResult:
     """Extract all symbols and imports from a source file.
 
     Detects language from file extension and dispatches to the correct
-    tree-sitter grammar. Supports Python, TypeScript/JavaScript, and Rust.
+    tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, and Go.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -1323,6 +1494,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "rust":
         symbols = _extract_symbols_rust(root, filename)
 
+    elif lang_name == "go":
+        symbols = _extract_symbols_go(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -1330,6 +1504,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_javascript(root)
     elif lang_name == "rust":
         imports = _extract_imports_rust(root)
+    elif lang_name == "go":
+        imports = _extract_imports_go(root)
 
     for imp in imports:
         imp.file = filename

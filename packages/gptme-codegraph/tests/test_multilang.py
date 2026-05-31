@@ -1,7 +1,7 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, and Rust source files.
+for JavaScript, TypeScript, Rust, and Go source files.
 """
 
 from __future__ import annotations
@@ -709,3 +709,173 @@ def test_parse_rust_imports_glob(rust_imports: Path):
     super_wild = [i for i in result.imports if i.module == "super" and i.name == "*"]
     assert len(super_wild) == 1
     assert super_wild[0].is_from is True
+
+
+# ---------------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------------
+
+_skip_no_go = pytest.mark.skipif(
+    not _has_grammar("go"),
+    reason="tree-sitter-go not installed",
+)
+
+_GO_MODULE = """\
+package main
+
+import (
+\t"fmt"
+\tm "math"
+\t. "os"
+\t_ "io"
+)
+
+import "strings"
+
+type Calculator struct {
+\tprecision int
+}
+
+type Adder interface {
+\tAdd(a, b int) int
+}
+
+func NewCalc(p int) *Calculator {
+\treturn &Calculator{precision: p}
+}
+
+func (c *Calculator) Add(a, b int) int {
+\tfmt.Println("adding")
+\treturn a + b
+}
+
+func (c Calculator) Precision() int {
+\treturn c.precision
+}
+
+func helper() {
+\tm.Sqrt(2.0)
+\tstrings.Join(nil, "")
+}
+"""
+
+
+@pytest.fixture
+def go_module() -> Generator[Path, None, None]:
+    """A temporary Go source file with functions, methods, and types."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".go", delete=False, prefix="test_go_"
+    ) as f:
+        f.write(_GO_MODULE)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_go
+def test_language_detection_go(go_module: Path):
+    """parse_file detects .go files."""
+    result = parse_file(go_module)
+    assert result.language == "go"
+
+
+@_skip_no_go
+def test_parse_go_functions(go_module: Path):
+    """Go: top-level functions are extracted."""
+    result = parse_file(go_module)
+    names = {s.name for s in result.symbols if s.kind == "function"}
+    assert "NewCalc" in names
+    assert "helper" in names
+
+
+@_skip_no_go
+def test_parse_go_methods(go_module: Path):
+    """Go: methods are extracted with correct parent class."""
+    result = parse_file(go_module)
+    methods = [s for s in result.symbols if s.kind == "method"]
+    assert len(methods) >= 2
+
+    add = [m for m in methods if m.name == "Add"]
+    assert len(add) == 1
+    assert add[0].parent_class == "Calculator"
+
+    prec = [m for m in methods if m.name == "Precision"]
+    assert len(prec) == 1
+    assert prec[0].parent_class == "Calculator"
+
+
+@_skip_no_go
+def test_parse_go_types(go_module: Path):
+    """Go: struct and interface type declarations are extracted as class."""
+    result = parse_file(go_module)
+    classes = {s.name for s in result.symbols if s.kind == "class"}
+    assert "Calculator" in classes
+    assert "Adder" in classes
+
+
+@_skip_no_go
+def test_parse_go_function_calls(go_module: Path):
+    """Go: calls are extracted from function bodies."""
+    result = parse_file(go_module)
+    helper = next((s for s in result.symbols if s.name == "helper"), None)
+    assert helper is not None
+    assert any("Sqrt" in c for c in helper.calls)
+    assert any("Join" in c for c in helper.calls)
+
+
+@_skip_no_go
+def test_parse_go_method_calls(go_module: Path):
+    """Go: calls are extracted from method bodies."""
+    result = parse_file(go_module)
+    add = next(
+        (s for s in result.symbols if s.name == "Add" and s.kind == "method"), None
+    )
+    assert add is not None
+    assert any("Println" in c for c in add.calls)
+
+
+@_skip_no_go
+def test_parse_go_imports_basic(go_module: Path):
+    """Go: plain imports are extracted."""
+    result = parse_file(go_module)
+    imports = result.imports
+
+    fmt_imp = [i for i in imports if i.name == "fmt"]
+    assert len(fmt_imp) == 1
+    assert fmt_imp[0].module == "fmt"
+    assert fmt_imp[0].alias is None
+    assert fmt_imp[0].is_from is False
+
+    strings_imp = [i for i in imports if i.name == "strings"]
+    assert len(strings_imp) == 1
+    assert strings_imp[0].module == "strings"
+
+
+@_skip_no_go
+def test_parse_go_imports_alias(go_module: Path):
+    """Go: aliased imports (import m "math") are extracted."""
+    result = parse_file(go_module)
+    math_imp = [i for i in result.imports if i.name == "math"]
+    assert len(math_imp) == 1
+    assert math_imp[0].alias == "m"
+    assert math_imp[0].is_from is False
+
+
+@_skip_no_go
+def test_parse_go_imports_dot(go_module: Path):
+    """Go: dot imports (import . "os") set is_from=True."""
+    result = parse_file(go_module)
+    os_imp = [i for i in result.imports if i.name == "os"]
+    assert len(os_imp) == 1
+    assert os_imp[0].is_from is True
+    assert os_imp[0].alias is None
+
+
+@_skip_no_go
+def test_parse_go_imports_blank(go_module: Path):
+    """Go: blank imports (import _ "io") have alias="_"."""
+    result = parse_file(go_module)
+    io_imp = [i for i in result.imports if i.name == "io"]
+    assert len(io_imp) == 1
+    assert io_imp[0].alias == "_"
+    assert io_imp[0].is_from is False
