@@ -95,6 +95,120 @@ def _exit_code(content: object) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _as_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _as_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _split_int(value: int | None, parts: int, index: int) -> int | None:
+    if value is None:
+        return None
+    if parts <= 1:
+        return value
+    base, remainder = divmod(value, parts)
+    return base + (1 if index < remainder else 0)
+
+
+def _split_float(value: float | None, parts: int) -> float | None:
+    if value is None:
+        return None
+    return value / parts if parts > 1 else value
+
+
+@dataclass(frozen=True)
+class _TurnUsage:
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cost_usd: float | None = None
+
+    def split(self, parts: int, index: int) -> _TurnUsage:
+        return _TurnUsage(
+            model=self.model,
+            input_tokens=_split_int(self.input_tokens, parts, index),
+            output_tokens=_split_int(self.output_tokens, parts, index),
+            cache_creation_tokens=_split_int(self.cache_creation_tokens, parts, index),
+            cache_read_tokens=_split_int(self.cache_read_tokens, parts, index),
+            cost_usd=_split_float(self.cost_usd, parts),
+        )
+
+
+def _usage_has_data(usage: _TurnUsage) -> bool:
+    return any(
+        value is not None
+        for value in (
+            usage.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_tokens,
+            usage.cache_read_tokens,
+            usage.cost_usd,
+        )
+    )
+
+
+def _cc_turn_usage(message: object) -> _TurnUsage | None:
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    model = message.get("model")
+    turn_usage = _TurnUsage(
+        model=model if isinstance(model, str) and model else None,
+        input_tokens=_as_int(usage.get("input_tokens")),
+        output_tokens=_as_int(usage.get("output_tokens")),
+        cache_creation_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+        cache_read_tokens=_as_int(usage.get("cache_read_input_tokens")),
+    )
+    return turn_usage if _usage_has_data(turn_usage) else None
+
+
+def _gptme_turn_usage(record: dict) -> _TurnUsage | None:
+    metadata = record.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw_usage = metadata.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else metadata
+    if not isinstance(usage, dict):
+        usage = {}
+    model = metadata.get("model") or record.get("model")
+    turn_usage = _TurnUsage(
+        model=model if isinstance(model, str) and model else None,
+        input_tokens=_as_int(usage.get("input_tokens")),
+        output_tokens=_as_int(usage.get("output_tokens")),
+        cache_creation_tokens=_as_int(usage.get("cache_creation_tokens")),
+        cache_read_tokens=_as_int(usage.get("cache_read_tokens")),
+        cost_usd=_as_float(metadata.get("cost")),
+    )
+    return turn_usage if _usage_has_data(turn_usage) else None
+
+
 @dataclass
 class ToolSpan:
     """A single tool invocation within an agent session.
@@ -112,6 +226,13 @@ class ToolSpan:
         exit_code: For Bash spans, the subprocess exit code when annotated
             in the result text ("Exit code: N"). None otherwise.
         turn_index: 0-indexed assistant turn that dispatched this tool call.
+        model: Model used for the assistant turn, when present in the
+            trajectory.
+        input_tokens/output_tokens/cache_*: Optional per-turn token usage
+            attributed to this tool call. Batched tool calls split the
+            assistant turn's usage evenly across dispatched calls.
+        cost_usd: Optional per-turn cost attributed to this call when the
+            trajectory records cost directly.
     """
 
     span_id: str
@@ -125,6 +246,12 @@ class ToolSpan:
     exit_code: int | None
     turn_index: int
     matched_lessons: list[str] = field(default_factory=list)
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cost_usd: float | None = None
 
 
 @dataclass
@@ -229,8 +356,9 @@ def extract_spans_from_cc_jsonl(
     if session_id is None:
         session_id = path.stem
 
-    # pending maps tool_use_id → (tool_name, dispatch_ts, dispatch_ts_str, input_size, turn_index)
-    pending: dict[str, tuple[str, datetime | None, str, int, int]] = {}
+    # pending maps tool_use_id → (tool_name, dispatch_ts, dispatch_ts_str,
+    #                             input_size, turn_index, attributed_usage)
+    pending: dict[str, tuple[str, datetime | None, str, int, int, _TurnUsage | None]] = {}
     spans: list[ToolSpan] = []
     turn_index = 0
 
@@ -253,21 +381,25 @@ def extract_spans_from_cc_jsonl(
         ts_str = record.get("timestamp", "")
 
         if rec_type == "assistant":
-            content = record.get("message", {}).get("content", [])
+            message = record.get("message", {})
+            content = message.get("content", []) if isinstance(message, dict) else []
             if not isinstance(content, list):
                 continue
-            dispatched_this_turn = False
-            for item in content:
-                if not isinstance(item, dict) or item.get("type") != "tool_use":
-                    continue
+            tool_items = [
+                item
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "tool_use" and item.get("id")
+            ]
+            if not tool_items:
+                continue
+            turn_usage = _cc_turn_usage(message)
+            for idx, item in enumerate(tool_items):
                 tool_id = item.get("id", "")
                 tool_name = item.get("name", "unknown")
                 isize = _input_size(item.get("input", {}))
-                if tool_id:
-                    pending[tool_id] = (tool_name, ts, ts_str, isize, turn_index)
-                    dispatched_this_turn = True
-            if dispatched_this_turn:
-                turn_index += 1
+                usage_share = turn_usage.split(len(tool_items), idx) if turn_usage else None
+                pending[tool_id] = (tool_name, ts, ts_str, isize, turn_index, usage_share)
+            turn_index += 1
 
         elif rec_type == "user":
             content = record.get("message", {}).get("content", [])
@@ -279,7 +411,9 @@ def extract_spans_from_cc_jsonl(
                 tool_use_id = item.get("tool_use_id", "")
                 if tool_use_id not in pending:
                     continue
-                tool_name, dispatch_ts, dispatch_ts_str, isize, tidx = pending.pop(tool_use_id)
+                tool_name, dispatch_ts, dispatch_ts_str, isize, tidx, usage = pending.pop(
+                    tool_use_id
+                )
                 is_error = bool(item.get("is_error"))
                 result_content = item.get("content", "")
                 osize = _output_size(result_content)
@@ -307,6 +441,12 @@ def extract_spans_from_cc_jsonl(
                         output_size=osize,
                         exit_code=exit_code,
                         turn_index=tidx,
+                        model=usage.model if usage else None,
+                        input_tokens=usage.input_tokens if usage else None,
+                        output_tokens=usage.output_tokens if usage else None,
+                        cache_creation_tokens=usage.cache_creation_tokens if usage else None,
+                        cache_read_tokens=usage.cache_read_tokens if usage else None,
+                        cost_usd=usage.cost_usd if usage else None,
                     )
                 )
 
@@ -361,8 +501,9 @@ def extract_spans_from_gptme_jsonl(
         return []
 
     # Pending tool dispatches awaiting their result.
-    # Each entry: (tool_name, call_id, dispatch_ts, dispatch_ts_str, input_size, turn_index)
-    pending: list[tuple[str, str, datetime | None, str, int, int]] = []
+    # Each entry: (tool_name, call_id, dispatch_ts, dispatch_ts_str,
+    #              input_size, turn_index, attributed_usage)
+    pending: list[tuple[str, str, datetime | None, str, int, int, _TurnUsage | None]] = []
     spans: list[ToolSpan] = []
     turn_index = 0
 
@@ -386,7 +527,8 @@ def extract_spans_from_gptme_jsonl(
             matches = list(_GPTME_TOOL_RE.finditer(content))
             if not matches:
                 continue
-            for m in matches:
+            turn_usage = _gptme_turn_usage(record)
+            for idx, m in enumerate(matches):
                 tool_name = m.group(1)
                 call_id = m.group(2)
                 args_str = m.group(3) or ""
@@ -395,7 +537,8 @@ def extract_spans_from_gptme_jsonl(
                 except json.JSONDecodeError:
                     args = args_str  # fall back to raw string length
                 isize = _input_size(args)
-                pending.append((tool_name, call_id, ts, ts_str, isize, turn_index))
+                usage_share = turn_usage.split(len(matches), idx) if turn_usage else None
+                pending.append((tool_name, call_id, ts, ts_str, isize, turn_index, usage_share))
             turn_index += 1
 
         elif role == "system":
@@ -406,7 +549,7 @@ def extract_spans_from_gptme_jsonl(
             if not pending:
                 continue
 
-            tool_name, _call_id, dispatch_ts, dispatch_ts_str, isize, tidx = pending.pop(0)
+            tool_name, _call_id, dispatch_ts, dispatch_ts_str, isize, tidx, usage = pending.pop(0)
             osize = len(content)
 
             dur_ms = -1
@@ -438,6 +581,12 @@ def extract_spans_from_gptme_jsonl(
                     output_size=osize,
                     exit_code=exit_code,
                     turn_index=tidx,
+                    model=usage.model if usage else None,
+                    input_tokens=usage.input_tokens if usage else None,
+                    output_tokens=usage.output_tokens if usage else None,
+                    cache_creation_tokens=usage.cache_creation_tokens if usage else None,
+                    cache_read_tokens=usage.cache_read_tokens if usage else None,
+                    cost_usd=usage.cost_usd if usage else None,
                 )
             )
 
@@ -507,11 +656,12 @@ def extract_spans_from_codex_jsonl(
         return []
 
     # pending maps call_id → (tool_name, dispatch_ts, dispatch_ts_str,
-    #                         input_size, turn_index, is_custom)
-    pending: dict[str, tuple[str, datetime | None, str, int, int, bool]] = {}
+    #                         input_size, turn_index, is_custom, model)
+    pending: dict[str, tuple[str, datetime | None, str, int, int, bool, str | None]] = {}
     spans: list[ToolSpan] = []
     turn_index = 0
     new_turn = False  # set by a turn marker; the next dispatch opens a new turn
+    current_model: str | None = None
 
     for line in text.splitlines():
         line = line.strip()
@@ -520,6 +670,12 @@ def extract_spans_from_codex_jsonl(
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
+            continue
+
+        if record.get("type") == "turn_context":
+            payload = record.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                current_model = payload["model"]
             continue
 
         if record.get("type") != "response_item":
@@ -555,13 +711,23 @@ def extract_spans_from_codex_jsonl(
             if new_turn:
                 turn_index += 1
                 new_turn = False
-            pending[call_id] = (tool_name, ts, ts_str, isize, turn_index, is_custom)
+            pending[call_id] = (
+                tool_name,
+                ts,
+                ts_str,
+                isize,
+                turn_index,
+                is_custom,
+                current_model,
+            )
 
         elif ptype in ("function_call_output", "custom_tool_call_output"):
             call_id = payload.get("call_id", "")
             if call_id not in pending:
                 continue
-            tool_name, dispatch_ts, dispatch_ts_str, isize, tidx, is_custom = pending.pop(call_id)
+            tool_name, dispatch_ts, dispatch_ts_str, isize, tidx, is_custom, model = pending.pop(
+                call_id
+            )
             output = payload.get("output", "")
             output_str = output if isinstance(output, str) else str(output)
             osize = len(output_str)
@@ -594,6 +760,7 @@ def extract_spans_from_codex_jsonl(
                     output_size=osize,
                     exit_code=exit_code,
                     turn_index=tidx,
+                    model=model,
                 )
             )
 
