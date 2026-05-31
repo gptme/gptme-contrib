@@ -3,7 +3,7 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, and Rust via tree-sitter grammars.
+Supports Python, TypeScript/JavaScript, Rust, and Go via tree-sitter grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
 
@@ -1305,18 +1305,37 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
 
 
 def _receiver_type_go(receiver_node) -> str | None:
-    """Extract the base type name from a Go receiver parameter_list."""
+    """Extract the base type name from a Go receiver parameter_list.
+
+    Handles plain, pointer, and generic receivers (Go 1.18+):
+      (r Foo)       → "Foo"
+      (r *Foo)      → "Foo"
+      (r Foo[T])    → "Foo"
+      (r *Foo[T])   → "Foo"
+    """
+
+    def _base_type(type_node) -> str | None:
+        if type_node.type == "type_identifier":
+            return _text(type_node)
+        if type_node.type == "pointer_type":
+            for sub in type_node.named_children:
+                result = _base_type(sub)
+                if result:
+                    return result
+        if type_node.type == "generic_type":
+            base = type_node.child_by_field_name("type")
+            if base is not None:
+                return _base_type(base)
+        return None
+
     for child in receiver_node.named_children:
         if child.type == "parameter_declaration":
             type_node = child.child_by_field_name("type")
             if type_node is None:
                 continue
-            if type_node.type == "pointer_type":
-                for sub in type_node.named_children:
-                    if sub.type == "type_identifier":
-                        return _text(sub)
-            elif type_node.type == "type_identifier":
-                return _text(type_node)
+            result = _base_type(type_node)
+            if result:
+                return result
     return None
 
 
@@ -1365,7 +1384,15 @@ def _extract_symbols_go(root, filepath: str) -> list[Symbol]:
                 if type_spec.type == "type_spec":
                     name_node = type_spec.child_by_field_name("name")
                     type_node = type_spec.child_by_field_name("type")
-                    if name_node and type_node:
+                    if (
+                        name_node
+                        and type_node
+                        and type_node.type
+                        in (
+                            "struct_type",
+                            "interface_type",
+                        )
+                    ):
                         symbols.append(
                             Symbol(
                                 name=_text(name_node),
