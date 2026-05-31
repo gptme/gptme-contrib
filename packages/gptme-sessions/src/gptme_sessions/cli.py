@@ -7,8 +7,9 @@ import logging
 import re
 import sys
 from datetime import date, datetime, timedelta, timezone
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import click
 
@@ -305,6 +306,86 @@ def _parse_since(since: str | None) -> int | None:
             f"invalid value {since!r} (expected e.g. 1h, 7d, 30d, or 'all')",
             param_hint="'--since'",
         )
+
+
+def _record_timestamp_sort_key(record: SessionRecord) -> tuple[int, str]:
+    """Sort records newest-first using ISO timestamps when possible."""
+    if record.timestamp:
+        try:
+            ts = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
+            return (1, ts.isoformat())
+        except ValueError:
+            pass
+    return (0, record.session_id)
+
+
+def _select_auto_tag_targets(
+    records: list[SessionRecord],
+    *,
+    limit: int,
+    retag_all: bool,
+) -> list[SessionRecord]:
+    """Return newest matching records for ``auto-tag`` processing."""
+    candidates = [
+        record
+        for record in records
+        if retag_all or not record.category or record.category == "unknown"
+    ]
+    candidates.sort(key=_record_timestamp_sort_key, reverse=True)
+    return candidates[:limit]
+
+
+def _load_auto_tag_mapping(mapping_file: Path) -> list[tuple[str, str]]:
+    """Load YAML mapping of ``pattern: category`` entries for ``auto-tag``."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - depends on environment packaging
+        raise click.ClickException(
+            "PyYAML is required for --mapping-file support. Install the 'yaml' package first."
+        ) from exc
+
+    try:
+        raw = yaml.safe_load(mapping_file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise click.ClickException(f"Failed to read mapping file {mapping_file}: {exc}") from exc
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed to parse YAML mapping file {mapping_file}: {exc}"
+        ) from exc
+
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        raise click.ClickException(
+            f"{mapping_file} must contain a YAML mapping of 'pattern: category' entries."
+        )
+
+    rules: list[tuple[str, str]] = []
+    for pattern, category in raw.items():
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise click.ClickException(f"{mapping_file} contains an empty or non-string pattern.")
+        if not isinstance(category, str) or not category.strip():
+            raise click.ClickException(
+                f"{mapping_file} maps pattern {pattern!r} to an empty or non-string category."
+            )
+        rules.append((pattern.strip(), category.strip()))
+    return rules
+
+
+def _match_auto_tag_override(
+    rules: list[tuple[str, str]],
+    candidates: list[str],
+) -> tuple[str, str] | None:
+    """Return the first matching override as ``(category, pattern)``."""
+    normalized = [candidate.lower() for candidate in candidates if candidate]
+    for pattern, category in rules:
+        pattern_norm = pattern.lower()
+        has_glob = any(ch in pattern for ch in "*?[")
+        for candidate in normalized:
+            matched = fnmatch(candidate, pattern_norm) if has_glob else pattern_norm in candidate
+            if matched:
+                return category, pattern
+    return None
 
 
 @click.group(invoke_without_command=True)
@@ -837,6 +918,152 @@ def annotate(
         finally:
             if _has_fcntl:
                 _fcntl.flock(lock_file, _fcntl.LOCK_UN)
+
+
+# -- auto-tag ----------------------------------------------------------------
+
+
+@cli.command("auto-tag")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=10,
+    show_default=True,
+    help="Maximum number of matching records to process",
+)
+@click.option(
+    "--retag-all",
+    is_flag=True,
+    help="Retag records even when they already have a category",
+)
+@click.option(
+    "--mapping-file",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Optional YAML mapping of 'pattern: category' overrides",
+)
+@click.option("--dry-run", is_flag=True, help="Show category changes without rewriting the store")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.pass_context
+def auto_tag(
+    ctx: click.Context,
+    limit: int,
+    retag_all: bool,
+    mapping_file: Path | None,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Assign categories to session records from trajectory-derived signals."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    if not records:
+        click.echo("No records in store.")
+        return
+
+    targets = _select_auto_tag_targets(records, limit=limit, retag_all=retag_all)
+    if not targets:
+        scope = "records" if retag_all else "untagged records"
+        click.echo(f"No {scope} matched the auto-tag selection.")
+        return
+
+    override_rules = _load_auto_tag_mapping(mapping_file) if mapping_file else []
+    results: list[dict[str, Any]] = []
+    changed = 0
+    unchanged = 0
+    skipped = 0
+
+    for record in targets:
+        row: dict[str, Any] = {
+            "session_id": record.session_id,
+            "previous_category": record.category,
+            "trajectory_path": record.trajectory_path,
+        }
+        if not record.trajectory_path:
+            row["status"] = "skipped"
+            row["reason"] = "missing trajectory_path"
+            results.append(row)
+            skipped += 1
+            continue
+
+        traj_path = Path(record.trajectory_path)
+        if not traj_path.exists():
+            row["status"] = "skipped"
+            row["reason"] = "trajectory_path does not exist"
+            results.append(row)
+            skipped += 1
+            continue
+
+        try:
+            extract_result = extract_from_path(traj_path)
+        except Exception as exc:
+            row["status"] = "skipped"
+            row["reason"] = f"signal extraction failed: {exc}"
+            results.append(row)
+            skipped += 1
+            continue
+
+        candidate_paths = [
+            value
+            for value in [
+                record.project,
+                record.journal_path,
+                record.trajectory_path,
+                *extract_result.get("file_writes", []),
+                *extract_result.get("journal_paths", []),
+            ]
+            if isinstance(value, str) and value
+        ]
+        override = _match_auto_tag_override(override_rules, candidate_paths)
+        inferred_category = cast(str | None, extract_result.get("inferred_category"))
+        category: str | None
+        if override is not None:
+            category, pattern = override
+            source = f"mapping:{pattern}"
+        else:
+            category = inferred_category
+            source = "signals"
+
+        if not category:
+            row["status"] = "skipped"
+            row["reason"] = "no category inferred"
+            results.append(row)
+            skipped += 1
+            continue
+
+        row["category"] = category
+        row["source"] = source
+        if record.category == category:
+            row["status"] = "unchanged"
+            unchanged += 1
+        else:
+            row["status"] = "updated" if not dry_run else "would-update"
+            changed += 1
+            if not dry_run:
+                record.category = category
+        results.append(row)
+
+    if changed and not dry_run:
+        store.rewrite(records)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        for row in results:
+            status = row["status"]
+            session_id = str(row["session_id"])
+            if status == "skipped":
+                click.echo(f"{session_id:<12}  skipped      {row['reason']}")
+                continue
+            previous = row.get("previous_category") or "?"
+            current = row.get("category") or "?"
+            click.echo(
+                f"{session_id:<12}  {status:<11}  {previous:<14} -> {current:<14}  [{row['source']}]"
+            )
+
+        summary_verb = "Would tag" if dry_run else "Tagged"
+        click.echo(
+            f"\n{summary_verb} {changed} record(s); {unchanged} unchanged; {skipped} skipped."
+        )
 
 
 # -- discover ----------------------------------------------------------------

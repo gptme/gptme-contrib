@@ -942,3 +942,116 @@ class TestRepairGradesCommand:
 
         persisted = SessionStore(sessions_dir=tmp_path).load_all()[0]
         assert persisted.grades == {}
+
+
+class TestAutoTagCommand:
+    def test_auto_tag_dry_run_does_not_rewrite_store(self, tmp_path: Path, monkeypatch) -> None:
+        """auto-tag --dry-run previews inferred categories without persisting them."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = tmp_path / "session-a.jsonl"
+        traj.write_text("{}\n", encoding="utf-8")
+        store.append(
+            SessionRecord(
+                session_id="session-a",
+                harness="codex",
+                trajectory_path=str(traj),
+            )
+        )
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _path: {
+                "inferred_category": "code",
+                "file_writes": ["scripts/tool.py"],
+                "journal_paths": [],
+            },
+        )
+
+        rc, out = _invoke(["auto-tag", "--dry-run", "--json"], tmp_path)
+
+        assert rc == 0
+        data = json.loads(out)
+        assert len(data) == 1
+        assert data[0]["status"] == "would-update"
+        assert data[0]["category"] == "code"
+
+        persisted = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert persisted.category is None
+
+    def test_auto_tag_updates_only_untagged_records(self, tmp_path: Path, monkeypatch) -> None:
+        """auto-tag retags untagged records by default and leaves tagged ones alone."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj_a = tmp_path / "session-a.jsonl"
+        traj_b = tmp_path / "session-b.jsonl"
+        traj_a.write_text("{}\n", encoding="utf-8")
+        traj_b.write_text("{}\n", encoding="utf-8")
+        store.append(
+            SessionRecord(
+                session_id="session-a",
+                harness="codex",
+                trajectory_path=str(traj_a),
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="session-b",
+                harness="codex",
+                trajectory_path=str(traj_b),
+                category="triage",
+            )
+        )
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _path: {
+                "inferred_category": "code",
+                "file_writes": ["scripts/tool.py"],
+                "journal_paths": [],
+            },
+        )
+
+        rc, out = _invoke(["auto-tag"], tmp_path)
+
+        assert rc == 0
+        assert "Tagged 1 record(s)" in out
+
+        records = SessionStore(sessions_dir=tmp_path).load_all()
+        assert records[0].category == "code"
+        assert records[1].category == "triage"
+
+    def test_auto_tag_mapping_file_overrides_signal_category(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Path override mappings take precedence over inferred trajectory category."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = tmp_path / "session-a.jsonl"
+        traj.write_text("{}\n", encoding="utf-8")
+        store.append(
+            SessionRecord(
+                session_id="session-a",
+                harness="codex",
+                trajectory_path=str(traj),
+            )
+        )
+        mapping = tmp_path / "auto-tag.yml"
+        mapping.write_text("scripts/twitter/: social\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _path: {
+                "inferred_category": "code",
+                "file_writes": ["scripts/twitter/post.py"],
+                "journal_paths": [],
+            },
+        )
+
+        rc, out = _invoke(["auto-tag", "--mapping-file", str(mapping), "--json"], tmp_path)
+
+        assert rc == 0
+        data = json.loads(out)
+        assert data[0]["status"] == "updated"
+        assert data[0]["category"] == "social"
+        assert data[0]["source"] == "mapping:scripts/twitter/"
+
+        persisted = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        assert persisted.category == "social"
