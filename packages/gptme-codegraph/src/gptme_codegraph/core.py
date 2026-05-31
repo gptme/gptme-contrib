@@ -718,6 +718,11 @@ def _extract_calls(node) -> list[str]:
                 func_node = cursor.node.child_by_field_name("function")
                 if func_node:
                     calls.append(_text(func_node))
+            elif cursor.node.type == "method_invocation":
+                # Java: method calls use method_invocation with a "name" field
+                name_node = cursor.node.child_by_field_name("name")
+                if name_node:
+                    calls.append(_text(name_node))
             if cursor.goto_first_child():
                 continue
             if cursor.goto_next_sibling():

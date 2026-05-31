@@ -1045,6 +1045,16 @@ def test_parse_java_line_numbers(java_module: Path):
 
 
 @_skip_no_java
+def test_parse_java_calls(java_module: Path):
+    """Java: method_invocation nodes are extracted as calls."""
+    result = parse_file(java_module)
+    # fromList calls values.get(0) — a method_invocation
+    from_list = next((s for s in result.symbols if s.name == "fromList"), None)
+    assert from_list is not None
+    assert "get" in from_list.calls, f"Expected 'get' in calls, got: {from_list.calls}"
+
+
+@_skip_no_java
 def test_build_index_java(java_module: Path):
     """Java: build_index picks up symbols from a .java file."""
     import shutil
