@@ -902,6 +902,109 @@ def _extract_imports_javascript(root) -> list[ImportInfo]:
     return imports
 
 
+def _extract_imports_rust(root) -> list[ImportInfo]:
+    """Extract `use` statements from a Rust parse tree.
+
+    Handles:
+    - use std::collections::HashMap;
+    - use crate::utils;
+    - use super::*;
+    - use foo::bar as baz;
+    - use std::io::{self, BufRead};
+    """
+    imports: list[ImportInfo] = []
+
+    def _text_rs(node) -> str:
+        try:
+            return node.text.decode("utf-8") if node.text else ""
+        except Exception:
+            return ""
+
+    def _scoped_ident_text(node) -> str:
+        """Reconstruct the full path from a scoped_identifier node."""
+        if node.type in ("identifier", "crate", "self", "super"):
+            return _text_rs(node)
+        parts = []
+        for child in node.named_children:
+            if child.type in ("identifier", "crate", "self", "super"):
+                parts.append(_text_rs(child))
+            elif child.type == "scoped_identifier":
+                parts.append(_scoped_ident_text(child))
+            elif child.type == "scoped_type_identifier":
+                parts.append(_scoped_ident_text(child))
+        return "::".join(parts)
+
+    def _extract_from_use_decl(node):
+        """Walk a use_declaration node and yield (name, module, alias) tuples."""
+        for child in node.named_children:
+            if child.type == "scoped_identifier":
+                # use std::collections::HashMap;  → name=HashMap, module=std::collections
+                # use crate::utils;               → name=utils,   module=crate
+                full_path = _scoped_ident_text(child)
+                name = full_path.split("::")[-1]
+                module = "::".join(full_path.split("::")[:-1]) or None
+                yield name, module, None, True
+            elif child.type == "use_as_clause":
+                # use foo::bar as baz;  → name=bar, module=foo, alias=baz
+                # use serde as s;       → name=serde, module=None, alias=s
+                path_node = child.child_by_field_name("path")
+                alias_node = child.child_by_field_name("alias")
+                alias = _text_rs(alias_node) if alias_node else None
+                if path_node:
+                    full_path = _scoped_ident_text(path_node)
+                    name = full_path.split("::")[-1]
+                    module = "::".join(full_path.split("::")[:-1]) or None
+                    yield name, module, alias, True
+            elif child.type == "use_wildcard":
+                # use super::*;  → name=*, module=super
+                path_part = None
+                for sub in child.named_children:
+                    if sub.type in ("super", "crate", "self"):
+                        path_part = _text_rs(sub)
+                    elif sub.type == "scoped_identifier":
+                        path_part = _scoped_ident_text(sub)
+                    elif sub.type == "identifier":
+                        path_part = _text_rs(sub)
+                yield "*", path_part, None, True
+            elif child.type == "scoped_use_list":
+                # use std::io::{self, BufRead};  → module=std::io, names={self, BufRead}
+                # First child of scoped_use_list is the scoped_identifier for module
+                module_node = child.named_children[0] if child.named_children else None
+                module_path = _scoped_ident_text(module_node) if module_node else None
+                # Walk the use_list child
+                for sub in child.named_children:
+                    if sub.type == "use_list":
+                        for item in sub.named_children:
+                            if item.type == "identifier":
+                                # Simple name: std::io::BufRead
+                                name = _text_rs(item)
+                                yield name, module_path, None, True
+                            elif item.type == "self":
+                                # self: std::io::{self, ...} → name=self, module=std::io
+                                yield "self", module_path, None, True
+                            elif item.type == "scoped_identifier":
+                                full_path = _scoped_ident_text(item)
+                                name = full_path.split("::")[-1]
+                                yield name, module_path, None, True
+
+    try:
+        for node in root.named_children:
+            if node.type == "use_declaration":
+                for name, module, alias, is_from in _extract_from_use_decl(node):
+                    imports.append(
+                        ImportInfo(
+                            file="",
+                            name=name,
+                            module=module,
+                            is_from=is_from,
+                            alias=alias,
+                        )
+                    )
+    except Exception:
+        pass
+    return imports
+
+
 # ---------------------------------------------------------------------------
 # Python extraction
 # ---------------------------------------------------------------------------
@@ -1225,6 +1328,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports(root)
     elif lang_name in ("typescript", "javascript", "tsx"):
         imports = _extract_imports_javascript(root)
+    elif lang_name == "rust":
+        imports = _extract_imports_rust(root)
 
     for imp in imports:
         imp.file = filename
