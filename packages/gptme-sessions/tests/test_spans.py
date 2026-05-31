@@ -165,6 +165,49 @@ def test_batched_tool_calls(tmp_path: Path) -> None:
     assert spans[0].turn_index == spans[1].turn_index == 0
 
 
+def test_cc_usage_split_across_batched_tool_calls(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-04-21T10:00:00+00:00",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 101,
+                    "output_tokens": 51,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 7,
+                },
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tid1",
+                        "name": "Read",
+                        "input": {"file_path": "a.py"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "tid2",
+                        "name": "Read",
+                        "input": {"file_path": "b.py"},
+                    },
+                ],
+            },
+        },
+        _cc_result("tid1", "content a", "2026-04-21T10:00:01+00:00"),
+        _cc_result("tid2", "content b", "2026-04-21T10:00:02+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records)
+    spans = extract_spans_from_cc_jsonl(p)
+
+    assert len(spans) == 2
+    assert [s.model for s in spans] == ["claude-sonnet-4-6", "claude-sonnet-4-6"]
+    assert [s.input_tokens for s in spans] == [51, 50]
+    assert [s.output_tokens for s in spans] == [26, 25]
+    assert [s.cache_creation_tokens for s in spans] == [2, 1]
+    assert [s.cache_read_tokens for s in spans] == [4, 3]
+
+
 def test_timestamp_is_dispatch_time(tmp_path: Path) -> None:
     """span.timestamp must reflect dispatch time, not result-arrival time."""
     dispatch_ts = "2026-04-21T10:00:00+00:00"
@@ -414,6 +457,37 @@ def test_gptme_single_shell_span(tmp_path: Path) -> None:
     assert s.output_size > 0
 
 
+def test_gptme_usage_metadata_attached_to_span(tmp_path: Path) -> None:
+    records = [
+        {
+            "role": "assistant",
+            "timestamp": "2026-04-21T10:00:00",
+            "content": '\n@shell(call-abc-0): {"command": "echo hi"}',
+            "metadata": {
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_tokens": 10,
+                    "cache_read_tokens": 400,
+                },
+                "cost": 0.012,
+            },
+        },
+        _gptme_result("Ran command: `echo hi`\n\nhi", "2026-04-21T10:00:01"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].model == "gpt-5.5"
+    assert spans[0].input_tokens == 100
+    assert spans[0].output_tokens == 20
+    assert spans[0].cache_creation_tokens == 10
+    assert spans[0].cache_read_tokens == 400
+    assert spans[0].cost_usd == 0.012
+
+
 def test_gptme_error_result_detected(tmp_path: Path) -> None:
     records = [
         _gptme_assistant("gh", "abc-0", {"url": "bad"}, "2026-04-21T10:00:00"),
@@ -648,6 +722,24 @@ def test_codex_single_exec_span(tmp_path: Path) -> None:
     assert s.success is True
     assert s.exit_code == 0
     assert s.turn_index == 0
+
+
+def test_codex_model_from_turn_context(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.5"},
+        },
+        _codex_function_call(
+            "exec_command", "c1", {"cmd": "git status"}, "2026-05-27T10:00:00+00:00"
+        ),
+        _codex_function_output("c1", "Process exited with code 0\n", "2026-05-27T10:00:01+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records, name="rollout-x.jsonl")
+    spans = extract_spans_from_codex_jsonl(p)
+
+    assert len(spans) == 1
+    assert spans[0].model == "gpt-5.5"
 
 
 def test_codex_exec_nonzero_exit_is_error(tmp_path: Path) -> None:
