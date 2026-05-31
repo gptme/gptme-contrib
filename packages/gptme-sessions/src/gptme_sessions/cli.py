@@ -308,12 +308,12 @@ def _parse_since(since: str | None) -> int | None:
         )
 
 
-def _record_timestamp_sort_key(record: SessionRecord) -> tuple[int, str]:
+def _record_timestamp_sort_key(record: SessionRecord) -> tuple[int, float | str]:
     """Sort records newest-first using ISO timestamps when possible."""
     if record.timestamp:
         try:
             ts = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
-            return (1, ts.isoformat())
+            return (1, ts.timestamp())
         except ValueError:
             pass
     return (0, record.session_id)
@@ -341,7 +341,7 @@ def _load_auto_tag_mapping(mapping_file: Path) -> list[tuple[str, str]]:
         import yaml
     except ImportError as exc:  # pragma: no cover - depends on environment packaging
         raise click.ClickException(
-            "PyYAML is required for --mapping-file support. Install the 'yaml' package first."
+            "PyYAML is required for --mapping-file support. Install the 'pyyaml' package first."
         ) from exc
 
     try:
