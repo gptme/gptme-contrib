@@ -46,6 +46,7 @@ _LANG_MAP: dict[str, str] = {
     ".cjs": "javascript",
     ".rs": "rust",
     ".go": "go",
+    ".java": "java",
 }
 
 _GRAMMAR_MODULES: dict[str, str] = {
@@ -56,6 +57,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "tsx": "tree_sitter_typescript",
     "rust": "tree_sitter_rust",
     "go": "tree_sitter_go",
+    "java": "tree_sitter_java",
 }
 
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
@@ -124,6 +126,12 @@ def _load_language(name: str):
         import tree_sitter_go as tsgo  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["go"] = tsgo.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_java as tsjava  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["java"] = tsjava.language()
     except ImportError:
         pass
 
@@ -1463,6 +1471,167 @@ def _extract_imports_go(root) -> list[ImportInfo]:
 
 
 # ---------------------------------------------------------------------------
+# Java extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_symbols_java(root, filepath: str) -> list[Symbol]:
+    """Extract classes, interfaces, enums, and methods from a Java parse tree."""
+    symbols: list[Symbol] = []
+
+    def _text(node) -> str:
+        try:
+            return node.text.decode("utf-8") if node.text else ""
+        except Exception:
+            return ""
+
+    def _extract_members(body_node, parent_class: str) -> None:
+        for member in body_node.named_children:
+            if member.type == "method_declaration":
+                name_node = member.child_by_field_name("name")
+                if name_node:
+                    body = member.child_by_field_name("body")
+                    calls = _extract_calls(body) if body else []
+                    symbols.append(
+                        Symbol(
+                            name=_text(name_node),
+                            kind="method",
+                            file=filepath,
+                            start_line=member.start_point[0] + 1,
+                            end_line=member.end_point[0] + 1,
+                            parent_class=parent_class,
+                            calls=list(set(calls)),
+                        )
+                    )
+            elif member.type == "constructor_declaration":
+                name_node = member.child_by_field_name("name")
+                if name_node:
+                    body = member.child_by_field_name("body")
+                    calls = _extract_calls(body) if body else []
+                    symbols.append(
+                        Symbol(
+                            name=_text(name_node),
+                            kind="method",
+                            file=filepath,
+                            start_line=member.start_point[0] + 1,
+                            end_line=member.end_point[0] + 1,
+                            parent_class=parent_class,
+                            calls=list(set(calls)),
+                        )
+                    )
+            elif member.type in (
+                "class_declaration",
+                "interface_declaration",
+                "enum_declaration",
+            ):
+                _extract_type_decl(member)
+
+    def _extract_type_decl(node) -> None:
+        if node.type == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                class_name = _text(name_node)
+                symbols.append(
+                    Symbol(
+                        name=class_name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+                body = node.child_by_field_name("body")
+                if body:
+                    _extract_members(body, parent_class=class_name)
+        elif node.type == "interface_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                iface_name = _text(name_node)
+                symbols.append(
+                    Symbol(
+                        name=iface_name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+                body = node.child_by_field_name("body")
+                if body:
+                    for member in body.named_children:
+                        if member.type == "method_declaration":
+                            mn = member.child_by_field_name("name")
+                            if mn:
+                                symbols.append(
+                                    Symbol(
+                                        name=_text(mn),
+                                        kind="method",
+                                        file=filepath,
+                                        start_line=member.start_point[0] + 1,
+                                        end_line=member.end_point[0] + 1,
+                                        parent_class=iface_name,
+                                    )
+                                )
+        elif node.type == "enum_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append(
+                    Symbol(
+                        name=_text(name_node),
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+
+    for child in root.named_children:
+        _extract_type_decl(child)
+
+    return symbols
+
+
+def _extract_imports_java(root) -> list[ImportInfo]:
+    """Extract import declarations from a Java parse tree."""
+    imports: list[ImportInfo] = []
+
+    def _text(node) -> str:
+        try:
+            return node.text.decode("utf-8") if node.text else ""
+        except Exception:
+            return ""
+
+    for child in root.named_children:
+        if child.type == "import_declaration":
+            is_wildcard = any(c.type == "asterisk" for c in child.children)
+            qualified = next(
+                (
+                    _text(c)
+                    for c in child.named_children
+                    if c.type == "scoped_identifier"
+                ),
+                None,
+            ) or next(
+                (_text(c) for c in child.named_children if c.type == "identifier"),
+                None,
+            )
+            if not qualified:
+                continue
+            if is_wildcard:
+                module, name = qualified, "*"
+            elif "." in qualified:
+                dot = qualified.rfind(".")
+                module, name = qualified[:dot], qualified[dot + 1 :]
+            else:
+                module, name = "", qualified
+            imports.append(
+                ImportInfo(file="", module=module, name=name, alias=None, is_from=True)
+            )
+
+    return imports
+
+
+# ---------------------------------------------------------------------------
 # Multi-language parse_file
 # ---------------------------------------------------------------------------
 
@@ -1471,7 +1640,7 @@ def parse_file(filepath: Path) -> FileParseResult:
     """Extract all symbols and imports from a source file.
 
     Detects language from file extension and dispatches to the correct
-    tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, and Go.
+    tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go, and Java.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -1497,6 +1666,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "go":
         symbols = _extract_symbols_go(root, filename)
 
+    elif lang_name == "java":
+        symbols = _extract_symbols_java(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -1506,6 +1678,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_rust(root)
     elif lang_name == "go":
         imports = _extract_imports_go(root)
+    elif lang_name == "java":
+        imports = _extract_imports_java(root)
 
     for imp in imports:
         imp.file = filename

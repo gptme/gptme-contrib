@@ -1,7 +1,7 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, Rust, and Go source files.
+for JavaScript, TypeScript, Rust, Go, and Java source files.
 """
 
 from __future__ import annotations
@@ -41,6 +41,10 @@ _skip_no_ts = pytest.mark.skipif(
 _skip_no_rust = pytest.mark.skipif(
     not _has_grammar("rust"),
     reason="tree-sitter-rust not installed",
+)
+_skip_no_java = pytest.mark.skipif(
+    not _has_grammar("java"),
+    reason="tree-sitter-java not installed",
 )
 
 # ---------------------------------------------------------------------------
@@ -879,3 +883,176 @@ def test_parse_go_imports_blank(go_module: Path):
     assert len(io_imp) == 1
     assert io_imp[0].alias == "_"
     assert io_imp[0].is_from is False
+
+
+# ---------------------------------------------------------------------------
+# Java fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def java_module() -> Generator[Path, None, None]:
+    """A Java file with a class, interface, enum, methods, and imports."""
+    code = """\
+package com.example;
+
+import java.util.List;
+import java.util.ArrayList;
+import static java.lang.Math.PI;
+import java.io.*;
+
+public class Calculator {
+    private int value;
+
+    public Calculator(int initial) {
+        this.value = initial;
+    }
+
+    public int add(int n) {
+        return value + n;
+    }
+
+    public int multiply(int n) {
+        return value * n;
+    }
+
+    public static Calculator fromList(List<Integer> values) {
+        return new Calculator(values.get(0));
+    }
+}
+
+interface Describable {
+    String describe();
+    int size();
+}
+
+enum Operation {
+    ADD,
+    MULTIPLY,
+    SUBTRACT
+}
+"""
+    with tempfile.NamedTemporaryFile(suffix=".java", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Java tests
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_java
+def test_parse_java_class(java_module: Path):
+    """Java: class is extracted with correct name and kind."""
+    result = parse_file(java_module)
+    names = [s.name for s in result.symbols]
+    assert "Calculator" in names
+    calc = next(s for s in result.symbols if s.name == "Calculator")
+    assert calc.kind == "class"
+    assert calc.parent_class is None
+
+
+@_skip_no_java
+def test_parse_java_methods(java_module: Path):
+    """Java: methods are extracted with parent_class set."""
+    result = parse_file(java_module)
+    methods = [
+        s
+        for s in result.symbols
+        if s.kind == "method" and s.parent_class == "Calculator"
+    ]
+    method_names = {m.name for m in methods}
+    assert "add" in method_names
+    assert "multiply" in method_names
+    assert "fromList" in method_names
+
+
+@_skip_no_java
+def test_parse_java_constructor(java_module: Path):
+    """Java: constructors are extracted as methods with parent_class."""
+    result = parse_file(java_module)
+    ctors = [
+        s
+        for s in result.symbols
+        if s.name == "Calculator" and s.parent_class == "Calculator"
+    ]
+    assert len(ctors) >= 1
+
+
+@_skip_no_java
+def test_parse_java_interface(java_module: Path):
+    """Java: interface is extracted as a class symbol."""
+    result = parse_file(java_module)
+    iface = next((s for s in result.symbols if s.name == "Describable"), None)
+    assert iface is not None
+    assert iface.kind == "class"
+
+
+@_skip_no_java
+def test_parse_java_interface_methods(java_module: Path):
+    """Java: interface method declarations are extracted."""
+    result = parse_file(java_module)
+    iface_methods = [s for s in result.symbols if s.parent_class == "Describable"]
+    names = {m.name for m in iface_methods}
+    assert "describe" in names
+    assert "size" in names
+
+
+@_skip_no_java
+def test_parse_java_enum(java_module: Path):
+    """Java: enum is extracted as a class symbol."""
+    result = parse_file(java_module)
+    enum_sym = next((s for s in result.symbols if s.name == "Operation"), None)
+    assert enum_sym is not None
+    assert enum_sym.kind == "class"
+
+
+@_skip_no_java
+def test_parse_java_imports_basic(java_module: Path):
+    """Java: standard imports are extracted with correct module and name."""
+    result = parse_file(java_module)
+    imports = result.imports
+
+    list_imp = next((i for i in imports if i.name == "List"), None)
+    assert list_imp is not None
+    assert list_imp.module == "java.util"
+    assert list_imp.is_from is True
+
+    arraylist_imp = next((i for i in imports if i.name == "ArrayList"), None)
+    assert arraylist_imp is not None
+    assert arraylist_imp.module == "java.util"
+
+
+@_skip_no_java
+def test_parse_java_imports_wildcard(java_module: Path):
+    """Java: wildcard imports (java.io.*) set name='*' and correct module."""
+    result = parse_file(java_module)
+    wildcard = next((i for i in result.imports if i.name == "*"), None)
+    assert wildcard is not None
+    assert wildcard.module == "java.io"
+
+
+@_skip_no_java
+def test_parse_java_line_numbers(java_module: Path):
+    """Java: symbol line numbers are positive and ordered."""
+    result = parse_file(java_module)
+    for sym in result.symbols:
+        assert sym.start_line >= 1
+        assert sym.end_line >= sym.start_line
+
+
+@_skip_no_java
+def test_build_index_java(java_module: Path):
+    """Java: build_index picks up symbols from a .java file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        dest = Path(d) / java_module.name
+        shutil.copy(java_module, dest)
+        index = build_index(d)
+        assert "Calculator" in index.entries
+        assert "add" in index.entries
