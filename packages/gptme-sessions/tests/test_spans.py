@@ -488,6 +488,43 @@ def test_gptme_usage_metadata_attached_to_span(tmp_path: Path) -> None:
     assert spans[0].cost_usd == 0.012
 
 
+def test_gptme_usage_split_across_batched_tool_calls(tmp_path: Path) -> None:
+    records = [
+        {
+            "role": "assistant",
+            "timestamp": "2026-04-21T10:00:00",
+            "content": "\n".join(
+                [
+                    '@shell(call-abc-0): {"command": "echo a"}',
+                    '@shell(call-def-1): {"command": "echo b"}',
+                ]
+            ),
+            "metadata": {
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 101,
+                    "output_tokens": 51,
+                    "cache_creation_tokens": 3,
+                    "cache_read_tokens": 7,
+                },
+                "cost": 0.12,
+            },
+        },
+        _gptme_result("Ran command: `echo a`\n\na", "2026-04-21T10:00:01"),
+        _gptme_result("Ran command: `echo b`\n\nb", "2026-04-21T10:00:02"),
+    ]
+    p = _write_gptme_session(tmp_path, records, "sess")
+    spans = extract_spans_from_gptme_jsonl(p)
+
+    assert len(spans) == 2
+    assert [s.model for s in spans] == ["gpt-5.5", "gpt-5.5"]
+    assert [s.input_tokens for s in spans] == [51, 50]
+    assert [s.output_tokens for s in spans] == [26, 25]
+    assert [s.cache_creation_tokens for s in spans] == [2, 1]
+    assert [s.cache_read_tokens for s in spans] == [4, 3]
+    assert [s.cost_usd for s in spans] == [0.06, 0.06]
+
+
 def test_gptme_error_result_detected(tmp_path: Path) -> None:
     records = [
         _gptme_assistant("gh", "abc-0", {"url": "bad"}, "2026-04-21T10:00:00"),

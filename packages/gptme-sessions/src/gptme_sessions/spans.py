@@ -193,7 +193,8 @@ def _gptme_turn_usage(record: dict) -> _TurnUsage | None:
     metadata = record.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
-    usage = metadata.get("usage") or metadata
+    raw_usage = metadata.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else metadata
     if not isinstance(usage, dict):
         usage = {}
     model = metadata.get("model") or record.get("model")
