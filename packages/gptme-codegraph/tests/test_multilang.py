@@ -54,6 +54,11 @@ _skip_no_ruby = pytest.mark.skipif(
     not _has_grammar("ruby"),
     reason="tree-sitter-ruby not installed",
 )
+_skip_no_php = pytest.mark.skipif(
+    not _has_grammar("php"),
+    reason="tree-sitter-php not installed",
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1622,3 +1627,295 @@ def test_parse_c_parenthesized_declarator(c_conditional_module: Path):
         ), f"Expected inner_func in symbols, got: {[s.name for s in result.symbols]}"
     finally:
         path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# PHP extraction tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def php_module() -> Generator[Path, None, None]:
+    """A PHP file with namespaces, use imports, classes, methods, interface, trait, and functions."""
+    code = """<?php
+
+namespace App\\Service;
+
+use App\\Entity\\User;
+use App\\Util\\Helper as H;
+use function array_map;
+use const PHP_EOL;
+
+class Calculator {
+    private int $value;
+
+    public function __construct(int $initialValue = 0) {
+        $this->value = $initialValue;
+    }
+
+    public function add(int $n): self {
+        $this->value += $n;
+        return $this;
+    }
+
+    public function getValue(): int {
+        return $this->value;
+    }
+
+    public static function create(int $val): self {
+        return new self($val);
+    }
+}
+
+interface Describable {
+    public function describe(): string;
+}
+
+trait Loggable {
+    public function log(string $msg): void {
+        echo $msg;
+    }
+}
+
+function helper(string $name): string {
+    return "Hello " . $name;
+}
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".php", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_php
+def test_language_detection_php(php_module: Path):
+    """PHP: language is detected from .php extension."""
+    from gptme_codegraph.core import _detect_language
+
+    assert _detect_language(php_module) == "php"
+
+
+@_skip_no_php
+def test_parse_php_class(php_module: Path):
+    """PHP: class is extracted with correct name and kind."""
+    result = parse_file(php_module)
+    classes = [s for s in result.symbols if s.kind == "class"]
+    class_names = {s.name for s in classes}
+    assert "Calculator" in class_names, f"Expected Calculator class, got {class_names}"
+    assert (
+        "Describable" in class_names
+    ), f"Expected Describable interface, got {class_names}"
+    assert "Loggable" in class_names, f"Expected Loggable trait, got {class_names}"
+    calc = next(s for s in classes if s.name == "Calculator")
+    assert calc.parent_class is None
+
+
+@_skip_no_php
+def test_parse_php_methods(php_module: Path):
+    """PHP: methods are extracted with parent_class set."""
+    result = parse_file(php_module)
+    methods = [s for s in result.symbols if s.kind == "method"]
+    method_names = {(s.name, s.parent_class) for s in methods}
+    assert ("__construct", "Calculator") in method_names
+    assert ("add", "Calculator") in method_names
+    assert ("getValue", "Calculator") in method_names
+    assert ("create", "Calculator") in method_names
+    assert ("describe", "Describable") in method_names
+    assert ("log", "Loggable") in method_names
+
+
+@_skip_no_php
+def test_parse_php_function(php_module: Path):
+    """PHP: top-level function is extracted as function kind."""
+    result = parse_file(php_module)
+    funcs = [s for s in result.symbols if s.kind == "function"]
+    func_names = {s.name for s in funcs}
+    assert "helper" in func_names, f"Expected helper function, got {func_names}"
+
+
+@_skip_no_php
+def test_parse_php_imports(php_module: Path):
+    """PHP: use declarations are extracted as imports."""
+    result = parse_file(php_module)
+    import_names = {(imp.name, imp.module, imp.alias) for imp in result.imports}
+    assert (
+        "User",
+        "App\\Entity",
+        None,
+    ) in import_names, f"Expected use App\\Entity\\User, got {import_names}"
+    assert (
+        "Helper",
+        "App\\Util",
+        "H",
+    ) in import_names, f"Expected use App\\Util\\Helper as H, got {import_names}"
+    assert "User" in {imp.name for imp in result.imports}, "User import missing"
+    assert "Helper" in {imp.name for imp in result.imports}, "Helper import missing"
+
+
+@_skip_no_php
+def test_parse_php_function_imports(php_module: Path):
+    """PHP: use function declarations are extracted."""
+    result = parse_file(php_module)
+    func_imports = [imp for imp in result.imports if imp.name == "array_map"]
+    assert (
+        len(func_imports) >= 1
+    ), f"Expected use function array_map, got {[(imp.name, imp.module) for imp in result.imports]}"
+
+
+@_skip_no_php
+def test_parse_php_const_imports(php_module: Path):
+    """PHP: use const declarations are extracted."""
+    result = parse_file(php_module)
+    const_imports = [imp for imp in result.imports if imp.name == "PHP_EOL"]
+    assert (
+        len(const_imports) >= 1
+    ), f"Expected use const PHP_EOL, got {[(imp.name, imp.module) for imp in result.imports]}"
+
+
+@_skip_no_php
+def test_parse_php_namespaced_function_const_imports(tmp_path: Path):
+    """PHP: namespaced function/const imports split module and symbol name."""
+    code = """<?php
+use function App\\Support\\array_map;
+use const App\\Support\\PHP_EOL;
+"""
+    php_file = tmp_path / "function_const_imports.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    import_names = {(imp.name, imp.module, imp.alias) for imp in result.imports}
+    assert (
+        "array_map",
+        "App\\Support",
+        None,
+    ) in import_names, f"Expected namespaced function import, got {import_names}"
+    assert (
+        "PHP_EOL",
+        "App\\Support",
+        None,
+    ) in import_names, f"Expected namespaced const import, got {import_names}"
+
+
+@_skip_no_php
+def test_parse_php_line_numbers(php_module: Path):
+    """PHP: symbol line numbers are correct."""
+    result = parse_file(php_module)
+    calc = next(
+        s for s in result.symbols if s.name == "Calculator" and s.kind == "class"
+    )
+    assert (
+        calc.start_line == 10
+    ), f"Expected Calculator at line 10, got {calc.start_line}"
+    add = next(
+        s for s in result.symbols if s.name == "add" and s.parent_class == "Calculator"
+    )
+    assert add.start_line == 17, f"Expected add at line 17, got {add.start_line}"
+    helper = next(s for s in result.symbols if s.name == "helper")
+    assert (
+        helper.start_line == 41
+    ), f"Expected helper at line 42, got {helper.start_line}"
+
+
+@_skip_no_php
+def test_build_index_php(php_module: Path):
+    """PHP: build_index works for a PHP file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(php_module, d)
+        index = build_index(d)
+        assert index.lookup("Calculator"), "Calculator not found in index"
+        assert index.lookup("helper"), "helper not found in index"
+
+
+@_skip_no_php
+def test_parse_php_method_calls(tmp_path: Path):
+    """PHP: -> method calls are extracted from method bodies."""
+    code = """<?php
+class Worker {
+    public function run(): void {
+        $calc = new Calculator();
+        $calc->add(5);
+        $this->getValue();
+        Calculator::create(10);
+    }
+}
+"""
+    php_file = tmp_path / "worker.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    run_method = next(s for s in result.symbols if s.name == "run")
+    assert "add" in run_method.calls, f"Expected 'add' in calls, got {run_method.calls}"
+    assert (
+        "getValue" in run_method.calls
+    ), f"Expected 'getValue' in calls, got {run_method.calls}"
+    assert (
+        "create" in run_method.calls
+    ), f"Expected 'create' in calls, got {run_method.calls}"
+
+
+@_skip_no_php
+def test_parse_php_group_use(tmp_path: Path):
+    """PHP: group use declarations (use Ns\\{A, B}) are extracted."""
+    code = """<?php
+use App\\Entity\\{User, Group};
+"""
+    php_file = tmp_path / "group_use.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    import_names = {imp.name for imp in result.imports}
+    assert "User" in import_names, f"Expected 'User' in imports, got {import_names}"
+    assert "Group" in import_names, f"Expected 'Group' in imports, got {import_names}"
+
+
+@_skip_no_php
+def test_parse_php_bracket_namespace_symbols_and_imports(tmp_path: Path):
+    """PHP: bracket-style namespaces expose nested symbols and imports."""
+    code = """<?php
+namespace Foo {
+    use App\\Entity\\User;
+
+    class Bar {}
+
+    function baz() {}
+}
+"""
+    php_file = tmp_path / "bracket_namespace.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    symbol_names = {(symbol.name, symbol.kind) for symbol in result.symbols}
+    import_names = {(imp.name, imp.module) for imp in result.imports}
+    assert ("Bar", "class") in symbol_names, f"Expected Bar class, got {symbol_names}"
+    assert (
+        "baz",
+        "function",
+    ) in symbol_names, f"Expected baz function, got {symbol_names}"
+    assert (
+        "User",
+        "App\\Entity",
+    ) in import_names, f"Expected User import, got {import_names}"
+
+
+@_skip_no_php
+def test_parse_php_function_call_expressions(tmp_path: Path):
+    """PHP: standalone function calls (function_call_expression) are extracted from call graph."""
+    code = """<?php
+function processItems(array $items): void {
+    $result = array_map(fn($x) => $x * 2, $items);
+    sort($result);
+    doSomethingElse();
+}
+"""
+    php_file = tmp_path / "func_calls.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    proc = next(s for s in result.symbols if s.name == "processItems")
+    assert "array_map" in proc.calls, f"Expected 'array_map' in calls, got {proc.calls}"
+    assert "sort" in proc.calls, f"Expected 'sort' in calls, got {proc.calls}"
+    assert (
+        "doSomethingElse" in proc.calls
+    ), f"Expected 'doSomethingElse' in calls, got {proc.calls}"
+
+
+# ---------------------------------------------------------------------------
