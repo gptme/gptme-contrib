@@ -1734,7 +1734,9 @@ def _extract_imports_ruby(root) -> list[ImportInfo]:
 
     require_methods = {"require", "require_relative", "load"}
 
-    def _walk(node) -> None:
+    stack = [root]
+    while stack:
+        node = stack.pop()
         if node.type == "call":
             method_node = node.child_by_field_name("method")
             receiver = node.child_by_field_name("receiver")
@@ -1758,10 +1760,7 @@ def _extract_imports_ruby(root) -> list[ImportInfo]:
                                         is_from=False,
                                     )
                                 )
-        for child in node.children:
-            _walk(child)
-
-    _walk(root)
+        stack.extend(node.children)
     return imports
 
 
