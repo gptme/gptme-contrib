@@ -1220,12 +1220,12 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
     def walk(node, parent_scope: str | None = None, parent_kind: str | None = None):
         if node.type == "function_item":
             name_node = node.child_by_field_name("name")
+            body_node = node.child_by_field_name("body")
             if name_node:
                 name = _text_rs(name_node)
                 # Determine kind: methods are inside impl_item
                 kind = "method" if parent_kind == "impl" else "function"
                 parent_class = parent_scope if kind == "method" else None
-                body_node = node.child_by_field_name("body")
                 calls = _extract_calls(body_node) if body_node else []
                 symbols.append(
                     Symbol(

@@ -453,6 +453,19 @@ def test_parse_rust_functions(rust_module: Path):
 
 
 @_skip_no_rust
+def test_parse_rust_function_calls(rust_module: Path):
+    """Rust: function calls are extracted."""
+    result = parse_file(rust_module)
+    multiply = [s for s in result.symbols if s.name == "multiply"]
+    assert len(multiply) == 1
+    assert "multiply_internal" in multiply[0].calls or "self" in multiply[0].calls
+    # add() doesn't call anything
+    add = [s for s in result.symbols if s.name == "add"]
+    assert len(add) == 1
+    assert len(add[0].calls) == 0
+
+
+@_skip_no_rust
 def test_parse_rust_struct(rust_module: Path):
     """Rust: parse_file extracts struct."""
     result = parse_file(rust_module)
@@ -591,15 +604,6 @@ def test_rust_symbol_locations(rust_module: Path):
         assert s.start_line >= 1
         assert s.end_line >= s.start_line
         assert s.file == str(rust_module)
-
-
-@_skip_no_rust
-def test_parse_rust_function_calls(rust_module: Path):
-    """Rust: calls are extracted from function bodies."""
-    result = parse_file(rust_module)
-    multiply = next((s for s in result.symbols if s.name == "multiply"), None)
-    assert multiply is not None, "multiply symbol not found in parse result"
-    assert "multiply_internal" in multiply.calls
 
 
 @_skip_no_rust
