@@ -779,10 +779,15 @@ def _last_swift_navigation_name(node) -> str | None:
         text = _text(suffix_name) if suffix_name is not None else _text(suffix)
         return text.lstrip(".") or None
 
+    # Only recurse into navigation_expression children in the fallback
+    # path.  Unrestricted recursion across all named_children can descend
+    # into argument sub-expressions (e.g. foo.bar(baz.qux())), yielding a
+    # name from an argument call rather than from the callee itself.
     for child in reversed(node.named_children):
-        found = _last_swift_navigation_name(child)
-        if found:
-            return found
+        if child.type == "navigation_expression":
+            found = _last_swift_navigation_name(child)
+            if found:
+                return found
     return None
 
 
