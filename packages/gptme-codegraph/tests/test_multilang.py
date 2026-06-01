@@ -2115,6 +2115,8 @@ class Calculator(private var value: Int = 0) {
 
     fun current(): Int = value
 
+    fun clamped(n: Int): Int = max(n, 0)
+
     companion object {
         fun create(initial: Int): Calculator {
             return Calculator(initial)
@@ -2211,6 +2213,16 @@ def test_parse_kotlin_calls(kotlin_module: Path):
     helper = next(s for s in result.symbols if s.name == "helper")
     assert any("trim" in call for call in helper.calls)
     assert any("uppercase" in call for call in helper.calls)
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_expression_body_calls(kotlin_module: Path):
+    """Kotlin: calls in expression-body functions (fun f() = expr) are captured."""
+    result = parse_file(kotlin_module)
+    clamped = next(s for s in result.symbols if s.name == "clamped")
+    assert "max" in clamped.calls, (
+        "expression-body call 'max' not captured; " f"got calls={clamped.calls!r}"
+    )
 
 
 @_skip_no_kotlin

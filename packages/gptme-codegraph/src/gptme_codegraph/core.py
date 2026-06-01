@@ -776,9 +776,15 @@ def _extract_calls(node) -> list[str]:
                 func_node = cursor.node.child_by_field_name("function")
                 if func_node:
                     calls.append(_text(func_node))
-                elif cursor.node.type == "call_expression":
-                    # Kotlin call_expression nodes do not expose a named
-                    # function field; the callee is the first named child.
+                elif cursor.node.type == "call_expression" and any(
+                    child.type == "value_arguments"
+                    for child in cursor.node.named_children
+                ):
+                    # Kotlin call_expression: no named "function" field; the
+                    # callee is the first named child that is not value_arguments.
+                    # Guarded by value_arguments presence (Kotlin-specific type)
+                    # so JS/TS/Go/Rust call_expression edge cases fall through
+                    # to the Ruby else branch instead of applying this path.
                     callee = next(
                         (
                             child
@@ -2391,7 +2397,10 @@ def _extract_symbols_kotlin(root, filepath: str) -> list[Symbol]:
             (child for child in node.named_children if child.type == "function_body"),
             None,
         )
-        calls = _extract_calls(body) if body is not None else []
+        # For expression-body functions (e.g. `fun greet() = println("hi")`)
+        # tree-sitter-kotlin emits no function_body child; fall back to walking
+        # the whole declaration so calls in the expression are still captured.
+        calls = _extract_calls(body if body is not None else node)
         symbols.append(
             Symbol(
                 name=_text(name_node),
