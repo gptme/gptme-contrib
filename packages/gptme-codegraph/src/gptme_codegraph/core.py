@@ -2555,7 +2555,14 @@ def _extract_imports_kotlin(root) -> list[ImportInfo]:
 
 
 def _swift_container_body(node):
-    """Return a Swift declaration body node when present."""
+    """Return a Swift declaration body node when present.
+
+    alex-pinkus/tree-sitter-swift uses a unified ``class_body`` node for all
+    nominal-type bodies (class, struct, extension, actor).  Only
+    ``protocol_body`` and ``enum_class_body`` are distinct.  If a future
+    grammar version introduces ``struct_body`` or ``actor_body``, update this
+    set to include them so methods inside those types are not silently skipped.
+    """
     for child in node.named_children:
         if child.type in {"class_body", "protocol_body", "enum_class_body"}:
             return child
@@ -2619,6 +2626,11 @@ def _extract_symbols_swift(root, filepath: str) -> list[Symbol]:
         )
 
     def _walk(node, parent_class: str | None = None) -> None:
+        # alex-pinkus/tree-sitter-swift emits ``class_declaration`` for all
+        # nominal types: class, struct, extension, and actor.  Only
+        # ``protocol_declaration`` is a distinct node.  If a future grammar
+        # version introduces ``extension_declaration`` or ``actor_declaration``,
+        # add them to this set so their members are not silently dropped.
         if node.type in {"class_declaration", "protocol_declaration"}:
             type_name = _swift_declaration_name(node)
             if type_name:
