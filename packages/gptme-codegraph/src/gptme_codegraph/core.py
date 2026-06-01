@@ -3,7 +3,7 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, and Ruby via tree-sitter
+Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, and C via tree-sitter
 grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
@@ -50,6 +50,8 @@ _LANG_MAP: dict[str, str] = {
     ".java": "java",
     ".cs": "csharp",
     ".rb": "ruby",
+    ".c": "c",
+    ".h": "c",
 }
 
 _GRAMMAR_MODULES: dict[str, str] = {
@@ -63,6 +65,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "java": "tree_sitter_java",
     "csharp": "tree_sitter_c_sharp",
     "ruby": "tree_sitter_ruby",
+    "c": "tree_sitter_c",
 }
 
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
@@ -149,6 +152,12 @@ def _load_language(name: str):
         import tree_sitter_ruby as tsruby  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["ruby"] = tsruby.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_c as tsc  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["c"] = tsc.language()
     except ImportError:
         pass
 
@@ -1911,6 +1920,147 @@ def _extract_imports_csharp(root) -> list[ImportInfo]:
 
 
 # ---------------------------------------------------------------------------
+# C extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _c_find_function_name(declarator) -> str | None:
+    """Walk a C declarator chain to find the function name identifier.
+
+    Handles both direct function_declarator and pointer_declarator wrapping
+    (e.g. ``int *foo(void)``).
+    """
+    if declarator is None:
+        return None
+    if declarator.type == "function_declarator":
+        name_node = declarator.child_by_field_name("declarator")
+        if name_node is not None:
+            return _text(name_node) if name_node.type == "identifier" else None
+    elif declarator.type == "pointer_declarator":
+        inner = declarator.child_by_field_name("declarator")
+        return _c_find_function_name(inner)
+    return None
+
+
+def _extract_symbols_c(root, filepath: str) -> list[Symbol]:
+    """Extract function definitions and typedef'd struct types from a C parse tree.
+
+    Functions are extracted as ``kind="function"``.  Named ``struct`` definitions
+    and ``typedef struct { ... } Name`` patterns are extracted as ``kind="class"``
+    to stay consistent with how structs are represented across other languages.
+    """
+    symbols: list[Symbol] = []
+
+    for node in root.named_children:
+        if node.type == "function_definition":
+            outer_decl = node.child_by_field_name("declarator")
+            name = _c_find_function_name(outer_decl)
+            if not name:
+                continue
+            body = node.child_by_field_name("body")
+            calls = _extract_calls(body) if body else []
+            symbols.append(
+                Symbol(
+                    name=name,
+                    kind="function",
+                    file=filepath,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    calls=list(set(calls)),
+                )
+            )
+        elif node.type == "struct_specifier":
+            # Named struct at top level: `struct Foo { ... };`
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append(
+                    Symbol(
+                        name=_text(name_node),
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+        elif node.type == "type_definition":
+            # typedef struct { ... } Name; or typedef struct Named Name;
+            has_struct = any(
+                c.type == "struct_specifier" for c in node.named_children
+            )
+            if has_struct:
+                # The typedef name is the type_identifier child at the end
+                type_id = next(
+                    (
+                        c
+                        for c in reversed(node.named_children)
+                        if c.type == "type_identifier"
+                    ),
+                    None,
+                )
+                if type_id:
+                    symbols.append(
+                        Symbol(
+                            name=_text(type_id),
+                            kind="class",
+                            file=filepath,
+                            start_line=node.start_point[0] + 1,
+                            end_line=node.end_point[0] + 1,
+                        )
+                    )
+
+    return symbols
+
+
+def _extract_imports_c(root) -> list[ImportInfo]:
+    """Extract ``#include`` directives from a C parse tree.
+
+    Handles both angle-bracket forms (``<stdio.h>``) and quoted forms
+    (``"myheader.h"``).  The include path is split on ``/`` to populate
+    ``module`` (the leading directory, e.g. ``sys``) and ``name`` (the
+    filename, e.g. ``types.h``).
+    """
+    imports: list[ImportInfo] = []
+
+    for node in root.named_children:
+        if node.type != "preproc_include":
+            continue
+        path_node = node.child_by_field_name("path")
+        if path_node is None:
+            continue
+        if path_node.type == "system_lib_string":
+            raw = _text(path_node)
+            include_path = raw.strip("<>")
+        elif path_node.type == "string_literal":
+            content = next(
+                (c for c in path_node.named_children if c.type == "string_content"),
+                None,
+            )
+            include_path = _text(content) if content else _strip_string_quotes(_text(path_node))
+        else:
+            include_path = _text(path_node).strip("<>\"'")
+
+        if not include_path:
+            continue
+
+        if "/" in include_path:
+            slash = include_path.rfind("/")
+            module, name = include_path[:slash], include_path[slash + 1 :]
+        else:
+            module, name = "", include_path
+
+        imports.append(
+            ImportInfo(
+                file="",
+                module=module,
+                name=name,
+                is_from=False,
+            )
+        )
+
+    return imports
+
+
+# ---------------------------------------------------------------------------
 # Multi-language parse_file
 # ---------------------------------------------------------------------------
 
@@ -1920,7 +2070,7 @@ def parse_file(filepath: Path) -> FileParseResult:
 
     Detects language from file extension and dispatches to the correct
     tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go,
-    Java, C#, and Ruby.
+    Java, C#, Ruby, and C.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -1955,6 +2105,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "ruby":
         symbols = _extract_symbols_ruby(root, filename)
 
+    elif lang_name == "c":
+        symbols = _extract_symbols_c(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -1970,6 +2123,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_csharp(root)
     elif lang_name == "ruby":
         imports = _extract_imports_ruby(root)
+    elif lang_name == "c":
+        imports = _extract_imports_c(root)
 
     for imp in imports:
         imp.file = filename
