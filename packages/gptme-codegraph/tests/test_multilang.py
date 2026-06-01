@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from gptme_codegraph.core import (
     _tree_sitter_parse,
+    build_call_graph,
     build_index,
     extract_symbols,
     parse_file,
@@ -646,6 +647,52 @@ def test_parse_rust_impl_method_calls(rust_module: Path):
     assert with_max.calls == []
 
 
+@_skip_no_rust
+def test_parse_rust_receiver_method_calls_link_call_graph(tmp_path: Path):
+    """Rust: self/Self method calls are linked to local impl methods."""
+    rust_file = tmp_path / "receiver_calls.rs"
+    rust_file.write_text(
+        """\
+struct Client;
+
+impl Client {
+    fn run(&self) -> i32 {
+        self.prepare();
+        Self::make();
+        helper()
+    }
+
+    fn prepare(&self) {}
+
+    fn make() -> i32 {
+        1
+    }
+}
+
+fn helper() -> i32 {
+    1
+}
+"""
+    )
+    result = parse_file(rust_file)
+    run = next(
+        (s for s in result.symbols if s.name == "run" and s.parent_class == "Client"),
+        None,
+    )
+    assert run is not None, "run method not found in parse result"
+    assert "self.prepare" in run.calls
+    assert "Client.prepare" in run.calls
+    assert "Self::make" in run.calls
+    assert "Client.make" in run.calls
+
+    callees, callers = build_call_graph(result.symbols)
+    assert "::Client.prepare" in callees["::Client.run"]
+    assert "::Client.make" in callees["::Client.run"]
+    assert "::helper" in callees["::Client.run"]
+    assert "::Client.run" in callers["::Client.prepare"]
+    assert "::Client.run" in callers["::Client.make"]
+
+
 # ---------------------------------------------------------------------------
 # Rust import extraction
 # ---------------------------------------------------------------------------
@@ -866,6 +913,94 @@ def test_parse_go_method_calls(go_module: Path):
     )
     assert add is not None
     assert any("Println" in c for c in add.calls)
+
+
+@_skip_no_go
+def test_parse_go_receiver_method_calls_link_call_graph(tmp_path: Path):
+    """Go: receiver method calls are linked to local methods."""
+    go_file = tmp_path / "receiver_calls.go"
+    go_file.write_text(
+        """\
+package main
+
+type Calculator struct{}
+
+func (c *Calculator) Add(a, b int) int {
+    c.log()
+    return helper(a + b)
+}
+
+func (c *Calculator) log() {}
+
+func helper(v int) int {
+    return v
+}
+"""
+    )
+    result = parse_file(go_file)
+    add = next(
+        (
+            s
+            for s in result.symbols
+            if s.name == "Add" and s.parent_class == "Calculator"
+        ),
+        None,
+    )
+    assert add is not None, "Add method not found in parse result"
+    assert "c.log" in add.calls
+    assert "Calculator.log" in add.calls
+
+    callees, callers = build_call_graph(result.symbols)
+    assert "::Calculator.log" in callees["::Calculator.Add"]
+    assert "::helper" in callees["::Calculator.Add"]
+    assert "::Calculator.Add" in callers["::Calculator.log"]
+
+
+@_skip_no_go
+def test_parse_go_receiver_aliases_skip_shadowed_locals(tmp_path: Path):
+    """Go: receiver aliases don't treat same-named locals as self calls."""
+    go_file = tmp_path / "receiver_shadow.go"
+    go_file.write_text(
+        """\
+package main
+
+type Client struct{}
+type Call struct{}
+
+func (c *Call) doX() {}
+
+func (c *Client) Run(calls []Call) {
+    c.log()
+    for _, c := range calls {
+        c.doX()
+    }
+    {
+        var c Call
+        c.doX()
+    }
+    c.finish()
+}
+
+func (c *Client) log() {}
+func (c *Client) finish() {}
+func (c *Client) doX() {}
+"""
+    )
+    result = parse_file(go_file)
+    run = next(
+        (s for s in result.symbols if s.name == "Run" and s.parent_class == "Client"),
+        None,
+    )
+    assert run is not None, "Run method not found in parse result"
+    assert "Client.log" in run.calls
+    assert "Client.finish" in run.calls
+    assert "Client.doX" not in run.calls
+
+    callees, _callers = build_call_graph(result.symbols)
+    assert "::Client.log" in callees["::Client.Run"]
+    assert "::Client.finish" in callees["::Client.Run"]
+    assert "::Client.doX" not in callees["::Client.Run"]
+    assert "::Call.doX" not in callees["::Client.Run"]
 
 
 @_skip_no_go
@@ -2438,3 +2573,73 @@ def test_build_index_cpp(cpp_module: Path):
         index = build_index(d)
         assert "Accumulator" in index.entries
         assert "add" in index.entries
+
+
+@_skip_no_go
+def test_parse_go_receiver_calls_no_collision_across_types(tmp_path: Path):
+    """Go: receiver aliases are qualified so same-named methods across types don't collide."""
+    go_file = tmp_path / "multitype.go"
+    go_file.write_text(
+        """\
+package main
+
+type Log struct{}
+func (l *Log) format() string { return "" }
+
+type Report struct{}
+func (r *Report) format() string { return "" }
+
+func (r *Report) Generate() string {
+    r.format()
+    return ""
+}
+"""
+    )
+    result = parse_file(go_file)
+
+    report_gen = next(
+        s for s in result.symbols if s.name == "Generate" and s.parent_class == "Report"
+    )
+    # The alias should be "Report.format", not bare "format"
+    assert "Report.format" in report_gen.calls  # qualified alias
+    assert "format" not in report_gen.calls  # bare name should not appear
+
+    callees, callers = build_call_graph(result.symbols)
+    # Report.Generate should call Report.format, not Log.format
+    assert "::Report.format" in callees["::Report.Generate"]
+    assert "::Log.format" not in callees["::Report.Generate"]
+
+
+@_skip_no_rust
+def test_parse_rust_receiver_calls_no_collision_across_types(tmp_path: Path):
+    """Rust: receiver aliases are qualified so same-named methods across types don't collide."""
+    rs_file = tmp_path / "multitype.rs"
+    rs_file.write_text(
+        """\
+struct Counter {}
+impl Counter {
+    fn reset(&self) {}
+    fn tick(&self) {
+        self.reset();
+    }
+}
+
+struct Timer {}
+impl Timer {
+    fn reset(&self) {}
+}
+"""
+    )
+    result = parse_file(rs_file)
+
+    tick = next(
+        s for s in result.symbols if s.name == "tick" and s.parent_class == "Counter"
+    )
+    # The alias should be "Counter.reset", not bare "reset"
+    assert "Counter.reset" in tick.calls  # qualified alias
+    assert "reset" not in tick.calls  # bare name should not appear
+
+    callees, callers = build_call_graph(result.symbols)
+    # Counter.tick should call Counter.reset, not Timer.reset
+    assert "::Counter.reset" in callees["::Counter.tick"]
+    assert "::Timer.reset" not in callees["::Counter.tick"]
