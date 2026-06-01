@@ -624,11 +624,36 @@ class SubscriptionManager:
                         d.mode = "capacity-rebalance-hold"
                     elif hold_mode == "manual-switch":
                         hold_reason = rebalance_state.get("reason", "manual switch")
+                        # Auto-renew: extend the hold so it doesn't expire
+                        # silently while --execute keeps running on this slot.
+                        # The operator's explicit switch intent should persist
+                        # until they explicitly switch to another slot.
+                        new_hold_until = current_time + timedelta(
+                            seconds=cfg.forward_routing_hold_seconds
+                        )
+                        self.save_rebalance_state(
+                            {
+                                "active": active,
+                                "action": "stay",
+                                "target": hold_target,
+                                "reason": hold_reason,
+                                "mode": "manual-switch",
+                                "hold_until": new_hold_until.isoformat(),
+                                "hold_seconds": cfg.forward_routing_hold_seconds,
+                                "auto_renewed": True,
+                            }
+                        )
+                        extended_remaining = int(
+                            (new_hold_until - current_time).total_seconds()
+                        )
                         d.reason = (
                             f"manual-switch hold active for "
-                            f"{format_duration(remaining)} ({hold_reason})"
+                            f"{format_duration(extended_remaining)} "
+                            f"({hold_reason})"
                         )
                         d.mode = "manual-switch-hold"
+                        d.hold_until = new_hold_until.isoformat()
+                        d.hold_seconds = extended_remaining
                     else:
                         raw_pace_overage = rebalance_state.get("pace_overage")
                         pace_overage = (
@@ -641,8 +666,11 @@ class SubscriptionManager:
                             f"(primary ahead of pace by {pace_overage:.0%})"
                         )
                         d.mode = "rebalance-hold"
-                    d.hold_until = hold_until.isoformat()
-                    d.hold_seconds = remaining
+                    # manual-switch branch already set d.hold_until/d.hold_seconds
+                    # with the auto-renewed extended values; don't clobber them.
+                    if hold_mode != "manual-switch":
+                        d.hold_until = hold_until.isoformat()
+                        d.hold_seconds = remaining
                     return d
 
             _fr_blocked, _ = self.is_subscription_blocked(usage, config=cfg)

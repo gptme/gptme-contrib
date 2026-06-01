@@ -395,3 +395,45 @@ def test_record_manual_switch_hold_persists_state(tmp_path: Path) -> None:
     decision = sm.evaluate(_healthy_usage(), "alice", now=now, rebalance_state=loaded)
     assert decision.action == "stay"
     assert decision.mode == "manual-switch-hold"
+
+
+def test_manual_switch_hold_auto_renews_on_evaluate(tmp_path: Path) -> None:
+    """A manual-switch hold must auto-renew on each evaluate() call so it
+    doesn't silently expire after the default hold duration while --execute
+    keeps running on that slot."""
+    sm = _make_manager(tmp_path)
+    now = datetime.now(timezone.utc)
+    near_expiry = now + timedelta(seconds=5)
+
+    # Create a hold that is near expiry
+    rebalance_state = {
+        "active": "alice",
+        "action": "stay",
+        "target": "alice",
+        "reason": "manual switch via --switch alice",
+        "mode": "manual-switch",
+        "hold_until": near_expiry,
+        "hold_seconds": 5,
+    }
+
+    # First evaluate: hold is respected (not expired yet)
+    decision = sm.evaluate(
+        _healthy_usage(), "alice", now=now, rebalance_state=rebalance_state
+    )
+    assert decision.action == "stay"
+    assert decision.mode == "manual-switch-hold"
+
+    # The hold should have been auto-renewed — persisted state shows the
+    # extended hold_until (8h from now, not 5s from now)
+    payload = json.loads(sm.config.rebalance_state_file.read_text())
+    renewed_until = datetime.fromisoformat(payload["hold_until"])
+    expected_until = now + timedelta(seconds=sm.config.forward_routing_hold_seconds)
+    diff = abs((renewed_until - expected_until).total_seconds())
+    assert diff < 5, (
+        f"hold_until {renewed_until} should be ~{expected_until} "
+        f"(diff={diff:.0f}s), got {payload['hold_until']}"
+    )
+    assert payload.get("auto_renewed") is True, "auto-renewal flag not set"
+
+    # The original near-expiry hold should have been extended well beyond 5s
+    assert renewed_until > near_expiry + timedelta(hours=6)
