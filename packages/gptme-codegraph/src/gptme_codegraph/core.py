@@ -4,7 +4,7 @@ Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
 Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, C, C++, PHP,
-and Kotlin via tree-sitter grammars.
+Kotlin, and Swift via tree-sitter grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
 
@@ -60,6 +60,7 @@ _LANG_MAP: dict[str, str] = {
     ".php": "php",
     ".kt": "kotlin",
     ".kts": "kotlin",
+    ".swift": "swift",
     ".c": "c",
 }
 
@@ -77,6 +78,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "ruby": "tree_sitter_ruby",
     "php": "tree_sitter_php",
     "kotlin": "tree_sitter_kotlin",
+    "swift": "tree_sitter_swift",
     "c": "tree_sitter_c",
 }
 
@@ -113,7 +115,7 @@ def _load_language(name: str):
 
     Returns None if the grammar is not installed.
     """
-    from tree_sitter import Language  # type: ignore[import-untyped,unused-ignore]
+    import tree_sitter as ts  # type: ignore[import-not-found,import-untyped,unused-ignore]
 
     # Lazy import each grammar; missing grammars silently return None
     grammar_map: dict[str, object] = {}
@@ -190,6 +192,12 @@ def _load_language(name: str):
         grammar_map["kotlin"] = tskotlin.language()
     except ImportError:
         pass
+    try:
+        import tree_sitter_swift as tsswift  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["swift"] = tsswift.language()
+    except ImportError:
+        pass
 
     lang = grammar_map.get(name)
     if lang is None:
@@ -200,7 +208,7 @@ def _load_language(name: str):
             lang = grammar_map.get("javascript")
     if lang is None:
         return None
-    return Language(lang)
+    return ts.Language(lang)
 
 
 def _module_path(filepath: str, directory: str | None = None) -> str:
@@ -694,7 +702,7 @@ def _missing_grammar_diagnostic(lang_name: str) -> dict[str, str]:
 def _tree_sitter_parse_attempt(code: bytes, lang_name: str = "python") -> _ParseAttempt:
     """Parse source code with tree-sitter and preserve missing-dependency diagnostics."""
     try:
-        from tree_sitter import Parser  # type: ignore[import-untyped,unused-ignore]
+        import tree_sitter as ts  # type: ignore[import-not-found,import-untyped,unused-ignore]
     except ImportError:
         return _ParseAttempt(
             diagnostic={
@@ -707,7 +715,7 @@ def _tree_sitter_parse_attempt(code: bytes, lang_name: str = "python") -> _Parse
             }
         )
 
-    parser = Parser()
+    parser = ts.Parser()
     language = _load_language(lang_name)
     if language is None:
         diagnostic = None
@@ -763,6 +771,21 @@ def _extract_docstring(body_node) -> str | None:
         return None
 
 
+def _last_swift_navigation_name(node) -> str | None:
+    """Return the final member name in a Swift navigation expression."""
+    suffix = node.child_by_field_name("suffix")
+    if suffix is not None:
+        suffix_name = suffix.child_by_field_name("suffix")
+        text = _text(suffix_name) if suffix_name is not None else _text(suffix)
+        return text.lstrip(".") or None
+
+    for child in reversed(node.named_children):
+        found = _last_swift_navigation_name(child)
+        if found:
+            return found
+    return None
+
+
 def _extract_calls(node) -> list[str]:
     """Extract all called function names from a tree-sitter node subtree."""
     calls = []
@@ -795,6 +818,23 @@ def _extract_calls(node) -> list[str]:
                     )
                     if callee:
                         calls.append(_text(callee))
+                elif cursor.node.type == "call_expression" and any(
+                    child.type == "call_suffix" for child in cursor.node.named_children
+                ):
+                    # Swift call_expression: first named child is the callee;
+                    # member calls wrap it in navigation_expression.
+                    callee = next(
+                        (
+                            child
+                            for child in cursor.node.named_children
+                            if child.type != "call_suffix"
+                        ),
+                        None,
+                    )
+                    if callee:
+                        calls.append(
+                            _last_swift_navigation_name(callee) or _text(callee)
+                        )
                 else:
                     # Ruby: call nodes carry the callee in a "method" field
                     method_node = cursor.node.child_by_field_name("method")
@@ -2509,6 +2549,147 @@ def _extract_imports_kotlin(root) -> list[ImportInfo]:
     return imports
 
 
+# ---------------------------------------------------------------------------
+# Swift extraction
+# ---------------------------------------------------------------------------
+
+
+def _swift_container_body(node):
+    """Return a Swift declaration body node when present."""
+    for child in node.named_children:
+        if child.type in {"class_body", "protocol_body", "enum_class_body"}:
+            return child
+    return None
+
+
+def _swift_declaration_name(node) -> str | None:
+    """Return the declared Swift type/function name."""
+    name_node = node.child_by_field_name("name")
+    if name_node is not None:
+        text = _text(name_node)
+        if text:
+            return text
+
+    for child in node.named_children:
+        if child.type in {"simple_identifier", "type_identifier"}:
+            text = _text(child)
+            if text:
+                return text
+        if child.type == "user_type":
+            text = _text(child)
+            if text:
+                return text
+    return None
+
+
+def _extract_symbols_swift(root, filepath: str) -> list[Symbol]:
+    """Extract Swift types, protocols, methods, initializers, and functions."""
+    symbols: list[Symbol] = []
+
+    def _add_function(node, parent_class: str | None) -> None:
+        name: str | None
+        if node.type == "init_declaration":
+            name = "init"
+        else:
+            name = _swift_declaration_name(node)
+        if not name:
+            return
+
+        body = node.child_by_field_name("body")
+        if body is None:
+            body = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type == "function_body"
+                ),
+                None,
+            )
+        calls = _extract_calls(body) if body is not None else []
+        symbols.append(
+            Symbol(
+                name=name,
+                kind="method" if parent_class else "function",
+                file=filepath,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                parent_class=parent_class,
+                calls=list(set(calls)),
+            )
+        )
+
+    def _walk(node, parent_class: str | None = None) -> None:
+        if node.type in {"class_declaration", "protocol_declaration"}:
+            type_name = _swift_declaration_name(node)
+            if type_name:
+                symbols.append(
+                    Symbol(
+                        name=type_name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent_class=parent_class,
+                    )
+                )
+            body = _swift_container_body(node)
+            if body is not None:
+                _walk(body, type_name or parent_class)
+            return
+
+        if node.type in {
+            "function_declaration",
+            "protocol_function_declaration",
+            "init_declaration",
+        }:
+            _add_function(node, parent_class)
+            return
+
+        for child in node.named_children:
+            _walk(child, parent_class)
+
+    _walk(root)
+    return symbols
+
+
+def _split_swift_import(qualified: str) -> tuple[str, str]:
+    """Split a Swift import into ``(module, name)`` pieces."""
+    if "." not in qualified:
+        return "", qualified
+    module, name = qualified.rsplit(".", 1)
+    return module, name
+
+
+def _extract_imports_swift(root) -> list[ImportInfo]:
+    """Extract Swift import declarations."""
+    imports: list[ImportInfo] = []
+
+    for node in root.named_children:
+        if node.type != "import_declaration":
+            continue
+        ident = next(
+            (child for child in node.named_children if child.type == "identifier"),
+            None,
+        )
+        if ident is None:
+            continue
+        qualified = _text(ident)
+        if not qualified:
+            continue
+        module, name = _split_swift_import(qualified)
+        imports.append(
+            ImportInfo(
+                file="",
+                module=module,
+                name=name,
+                alias=None,
+                is_from=True,
+            )
+        )
+
+    return imports
+
+
 # C++ extraction
 # ---------------------------------------------------------------------------
 
@@ -2749,7 +2930,7 @@ def parse_file(filepath: Path) -> FileParseResult:
 
     Detects language from file extension and dispatches to the correct
     tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go,
-    Java, C#, Ruby, C, C++, PHP, and Kotlin.
+    Java, C#, Ruby, C, C++, PHP, Kotlin, and Swift.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -2795,6 +2976,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "kotlin":
         symbols = _extract_symbols_kotlin(root, filename)
 
+    elif lang_name == "swift":
+        symbols = _extract_symbols_swift(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -2818,6 +3002,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_php(root)
     elif lang_name == "kotlin":
         imports = _extract_imports_kotlin(root)
+    elif lang_name == "swift":
+        imports = _extract_imports_swift(root)
 
     for imp in imports:
         imp.file = filename

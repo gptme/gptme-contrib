@@ -1,7 +1,8 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby, C++, Kotlin).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby, C++, Kotlin, Swift).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, Rust, Go, Java, C#, Ruby, C++, and Kotlin source files.
+for JavaScript, TypeScript, Rust, Go, Java, C#, Ruby, C++, Kotlin, and Swift
+source files.
 """
 
 from __future__ import annotations
@@ -65,6 +66,10 @@ _skip_no_php = pytest.mark.skipif(
 _skip_no_kotlin = pytest.mark.skipif(
     not _has_grammar("kotlin"),
     reason="tree-sitter-kotlin not installed",
+)
+_skip_no_swift = pytest.mark.skipif(
+    not _has_grammar("swift"),
+    reason="tree-sitter-swift not installed",
 )
 
 
@@ -2220,9 +2225,9 @@ def test_parse_kotlin_expression_body_calls(kotlin_module: Path):
     """Kotlin: calls in expression-body functions (fun f() = expr) are captured."""
     result = parse_file(kotlin_module)
     clamped = next(s for s in result.symbols if s.name == "clamped")
-    assert "max" in clamped.calls, (
-        "expression-body call 'max' not captured; " f"got calls={clamped.calls!r}"
-    )
+    assert (
+        "max" in clamped.calls
+    ), f"expression-body call 'max' not captured; got calls={clamped.calls!r}"
 
 
 @_skip_no_kotlin
@@ -2246,6 +2251,178 @@ def test_build_index_kotlin(kotlin_module: Path):
         index = build_index(d)
         assert index.lookup("Calculator"), "Calculator not found in index"
         assert index.lookup("helper"), "helper not found in index"
+
+
+# ---------------------------------------------------------------------------
+# Swift extraction tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def swift_module() -> Generator[Path, None, None]:
+    """A Swift file with imports, protocols, types, methods, and functions."""
+    code = """\
+import Foundation
+import class UIKit.UIViewController
+import struct SwiftUI.View
+
+protocol Describable {
+    func describe() -> String
+}
+
+class Calculator: Describable {
+    private var value: Int
+
+    init(value: Int = 0) {
+        self.value = value
+    }
+
+    func add(_ n: Int) -> Calculator {
+        value += n
+        log("added")
+        return self
+    }
+
+    func current() -> Int { value }
+
+    static func create(_ initial: Int) -> Calculator {
+        return Calculator(value: initial)
+    }
+}
+
+struct Logger {
+    func log(_ message: String) {
+        print(message)
+    }
+}
+
+enum Mode {
+    case fast
+}
+
+func helper(_ name: String) -> String {
+    return name.trimmingCharacters(in: .whitespaces).uppercased()
+}
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".swift", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_swift
+def test_language_detection_swift(swift_module: Path):
+    """Swift: .swift files are detected as Swift."""
+    result = parse_file(swift_module)
+    assert result.language == "swift"
+
+
+@_skip_no_swift
+def test_parse_swift_types(swift_module: Path):
+    """Swift: classes, structs, enums, and protocols are class-kind symbols."""
+    result = parse_file(swift_module)
+    classes = {s.name for s in result.symbols if s.kind == "class"}
+    assert "Calculator" in classes
+    assert "Logger" in classes
+    assert "Mode" in classes
+    assert "Describable" in classes
+
+
+@_skip_no_swift
+def test_parse_swift_methods(swift_module: Path):
+    """Swift: methods, initializers, static methods, and protocol functions parse."""
+    result = parse_file(swift_module)
+    methods = {(s.name, s.parent_class) for s in result.symbols if s.kind == "method"}
+    assert ("init", "Calculator") in methods
+    assert ("add", "Calculator") in methods
+    assert ("current", "Calculator") in methods
+    assert ("create", "Calculator") in methods
+    assert ("describe", "Describable") in methods
+    assert ("log", "Logger") in methods
+
+
+@_skip_no_swift
+def test_parse_swift_top_level_function(swift_module: Path):
+    """Swift: top-level functions are extracted as functions."""
+    result = parse_file(swift_module)
+    functions = {s.name for s in result.symbols if s.kind == "function"}
+    assert "helper" in functions
+
+
+@_skip_no_swift
+def test_parse_swift_imports(swift_module: Path):
+    """Swift: import declarations split module and imported name."""
+    result = parse_file(swift_module)
+    imports = {(imp.module, imp.name, imp.alias) for imp in result.imports}
+    assert ("", "Foundation", None) in imports
+    assert ("UIKit", "UIViewController", None) in imports
+    assert ("SwiftUI", "View", None) in imports
+
+
+@_skip_no_swift
+def test_parse_swift_calls(swift_module: Path):
+    """Swift: simple and chained call expressions are extracted."""
+    result = parse_file(swift_module)
+    add = next(s for s in result.symbols if s.name == "add")
+    assert "log" in add.calls
+    create = next(s for s in result.symbols if s.name == "create")
+    assert "Calculator" in create.calls
+    log = next(s for s in result.symbols if s.name == "log")
+    assert "print" in log.calls
+    helper = next(s for s in result.symbols if s.name == "helper")
+    assert "trimmingCharacters" in helper.calls
+    assert "uppercased" in helper.calls
+
+
+@_skip_no_swift
+def test_parse_swift_line_numbers(swift_module: Path):
+    """Swift: symbol line numbers are positive and ordered."""
+    result = parse_file(swift_module)
+    assert result.symbols
+    for sym in result.symbols:
+        assert sym.start_line >= 1
+        assert sym.end_line >= sym.start_line
+
+
+@_skip_no_swift
+def test_build_index_swift(swift_module: Path):
+    """Swift: build_index picks up symbols from a .swift file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(swift_module, d)
+        index = build_index(d)
+        assert index.lookup("Calculator"), "Calculator not found in index"
+        assert index.lookup("helper"), "helper not found in index"
+
+
+@_skip_no_swift
+def test_parse_swift_extension_and_actor(tmp_path: Path):
+    """Swift: extensions and actors provide a parent container for methods."""
+    swift_file = tmp_path / "extensions.swift"
+    swift_file.write_text(
+        """\
+extension Calculator {
+    func reset() {
+        clear()
+    }
+}
+
+actor Store {
+    func save() {
+        persist()
+    }
+}
+"""
+    )
+    result = parse_file(swift_file)
+    methods = {(s.name, s.parent_class) for s in result.symbols if s.kind == "method"}
+    assert ("reset", "Calculator") in methods
+    assert ("save", "Store") in methods
+    reset = next(s for s in result.symbols if s.name == "reset")
+    assert "clear" in reset.calls
 
 
 # ---------------------------------------------------------------------------
