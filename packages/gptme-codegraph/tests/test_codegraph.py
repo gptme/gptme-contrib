@@ -1327,3 +1327,22 @@ def test_cross_file_call_graph_rust_path_qualified(tmp_path: Path):
 
     assert "utils::parse" in callees.get("main::run", set())
     assert "main::run" in callers.get("utils::parse", set())
+
+
+@_skip_no_rust
+def test_cross_file_call_graph_rust_path_qualified_no_collision(tmp_path: Path):
+    """Rust path-qualified calls resolve to the correct module when multiple
+    modules define a function with the same name (e.g. parse)."""
+    (tmp_path / "utils.rs").write_text("pub fn parse() {}\n")
+    (tmp_path / "other.rs").write_text("pub fn parse() {}\n")
+    (tmp_path / "main.rs").write_text(
+        "fn run() { crate::utils::parse(); crate::other::parse(); }\n"
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::parse" in callees.get("main::run", set())
+    assert "other::parse" in callees.get("main::run", set())
+    assert "main::run" in callers.get("utils::parse", set())
+    assert "main::run" in callers.get("other::parse", set())

@@ -3381,6 +3381,8 @@ def build_cross_file_call_graph(
         qid = sym.qualified_id()
         if sym.name not in name_to_qid:
             name_to_qid[sym.name] = qid
+    # All qualified IDs — used for precise Rust path-qualified resolution.
+    known_qids = {sym.qualified_id() for sym in all_symbols}
 
     callees: dict[str, set[str]] = {}
     callers: dict[str, set[str]] = defaultdict(set)
@@ -3406,9 +3408,19 @@ def build_cross_file_call_graph(
                     elif "::" in call:
                         # Rust path-qualified call: ``crate::module::fn()`` or
                         # ``super::util::parse()`` — no explicit ``use`` import.
-                        # Extract the last path segment as the candidate name.
-                        last_segment = call.rsplit("::", 1)[-1]
-                        if last_segment in known_names:
+                        # Use the module context (second-to-last segment) to build
+                        # a candidate qualified ID (e.g. ``utils::parse`` from
+                        # ``crate::utils::parse``) and prefer that over a bare-name
+                        # match, which silently picks the first-registered symbol
+                        # when multiple modules define the same function name.
+                        parts = call.split("::")
+                        last_segment = parts[-1]
+                        candidate_qid = (
+                            f"{parts[-2]}::{last_segment}" if len(parts) >= 2 else None
+                        )
+                        if candidate_qid and candidate_qid in known_qids:
+                            resolved_calls.add(candidate_qid)
+                        elif last_segment in known_names:
                             resolved_calls.add(last_segment)
                     # else: external builtin/library — ignore
             qid = name_to_qid.get(sym.name, sym.qualified_id())
