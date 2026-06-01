@@ -1396,3 +1396,229 @@ def test_build_index_ruby(ruby_module: Path):
         index = build_index(d)
         assert "Circle" in index.entries
         assert "area" in index.entries
+
+
+_skip_no_c = pytest.mark.skipif(
+    not _has_grammar("c"),
+    reason="tree-sitter-c not installed",
+)
+
+
+@pytest.fixture
+def c_module() -> Generator[Path, None, None]:
+    """A C file with includes, a typedef'd struct, a named struct, and functions."""
+    code = """\
+#include <stdio.h>
+#include <sys/types.h>
+#include "utils.h"
+
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+struct Config {
+    int width;
+    int height;
+};
+
+static int add(int a, int b) {
+    return a + b;
+}
+
+int multiply(int a, int b) {
+    int result = add(a, b);
+    printf("%d", result);
+    return result;
+}
+
+int *alloc_point(void) {
+    return NULL;
+}
+
+int main(void) {
+    int r = multiply(3, 4);
+    return 0;
+}
+"""
+    with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# C tests
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_c
+def test_language_detection_c(c_module: Path):
+    """C: .c files are detected as the c language."""
+    result = parse_file(c_module)
+    assert result.language == "c"
+
+
+@_skip_no_c
+def test_parse_c_functions(c_module: Path):
+    """C: function definitions are extracted with kind='function'."""
+    result = parse_file(c_module)
+    names = [s.name for s in result.symbols]
+    assert "add" in names
+    assert "multiply" in names
+    assert "main" in names
+    for s in result.symbols:
+        if s.name in ("add", "multiply", "main"):
+            assert s.kind == "function"
+
+
+@_skip_no_c
+def test_parse_c_pointer_return(c_module: Path):
+    """C: function with pointer return type (int *foo) is still extracted."""
+    result = parse_file(c_module)
+    assert any(s.name == "alloc_point" for s in result.symbols)
+
+
+@_skip_no_c
+def test_parse_c_typedef_struct(c_module: Path):
+    """C: typedef struct { ... } Name is extracted as kind='class'."""
+    result = parse_file(c_module)
+    sym = next((s for s in result.symbols if s.name == "Point"), None)
+    assert sym is not None
+    assert sym.kind == "class"
+
+
+@_skip_no_c
+def test_parse_c_named_struct(c_module: Path):
+    """C: named struct declarations are extracted as kind='class'."""
+    result = parse_file(c_module)
+    sym = next((s for s in result.symbols if s.name == "Config"), None)
+    assert sym is not None
+    assert sym.kind == "class"
+
+
+@_skip_no_c
+def test_parse_c_calls(c_module: Path):
+    """C: function calls inside a body are extracted."""
+    result = parse_file(c_module)
+    multiply_sym = next((s for s in result.symbols if s.name == "multiply"), None)
+    assert multiply_sym is not None
+    assert any(
+        "add" in c for c in multiply_sym.calls
+    ), f"Expected 'add' in calls, got: {multiply_sym.calls}"
+    assert any(
+        "printf" in c for c in multiply_sym.calls
+    ), f"Expected 'printf' in calls, got: {multiply_sym.calls}"
+
+
+@_skip_no_c
+def test_parse_c_imports_stdlib(c_module: Path):
+    """C: angle-bracket includes are extracted with correct name."""
+    result = parse_file(c_module)
+    stdio = next((i for i in result.imports if i.name == "stdio.h"), None)
+    assert stdio is not None
+    assert stdio.module == ""
+
+
+@_skip_no_c
+def test_parse_c_imports_nested(c_module: Path):
+    """C: nested include paths (sys/types.h) split into module and name."""
+    result = parse_file(c_module)
+    types = next((i for i in result.imports if i.name == "types.h"), None)
+    assert types is not None
+    assert types.module == "sys"
+
+
+@_skip_no_c
+def test_parse_c_imports_local(c_module: Path):
+    """C: quoted local includes are extracted."""
+    result = parse_file(c_module)
+    utils = next((i for i in result.imports if i.name == "utils.h"), None)
+    assert utils is not None
+
+
+@_skip_no_c
+def test_parse_c_line_numbers(c_module: Path):
+    """C: symbol line numbers are positive and ordered."""
+    result = parse_file(c_module)
+    assert result.symbols
+    for sym in result.symbols:
+        assert sym.start_line >= 1
+        assert sym.end_line >= sym.start_line
+
+
+@_skip_no_c
+def test_build_index_c(c_module: Path):
+    """C: build_index picks up functions from a .c file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        dest = Path(d) / c_module.name
+        shutil.copy(c_module, dest)
+        index = build_index(d)
+        assert "add" in index.entries
+        assert "multiply" in index.entries
+
+
+@pytest.fixture
+def c_conditional_module() -> Generator[Path, None, None]:
+    """A C file with preprocessor-conditional includes and a conditionally-compiled function."""
+    code = """\
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#ifndef NO_EXTRA
+#include <extra.h>
+#endif
+#if defined(FEATURE_X)
+#include <feature.h>
+int feature_x_init(void) { return 0; }
+#endif
+#ifdef USE_BAR
+int bar(void) { return 2; }
+#endif
+int main(void) { return 0; }
+"""
+    with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_c
+def test_parse_c_preprocessor_conditional(c_conditional_module: Path):
+    """C: #include inside #ifdef/#ifndef/#if is extracted via recursive walk."""
+    result = parse_file(c_conditional_module)
+
+    import_names = {i.name for i in result.imports}
+    assert "stdio.h" in import_names, "top-level include missing"
+    assert "windows.h" in import_names, "#ifdef-guarded include missing"
+    assert "extra.h" in import_names, "#ifndef-guarded include missing"
+    assert "feature.h" in import_names, "#if defined(...)-guarded include missing"
+
+    symbol_names = {s.name for s in result.symbols}
+    assert "feature_x_init" in symbol_names, "function inside #if defined(...) missing"
+    assert "bar" in symbol_names, "function inside #ifdef missing"
+    assert "main" in symbol_names
+
+
+@_skip_no_c
+def test_parse_c_parenthesized_declarator(c_conditional_module: Path):
+    """C: int (*(foo))(void) — parenthesized_declarator wraps a pointer_declarator."""
+    # The default c_module fixture doesn't have this pattern, but our
+    # _c_find_function_name handles it.  Test with a separate fixture.
+    code = "int (*(inner_func))(void) { return NULL; }\n"
+    with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    try:
+        result = parse_file(path)
+        assert any(
+            s.name == "inner_func" for s in result.symbols
+        ), f"Expected inner_func in symbols, got: {[s.name for s in result.symbols]}"
+    finally:
+        path.unlink(missing_ok=True)
