@@ -1242,3 +1242,107 @@ def cmd_plugin():
 
     assert "main::helper" in callees.get("main::cmd_plugin", set())
     assert "main::cmd_plugin" in callers.get("main::helper", set())
+
+
+# ---------------------------------------------------------------------------
+# Cross-language cross-module call resolution
+# ---------------------------------------------------------------------------
+
+_skip_no_rust = pytest.mark.skipif(
+    not _has_grammar("tree_sitter_rust"),
+    reason="tree-sitter-rust not installed",
+)
+_skip_no_go = pytest.mark.skipif(
+    not _has_grammar("tree_sitter_go"),
+    reason="tree-sitter-go not installed",
+)
+
+
+@_skip_no_ts
+def test_cross_file_call_graph_typescript_named_import(tmp_path: Path):
+    """TypeScript named import: import { greet } from './utils'; greet()."""
+    (tmp_path / "utils.ts").write_text("export function greet(): void {}\n")
+    (tmp_path / "main.ts").write_text(
+        'import { greet } from "./utils";\nfunction main() { greet(); }\n'
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::greet" in callees.get("main::main", set())
+    assert "main::main" in callers.get("utils::greet", set())
+
+
+@_skip_no_ts
+def test_cross_file_call_graph_typescript_namespace_import(tmp_path: Path):
+    """TypeScript namespace import: import * as utils from './utils'; utils.greet()."""
+    (tmp_path / "utils.ts").write_text("export function greet(): void {}\n")
+    (tmp_path / "main.ts").write_text(
+        'import * as utils from "./utils";\nfunction main() { utils.greet(); }\n'
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::greet" in callees.get("main::main", set())
+    assert "main::main" in callers.get("utils::greet", set())
+
+
+@_skip_no_go
+def test_cross_file_call_graph_go_pkg_qualified(tmp_path: Path):
+    """Go package-qualified call: import 'pkg'; pkg.Func()."""
+    (tmp_path / "utils.go").write_text("package utils\nfunc Greet() {}\n")
+    (tmp_path / "main.go").write_text(
+        'package main\nimport "utils"\nfunc Run() { utils.Greet() }\n'
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::Greet" in callees.get("main::Run", set())
+    assert "main::Run" in callers.get("utils::Greet", set())
+
+
+@_skip_no_rust
+def test_cross_file_call_graph_rust_use_import(tmp_path: Path):
+    """Rust explicit use: use crate::greet; greet()."""
+    (tmp_path / "lib.rs").write_text("pub fn greet() {}\n")
+    (tmp_path / "main.rs").write_text("use crate::greet;\nfn run() { greet(); }\n")
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "lib::greet" in callees.get("main::run", set())
+    assert "main::run" in callers.get("lib::greet", set())
+
+
+@_skip_no_rust
+def test_cross_file_call_graph_rust_path_qualified(tmp_path: Path):
+    """Rust path-qualified call without explicit use: crate::utils::parse()."""
+    (tmp_path / "utils.rs").write_text("pub fn parse() {}\n")
+    (tmp_path / "main.rs").write_text("fn run() { crate::utils::parse(); }\n")
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::parse" in callees.get("main::run", set())
+    assert "main::run" in callers.get("utils::parse", set())
+
+
+@_skip_no_rust
+def test_cross_file_call_graph_rust_path_qualified_no_collision(tmp_path: Path):
+    """Rust path-qualified calls resolve to the correct module when multiple
+    modules define a function with the same name (e.g. parse)."""
+    (tmp_path / "utils.rs").write_text("pub fn parse() {}\n")
+    (tmp_path / "other.rs").write_text("pub fn parse() {}\n")
+    (tmp_path / "main.rs").write_text(
+        "fn run() { crate::utils::parse(); crate::other::parse(); }\n"
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::parse" in callees.get("main::run", set())
+    assert "other::parse" in callees.get("main::run", set())
+    assert "main::run" in callers.get("utils::parse", set())
+    assert "main::run" in callers.get("other::parse", set())
