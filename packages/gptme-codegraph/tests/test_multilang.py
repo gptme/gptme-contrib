@@ -676,9 +676,9 @@ fn helper() -> i32 {
     )
     assert run is not None, "run method not found in parse result"
     assert "self.prepare" in run.calls
-    assert "prepare" in run.calls
+    assert "Client.prepare" in run.calls
     assert "Self::make" in run.calls
-    assert "make" in run.calls
+    assert "Client.make" in run.calls
 
     callees, callers = build_call_graph(result.symbols)
     assert "::Client.prepare" in callees["::Client.run"]
@@ -943,7 +943,7 @@ func helper(v int) int {
     )
     assert add is not None, "Add method not found in parse result"
     assert "c.log" in add.calls
-    assert "log" in add.calls
+    assert "Calculator.log" in add.calls
 
     callees, callers = build_call_graph(result.symbols)
     assert "::Calculator.log" in callees["::Calculator.Add"]
@@ -2349,3 +2349,73 @@ def test_build_index_cpp(cpp_module: Path):
         index = build_index(d)
         assert "Accumulator" in index.entries
         assert "add" in index.entries
+
+
+@_skip_no_go
+def test_parse_go_receiver_calls_no_collision_across_types(tmp_path: Path):
+    """Go: receiver aliases are qualified so same-named methods across types don't collide."""
+    go_file = tmp_path / "multitype.go"
+    go_file.write_text(
+        """\
+package main
+
+type Log struct{}
+func (l *Log) format() string { return "" }
+
+type Report struct{}
+func (r *Report) format() string { return "" }
+
+func (r *Report) Generate() string {
+    r.format()
+    return ""
+}
+"""
+    )
+    result = parse_file(go_file)
+
+    report_gen = next(
+        s for s in result.symbols if s.name == "Generate" and s.parent_class == "Report"
+    )
+    # The alias should be "Report.format", not bare "format"
+    assert "Report.format" in report_gen.calls  # qualified alias
+    assert "format" not in report_gen.calls  # bare name should not appear
+
+    callees, callers = build_call_graph(result.symbols)
+    # Report.Generate should call Report.format, not Log.format
+    assert "::Report.format" in callees["::Report.Generate"]
+    assert "::Log.format" not in callees["::Report.Generate"]
+
+
+@_skip_no_rust
+def test_parse_rust_receiver_calls_no_collision_across_types(tmp_path: Path):
+    """Rust: receiver aliases are qualified so same-named methods across types don't collide."""
+    rs_file = tmp_path / "multitype.rs"
+    rs_file.write_text(
+        """\
+struct Counter {}
+impl Counter {
+    fn reset(&self) {}
+    fn tick(&self) {
+        self.reset();
+    }
+}
+
+struct Timer {}
+impl Timer {
+    fn reset(&self) {}
+}
+"""
+    )
+    result = parse_file(rs_file)
+
+    tick = next(
+        s for s in result.symbols if s.name == "tick" and s.parent_class == "Counter"
+    )
+    # The alias should be "Counter.reset", not bare "reset"
+    assert "Counter.reset" in tick.calls  # qualified alias
+    assert "reset" not in tick.calls  # bare name should not appear
+
+    callees, callers = build_call_graph(result.symbols)
+    # Counter.tick should call Counter.reset, not Timer.reset
+    assert "::Counter.reset" in callees["::Counter.tick"]
+    assert "::Timer.reset" not in callees["::Counter.tick"]

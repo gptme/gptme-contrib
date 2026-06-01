@@ -836,24 +836,40 @@ def _extract_calls(node) -> list[str]:
     return calls
 
 
-def _rust_receiver_call_aliases(calls: list[str]) -> list[str]:
-    """Return local method aliases for Rust receiver/associated self calls."""
+def _rust_receiver_call_aliases(
+    calls: list[str], parent_class: str | None
+) -> list[str]:
+    """Return local method aliases for Rust receiver/associated self calls.
+
+    Aliases are qualified as ParentClass.method to avoid bare-name
+    collisions when multiple types in the same file define methods with
+    the same name.
+    """
+    if not parent_class:
+        return []
     aliases: list[str] = []
     for call in calls:
         if call.startswith("self."):
             method = call.removeprefix("self.")
             if method and "." not in method:
-                aliases.append(method)
+                aliases.append(f"{parent_class}.{method}")
         elif call.startswith("Self::"):
             method = call.removeprefix("Self::")
             if method and "::" not in method:
-                aliases.append(method)
+                aliases.append(f"{parent_class}.{method}")
     return aliases
 
 
-def _go_receiver_call_aliases(calls: list[str], receiver_name: str | None) -> list[str]:
-    """Return local method aliases for Go calls through the method receiver."""
-    if not receiver_name:
+def _go_receiver_call_aliases(
+    calls: list[str], receiver_name: str | None, parent_class: str | None
+) -> list[str]:
+    """Return local method aliases for Go calls through the method receiver.
+
+    Aliases are qualified as ParentClass.method to avoid bare-name
+    collisions when multiple types in the same file define methods with
+    the same name.
+    """
+    if not receiver_name or not parent_class:
         return []
     prefix = f"{receiver_name}."
     aliases: list[str] = []
@@ -861,7 +877,7 @@ def _go_receiver_call_aliases(calls: list[str], receiver_name: str | None) -> li
         if call.startswith(prefix):
             method = call.removeprefix(prefix)
             if method and "." not in method:
-                aliases.append(method)
+                aliases.append(f"{parent_class}.{method}")
     return aliases
 
 
@@ -1364,7 +1380,7 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
                 parent_class = parent_scope if kind == "method" else None
                 calls = _extract_calls(body_node) if body_node else []
                 if kind == "method":
-                    calls.extend(_rust_receiver_call_aliases(calls))
+                    calls.extend(_rust_receiver_call_aliases(calls, parent_class))
                 symbols.append(
                     Symbol(
                         name=name,
@@ -1532,7 +1548,9 @@ def _extract_symbols_go(root, filepath: str) -> list[Symbol]:
                 )
                 body_node = node.child_by_field_name("body")
                 calls = _extract_calls(body_node) if body_node else []
-                calls.extend(_go_receiver_call_aliases(calls, receiver_name))
+                calls.extend(
+                    _go_receiver_call_aliases(calls, receiver_name, parent_class)
+                )
                 symbols.append(
                     Symbol(
                         name=_text(name_node),
@@ -2917,14 +2935,43 @@ def build_call_graph(
     """
     known_names = {s.name for s in symbols}
     # Map bare names → qualified IDs for the single-file case.
-    # Within one file, name collisions don't occur, so this is 1:1.
     name_to_qid: dict[str, str] = {}
     for s in symbols:
         qid = s.qualified_id()
         name_to_qid[s.name] = qid
+        # Add qualified-name entries for methods with a parent class.
+        # This prevents bare-name collisions when two types define a
+        # method with the same name (common with "log", "String", etc.).
+        # Aliases from _rust/go_receiver_call_aliases are bare names,
+        # but _resolve_call below tries the qualified form on collision.
+        if s.parent_class and s.name:
+            qualified_key = f"{s.parent_class}.{s.name}"
+            name_to_qid[qualified_key] = qid
+            known_names.add(qualified_key)
 
     callees: dict[str, set[str]] = {}
     callers: dict[str, set[str]] = defaultdict(set)
+
+    # Detect bare-name collisions across types (e.g., two types both
+    # defining a "log" method).  When a caller with a known parent_class
+    # references a colliding bare name, prefer the qualified lookup
+    # ("ParentClass.method") to avoid wrong-type edges.
+    _collision_names = {
+        name
+        for name in known_names
+        if "." not in name and sum(1 for s in symbols if s.name == name) > 1
+    }
+
+    def _resolve_call(call: str, sym: Symbol) -> str | None:
+        qid = name_to_qid.get(call)
+        if qid is None:
+            return None
+        if call in _collision_names and sym.parent_class:
+            qualified_c = f"{sym.parent_class}.{call}"
+            qid_preferred = name_to_qid.get(qualified_c)
+            if qid_preferred is not None:
+                return qid_preferred
+        return qid
 
     for sym in symbols:
         if sym.kind == "class":
@@ -2932,7 +2979,11 @@ def build_call_graph(
         qid = name_to_qid.get(sym.name, sym.qualified_id())
         # Filter to known symbols only: excludes external builtins and dotted
         # attribute calls like 'calc.add' that can't be resolved locally.
-        filtered_calls = {name_to_qid[c] for c in sym.calls if c in known_names}
+        filtered_calls = {
+            resolved
+            for c in sym.calls
+            if c in known_names and (resolved := _resolve_call(c, sym)) is not None
+        }
         callees[qid] = filtered_calls
         for called_qid in filtered_calls:
             callers[called_qid].add(qid)
