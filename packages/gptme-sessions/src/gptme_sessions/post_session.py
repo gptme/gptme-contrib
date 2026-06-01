@@ -249,6 +249,7 @@ def post_session(
     deliverables: list[str] | None = None,
     journal_path: str | None = None,
     session_id: str | None = None,
+    repo_root: str | Path | None = None,
 ) -> PostSessionResult:
     """Record a completed agent session and extract trajectory signals.
 
@@ -724,6 +725,33 @@ def post_session(
                 )
         except Exception as e:
             logger.warning("Duplicate journal_path check failed (non-fatal): %s", e)
+
+    # --- Durability scoring (impact_durability dimension, ErikBjare/bob#632) ---
+    # Computed at post-session time but only returns a score for sessions
+    # >= 30 days old with commit deliveries.  Younger sessions get `None`.
+    if repo_root is not None:
+        try:
+            from .durability import compute_durability
+
+            durability_score = compute_durability(record, repo_root)
+            if durability_score is not None:
+                record.grades["durability"] = durability_score
+                n_commits = len(
+                    [
+                        d
+                        for d in (record.deliverables or [])
+                        if any(c in "0123456789abcdef" for c in (d or "").strip().lower())
+                        and 7 <= len((d or "").strip()) <= 40
+                    ]
+                )
+                record.grade_reasons["durability"] = (
+                    f"Durability {durability_score:.2f}: "
+                    f"{'all' if durability_score >= 1.0 else f'{round(durability_score * n_commits)}/{n_commits}'} "
+                    f"commit(s) survived 30+ days without reversion"
+                )
+        except Exception as e:
+            logger.warning("Durability scoring failed (non-fatal): %s", e)
+
     store.append(record)
 
     return PostSessionResult(

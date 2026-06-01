@@ -54,6 +54,10 @@ from .classification import (
     judge_and_classify,
     normalize_category,
 )
+from .durability import (
+    compute_durability,
+    compute_durability_for_store,
+)
 from .spans import (
     SpanAggregates,
     ToolSpan,
@@ -113,6 +117,8 @@ __all__ = [
     "SessionTranscript",
     "TRANSCRIPT_SCHEMA_VERSION",
     "read_transcript",
+    "compute_durability",
+    "compute_durability_for_store",
     "SpanAggregates",
     "ToolSpan",
     "extract_spans_from_cc_jsonl",

@@ -2203,6 +2203,12 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 @click.option("--journal-path", default=None, help="Path to journal entry for this session")
 @click.option("--session-id", default=None, help="Override auto-generated session ID")
 @click.option(
+    "--repo-root",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=None,
+    help="Git repo root for durability scoring (ErikBjare/bob#632)",
+)
+@click.option(
     "--context-tier",
     default=None,
     type=click.Choice(sorted(VALID_CONTEXT_TIERS)),
@@ -2234,6 +2240,7 @@ def post_session_cmd(
     deliverables_raw: tuple[str, ...],
     journal_path: str | None,
     session_id: str | None,
+    repo_root: Path | None,
     context_tier: str | None,
     ab_group: str | None,
     tier_version: str | None,
@@ -2259,6 +2266,7 @@ def post_session_cmd(
         deliverables=deliverables,
         journal_path=journal_path,
         session_id=session_id,
+        repo_root=repo_root,
         context_tier=context_tier,
         ab_group=ab_group,
         tier_version=tier_version,
