@@ -1288,6 +1288,32 @@ def test_cross_file_call_graph_typescript_namespace_import(tmp_path: Path):
     assert "main::main" in callers.get("utils::greet", set())
 
 
+def test_cross_file_call_graph_python_from_import(tmp_path: Path):
+    """Python from-import: from utils import greet; greet()."""
+    (tmp_path / "utils.py").write_text("def greet(): pass\n")
+    (tmp_path / "main.py").write_text(
+        "from utils import greet\ndef run():\n    greet()\n"
+    )
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::greet" in callees.get("main::run", set())
+    assert "main::run" in callers.get("utils::greet", set())
+
+
+def test_cross_file_call_graph_python_module_import(tmp_path: Path):
+    """Python module import: import utils; utils.greet()."""
+    (tmp_path / "utils.py").write_text("def greet(): pass\n")
+    (tmp_path / "main.py").write_text("import utils\ndef run():\n    utils.greet()\n")
+
+    index = build_index(tmp_path)
+    callees, callers = build_cross_file_call_graph(index, tmp_path)
+
+    assert "utils::greet" in callees.get("main::run", set())
+    assert "main::run" in callers.get("utils::greet", set())
+
+
 @_skip_no_go
 def test_cross_file_call_graph_go_pkg_qualified(tmp_path: Path):
     """Go package-qualified call: import 'pkg'; pkg.Func()."""
