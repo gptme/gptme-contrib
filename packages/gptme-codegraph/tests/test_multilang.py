@@ -1897,4 +1897,25 @@ namespace Foo {
     ) in import_names, f"Expected User import, got {import_names}"
 
 
+@_skip_no_php
+def test_parse_php_function_call_expressions(tmp_path: Path):
+    """PHP: standalone function calls (function_call_expression) are extracted from call graph."""
+    code = """<?php
+function processItems(array $items): void {
+    $result = array_map(fn($x) => $x * 2, $items);
+    sort($result);
+    doSomethingElse();
+}
+"""
+    php_file = tmp_path / "func_calls.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    proc = next(s for s in result.symbols if s.name == "processItems")
+    assert "array_map" in proc.calls, f"Expected 'array_map' in calls, got {proc.calls}"
+    assert "sort" in proc.calls, f"Expected 'sort' in calls, got {proc.calls}"
+    assert (
+        "doSomethingElse" in proc.calls
+    ), f"Expected 'doSomethingElse' in calls, got {proc.calls}"
+
+
 # ---------------------------------------------------------------------------

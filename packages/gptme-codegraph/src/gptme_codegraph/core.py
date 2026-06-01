@@ -765,8 +765,8 @@ def _extract_calls(node) -> list[str]:
                 if name_node:
                     calls.append(_text(name_node))
             elif cursor.node.type == "function_call_expression":
-                # PHP: function_call_expression has a "name" child
-                name_node = cursor.node.child_by_field_name("name")
+                # PHP: callee is the "function" field (not "name")
+                name_node = cursor.node.child_by_field_name("function")
                 if name_node:
                     calls.append(_text(name_node))
             elif cursor.node.type == "member_call_expression":
