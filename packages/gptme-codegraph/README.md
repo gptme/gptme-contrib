@@ -5,7 +5,7 @@ Structural code retrieval for gptme via [tree-sitter](https://tree-sitter.github
 ## Features
 
 - **9 MCP tools**: `codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`, `codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_blast`, `codegraph_impact`
-- **Multi-language symbol extraction** for Python, JavaScript/TypeScript, Rust, Go, Java, C#, Ruby, C, C++, PHP, and Kotlin
+- **Multi-language symbol extraction** for Python, JavaScript/TypeScript, Rust, Go, Java, C#, Ruby, C, C++, PHP, Kotlin, and Swift
 - **Cross-file import capture** across supported languages, with strongest semantic resolution on Python
 - **Qualified symbol IDs** (`module::Class.method`) for unambiguous cross-file references
 - **SQLite index cache** — optional persistent cache for large codebases
@@ -78,7 +78,7 @@ gptme-codegraph-commit-map path/to/repo --refresh
 
 Freshness is keyed off a digest of supported source files (`*.py`, `*.ts`,
 `*.tsx`, `*.js`, `*.rs`, `*.go`, `*.java`, `*.cs`, `*.rb`, `*.c`, `*.cpp`,
-`*.php`, `*.kt`, `*.kts`), not `HEAD` — so an artifact regenerated in a
+`*.php`, `*.kt`, `*.kts`, `*.swift`), not `HEAD` — so an artifact regenerated in a
 pre-commit hook stays fresh after the commit that contains it lands. The default
 staleness window is 1 day (`--stale-after-days N` to change it). The artifact is
 structural only (paths, class/function names, nesting) — no source, comments, or
@@ -128,7 +128,7 @@ print(radius)  # {"depth_0": {…}, "depth_1": {…}, …}
 
 Experimental package — Python support is the deepest path today, with broad
 tree-sitter extraction now wired into the same surface for common web, systems,
-JVM, scripting, and PHP/Kotlin codebases. Cross-file resolution remains
+JVM, scripting, PHP/Kotlin, and Swift codebases. Cross-file resolution remains
 strongest on Python; non-Python import handling is best-effort rather than fully
 semantic.
 
