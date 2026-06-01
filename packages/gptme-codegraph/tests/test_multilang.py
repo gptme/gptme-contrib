@@ -1,7 +1,7 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, Rust, Go, Java, and C# source files.
+for JavaScript, TypeScript, Rust, Go, Java, C#, and Ruby source files.
 """
 
 from __future__ import annotations
@@ -49,6 +49,10 @@ _skip_no_java = pytest.mark.skipif(
 _skip_no_csharp = pytest.mark.skipif(
     not _has_grammar("c_sharp"),
     reason="tree-sitter-c-sharp not installed",
+)
+_skip_no_ruby = pytest.mark.skipif(
+    not _has_grammar("ruby"),
+    reason="tree-sitter-ruby not installed",
 )
 
 # ---------------------------------------------------------------------------
@@ -1130,6 +1134,51 @@ namespace Example.App
 
 
 # ---------------------------------------------------------------------------
+# Ruby fixtures + tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ruby_module() -> Generator[Path, None, None]:
+    """A Ruby source file exercising modules, classes, methods, and requires."""
+    code = """\
+require "json"
+require_relative "support/base"
+
+module Geometry
+  PI = 3.14159
+
+  class Circle < Shape
+    def initialize(radius)
+      @radius = radius
+    end
+
+    def area
+      compute(PI * @radius * @radius)
+    end
+
+    def self.unit
+      new(1)
+    end
+  end
+
+  def describe
+    puts "geometry"
+  end
+end
+
+def main
+  Geometry::Circle.unit.area
+end
+"""
+    with tempfile.NamedTemporaryFile(suffix=".rb", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # C# tests
 # ---------------------------------------------------------------------------
 
@@ -1246,3 +1295,104 @@ def test_build_index_csharp(csharp_module: Path):
         index = build_index(d)
         assert "Calculator" in index.entries
         assert "Add" in index.entries
+
+
+@_skip_no_ruby
+def test_parse_ruby_module(ruby_module: Path):
+    """Ruby: module is extracted as a class-kind namespace symbol."""
+    result = parse_file(ruby_module)
+    geometry = next((s for s in result.symbols if s.name == "Geometry"), None)
+    assert geometry is not None
+    assert geometry.kind == "class"
+    assert geometry.parent_class is None
+
+
+@_skip_no_ruby
+def test_parse_ruby_class(ruby_module: Path):
+    """Ruby: a class nested in a module records the module as parent."""
+    result = parse_file(ruby_module)
+    circle = next((s for s in result.symbols if s.name == "Circle"), None)
+    assert circle is not None
+    assert circle.kind == "class"
+    assert circle.parent_class == "Geometry"
+
+
+@_skip_no_ruby
+def test_parse_ruby_methods(ruby_module: Path):
+    """Ruby: instance methods are extracted with their class as parent."""
+    result = parse_file(ruby_module)
+    area = next((s for s in result.symbols if s.name == "area"), None)
+    assert area is not None
+    assert area.kind == "method"
+    assert area.parent_class == "Circle"
+
+
+@_skip_no_ruby
+def test_parse_ruby_singleton_method(ruby_module: Path):
+    """Ruby: def self.x singleton methods are extracted."""
+    result = parse_file(ruby_module)
+    unit = next((s for s in result.symbols if s.name == "unit"), None)
+    assert unit is not None
+    assert unit.kind == "method"
+    assert unit.parent_class == "Circle"
+
+
+@_skip_no_ruby
+def test_parse_ruby_module_level_method(ruby_module: Path):
+    """Ruby: a def directly inside a module is parented to the module."""
+    result = parse_file(ruby_module)
+    describe = next((s for s in result.symbols if s.name == "describe"), None)
+    assert describe is not None
+    assert describe.parent_class == "Geometry"
+
+
+@_skip_no_ruby
+def test_parse_ruby_top_level_function(ruby_module: Path):
+    """Ruby: a top-level def has no parent and is a function."""
+    result = parse_file(ruby_module)
+    main = next((s for s in result.symbols if s.name == "main"), None)
+    assert main is not None
+    assert main.kind == "function"
+    assert main.parent_class is None
+
+
+@_skip_no_ruby
+def test_parse_ruby_calls(ruby_module: Path):
+    """Ruby: call nodes (method field) are extracted into calls."""
+    result = parse_file(ruby_module)
+    area = next((s for s in result.symbols if s.name == "area"), None)
+    assert area is not None
+    assert "compute" in area.calls, f"Expected 'compute' in calls, got: {area.calls}"
+
+
+@_skip_no_ruby
+def test_parse_ruby_requires(ruby_module: Path):
+    """Ruby: require and require_relative are extracted as imports."""
+    result = parse_file(ruby_module)
+    modules = {imp.module for imp in result.imports}
+    assert "json" in modules
+    assert "support/base" in modules
+
+
+@_skip_no_ruby
+def test_parse_ruby_line_numbers(ruby_module: Path):
+    """Ruby: symbols carry sensible 1-based line numbers."""
+    result = parse_file(ruby_module)
+    circle = next((s for s in result.symbols if s.name == "Circle"), None)
+    assert circle is not None
+    assert circle.start_line >= 1
+    assert circle.end_line >= circle.start_line
+
+
+@_skip_no_ruby
+def test_build_index_ruby(ruby_module: Path):
+    """Ruby: build_index picks up symbols from a .rb file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        dest = Path(d) / ruby_module.name
+        shutil.copy(ruby_module, dest)
+        index = build_index(d)
+        assert "Circle" in index.entries
+        assert "area" in index.entries
