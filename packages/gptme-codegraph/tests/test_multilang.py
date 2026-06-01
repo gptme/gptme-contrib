@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from gptme_codegraph.core import (
     _tree_sitter_parse,
+    build_call_graph,
     build_index,
     extract_symbols,
     parse_file,
@@ -641,6 +642,52 @@ def test_parse_rust_impl_method_calls(rust_module: Path):
     assert with_max.calls == []
 
 
+@_skip_no_rust
+def test_parse_rust_receiver_method_calls_link_call_graph(tmp_path: Path):
+    """Rust: self/Self method calls are linked to local impl methods."""
+    rust_file = tmp_path / "receiver_calls.rs"
+    rust_file.write_text(
+        """\
+struct Client;
+
+impl Client {
+    fn run(&self) -> i32 {
+        self.prepare();
+        Self::make();
+        helper()
+    }
+
+    fn prepare(&self) {}
+
+    fn make() -> i32 {
+        1
+    }
+}
+
+fn helper() -> i32 {
+    1
+}
+"""
+    )
+    result = parse_file(rust_file)
+    run = next(
+        (s for s in result.symbols if s.name == "run" and s.parent_class == "Client"),
+        None,
+    )
+    assert run is not None, "run method not found in parse result"
+    assert "self.prepare" in run.calls
+    assert "prepare" in run.calls
+    assert "Self::make" in run.calls
+    assert "make" in run.calls
+
+    callees, callers = build_call_graph(result.symbols)
+    assert "::Client.prepare" in callees["::Client.run"]
+    assert "::Client.make" in callees["::Client.run"]
+    assert "::helper" in callees["::Client.run"]
+    assert "::Client.run" in callers["::Client.prepare"]
+    assert "::Client.run" in callers["::Client.make"]
+
+
 # ---------------------------------------------------------------------------
 # Rust import extraction
 # ---------------------------------------------------------------------------
@@ -861,6 +908,47 @@ def test_parse_go_method_calls(go_module: Path):
     )
     assert add is not None
     assert any("Println" in c for c in add.calls)
+
+
+@_skip_no_go
+def test_parse_go_receiver_method_calls_link_call_graph(tmp_path: Path):
+    """Go: receiver method calls are linked to local methods."""
+    go_file = tmp_path / "receiver_calls.go"
+    go_file.write_text(
+        """\
+package main
+
+type Calculator struct{}
+
+func (c *Calculator) Add(a, b int) int {
+    c.log()
+    return helper(a + b)
+}
+
+func (c *Calculator) log() {}
+
+func helper(v int) int {
+    return v
+}
+"""
+    )
+    result = parse_file(go_file)
+    add = next(
+        (
+            s
+            for s in result.symbols
+            if s.name == "Add" and s.parent_class == "Calculator"
+        ),
+        None,
+    )
+    assert add is not None, "Add method not found in parse result"
+    assert "c.log" in add.calls
+    assert "log" in add.calls
+
+    callees, callers = build_call_graph(result.symbols)
+    assert "::Calculator.log" in callees["::Calculator.Add"]
+    assert "::helper" in callees["::Calculator.Add"]
+    assert "::Calculator.Add" in callers["::Calculator.log"]
 
 
 @_skip_no_go

@@ -836,6 +836,35 @@ def _extract_calls(node) -> list[str]:
     return calls
 
 
+def _rust_receiver_call_aliases(calls: list[str]) -> list[str]:
+    """Return local method aliases for Rust receiver/associated self calls."""
+    aliases: list[str] = []
+    for call in calls:
+        if call.startswith("self."):
+            method = call.removeprefix("self.")
+            if method and "." not in method:
+                aliases.append(method)
+        elif call.startswith("Self::"):
+            method = call.removeprefix("Self::")
+            if method and "::" not in method:
+                aliases.append(method)
+    return aliases
+
+
+def _go_receiver_call_aliases(calls: list[str], receiver_name: str | None) -> list[str]:
+    """Return local method aliases for Go calls through the method receiver."""
+    if not receiver_name:
+        return []
+    prefix = f"{receiver_name}."
+    aliases: list[str] = []
+    for call in calls:
+        if call.startswith(prefix):
+            method = call.removeprefix(prefix)
+            if method and "." not in method:
+                aliases.append(method)
+    return aliases
+
+
 def _strip_string_quotes(text: str) -> str:
     """Return a string literal without its outer quote characters."""
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
@@ -1334,6 +1363,8 @@ def _extract_symbols_rust(root, filepath: str) -> list[Symbol]:
                 kind = "method" if parent_kind == "impl" else "function"
                 parent_class = parent_scope if kind == "method" else None
                 calls = _extract_calls(body_node) if body_node else []
+                if kind == "method":
+                    calls.extend(_rust_receiver_call_aliases(calls))
                 symbols.append(
                     Symbol(
                         name=name,
@@ -1459,6 +1490,16 @@ def _receiver_type_go(receiver_node) -> str | None:
     return None
 
 
+def _receiver_name_go(receiver_node) -> str | None:
+    """Extract the variable name from a Go receiver parameter_list."""
+    for child in receiver_node.named_children:
+        if child.type == "parameter_declaration":
+            name_node = child.child_by_field_name("name")
+            if name_node is not None:
+                return _text(name_node)
+    return None
+
+
 def _extract_symbols_go(root, filepath: str) -> list[Symbol]:
     """Extract functions, methods, and named types from a Go parse tree."""
     symbols: list[Symbol] = []
@@ -1486,8 +1527,12 @@ def _extract_symbols_go(root, filepath: str) -> list[Symbol]:
                 parent_class = (
                     _receiver_type_go(receiver_node) if receiver_node else None
                 )
+                receiver_name = (
+                    _receiver_name_go(receiver_node) if receiver_node else None
+                )
                 body_node = node.child_by_field_name("body")
                 calls = _extract_calls(body_node) if body_node else []
+                calls.extend(_go_receiver_call_aliases(calls, receiver_name))
                 symbols.append(
                     Symbol(
                         name=_text(name_node),
