@@ -1559,3 +1559,65 @@ def test_build_index_c(c_module: Path):
         index = build_index(d)
         assert "add" in index.entries
         assert "multiply" in index.entries
+
+
+@pytest.fixture
+def c_conditional_module() -> Generator[Path, None, None]:
+    """A C file with preprocessor-conditional includes and a conditionally-compiled function."""
+    code = """\
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#ifndef NO_EXTRA
+#include <extra.h>
+#endif
+#if defined(FEATURE_X)
+#include <feature.h>
+int feature_x_init(void) { return 0; }
+#endif
+#ifdef USE_BAR
+int bar(void) { return 2; }
+#endif
+int main(void) { return 0; }
+"""
+    with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_c
+def test_parse_c_preprocessor_conditional(c_conditional_module: Path):
+    """C: #include inside #ifdef/#ifndef/#if is extracted via recursive walk."""
+    result = parse_file(c_conditional_module)
+
+    import_names = {i.name for i in result.imports}
+    assert "stdio.h" in import_names, "top-level include missing"
+    assert "windows.h" in import_names, "#ifdef-guarded include missing"
+    assert "extra.h" in import_names, "#ifndef-guarded include missing"
+    assert "feature.h" in import_names, "#if defined(...)-guarded include missing"
+
+    symbol_names = {s.name for s in result.symbols}
+    assert "feature_x_init" in symbol_names, "function inside #if defined(...) missing"
+    assert "bar" in symbol_names, "function inside #ifdef missing"
+    assert "main" in symbol_names
+
+
+@_skip_no_c
+def test_parse_c_parenthesized_declarator(c_conditional_module: Path):
+    """C: int (*(foo))(void) — parenthesized_declarator wraps a pointer_declarator."""
+    # The default c_module fixture doesn't have this pattern, but our
+    # _c_find_function_name handles it.  Test with a separate fixture.
+    code = "int (*(inner_func))(void) { return NULL; }\n"
+    with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    try:
+        result = parse_file(path)
+        assert any(
+            s.name == "inner_func" for s in result.symbols
+        ), f"Expected inner_func in symbols, got: {[s.name for s in result.symbols]}"
+    finally:
+        path.unlink(missing_ok=True)

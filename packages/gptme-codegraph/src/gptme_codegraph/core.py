@@ -1927,18 +1927,38 @@ def _extract_imports_csharp(root) -> list[ImportInfo]:
 def _c_find_function_name(declarator) -> str | None:
     """Walk a C declarator chain to find the function name identifier.
 
-    Handles both direct function_declarator and pointer_declarator wrapping
-    (e.g. ``int *foo(void)``).
+    Handles direct ``function_declarator``, ``pointer_declarator`` wrapping
+    (e.g. ``int *foo(void)``), and ``parenthesized_declarator`` wrapping
+    (e.g. ``int (*(foo))(void)``).
     """
     if declarator is None:
         return None
+    if declarator.type == "identifier":
+        return _text(declarator)
     if declarator.type == "function_declarator":
+        # The function name is in the "declarator" child, which may be a
+        # plain identifier ("int foo(void)") or a wrapping node such as
+        # parenthesized_declarator ("int (*(foo))(void)").
         name_node = declarator.child_by_field_name("declarator")
         if name_node is not None:
-            return _text(name_node) if name_node.type == "identifier" else None
+            if name_node.type == "identifier":
+                return _text(name_node)
+            # Recurse into wrapping node (e.g. parenthesized_declarator)
+            return _c_find_function_name(name_node)
     elif declarator.type == "pointer_declarator":
         inner = declarator.child_by_field_name("declarator")
         return _c_find_function_name(inner)
+    elif declarator.type == "parenthesized_declarator":
+        # Walk through parentheses to find the inner declarator chain.
+        # The content inside the parens (e.g. identifier, pointer_declarator,
+        # or another parenthesized_declarator) is in a child node.
+        for child in declarator.children:
+            if child.type in (
+                "identifier",
+                "pointer_declarator",
+                "parenthesized_declarator",
+            ):
+                return _c_find_function_name(child)
     return None
 
 
@@ -1948,66 +1968,85 @@ def _extract_symbols_c(root, filepath: str) -> list[Symbol]:
     Functions are extracted as ``kind="function"``.  Named ``struct`` definitions
     and ``typedef struct { ... } Name`` patterns are extracted as ``kind="class"``
     to stay consistent with how structs are represented across other languages.
+
+    Walks recursively through preprocessor conditionals (``#ifdef``, ``#ifndef``,
+    ``#if``, ``#elif``, ``#else``) so that functions and structs guarded by
+    platform-specific or feature-test macros are not silently dropped.
     """
     symbols: list[Symbol] = []
 
-    for node in root.named_children:
-        if node.type == "function_definition":
-            outer_decl = node.child_by_field_name("declarator")
-            name = _c_find_function_name(outer_decl)
-            if not name:
-                continue
-            body = node.child_by_field_name("body")
-            calls = _extract_calls(body) if body else []
-            symbols.append(
-                Symbol(
-                    name=name,
-                    kind="function",
-                    file=filepath,
-                    start_line=node.start_point[0] + 1,
-                    end_line=node.end_point[0] + 1,
-                    calls=list(set(calls)),
-                )
-            )
-        elif node.type == "struct_specifier":
-            # Named struct at top level: `struct Foo { ... };`
-            name_node = node.child_by_field_name("name")
-            if name_node:
+    # Preprocessor conditional node types that may wrap symbols
+    _PREPROC_WRAPPER = frozenset(
+        {
+            "preproc_ifdef",
+            "preproc_ifndef",
+            "preproc_if",
+            "preproc_elif",
+            "preproc_else",
+        }
+    )
+
+    def _walk(node) -> None:
+        for child in node.named_children:
+            if child.type in _PREPROC_WRAPPER:
+                _walk(child)
+            elif child.type == "function_definition":
+                outer_decl = child.child_by_field_name("declarator")
+                name = _c_find_function_name(outer_decl)
+                if not name:
+                    continue
+                body = child.child_by_field_name("body")
+                calls = _extract_calls(body) if body else []
                 symbols.append(
                     Symbol(
-                        name=_text(name_node),
-                        kind="class",
+                        name=name,
+                        kind="function",
                         file=filepath,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
+                        start_line=child.start_point[0] + 1,
+                        end_line=child.end_point[0] + 1,
+                        calls=list(set(calls)),
                     )
                 )
-        elif node.type == "type_definition":
-            # typedef struct { ... } Name; or typedef struct Named Name;
-            has_struct = any(
-                c.type == "struct_specifier" for c in node.named_children
-            )
-            if has_struct:
-                # The typedef name is the type_identifier child at the end
-                type_id = next(
-                    (
-                        c
-                        for c in reversed(node.named_children)
-                        if c.type == "type_identifier"
-                    ),
-                    None,
-                )
-                if type_id:
+            elif child.type == "struct_specifier":
+                # Named struct at top level: `struct Foo { ... };`
+                name_node = child.child_by_field_name("name")
+                if name_node:
                     symbols.append(
                         Symbol(
-                            name=_text(type_id),
+                            name=_text(name_node),
                             kind="class",
                             file=filepath,
-                            start_line=node.start_point[0] + 1,
-                            end_line=node.end_point[0] + 1,
+                            start_line=child.start_point[0] + 1,
+                            end_line=child.end_point[0] + 1,
                         )
                     )
+            elif child.type == "type_definition":
+                # typedef struct { ... } Name; or typedef struct Named Name;
+                has_struct = any(
+                    c.type == "struct_specifier" for c in child.named_children
+                )
+                if has_struct:
+                    # The typedef name is the type_identifier child at the end
+                    type_id = next(
+                        (
+                            c
+                            for c in reversed(child.named_children)
+                            if c.type == "type_identifier"
+                        ),
+                        None,
+                    )
+                    if type_id:
+                        symbols.append(
+                            Symbol(
+                                name=_text(type_id),
+                                kind="class",
+                                file=filepath,
+                                start_line=child.start_point[0] + 1,
+                                end_line=child.end_point[0] + 1,
+                            )
+                        )
 
+    _walk(root)
     return symbols
 
 
@@ -2018,15 +2057,35 @@ def _extract_imports_c(root) -> list[ImportInfo]:
     (``"myheader.h"``).  The include path is split on ``/`` to populate
     ``module`` (the leading directory, e.g. ``sys``) and ``name`` (the
     filename, e.g. ``types.h``).
+
+    Walks recursively through preprocessor conditionals (``#ifdef``, ``#ifndef``,
+    ``#if``, ``#elif``, ``#else``) so that platform-specific or feature-guarded
+    includes are not silently dropped.
     """
     imports: list[ImportInfo] = []
 
-    for node in root.named_children:
-        if node.type != "preproc_include":
-            continue
+    # Preprocessor conditional node types that may wrap #include directives
+    _PREPROC_WRAPPER = frozenset(
+        {
+            "preproc_ifdef",
+            "preproc_ifndef",
+            "preproc_if",
+            "preproc_elif",
+            "preproc_else",
+        }
+    )
+
+    def _walk(node) -> None:
+        for child in node.named_children:
+            if child.type in _PREPROC_WRAPPER:
+                _walk(child)
+            elif child.type == "preproc_include":
+                _extract_include(child)
+
+    def _extract_include(node) -> None:
         path_node = node.child_by_field_name("path")
         if path_node is None:
-            continue
+            return
         if path_node.type == "system_lib_string":
             raw = _text(path_node)
             include_path = raw.strip("<>")
@@ -2035,12 +2094,14 @@ def _extract_imports_c(root) -> list[ImportInfo]:
                 (c for c in path_node.named_children if c.type == "string_content"),
                 None,
             )
-            include_path = _text(content) if content else _strip_string_quotes(_text(path_node))
+            include_path = (
+                _text(content) if content else _strip_string_quotes(_text(path_node))
+            )
         else:
             include_path = _text(path_node).strip("<>\"'")
 
         if not include_path:
-            continue
+            return
 
         if "/" in include_path:
             slash = include_path.rfind("/")
@@ -2057,6 +2118,7 @@ def _extract_imports_c(root) -> list[ImportInfo]:
             )
         )
 
+    _walk(root)
     return imports
 
 
