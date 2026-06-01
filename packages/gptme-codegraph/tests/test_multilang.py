@@ -54,6 +54,11 @@ _skip_no_ruby = pytest.mark.skipif(
     not _has_grammar("ruby"),
     reason="tree-sitter-ruby not installed",
 )
+_skip_no_php = pytest.mark.skipif(
+    not _has_grammar("php"),
+    reason="tree-sitter-php not installed",
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1622,3 +1627,183 @@ def test_parse_c_parenthesized_declarator(c_conditional_module: Path):
         ), f"Expected inner_func in symbols, got: {[s.name for s in result.symbols]}"
     finally:
         path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# PHP extraction tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def php_module() -> Generator[Path, None, None]:
+    """A PHP file with namespaces, use imports, classes, methods, interface, trait, and functions."""
+    code = """<?php
+
+namespace App\\Service;
+
+use App\\Entity\\User;
+use App\\Util\\Helper as H;
+use function array_map;
+use const PHP_EOL;
+
+class Calculator {
+    private int $value;
+
+    public function __construct(int $initialValue = 0) {
+        $this->value = $initialValue;
+    }
+
+    public function add(int $n): self {
+        $this->value += $n;
+        return $this;
+    }
+
+    public function getValue(): int {
+        return $this->value;
+    }
+
+    public static function create(int $val): self {
+        return new self($val);
+    }
+}
+
+interface Describable {
+    public function describe(): string;
+}
+
+trait Loggable {
+    public function log(string $msg): void {
+        echo $msg;
+    }
+}
+
+function helper(string $name): string {
+    return "Hello " . $name;
+}
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".php", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_php
+def test_language_detection_php(php_module: Path):
+    """PHP: language is detected from .php extension."""
+    from gptme_codegraph.core import _detect_language
+
+    assert _detect_language(php_module) == "php"
+
+
+@_skip_no_php
+def test_parse_php_class(php_module: Path):
+    """PHP: class is extracted with correct name and kind."""
+    result = parse_file(php_module)
+    classes = [s for s in result.symbols if s.kind == "class"]
+    class_names = {s.name for s in classes}
+    assert "Calculator" in class_names, f"Expected Calculator class, got {class_names}"
+    assert (
+        "Describable" in class_names
+    ), f"Expected Describable interface, got {class_names}"
+    assert "Loggable" in class_names, f"Expected Loggable trait, got {class_names}"
+    calc = next(s for s in classes if s.name == "Calculator")
+    assert calc.parent_class is None
+
+
+@_skip_no_php
+def test_parse_php_methods(php_module: Path):
+    """PHP: methods are extracted with parent_class set."""
+    result = parse_file(php_module)
+    methods = [s for s in result.symbols if s.kind == "method"]
+    method_names = {(s.name, s.parent_class) for s in methods}
+    assert ("__construct", "Calculator") in method_names
+    assert ("add", "Calculator") in method_names
+    assert ("getValue", "Calculator") in method_names
+    assert ("create", "Calculator") in method_names
+    assert ("describe", "Describable") in method_names
+    assert ("log", "Loggable") in method_names
+
+
+@_skip_no_php
+def test_parse_php_function(php_module: Path):
+    """PHP: top-level function is extracted as function kind."""
+    result = parse_file(php_module)
+    funcs = [s for s in result.symbols if s.kind == "function"]
+    func_names = {s.name for s in funcs}
+    assert "helper" in func_names, f"Expected helper function, got {func_names}"
+
+
+@_skip_no_php
+def test_parse_php_imports(php_module: Path):
+    """PHP: use declarations are extracted as imports."""
+    result = parse_file(php_module)
+    import_names = {(imp.name, imp.module, imp.alias) for imp in result.imports}
+    assert (
+        "User",
+        "App\\Entity",
+        None,
+    ) in import_names, f"Expected use App\\Entity\\User, got {import_names}"
+    assert (
+        "Helper",
+        "App\\Util",
+        "H",
+    ) in import_names, f"Expected use App\\Util\\Helper as H, got {import_names}"
+    assert "User" in {imp.name for imp in result.imports}, "User import missing"
+    assert "Helper" in {imp.name for imp in result.imports}, "Helper import missing"
+
+
+@_skip_no_php
+def test_parse_php_function_imports(php_module: Path):
+    """PHP: use function declarations are extracted."""
+    result = parse_file(php_module)
+    func_imports = [imp for imp in result.imports if imp.name == "array_map"]
+    assert (
+        len(func_imports) >= 1
+    ), f"Expected use function array_map, got {[(imp.name, imp.module) for imp in result.imports]}"
+
+
+@_skip_no_php
+def test_parse_php_const_imports(php_module: Path):
+    """PHP: use const declarations are extracted."""
+    result = parse_file(php_module)
+    const_imports = [imp for imp in result.imports if imp.name == "PHP_EOL"]
+    assert (
+        len(const_imports) >= 1
+    ), f"Expected use const PHP_EOL, got {[(imp.name, imp.module) for imp in result.imports]}"
+
+
+@_skip_no_php
+def test_parse_php_line_numbers(php_module: Path):
+    """PHP: symbol line numbers are correct."""
+    result = parse_file(php_module)
+    calc = next(
+        s for s in result.symbols if s.name == "Calculator" and s.kind == "class"
+    )
+    assert (
+        calc.start_line == 10
+    ), f"Expected Calculator at line 10, got {calc.start_line}"
+    add = next(
+        s for s in result.symbols if s.name == "add" and s.parent_class == "Calculator"
+    )
+    assert add.start_line == 17, f"Expected add at line 17, got {add.start_line}"
+    helper = next(s for s in result.symbols if s.name == "helper")
+    assert (
+        helper.start_line == 41
+    ), f"Expected helper at line 42, got {helper.start_line}"
+
+
+@_skip_no_php
+def test_build_index_php(php_module: Path):
+    """PHP: build_index works for a PHP file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(php_module, d)
+        index = build_index(d)
+        assert index.lookup("Calculator"), "Calculator not found in index"
+        assert index.lookup("helper"), "helper not found in index"
+
+
+# ---------------------------------------------------------------------------

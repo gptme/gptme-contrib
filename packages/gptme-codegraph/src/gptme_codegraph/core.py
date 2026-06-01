@@ -3,7 +3,7 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, and C via tree-sitter
+Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, C, and PHP via tree-sitter
 grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
@@ -50,6 +50,7 @@ _LANG_MAP: dict[str, str] = {
     ".java": "java",
     ".cs": "csharp",
     ".rb": "ruby",
+    ".php": "php",
     ".c": "c",
     ".h": "c",
 }
@@ -65,6 +66,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "java": "tree_sitter_java",
     "csharp": "tree_sitter_c_sharp",
     "ruby": "tree_sitter_ruby",
+    "php": "tree_sitter_php",
     "c": "tree_sitter_c",
 }
 
@@ -158,6 +160,12 @@ def _load_language(name: str):
         import tree_sitter_c as tsc  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["c"] = tsc.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_php as tsphp  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["php"] = tsphp.language_php()
     except ImportError:
         pass
 
@@ -756,6 +764,21 @@ def _extract_calls(node) -> list[str]:
                 name_node = cursor.node.child_by_field_name("name")
                 if name_node:
                     calls.append(_text(name_node))
+            elif cursor.node.type == "function_call_expression":
+                # PHP: function_call_expression has a "name" child
+                name_node = cursor.node.child_by_field_name("name")
+                if name_node:
+                    calls.append(_text(name_node))
+            elif cursor.node.type == "member_call_expression":
+                # PHP: $obj->method() — method name is the second "name" child
+                names = [c for c in cursor.node.named_children if c.type == "name"]
+                if len(names) >= 2:
+                    calls.append(_text(names[-1]))
+            elif cursor.node.type == "scoped_call_expression":
+                # PHP: Class::method() — method name is the second "name" child
+                names = [c for c in cursor.node.named_children if c.type == "name"]
+                if names:
+                    calls.append(_text(names[-1]))
             if cursor.goto_first_child():
                 continue
             if cursor.goto_next_sibling():
@@ -2123,6 +2146,150 @@ def _extract_imports_c(root) -> list[ImportInfo]:
 
 
 # ---------------------------------------------------------------------------
+# PHP extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_symbols_php(root, filepath: str) -> list[Symbol]:
+    """Extract classes, interfaces, traits, methods, and functions from a PHP parse tree."""
+    symbols: list[Symbol] = []
+
+    def _extract_method_body(body_node, parent_class: str) -> None:
+        for child in body_node.named_children:
+            if child.type == "method_declaration":
+                name_node = child.child_by_field_name("name")
+                if name_node:
+                    body = child.child_by_field_name("body")
+                    calls = _extract_calls(body) if body else []
+                    symbols.append(
+                        Symbol(
+                            name=_text(name_node),
+                            kind="method",
+                            file=filepath,
+                            start_line=child.start_point[0] + 1,
+                            end_line=child.end_point[0] + 1,
+                            parent_class=parent_class,
+                            calls=list(set(calls)),
+                        )
+                    )
+
+    for node in root.named_children:
+        if node.type == "function_definition":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                body = node.child_by_field_name("body")
+                calls = _extract_calls(body) if body else []
+                symbols.append(
+                    Symbol(
+                        name=_text(name_node),
+                        kind="function",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        calls=list(set(calls)),
+                    )
+                )
+
+        elif node.type in {
+            "class_declaration",
+            "interface_declaration",
+            "trait_declaration",
+        }:
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                class_name = _text(name_node)
+                symbols.append(
+                    Symbol(
+                        name=class_name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                    )
+                )
+                body = node.child_by_field_name("body")
+                if body:
+                    _extract_method_body(body, parent_class=class_name)
+
+    return symbols
+
+
+def _extract_imports_php(root) -> list[ImportInfo]:
+    """Extract ``use`` import declarations from a PHP parse tree.
+
+    Handles:
+    - use App\\Entity\\User;
+    - use App\\Util\\Helper as H;
+    - use function array_map;
+    - use const PHP_EOL;
+    - use App\\Entity\\{User, Group};   (group use declarations)
+    """
+    imports: list[ImportInfo] = []
+
+    for child in root.named_children:
+        if child.type != "namespace_use_declaration":
+            continue
+
+        # Simple use: single clause
+        clause = next(
+            (c for c in child.named_children if c.type == "namespace_use_clause"),
+            None,
+        )
+        if clause:
+            # Check if this is a function/const import (use function X / use const X)
+            is_fn_const = any(c.type in {"function", "const"} for c in clause.children)
+            if is_fn_const:
+                name_node = next(
+                    (c for c in clause.named_children if c.type == "name"),
+                    None,
+                )
+                if name_node:
+                    imports.append(
+                        ImportInfo(
+                            file="",
+                            module="",
+                            name=_text(name_node),
+                            alias=None,
+                            is_from=True,
+                        )
+                    )
+                continue
+
+            qual = next(
+                (c for c in clause.named_children if c.type == "qualified_name"),
+                None,
+            )
+            if qual is None:
+                continue
+            qualified = _text(qual)
+            if not qualified:
+                continue
+
+            module = ""
+            name = qualified
+            dot = qualified.rfind("\\")
+            if dot >= 0:
+                module = qualified[:dot]
+                name = qualified[dot + 1 :]
+
+            alias = clause.child_by_field_name("alias")
+            alias_text = _text(alias) if alias else None
+
+            imports.append(
+                ImportInfo(
+                    file="",
+                    module=module,
+                    name=name,
+                    alias=alias_text,
+                    is_from=True,
+                )
+            )
+            continue
+
+    return imports
+
+
+# ---------------------------------------------------------------------------
 # Multi-language parse_file
 # ---------------------------------------------------------------------------
 
@@ -2132,7 +2299,7 @@ def parse_file(filepath: Path) -> FileParseResult:
 
     Detects language from file extension and dispatches to the correct
     tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go,
-    Java, C#, Ruby, and C.
+    Java, C#, Ruby, PHP, and C.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -2170,6 +2337,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "c":
         symbols = _extract_symbols_c(root, filename)
 
+    elif lang_name == "php":
+        symbols = _extract_symbols_php(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -2187,6 +2357,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_ruby(root)
     elif lang_name == "c":
         imports = _extract_imports_c(root)
+    elif lang_name == "php":
+        imports = _extract_imports_php(root)
 
     for imp in imports:
         imp.file = filename
