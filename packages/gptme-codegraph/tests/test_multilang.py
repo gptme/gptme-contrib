@@ -952,6 +952,53 @@ func helper(v int) int {
 
 
 @_skip_no_go
+def test_parse_go_receiver_aliases_skip_shadowed_locals(tmp_path: Path):
+    """Go: receiver aliases don't treat same-named locals as self calls."""
+    go_file = tmp_path / "receiver_shadow.go"
+    go_file.write_text(
+        """\
+package main
+
+type Client struct{}
+type Call struct{}
+
+func (c *Call) doX() {}
+
+func (c *Client) Run(calls []Call) {
+    c.log()
+    for _, c := range calls {
+        c.doX()
+    }
+    {
+        var c Call
+        c.doX()
+    }
+    c.finish()
+}
+
+func (c *Client) log() {}
+func (c *Client) finish() {}
+func (c *Client) doX() {}
+"""
+    )
+    result = parse_file(go_file)
+    run = next(
+        (s for s in result.symbols if s.name == "Run" and s.parent_class == "Client"),
+        None,
+    )
+    assert run is not None, "Run method not found in parse result"
+    assert "Client.log" in run.calls
+    assert "Client.finish" in run.calls
+    assert "Client.doX" not in run.calls
+
+    callees, _callers = build_call_graph(result.symbols)
+    assert "::Client.log" in callees["::Client.Run"]
+    assert "::Client.finish" in callees["::Client.Run"]
+    assert "::Client.doX" not in callees["::Client.Run"]
+    assert "::Call.doX" not in callees["::Client.Run"]
+
+
+@_skip_no_go
 def test_parse_go_imports_basic(go_module: Path):
     """Go: plain imports are extracted."""
     result = parse_file(go_module)

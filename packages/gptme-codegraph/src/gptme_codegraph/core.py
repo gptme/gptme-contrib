@@ -860,24 +860,116 @@ def _rust_receiver_call_aliases(
     return aliases
 
 
+def _go_node_declares_identifier(node, name: str) -> bool:
+    """Return True when a Go declaration node binds ``name`` on its left side."""
+    if node is None:
+        return False
+    if node.type == "range_clause" and ":=" not in _text(node):
+        return False
+    if node.type not in {
+        "short_var_declaration",
+        "range_clause",
+        "var_declaration",
+        "var_spec",
+        "parameter_declaration",
+    }:
+        return False
+
+    left_node = (
+        node.child_by_field_name("left")
+        or node.child_by_field_name("name")
+        or node.child_by_field_name("parameters")
+    )
+    search_node = left_node or node
+    stack = list(search_node.named_children)
+    while stack:
+        child = stack.pop()
+        if child.type == "identifier" and _text(child) == name:
+            return True
+        stack.extend(child.named_children)
+    return False
+
+
+def _go_selector_method_name(node, receiver_name: str) -> str | None:
+    """Return the method name for ``receiver.method()`` Go call expressions."""
+    if node.type != "call_expression":
+        return None
+    function_node = node.child_by_field_name("function")
+    if function_node is None or function_node.type != "selector_expression":
+        return None
+    operand_node = function_node.child_by_field_name("operand")
+    field_node = function_node.child_by_field_name("field")
+    if (
+        operand_node is None
+        or field_node is None
+        or operand_node.type != "identifier"
+        or _text(operand_node) != receiver_name
+    ):
+        return None
+    method = _text(field_node)
+    return method if method else None
+
+
 def _go_receiver_call_aliases(
-    calls: list[str], receiver_name: str | None, parent_class: str | None
+    body_node, receiver_name: str | None, parent_class: str | None
 ) -> list[str]:
-    """Return local method aliases for Go calls through the method receiver.
+    """Return local method aliases for unshadowed Go receiver calls.
 
     Aliases are qualified as ParentClass.method to avoid bare-name
     collisions when multiple types in the same file define methods with
-    the same name.
+    the same name.  They are only emitted for selector calls that still
+    refer to the method receiver; local variables that shadow the receiver
+    name must not create self-call edges.
     """
-    if not receiver_name or not parent_class:
+    if not body_node or not receiver_name or not parent_class:
         return []
-    prefix = f"{receiver_name}."
+
     aliases: list[str] = []
-    for call in calls:
-        if call.startswith(prefix):
-            method = call.removeprefix(prefix)
-            if method and "." not in method:
-                aliases.append(f"{parent_class}.{method}")
+
+    def visit(node, receiver_shadowed: bool = False) -> None:
+        method = _go_selector_method_name(node, receiver_name)
+        if method and not receiver_shadowed:
+            aliases.append(f"{parent_class}.{method}")
+
+        if node.type in {"block", "statement_list"}:
+            local_shadowed = receiver_shadowed
+            for child in node.named_children:
+                visit(child, local_shadowed)
+                if _go_node_declares_identifier(child, receiver_name):
+                    local_shadowed = True
+            return
+
+        if node.type == "if_statement":
+            initializer = node.child_by_field_name("initializer")
+            if initializer is not None:
+                visit(initializer, receiver_shadowed)
+            initializer_shadows = _go_node_declares_identifier(
+                initializer, receiver_name
+            )
+            scoped_shadowed = receiver_shadowed or initializer_shadows
+            for field in ("condition", "consequence", "alternative"):
+                child = node.child_by_field_name(field)
+                if child is not None:
+                    visit(child, scoped_shadowed)
+            return
+
+        if node.type == "for_statement":
+            body = node.child_by_field_name("body")
+            for_child_shadowed = receiver_shadowed
+            for child in node.named_children:
+                if child == body:
+                    continue
+                visit(child, receiver_shadowed)
+                if _go_node_declares_identifier(child, receiver_name):
+                    for_child_shadowed = True
+            if body is not None:
+                visit(body, receiver_shadowed or for_child_shadowed)
+            return
+
+        for child in node.named_children:
+            visit(child, receiver_shadowed)
+
+    visit(body_node)
     return aliases
 
 
@@ -1549,7 +1641,7 @@ def _extract_symbols_go(root, filepath: str) -> list[Symbol]:
                 body_node = node.child_by_field_name("body")
                 calls = _extract_calls(body_node) if body_node else []
                 calls.extend(
-                    _go_receiver_call_aliases(calls, receiver_name, parent_class)
+                    _go_receiver_call_aliases(body_node, receiver_name, parent_class)
                 )
                 symbols.append(
                     Symbol(
@@ -2942,8 +3034,9 @@ def build_call_graph(
         # Add qualified-name entries for methods with a parent class.
         # This prevents bare-name collisions when two types define a
         # method with the same name (common with "log", "String", etc.).
-        # Aliases from _rust/go_receiver_call_aliases are bare names,
-        # but _resolve_call below tries the qualified form on collision.
+        # Receiver-call aliases are qualified, so self/receiver-local method
+        # calls can resolve without colliding with same-named methods on
+        # other types.
         if s.parent_class and s.name:
             qualified_key = f"{s.parent_class}.{s.name}"
             name_to_qid[qualified_key] = qid
