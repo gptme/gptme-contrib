@@ -770,10 +770,10 @@ def _extract_calls(node) -> list[str]:
                 if name_node:
                     calls.append(_text(name_node))
             elif cursor.node.type == "member_call_expression":
-                # PHP: $obj->method() — method name is the second "name" child
-                names = [c for c in cursor.node.named_children if c.type == "name"]
-                if len(names) >= 2:
-                    calls.append(_text(names[-1]))
+                # PHP: $obj->method() — object is variable_name, method is the "name" field
+                name_node = cursor.node.child_by_field_name("name")
+                if name_node:
+                    calls.append(_text(name_node))
             elif cursor.node.type == "scoped_call_expression":
                 # PHP: Class::method() — method name is the second "name" child
                 names = [c for c in cursor.node.named_children if c.type == "name"]
@@ -2285,6 +2285,53 @@ def _extract_imports_php(root) -> list[ImportInfo]:
                 )
             )
             continue
+
+        # Group use: use App\Entity\{User, Group};
+        group = next(
+            (c for c in child.named_children if c.type == "namespace_use_group"),
+            None,
+        )
+        if group:
+            prefix_node = next(
+                (c for c in child.named_children if c.type == "namespace_name"),
+                None,
+            )
+            prefix = _text(prefix_node) if prefix_node else ""
+            for clause in group.named_children:
+                if clause.type != "namespace_use_clause":
+                    continue
+                qual = next(
+                    (
+                        c
+                        for c in clause.named_children
+                        if c.type in {"qualified_name", "name"}
+                    ),
+                    None,
+                )
+                if qual is None:
+                    continue
+                qualified = _text(qual)
+                if not qualified:
+                    continue
+                module = prefix
+                name = qualified
+                dot = qualified.rfind("\\")
+                if dot >= 0:
+                    module = (
+                        prefix + "\\" + qualified[:dot] if prefix else qualified[:dot]
+                    )
+                    name = qualified[dot + 1 :]
+                alias = clause.child_by_field_name("alias")
+                alias_text = _text(alias) if alias else None
+                imports.append(
+                    ImportInfo(
+                        file="",
+                        module=module,
+                        name=name,
+                        alias=alias_text,
+                        is_from=True,
+                    )
+                )
 
     return imports
 

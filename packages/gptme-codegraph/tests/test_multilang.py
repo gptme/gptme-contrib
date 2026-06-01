@@ -1806,4 +1806,44 @@ def test_build_index_php(php_module: Path):
         assert index.lookup("helper"), "helper not found in index"
 
 
+@_skip_no_php
+def test_parse_php_method_calls(tmp_path: Path):
+    """PHP: -> method calls are extracted from method bodies."""
+    code = """<?php
+class Worker {
+    public function run(): void {
+        $calc = new Calculator();
+        $calc->add(5);
+        $this->getValue();
+        Calculator::create(10);
+    }
+}
+"""
+    php_file = tmp_path / "worker.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    run_method = next(s for s in result.symbols if s.name == "run")
+    assert "add" in run_method.calls, f"Expected 'add' in calls, got {run_method.calls}"
+    assert (
+        "getValue" in run_method.calls
+    ), f"Expected 'getValue' in calls, got {run_method.calls}"
+    assert (
+        "create" in run_method.calls
+    ), f"Expected 'create' in calls, got {run_method.calls}"
+
+
+@_skip_no_php
+def test_parse_php_group_use(tmp_path: Path):
+    """PHP: group use declarations (use Ns\\{A, B}) are extracted."""
+    code = """<?php
+use App\\Entity\\{User, Group};
+"""
+    php_file = tmp_path / "group_use.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    import_names = {imp.name for imp in result.imports}
+    assert "User" in import_names, f"Expected 'User' in imports, got {import_names}"
+    assert "Group" in import_names, f"Expected 'Group' in imports, got {import_names}"
+
+
 # ---------------------------------------------------------------------------
