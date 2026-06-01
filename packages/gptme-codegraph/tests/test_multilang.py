@@ -1296,6 +1296,7 @@ def test_build_index_csharp(csharp_module: Path):
         assert "Calculator" in index.entries
         assert "Add" in index.entries
 
+
 @_skip_no_ruby
 def test_parse_ruby_module(ruby_module: Path):
     """Ruby: module is extracted as a class-kind namespace symbol."""
