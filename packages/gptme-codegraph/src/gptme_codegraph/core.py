@@ -3,8 +3,8 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, C, C++, and PHP via tree-sitter
-grammars.
+Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, C, C++, PHP,
+and Kotlin via tree-sitter grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
 
@@ -58,6 +58,8 @@ _LANG_MAP: dict[str, str] = {
     ".hxx": "cpp",
     ".rb": "ruby",
     ".php": "php",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
     ".c": "c",
 }
 
@@ -74,6 +76,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "cpp": "tree_sitter_cpp",
     "ruby": "tree_sitter_ruby",
     "php": "tree_sitter_php",
+    "kotlin": "tree_sitter_kotlin",
     "c": "tree_sitter_c",
 }
 
@@ -179,6 +182,12 @@ def _load_language(name: str):
         import tree_sitter_php as tsphp  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["php"] = tsphp.language_php()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_kotlin as tskotlin  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["kotlin"] = tskotlin.language()
     except ImportError:
         pass
 
@@ -767,6 +776,25 @@ def _extract_calls(node) -> list[str]:
                 func_node = cursor.node.child_by_field_name("function")
                 if func_node:
                     calls.append(_text(func_node))
+                elif cursor.node.type == "call_expression" and any(
+                    child.type == "value_arguments"
+                    for child in cursor.node.named_children
+                ):
+                    # Kotlin call_expression: no named "function" field; the
+                    # callee is the first named child that is not value_arguments.
+                    # Guarded by value_arguments presence (Kotlin-specific type)
+                    # so JS/TS/Go/Rust call_expression edge cases fall through
+                    # to the Ruby else branch instead of applying this path.
+                    callee = next(
+                        (
+                            child
+                            for child in cursor.node.named_children
+                            if child.type != "value_arguments"
+                        ),
+                        None,
+                    )
+                    if callee:
+                        calls.append(_text(callee))
                 else:
                     # Ruby: call nodes carry the callee in a "method" field
                     method_node = cursor.node.child_by_field_name("method")
@@ -2352,6 +2380,135 @@ def _extract_imports_php(root) -> list[ImportInfo]:
     return imports
 
 
+# ---------------------------------------------------------------------------
+# Kotlin extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_symbols_kotlin(root, filepath: str) -> list[Symbol]:
+    """Extract classes, objects, methods, and top-level functions from Kotlin."""
+    symbols: list[Symbol] = []
+
+    def _function_symbol(node, parent_class: str | None) -> None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            return
+        body = next(
+            (child for child in node.named_children if child.type == "function_body"),
+            None,
+        )
+        # For expression-body functions (e.g. `fun greet() = println("hi")`)
+        # tree-sitter-kotlin emits no function_body child; fall back to walking
+        # the whole declaration so calls in the expression are still captured.
+        calls = _extract_calls(body if body is not None else node)
+        symbols.append(
+            Symbol(
+                name=_text(name_node),
+                kind="method" if parent_class else "function",
+                file=filepath,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                parent_class=parent_class,
+                calls=list(set(calls)),
+            )
+        )
+
+    def _walk(node, parent_class: str | None = None) -> None:
+        if node.type in {"class_declaration", "object_declaration"}:
+            name_node = node.child_by_field_name("name")
+            class_name = _text(name_node) if name_node else ""
+            if class_name:
+                symbols.append(
+                    Symbol(
+                        name=class_name,
+                        kind="class",
+                        file=filepath,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent_class=parent_class,
+                    )
+                )
+            body = next(
+                (child for child in node.named_children if child.type == "class_body"),
+                None,
+            )
+            if body is not None:
+                _walk(body, class_name or parent_class)
+            return
+
+        if node.type == "companion_object":
+            body = next(
+                (child for child in node.named_children if child.type == "class_body"),
+                None,
+            )
+            if body is not None:
+                _walk(body, parent_class)
+            return
+
+        if node.type == "function_declaration":
+            _function_symbol(node, parent_class)
+            return
+
+        for child in node.named_children:
+            _walk(child, parent_class)
+
+    _walk(root)
+    return symbols
+
+
+def _split_kotlin_import(qualified: str, is_wildcard: bool) -> tuple[str, str]:
+    """Split a Kotlin import into ``(module, name)`` pieces."""
+    if is_wildcard:
+        return qualified, "*"
+    if "." not in qualified:
+        return "", qualified
+    module, name = qualified.rsplit(".", 1)
+    return module, name
+
+
+def _extract_imports_kotlin(root) -> list[ImportInfo]:
+    """Extract Kotlin import declarations, including aliases and wildcards."""
+    imports: list[ImportInfo] = []
+
+    for node in root.named_children:
+        if node.type != "import":
+            continue
+        qualified_node = next(
+            (
+                child
+                for child in node.named_children
+                if child.type == "qualified_identifier"
+            ),
+            None,
+        )
+        if qualified_node is None:
+            continue
+        qualified = _text(qualified_node)
+        if not qualified:
+            continue
+        is_wildcard = any(child.type == "*" for child in node.children)
+        module, name = _split_kotlin_import(qualified, is_wildcard)
+        alias_node = next(
+            (
+                child
+                for child in node.named_children
+                if child.type == "identifier" and child is not qualified_node
+            ),
+            None,
+        )
+        imports.append(
+            ImportInfo(
+                file="",
+                module=module,
+                name=name,
+                alias=_text(alias_node) if alias_node is not None else None,
+                is_from=True,
+            )
+        )
+
+    return imports
+
+
 # C++ extraction
 # ---------------------------------------------------------------------------
 
@@ -2592,7 +2749,7 @@ def parse_file(filepath: Path) -> FileParseResult:
 
     Detects language from file extension and dispatches to the correct
     tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go,
-    Java, C#, Ruby, C, C++, and PHP.
+    Java, C#, Ruby, C, C++, PHP, and Kotlin.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -2635,6 +2792,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "php":
         symbols = _extract_symbols_php(root, filename)
 
+    elif lang_name == "kotlin":
+        symbols = _extract_symbols_kotlin(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -2656,6 +2816,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_c(root)
     elif lang_name == "php":
         imports = _extract_imports_php(root)
+    elif lang_name == "kotlin":
+        imports = _extract_imports_kotlin(root)
 
     for imp in imports:
         imp.file = filename
