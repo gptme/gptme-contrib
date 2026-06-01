@@ -3,7 +3,7 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, C, and PHP via tree-sitter
+Supports Python, TypeScript/JavaScript, Rust, Go, Java, C#, Ruby, C, C++, and PHP via tree-sitter
 grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
@@ -49,10 +49,16 @@ _LANG_MAP: dict[str, str] = {
     ".go": "go",
     ".java": "java",
     ".cs": "csharp",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".h": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
     ".rb": "ruby",
     ".php": "php",
     ".c": "c",
-    ".h": "c",
 }
 
 _GRAMMAR_MODULES: dict[str, str] = {
@@ -65,6 +71,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "go": "tree_sitter_go",
     "java": "tree_sitter_java",
     "csharp": "tree_sitter_c_sharp",
+    "cpp": "tree_sitter_cpp",
     "ruby": "tree_sitter_ruby",
     "php": "tree_sitter_php",
     "c": "tree_sitter_c",
@@ -148,6 +155,12 @@ def _load_language(name: str):
         import tree_sitter_c_sharp as tscsharp  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["csharp"] = tscsharp.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_cpp as tscpp  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["cpp"] = tscpp.language()
     except ImportError:
         pass
     try:
@@ -798,6 +811,16 @@ def _extract_calls(node) -> list[str]:
 def _strip_string_quotes(text: str) -> str:
     """Return a string literal without its outer quote characters."""
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    return text
+
+
+def _strip_include_delimiters(text: str) -> str:
+    """Return an include path without ``""`` or ``<>`` delimiters."""
+    if len(text) >= 2 and (
+        (text[0] == text[-1] and text[0] in {'"', "'"})
+        or (text[0] == "<" and text[-1] == ">")
+    ):
         return text[1:-1]
     return text
 
@@ -2329,6 +2352,214 @@ def _extract_imports_php(root) -> list[ImportInfo]:
     return imports
 
 
+# C++ extraction
+# ---------------------------------------------------------------------------
+
+
+_CPP_TYPE_NODES = frozenset(
+    {"class_specifier", "struct_specifier", "union_specifier", "enum_specifier"}
+)
+
+
+def _cpp_container_body(node):
+    """Return a C++ namespace/type body node when present."""
+    for child in node.named_children:
+        if child.type in (
+            "declaration_list",
+            "field_declaration_list",
+            "enumerator_list",
+        ):
+            return child
+    return None
+
+
+def _cpp_type_name(node) -> str | None:
+    """Return the declared C++ type name."""
+    for child in node.named_children:
+        if child.type in {
+            "type_identifier",
+            "identifier",
+            "namespace_identifier",
+        }:
+            name = _text(child)
+            if name:
+                return name
+    return None
+
+
+def _cpp_qualified_parts(node) -> list[str]:
+    """Return the named segments inside a C++ qualified identifier."""
+    if node.type in {
+        "identifier",
+        "field_identifier",
+        "type_identifier",
+        "namespace_identifier",
+        "destructor_name",
+        "operator_name",
+    }:
+        text = _text(node)
+        return [text] if text else []
+
+    parts: list[str] = []
+    for child in node.named_children:
+        parts.extend(_cpp_qualified_parts(child))
+    return parts
+
+
+def _cpp_function_name_and_parent(
+    declarator, known_types: set[str]
+) -> tuple[str | None, str | None]:
+    """Return ``(name, parent_class)`` for a C++ declarator subtree."""
+    if declarator.type == "qualified_identifier":
+        parts = _cpp_qualified_parts(declarator)
+        if not parts:
+            return None, None
+        parent = parts[-2] if len(parts) >= 2 and parts[-2] in known_types else None
+        return parts[-1], parent
+
+    if declarator.type in {
+        "identifier",
+        "field_identifier",
+        "destructor_name",
+        "operator_name",
+    }:
+        text = _text(declarator)
+        return (text, None) if text else (None, None)
+
+    for child in declarator.named_children:
+        if child.type == "parameter_list":
+            continue
+        name, parent = _cpp_function_name_and_parent(child, known_types)
+        if name:
+            return name, parent
+    return None, None
+
+
+def _cpp_function_body(node):
+    """Return a function's compound statement node when present."""
+    body = node.child_by_field_name("body")
+    if body is not None:
+        return body
+    for child in node.named_children:
+        if child.type == "compound_statement":
+            return child
+    return None
+
+
+def _extract_symbols_cpp(root, filepath: str) -> list[Symbol]:
+    """Extract classes, methods, and functions from a C++ parse tree.
+
+    Scope is intentionally narrow: namespaces, top-level functions, class/struct/enum
+    declarations, inline member definitions, and out-of-class member definitions that
+    use a known declared type name.
+    """
+    symbols: list[Symbol] = []
+    known_types: set[str] = set()
+
+    def _add_function(node, parent_class: str | None = None) -> None:
+        declarator = node.child_by_field_name("declarator")
+        if declarator is None:
+            declarator = next(
+                (child for child in node.named_children if "declarator" in child.type),
+                None,
+            )
+        if declarator is None:
+            return
+
+        name, inferred_parent = _cpp_function_name_and_parent(declarator, known_types)
+        if not name:
+            return
+
+        effective_parent = parent_class or inferred_parent
+        body = _cpp_function_body(node)
+        calls = _extract_calls(body) if body else []
+        symbols.append(
+            Symbol(
+                name=name,
+                kind="method" if effective_parent else "function",
+                file=filepath,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                parent_class=effective_parent,
+                calls=list(set(calls)),
+            )
+        )
+
+    def _visit_type(node) -> None:
+        type_name = _cpp_type_name(node)
+        if not type_name:
+            return
+
+        known_types.add(type_name)
+        symbols.append(
+            Symbol(
+                name=type_name,
+                kind="class",
+                file=filepath,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+            )
+        )
+
+        body = _cpp_container_body(node)
+        if body is None:
+            return
+
+        for child in body.named_children:
+            if child.type == "function_definition":
+                _add_function(child, parent_class=type_name)
+            elif child.type in _CPP_TYPE_NODES:
+                _visit_type(child)
+
+    def _walk_container(node) -> None:
+        for child in node.named_children:
+            if child.type == "namespace_definition":
+                body = _cpp_container_body(child)
+                _walk_container(body if body is not None else child)
+            elif child.type in _CPP_TYPE_NODES:
+                _visit_type(child)
+            elif child.type == "function_definition":
+                _add_function(child)
+
+    _walk_container(root)
+    return symbols
+
+
+def _extract_imports_cpp(root) -> list[ImportInfo]:
+    """Extract ``#include`` directives from a C++ parse tree."""
+    imports: list[ImportInfo] = []
+
+    for child in root.named_children:
+        if child.type != "preproc_include":
+            continue
+        path_node = child.child_by_field_name("path")
+        if path_node is None:
+            path_node = next(
+                (
+                    node
+                    for node in child.named_children
+                    if node.type in {"string_literal", "system_lib_string"}
+                ),
+                None,
+            )
+        if path_node is None:
+            continue
+        include_path = _strip_include_delimiters(_text(path_node))
+        if not include_path:
+            continue
+        parts = include_path.split("/")
+        imports.append(
+            ImportInfo(
+                file="",
+                module="/".join(parts[:-1]),
+                name=parts[-1],
+                alias=None,
+                is_from=True,
+            )
+        )
+    return imports
+
+
 # ---------------------------------------------------------------------------
 # Multi-language parse_file
 # ---------------------------------------------------------------------------
@@ -2339,7 +2570,7 @@ def parse_file(filepath: Path) -> FileParseResult:
 
     Detects language from file extension and dispatches to the correct
     tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go,
-    Java, C#, Ruby, PHP, and C.
+    Java, C#, Ruby, C, C++, and PHP.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -2370,6 +2601,8 @@ def parse_file(filepath: Path) -> FileParseResult:
 
     elif lang_name == "csharp":
         symbols = _extract_symbols_csharp(root, filename)
+    elif lang_name == "cpp":
+        symbols = _extract_symbols_cpp(root, filename)
 
     elif lang_name == "ruby":
         symbols = _extract_symbols_ruby(root, filename)
@@ -2393,6 +2626,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_java(root)
     elif lang_name == "csharp":
         imports = _extract_imports_csharp(root)
+    elif lang_name == "cpp":
+        imports = _extract_imports_cpp(root)
     elif lang_name == "ruby":
         imports = _extract_imports_ruby(root)
     elif lang_name == "c":

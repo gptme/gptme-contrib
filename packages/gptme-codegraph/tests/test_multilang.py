@@ -1,7 +1,7 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby, C++).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, Rust, Go, Java, C#, and Ruby source files.
+for JavaScript, TypeScript, Rust, Go, Java, C#, Ruby, and C++ source files.
 """
 
 from __future__ import annotations
@@ -49,6 +49,10 @@ _skip_no_java = pytest.mark.skipif(
 _skip_no_csharp = pytest.mark.skipif(
     not _has_grammar("c_sharp"),
     reason="tree-sitter-c-sharp not installed",
+)
+_skip_no_cpp = pytest.mark.skipif(
+    not _has_grammar("cpp"),
+    reason="tree-sitter-cpp not installed",
 )
 _skip_no_ruby = pytest.mark.skipif(
     not _has_grammar("ruby"),
@@ -1138,6 +1142,39 @@ namespace Example.App
     path.unlink(missing_ok=True)
 
 
+@pytest.fixture
+def cpp_module() -> Generator[Path, None, None]:
+    """A C++ file with includes, namespace, class, methods, and free functions."""
+    code = """\
+#include <vector>
+#include "widget.hpp"
+
+namespace math {
+class Accumulator {
+public:
+    Accumulator() {}
+    int add(int x);
+    static int helper(int x) { return x; }
+};
+
+int scale(int x) { return x * 2; }
+
+int Accumulator::add(int x) {
+    return helper(x) + scale(x);
+}
+}
+
+int free_fn(int n) {
+    return math::Accumulator::helper(n);
+}
+"""
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Ruby fixtures + tests
 # ---------------------------------------------------------------------------
@@ -1392,6 +1429,7 @@ def test_parse_ruby_line_numbers(ruby_module: Path):
 @_skip_no_ruby
 def test_build_index_ruby(ruby_module: Path):
     """Ruby: build_index picks up symbols from a .rb file."""
+
     import shutil
     import tempfile
 
@@ -1547,6 +1585,92 @@ def test_parse_c_imports_local(c_module: Path):
 def test_parse_c_line_numbers(c_module: Path):
     """C: symbol line numbers are positive and ordered."""
     result = parse_file(c_module)
+# ---------------------------------------------------------------------------
+# C++
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_cpp
+def test_language_detection_cpp(cpp_module: Path):
+    """C++: .cpp files are detected as the cpp language."""
+    result = parse_file(cpp_module)
+    assert result.language == "cpp"
+
+
+@_skip_no_cpp
+def test_language_detection_cpp_header(tmp_path: Path):
+    """C++: .h headers are treated as C++ source files."""
+    header = tmp_path / "widget.h"
+    header.write_text("class Widget {};\n")
+
+    result = parse_file(header)
+
+    assert result.language == "cpp"
+    assert any(sym.name == "Widget" for sym in result.symbols)
+
+
+@_skip_no_cpp
+def test_parse_cpp_class_and_functions(cpp_module: Path):
+    """C++: class and top-level functions are extracted."""
+    result = parse_file(cpp_module)
+
+    classes = {s.name for s in result.symbols if s.kind == "class"}
+    assert "Accumulator" in classes
+
+    functions = {s.name for s in result.symbols if s.kind == "function"}
+    assert "scale" in functions
+    assert "free_fn" in functions
+
+
+@_skip_no_cpp
+def test_parse_cpp_methods(cpp_module: Path):
+    """C++: inline and out-of-class methods carry their parent class."""
+    result = parse_file(cpp_module)
+    methods = [s for s in result.symbols if s.kind == "method"]
+    method_names = {s.name for s in methods}
+
+    assert "Accumulator" in method_names
+    assert "add" in method_names
+    assert "helper" in method_names
+
+    add = next((s for s in methods if s.name == "add"), None)
+    assert add is not None
+    assert add.parent_class == "Accumulator"
+
+
+@_skip_no_cpp
+def test_parse_cpp_calls(cpp_module: Path):
+    """C++: call_expression nodes are extracted from methods and functions."""
+    result = parse_file(cpp_module)
+
+    add = next((s for s in result.symbols if s.name == "add"), None)
+    assert add is not None
+    assert "helper" in add.calls
+    assert "scale" in add.calls
+
+    free_fn = next((s for s in result.symbols if s.name == "free_fn"), None)
+    assert free_fn is not None
+    assert "math::Accumulator::helper" in free_fn.calls
+
+
+@_skip_no_cpp
+def test_parse_cpp_imports(cpp_module: Path):
+    """C++: #include directives resolve to import records."""
+    result = parse_file(cpp_module)
+
+    vector = next((i for i in result.imports if i.name == "vector"), None)
+    assert vector is not None
+    assert vector.module == ""
+
+    widget = next((i for i in result.imports if i.name == "widget.hpp"), None)
+    assert widget is not None
+    assert widget.module == ""
+
+
+@_skip_no_cpp
+def test_parse_cpp_line_numbers(cpp_module: Path):
+    """C++: symbol line numbers are positive and ordered."""
+    result = parse_file(cpp_module)
     assert result.symbols
     for sym in result.symbols:
         assert sym.start_line >= 1
@@ -1919,3 +2043,16 @@ function processItems(array $items): void {
 
 
 # ---------------------------------------------------------------------------
+
+@_skip_no_cpp
+def test_build_index_cpp(cpp_module: Path):
+    """C++: build_index picks up symbols from a .cpp file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        dest = Path(d) / cpp_module.name
+        shutil.copy(cpp_module, dest)
+        index = build_index(d)
+        assert "Accumulator" in index.entries
+        assert "add" in index.entries
