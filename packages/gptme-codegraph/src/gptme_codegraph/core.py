@@ -2173,7 +2173,7 @@ def _extract_symbols_php(root, filepath: str) -> list[Symbol]:
                         )
                     )
 
-    for node in root.named_children:
+    def _walk(node) -> None:
         if node.type == "function_definition":
             name_node = node.child_by_field_name("name")
             if name_node:
@@ -2189,8 +2189,9 @@ def _extract_symbols_php(root, filepath: str) -> list[Symbol]:
                         calls=list(set(calls)),
                     )
                 )
+            return
 
-        elif node.type in {
+        if node.type in {
             "class_declaration",
             "interface_declaration",
             "trait_declaration",
@@ -2210,8 +2211,24 @@ def _extract_symbols_php(root, filepath: str) -> list[Symbol]:
                 body = node.child_by_field_name("body")
                 if body:
                     _extract_method_body(body, parent_class=class_name)
+            return
 
+        for child in node.named_children:
+            _walk(child)
+
+    _walk(root)
     return symbols
+
+
+def _split_php_import_name(qualified: str, prefix: str = "") -> tuple[str, str]:
+    """Split a PHP import target into ``(module, name)`` pieces."""
+    module = prefix
+    name = qualified
+    dot = qualified.rfind("\\")
+    if dot >= 0:
+        module = prefix + "\\" + qualified[:dot] if prefix else qualified[:dot]
+        name = qualified[dot + 1 :]
+    return module, name
 
 
 def _extract_imports_php(root) -> list[ImportInfo]:
@@ -2226,113 +2243,89 @@ def _extract_imports_php(root) -> list[ImportInfo]:
     """
     imports: list[ImportInfo] = []
 
-    for child in root.named_children:
-        if child.type != "namespace_use_declaration":
-            continue
-
-        # Simple use: single clause
-        clause = next(
-            (c for c in child.named_children if c.type == "namespace_use_clause"),
-            None,
-        )
-        if clause:
-            # Check if this is a function/const import (use function X / use const X)
-            is_fn_const = any(c.type in {"function", "const"} for c in clause.children)
-            if is_fn_const:
-                name_node = next(
-                    (c for c in clause.named_children if c.type == "name"),
-                    None,
-                )
-                if name_node:
-                    imports.append(
-                        ImportInfo(
-                            file="",
-                            module="",
-                            name=_text(name_node),
-                            alias=None,
-                            is_from=True,
-                        )
-                    )
-                continue
-
-            qual = next(
-                (c for c in clause.named_children if c.type == "qualified_name"),
+    def _walk(node) -> None:
+        if node.type == "namespace_use_declaration":
+            clause = next(
+                (c for c in node.named_children if c.type == "namespace_use_clause"),
                 None,
             )
-            if qual is None:
-                continue
-            qualified = _text(qual)
-            if not qualified:
-                continue
-
-            module = ""
-            name = qualified
-            dot = qualified.rfind("\\")
-            if dot >= 0:
-                module = qualified[:dot]
-                name = qualified[dot + 1 :]
-
-            alias = clause.child_by_field_name("alias")
-            alias_text = _text(alias) if alias else None
-
-            imports.append(
-                ImportInfo(
-                    file="",
-                    module=module,
-                    name=name,
-                    alias=alias_text,
-                    is_from=True,
+            if clause:
+                is_fn_const = any(
+                    child.type in {"function", "const"} for child in clause.children
                 )
-            )
-            continue
-
-        # Group use: use App\Entity\{User, Group};
-        group = next(
-            (c for c in child.named_children if c.type == "namespace_use_group"),
-            None,
-        )
-        if group:
-            prefix_node = next(
-                (c for c in child.named_children if c.type == "namespace_name"),
-                None,
-            )
-            prefix = _text(prefix_node) if prefix_node else ""
-            for clause in group.named_children:
-                if clause.type != "namespace_use_clause":
-                    continue
                 qual = next(
                     (
-                        c
-                        for c in clause.named_children
-                        if c.type in {"qualified_name", "name"}
+                        child
+                        for child in clause.named_children
+                        if child.type in {"qualified_name", "name"}
                     ),
                     None,
                 )
-                if qual is None:
-                    continue
-                qualified = _text(qual)
-                if not qualified:
-                    continue
-                module = prefix
-                name = qualified
-                dot = qualified.rfind("\\")
-                if dot >= 0:
-                    module = (
-                        prefix + "\\" + qualified[:dot] if prefix else qualified[:dot]
-                    )
-                    name = qualified[dot + 1 :]
-                alias = clause.child_by_field_name("alias")
-                alias_text = _text(alias) if alias else None
-                imports.append(
-                    ImportInfo(
-                        file="",
-                        module=module,
-                        name=name,
-                        alias=alias_text,
-                        is_from=True,
-                    )
-                )
+                if qual is not None:
+                    qualified = _text(qual)
+                    if qualified:
+                        module, name = _split_php_import_name(qualified)
+                        alias = clause.child_by_field_name("alias")
+                        alias_text = _text(alias) if alias else None
+                        imports.append(
+                            ImportInfo(
+                                file="",
+                                module=module,
+                                name=name,
+                                alias=alias_text,
+                                is_from=True,
+                            )
+                        )
+                        if is_fn_const:
+                            return
+                if is_fn_const:
+                    return
 
+            # Group use: use App\Entity\{User, Group};
+            group = next(
+                (c for c in node.named_children if c.type == "namespace_use_group"),
+                None,
+            )
+            if group:
+                prefix_node = next(
+                    (c for c in node.named_children if c.type == "namespace_name"),
+                    None,
+                )
+                prefix = _text(prefix_node) if prefix_node else ""
+                for clause in group.named_children:
+                    if clause.type != "namespace_use_clause":
+                        continue
+                    qual = next(
+                        (
+                            child
+                            for child in clause.named_children
+                            if child.type in {"qualified_name", "name"}
+                        ),
+                        None,
+                    )
+                    if qual is None:
+                        continue
+                    qualified = _text(qual)
+                    if not qualified:
+                        continue
+                    module, name = _split_php_import_name(qualified, prefix=prefix)
+                    alias = clause.child_by_field_name("alias")
+                    alias_text = _text(alias) if alias else None
+                    imports.append(
+                        ImportInfo(
+                            file="",
+                            module=module,
+                            name=name,
+                            alias=alias_text,
+                            is_from=True,
+                        )
+                    )
+            return
+
+        for child in node.named_children:
+            _walk(child)
+
+    _walk(root)
     return imports
 
 

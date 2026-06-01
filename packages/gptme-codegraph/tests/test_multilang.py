@@ -1774,6 +1774,29 @@ def test_parse_php_const_imports(php_module: Path):
 
 
 @_skip_no_php
+def test_parse_php_namespaced_function_const_imports(tmp_path: Path):
+    """PHP: namespaced function/const imports split module and symbol name."""
+    code = """<?php
+use function App\\Support\\array_map;
+use const App\\Support\\PHP_EOL;
+"""
+    php_file = tmp_path / "function_const_imports.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    import_names = {(imp.name, imp.module, imp.alias) for imp in result.imports}
+    assert (
+        "array_map",
+        "App\\Support",
+        None,
+    ) in import_names, f"Expected namespaced function import, got {import_names}"
+    assert (
+        "PHP_EOL",
+        "App\\Support",
+        None,
+    ) in import_names, f"Expected namespaced const import, got {import_names}"
+
+
+@_skip_no_php
 def test_parse_php_line_numbers(php_module: Path):
     """PHP: symbol line numbers are correct."""
     result = parse_file(php_module)
@@ -1844,6 +1867,34 @@ use App\\Entity\\{User, Group};
     import_names = {imp.name for imp in result.imports}
     assert "User" in import_names, f"Expected 'User' in imports, got {import_names}"
     assert "Group" in import_names, f"Expected 'Group' in imports, got {import_names}"
+
+
+@_skip_no_php
+def test_parse_php_bracket_namespace_symbols_and_imports(tmp_path: Path):
+    """PHP: bracket-style namespaces expose nested symbols and imports."""
+    code = """<?php
+namespace Foo {
+    use App\\Entity\\User;
+
+    class Bar {}
+
+    function baz() {}
+}
+"""
+    php_file = tmp_path / "bracket_namespace.php"
+    php_file.write_text(code)
+    result = parse_file(php_file)
+    symbol_names = {(symbol.name, symbol.kind) for symbol in result.symbols}
+    import_names = {(imp.name, imp.module) for imp in result.imports}
+    assert ("Bar", "class") in symbol_names, f"Expected Bar class, got {symbol_names}"
+    assert (
+        "baz",
+        "function",
+    ) in symbol_names, f"Expected baz function, got {symbol_names}"
+    assert (
+        "User",
+        "App\\Entity",
+    ) in import_names, f"Expected User import, got {import_names}"
 
 
 # ---------------------------------------------------------------------------
