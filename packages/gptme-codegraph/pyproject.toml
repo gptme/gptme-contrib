@@ -18,6 +18,7 @@ treesitter = [
     "tree-sitter-rust>=0.24.0",
     "tree-sitter-go>=0.23.0",
     "tree-sitter-java>=0.23.0",
+    "tree-sitter-c-sharp>=0.23.0",
 ]
 mcp = [
     "mcp>=1.0.0",
