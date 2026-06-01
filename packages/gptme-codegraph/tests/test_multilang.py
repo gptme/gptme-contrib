@@ -458,7 +458,7 @@ def test_parse_rust_function_calls(rust_module: Path):
     result = parse_file(rust_module)
     multiply = [s for s in result.symbols if s.name == "multiply"]
     assert len(multiply) == 1
-    assert "multiply_internal" in multiply[0].calls or "self" in multiply[0].calls
+    assert "multiply_internal" in multiply[0].calls
     # add() doesn't call anything
     add = [s for s in result.symbols if s.name == "add"]
     assert len(add) == 1
